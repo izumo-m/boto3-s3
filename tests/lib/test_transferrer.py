@@ -1,0 +1,973 @@
+"""``boto3_s3.transfer``: the s3transfer-backed engine, against a recording client.
+
+The recorder replaces ``client._make_api_call`` (the same seam aws-cli's own
+functional tests stub at the HTTP layer), so the genuine s3transfer
+submission paths run - single-part and multipart - while every API call is
+recorded. ``TransferConfig(use_threads=False)`` selects the
+NonThreadedExecutor exactly like boto3 does, making multipart call order
+deterministic.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+from boto3.s3.transfer import TransferConfig
+from botocore.exceptions import ClientError
+
+from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
+from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
+from boto3_s3.types import (
+    CopyPropsMode,
+    OpKind,
+    OpOutcome,
+    OpResult,
+    TransferOptions,
+    TransferProgress,
+)
+from tests.utils.fakemodel import model_only_client
+from tests.utils.recorder import ApiCall, make_recording_client
+
+_SYNC_CONFIG = TransferConfig(use_threads=False)
+_MIB = 1024 * 1024
+
+
+def _client_error(code: str, status: int, operation: str) -> ClientError:
+    response: Any = {
+        "Error": {"Code": code, "Message": "stub"},
+        "ResponseMetadata": {"HTTPStatusCode": status},
+    }
+    return ClientError(response, operation)
+
+
+def _ops(calls: list[ApiCall]) -> list[str]:
+    return [call.operation for call in calls]
+
+
+def _run(
+    kind: OpKind,
+    items: list[TransferItem],
+    responses: list[dict[str, Any] | Exception],
+    *,
+    source_responses: list[dict[str, Any] | Exception] | None = None,
+    options: TransferOptions | None = None,
+    config: TransferConfig = _SYNC_CONFIG,
+    is_move: bool = False,
+) -> tuple[list[ApiCall], list[ApiCall], list[OpResult], Transferrer]:
+    client, calls = make_recording_client(responses)
+    source_client = None
+    source_calls: list[ApiCall] = []
+    if source_responses is not None:
+        source_client, source_calls = make_recording_client(source_responses)
+    results: list[OpResult] = []
+    transferrer = Transferrer(
+        kind,
+        client,
+        source_client=source_client,
+        transfer_config=config,
+        options=options,
+        is_move=is_move,
+        on_result=results.append,
+    )
+    with transferrer:
+        for item in items:
+            transferrer.submit(item)
+    return calls, source_calls, results, transferrer
+
+
+class TestUpload:
+    def test_single_put_object(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"payload")
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            src_path=str(src),
+            dst_bucket="bucket",
+            dst_key="up/a.bin",
+            src_display=str(src),
+            dst_display="s3://bucket/up/a.bin",
+        )
+        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        assert _ops(calls) == ["PutObject"]
+        assert calls[0].params["Bucket"] == "bucket"
+        assert calls[0].params["Key"] == "up/a.bin"
+        assert (transferrer.succeeded, transferrer.failed) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert results[0].src == str(src)
+        assert results[0].dest == "s3://bucket/up/a.bin"
+        assert results[0].bytes_transferred == 7
+
+    def test_multipart_upload_sequence(self, tmp_path: Path) -> None:
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"x" * (9 * _MIB))
+        item = TransferItem(
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
+        )
+        calls, _, _, transferrer = _run(
+            OpKind.UPLOAD,
+            [item],
+            [{"UploadId": "upload-id"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
+        )
+        assert _ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPart",
+            "UploadPart",
+            "CompleteMultipartUpload",
+        ]
+        assert calls[1].params["UploadId"] == "upload-id"
+        assert transferrer.succeeded == 1
+
+    def test_content_type_guessed_for_uploads(self, tmp_path: Path) -> None:
+        src = tmp_path / "data.json"
+        src.write_bytes(b"{}")
+        item = TransferItem(
+            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(OpKind.UPLOAD, [item], [{}])
+        assert calls[0].params["ContentType"] == "application/json"
+
+    def test_explicit_content_type_wins_over_the_guess(self, tmp_path: Path) -> None:
+        src = tmp_path / "data.json"
+        src.write_bytes(b"{}")
+        item = TransferItem(
+            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD, [item], [{}], options=TransferOptions(content_type="text/x-probe")
+        )
+        assert calls[0].params["ContentType"] == "text/x-probe"
+
+    def test_no_guess_leaves_content_type_unset(self, tmp_path: Path) -> None:
+        src = tmp_path / "data.json"
+        src.write_bytes(b"{}")
+        item = TransferItem(
+            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD, [item], [{}], options=TransferOptions(guess_mime_type=False)
+        )
+        assert "ContentType" not in calls[0].params
+
+    def test_request_params_flow_into_put_object(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD,
+            [item],
+            [{}],
+            options=TransferOptions(
+                storage_class="STANDARD_IA", metadata={"k1": "v1"}, sse="AES256"
+            ),
+        )
+        params = calls[0].params
+        assert params["StorageClass"] == "STANDARD_IA"
+        assert params["Metadata"] == {"k1": "v1"}
+        assert params["ServerSideEncryption"] == "AES256"
+
+    def test_failure_translates_and_aggregates(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, results, transferrer = _run(
+            OpKind.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
+        )
+        assert _ops(calls) == ["PutObject"]
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert isinstance(transferrer.first_error, NotFoundError)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert str(results[0].error).startswith("An error occurred (NoSuchBucket)")
+
+    def test_invalid_grants_raise_at_submit_time(self, tmp_path: Path) -> None:
+        # aws maps request params per item inside its pipeline, so a bad
+        # --grants surfaces in-flight (fatal error, rc 1) - never upfront.
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        client, calls = make_recording_client([{}])
+        transferrer = Transferrer(
+            OpKind.UPLOAD,
+            client,
+            options=TransferOptions(grants=["bogus"]),
+            transfer_config=_SYNC_CONFIG,
+        )
+        with pytest.raises(ValidationError), transferrer:
+            transferrer.submit(item)
+        assert calls == []
+
+
+class TestDownload:
+    def _item(self, tmp_path: Path, dest: str = "out/a.bin") -> TransferItem:
+        return TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dst_path=str(tmp_path / dest),
+            src_display="s3://bucket/d/a.bin",
+            dst_display=dest,
+        )
+
+    def _get_object_response(self) -> dict[str, Any]:
+        return {"Body": io.BytesIO(b"payload"), "ContentLength": 7, "ETag": '"abc123"'}
+
+    def test_single_download_writes_file_and_stamps_mtime(self, tmp_path: Path) -> None:
+        item = self._item(tmp_path)
+        calls, _, results, transferrer = _run(
+            OpKind.DOWNLOAD, [item], [self._get_object_response()]
+        )
+        # Size + etag were both provided, so no HeadObject probe happened.
+        assert _ops(calls) == ["GetObject"]
+        target = tmp_path / "out" / "a.bin"
+        assert target.read_bytes() == b"payload"
+        assert item.mtime is not None
+        assert os.stat(target).st_mtime == item.mtime.timestamp()
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_parent_directories_are_created(self, tmp_path: Path) -> None:
+        item = self._item(tmp_path, dest="deep/er/tree/a.bin")
+        _run(OpKind.DOWNLOAD, [item], [self._get_object_response()])
+        assert (tmp_path / "deep" / "er" / "tree" / "a.bin").exists()
+
+    def test_utime_failure_warns_but_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        item = self._item(tmp_path)
+
+        def _boom(path: object, times: object) -> None:
+            raise OSError(1, "Operation not permitted")
+
+        monkeypatch.setattr(os, "utime", _boom)
+        _, _, results, transferrer = _run(OpKind.DOWNLOAD, [item], [self._get_object_response()])
+        assert (transferrer.succeeded, transferrer.failed, transferrer.warned) == (1, 0, 1)
+        outcomes = [result.outcome for result in results]
+        assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
+        warned = results[0]
+        assert "but was unable to update the last modified time." in str(warned.error)
+        assert str(warned.error).startswith(f"Skipping file {item.dst_path}.")
+        # EPERM gets aws's re-wording (aws-cli set_file_utime).
+        assert "attempting to modify the utime of the file failed" in str(warned.error)
+
+    def test_download_request_params(self, tmp_path: Path) -> None:
+        item = self._item(tmp_path)
+        calls, _, _, _ = _run(
+            OpKind.DOWNLOAD,
+            [item],
+            [self._get_object_response()],
+            options=TransferOptions(request_payer="requester"),
+        )
+        assert calls[0].params["RequestPayer"] == "requester"
+
+    def test_streaming_download_reports_resolved_bytes(self) -> None:
+        # No size/etag (a streaming download): s3transfer probes the object via
+        # HeadObject, so SUCCEEDED must report the resolved byte count, not 0.
+        sink = io.BytesIO()
+        item = TransferItem(
+            compare_key="a.bin",
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dst_fileobj=sink,
+            src_display="s3://bucket/d/a.bin",
+            dst_display="-",
+        )
+        head = {"ContentLength": 7, "ETag": '"abc123"'}
+        calls, _, results, _ = _run(OpKind.DOWNLOAD, [item], [head, self._get_object_response()])
+        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert sink.getvalue() == b"payload"
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert results[0].bytes_transferred == 7
+
+
+class TestCopy:
+    def _item(self, *, size: int = 7, head: dict[str, Any] | None = None) -> TransferItem:
+        # An etag is always known for an S3 source (listing and HeadObject
+        # both carry it); providing it alongside the size is what keeps
+        # s3transfer 0.17's copy path from probing the source with its own
+        # HeadObject (it heads when size OR etag is missing).
+        return TransferItem(
+            compare_key="a.bin",
+            size=size,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dst_bucket="dst-b",
+            dst_key="cp/a.bin",
+            head=head,
+        )
+
+    def test_single_part_copy_props_default_is_native(self) -> None:
+        # Below the threshold S3's CopyObject carries metadata and tags by
+        # itself: no directives are sent and no extra reads happen.
+        calls, source_calls, _, transferrer = _run(
+            OpKind.COPY, [self._item()], [{}], source_responses=[]
+        )
+        assert _ops(calls) == ["CopyObject"]
+        assert calls[0].params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert "MetadataDirective" not in calls[0].params
+        assert "TaggingDirective" not in calls[0].params
+        assert source_calls == []
+        assert transferrer.succeeded == 1
+
+    def test_copy_props_none_replaces_both_directives(self) -> None:
+        calls, _, _, _ = _run(
+            OpKind.COPY,
+            [self._item()],
+            [{}],
+            source_responses=[],
+            options=TransferOptions(copy_props=CopyPropsMode.NONE),
+        )
+        assert calls[0].params["MetadataDirective"] == "REPLACE"
+        assert calls[0].params["TaggingDirective"] == "REPLACE"
+
+    def test_explicit_metadata_directive_disables_copy_props(self) -> None:
+        calls, source_calls, _, _ = _run(
+            OpKind.COPY,
+            [self._item(size=9 * _MIB)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(metadata_directive="REPLACE"),
+        )
+        assert _ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "UploadPartCopy",
+            "CompleteMultipartUpload",
+        ]
+        assert source_calls == []
+
+    def test_multipart_metadata_injected_from_cached_head(self) -> None:
+        head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
+        calls, source_calls, _, _ = _run(
+            OpKind.COPY,
+            [self._item(size=9 * _MIB, head=head)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {},
+            ],
+            source_responses=[{"TagSet": []}],
+            options=TransferOptions(copy_props=CopyPropsMode.METADATA_DIRECTIVE),
+        )
+        # The cached single-source HeadObject is reused: no second HEAD.
+        assert source_calls == []
+        create = calls[0]
+        assert create.operation == "CreateMultipartUpload"
+        assert create.params["ContentType"] == "text/html"
+        assert create.params["Metadata"] == {"a": "b"}
+
+    def test_multipart_default_heads_source_and_inlines_small_tags(self) -> None:
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {"ContentType": "text/css", "Metadata": {}},
+            {"TagSet": [{"Key": "team", "Value": "a&b"}]},
+        ]
+        calls, source_calls, _, transferrer = _run(
+            OpKind.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+        )
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        create = calls[0]
+        assert create.params["ContentType"] == "text/css"
+        assert create.params["Tagging"] == "team=a%26b"
+        assert transferrer.succeeded == 1
+
+    def test_oversized_tags_apply_after_the_copy(self) -> None:
+        big = "v" * 3000
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            {},  # PutObjectTagging
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+        ]
+        calls, _, results, transferrer = _run(
+            OpKind.COPY, [self._item(size=9 * _MIB)], responses, source_responses=source_responses
+        )
+        assert _ops(calls)[-1] == "PutObjectTagging"
+        assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "k", "Value": big}]}
+        assert "Tagging" not in calls[0].params
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_post_copy_tagging_failure_rolls_back_the_destination(self) -> None:
+        big = "v" * 3000
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            {},  # rollback DeleteObject
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+        ]
+        calls, _, results, transferrer = _run(
+            OpKind.COPY, [self._item(size=9 * _MIB)], responses, source_responses=source_responses
+        )
+        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+
+class TestNonTransferOutcomes:
+    def test_dryrun_emits_without_building_a_manager(self) -> None:
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
+        with Transferrer(OpKind.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer.dryrun(item)
+        assert calls == []
+        assert transferrer._manager is None  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
+        assert (results[0].src, results[0].dest) == ("a", "s3://b/a")
+
+    def test_warn_and_skip_count_into_the_rollup(self) -> None:
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(OpKind.DOWNLOAD, client, on_result=results.append) as transferrer:
+            transferrer.warn("Skipping file s3://b/k. Object is of storage class GLACIER.", key="k")
+            transferrer.skip(TransferItem(compare_key="k2"))
+        assert (transferrer.warned, transferrer.skipped) == (1, 1)
+        assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
+        assert results[0].kind is OpKind.DOWNLOAD
+
+    def test_progress_events_accumulate(self, tmp_path: Path) -> None:
+        # Driven through a download: the canned GetObject Body is genuinely
+        # read by s3transfer's I/O loop, which is what fires progress deltas
+        # (an upload under the recorder never reads its Body).
+        progress: list[TransferProgress] = []
+        client, _ = make_recording_client(
+            [{"Body": io.BytesIO(b"x" * 1000), "ContentLength": 1000, "ETag": '"e"'}]
+        )
+        item = TransferItem(
+            compare_key="a.bin",
+            size=1000,
+            etag="e",
+            src_bucket="b",
+            src_key="k",
+            dst_path=str(tmp_path / "a.bin"),
+        )
+        with Transferrer(
+            OpKind.DOWNLOAD, client, transfer_config=_SYNC_CONFIG, on_progress=progress.append
+        ) as transferrer:
+            transferrer.submit(item)
+        assert progress[0].bytes_done == 0  # queued notification
+        assert progress[-1].bytes_done == 1000
+        assert all(p.bytes_total == 1000 for p in progress)
+
+
+class TestNoOverwrite:
+    def test_put_object_carries_if_none_match(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD, [item], [{}], options=TransferOptions(no_overwrite=True)
+        )
+        assert calls[0].params["IfNoneMatch"] == "*"
+
+    def test_precondition_failed_is_a_silent_skip(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, results, transferrer = _run(
+            OpKind.UPLOAD,
+            [item],
+            [_client_error("PreconditionFailed", 412, "PutObject")],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert _ops(calls) == ["PutObject"]
+        assert (transferrer.failed, transferrer.skipped) == (0, 1)
+        assert transferrer.first_error is None
+        assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+
+    def test_multipart_upload_applies_it_to_complete_only(self, tmp_path: Path) -> None:
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"x" * (9 * _MIB))
+        item = TransferItem(
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD,
+            [item],
+            [{"UploadId": "u"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert _ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPart",
+            "UploadPart",
+            "CompleteMultipartUpload",
+        ]
+        assert "IfNoneMatch" not in calls[0].params
+        assert "IfNoneMatch" not in calls[1].params
+        assert calls[3].params["IfNoneMatch"] == "*"
+
+    def test_multipart_copy_applies_it_to_complete_only(self) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dst_bucket="dst-b",
+            dst_key="cp/a.bin",
+        )
+        calls, _, _, _ = _run(
+            OpKind.COPY,
+            [item],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(no_overwrite=True, metadata_directive="REPLACE"),
+        )
+        assert "IfNoneMatch" not in calls[0].params
+        assert calls[3].params["IfNoneMatch"] == "*"
+
+
+class TestMove:
+    """``is_move``: delete-the-source semantics + the MOVE reporting kind."""
+
+    def _download_item(self, tmp_path: Path) -> TransferItem:
+        return TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dst_path=str(tmp_path / "out" / "a.bin"),
+        )
+
+    def _get_object_response(self) -> dict[str, Any]:
+        return {"Body": io.BytesIO(b"payload"), "ContentLength": 7, "ETag": '"abc123"'}
+
+    def test_upload_move_deletes_the_local_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"payload")
+        item = TransferItem(
+            compare_key="a.bin", size=7, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}], is_move=True)
+        assert _ops(calls) == ["PutObject"]
+        assert not src.exists()
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert all(result.kind is OpKind.MOVE for result in results)
+
+    def test_download_move_deletes_on_the_managers_client(self, tmp_path: Path) -> None:
+        item = self._download_item(tmp_path)
+        calls, _, results, transferrer = _run(
+            OpKind.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
+        )
+        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
+        target = tmp_path / "out" / "a.bin"
+        assert target.read_bytes() == b"payload"
+        # The mtime stamp still lands (after the delete in our ordering).
+        assert item.mtime is not None
+        assert os.stat(target).st_mtime == item.mtime.timestamp()
+        assert transferrer.succeeded == 1
+        assert [result.kind for result in results] == [OpKind.MOVE]
+
+    def test_copy_move_deletes_on_the_source_client(self) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dst_bucket="dst-b",
+            dst_key="cp/a.bin",
+        )
+        calls, source_calls, _, transferrer = _run(
+            OpKind.COPY, [item], [{}], source_responses=[{}], is_move=True
+        )
+        assert _ops(calls) == ["CopyObject"]
+        assert _ops(source_calls) == ["DeleteObject"]
+        assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert transferrer.succeeded == 1
+
+    def test_request_payer_flows_to_the_delete(self, tmp_path: Path) -> None:
+        item = self._download_item(tmp_path)
+        calls, _, _, _ = _run(
+            OpKind.DOWNLOAD,
+            [item],
+            [self._get_object_response(), {}],
+            options=TransferOptions(request_payer="requester"),
+            is_move=True,
+        )
+        assert calls[1].operation == "DeleteObject"
+        assert calls[1].params["RequestPayer"] == "requester"
+
+    def test_delete_failure_flips_the_move_to_failed(self, tmp_path: Path) -> None:
+        item = self._download_item(tmp_path)
+        calls, _, results, transferrer = _run(
+            OpKind.DOWNLOAD,
+            [item],
+            [self._get_object_response(), _client_error("AccessDenied", 403, "DeleteObject")],
+            is_move=True,
+        )
+        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        # The bytes are on disk (aws ditto), but the move reports failed.
+        assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert transferrer.first_error is not None
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert str(results[0].error).startswith("An error occurred (AccessDenied)")
+
+    def test_os_remove_failure_flips_the_move_to_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+
+        def _boom(path: object) -> None:
+            raise OSError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(os, "remove", _boom)
+        _, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}], is_move=True)
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        # aws prints the OS's own wording after "move failed: ...".
+        assert str(results[0].error) == f"[Errno 13] Permission denied: '{src}'"
+
+    def test_transfer_failure_leaves_the_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, results, transferrer = _run(
+            OpKind.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")], is_move=True
+        )
+        assert _ops(calls) == ["PutObject"]
+        assert src.exists()
+        assert transferrer.failed == 1
+        assert [result.kind for result in results] == [OpKind.MOVE]
+
+    def test_no_overwrite_rejection_keeps_the_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, results, transferrer = _run(
+            OpKind.UPLOAD,
+            [item],
+            [_client_error("PreconditionFailed", 412, "PutObject")],
+            options=TransferOptions(no_overwrite=True),
+            is_move=True,
+        )
+        assert _ops(calls) == ["PutObject"]
+        assert src.exists()
+        assert (transferrer.failed, transferrer.skipped) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+
+    def test_post_copy_tagging_failure_keeps_the_source(self) -> None:
+        # _SetTags settles (rolls back the destination, flips the future)
+        # before _DeleteSource looks at it: the source object survives.
+        big = "v" * 3000
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dst_bucket="dst-b",
+            dst_key="cp/a.bin",
+        )
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            {},  # rollback DeleteObject (destination side)
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+        ]
+        calls, source_calls, results, transferrer = _run(
+            OpKind.COPY, [item], responses, source_responses=source_responses, is_move=True
+        )
+        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
+        # No source-side delete: the only source calls are the props reads.
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
+        with Transferrer(
+            OpKind.UPLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer.dryrun(item)
+            transferrer.warn("Skipping file a. probe", key="a")
+            transferrer.skip(TransferItem(compare_key="a2"))
+        assert calls == []
+        assert [result.outcome for result in results] == [
+            OpOutcome.DRYRUN,
+            OpOutcome.WARNED,
+            OpOutcome.SKIPPED,
+        ]
+        assert all(result.kind is OpKind.MOVE for result in results)
+
+
+class TestChecksumOptions:
+    def test_explicit_algorithm_overrides_the_engine_default(self, tmp_path: Path) -> None:
+        # s3transfer injects ChecksumAlgorithm=CRC32 via setdefault; an
+        # explicit --checksum-algorithm must win.
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        calls, _, _, _ = _run(
+            OpKind.UPLOAD, [item], [{}], options=TransferOptions(checksum_algorithm="SHA256")
+        )
+        assert calls[0].params["ChecksumAlgorithm"] == "SHA256"
+
+    def test_checksum_mode_flows_to_get_object(self, tmp_path: Path) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            src_bucket="b",
+            src_key="k",
+            dst_path=str(tmp_path / "out.bin"),
+        )
+        calls, _, _, _ = _run(
+            OpKind.DOWNLOAD,
+            [item],
+            [{"Body": io.BytesIO(b"payload"), "ContentLength": 7, "ETag": '"abc123"'}],
+            options=TransferOptions(checksum_mode="ENABLED"),
+        )
+        assert calls[0].params["ChecksumMode"] == "ENABLED"
+
+
+class TestStreams:
+    def test_stream_upload_uses_the_fileobj(self) -> None:
+        item = TransferItem(
+            compare_key="streaming.txt",
+            src_fileobj=io.BytesIO(b"foo\n"),
+            dst_bucket="bucket",
+            dst_key="streaming.txt",
+            src_display="-",
+            dst_display="s3://bucket/streaming.txt",
+        )
+        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        assert _ops(calls) == ["PutObject"]
+        assert calls[0].params["Key"] == "streaming.txt"
+        # No path means no mimetypes guess: ContentType stays unset.
+        assert "ContentType" not in calls[0].params
+        assert transferrer.succeeded == 1
+        assert results[-1].src == "-"
+
+    def test_stream_upload_with_expected_size(self) -> None:
+        item = TransferItem(
+            compare_key="streaming.txt",
+            size=4,
+            src_fileobj=io.BytesIO(b"foo\n"),
+            dst_bucket="bucket",
+            dst_key="streaming.txt",
+        )
+        calls, _, _, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        assert _ops(calls) == ["PutObject"]
+        assert transferrer.succeeded == 1
+
+    def test_stream_download_probes_then_writes(self) -> None:
+        sink = io.BytesIO()
+        item = TransferItem(
+            compare_key="streaming.txt",
+            src_bucket="bucket",
+            src_key="streaming.txt",
+            dst_fileobj=sink,
+            src_display="s3://bucket/streaming.txt",
+            dst_display="-",
+        )
+        # Without size+etag s3transfer probes the object itself (the aws
+        # stream wire shape: HeadObject then GetObject).
+        calls, _, _, transferrer = _run(
+            OpKind.DOWNLOAD,
+            [item],
+            [
+                {"ContentLength": 4, "ETag": '"foo"'},
+                {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
+            ],
+        )
+        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert sink.getvalue() == b"foo\n"
+        assert transferrer.succeeded == 1
+
+
+class TestEngineSelection:
+    """``preferred_transfer_client`` resolution at the manager seam (docs/crt.md)."""
+
+    def _transferrer(self, kind: OpKind, config: Any) -> Transferrer:
+        client, _ = make_recording_client([])
+        return Transferrer(kind, client, transfer_config=config)
+
+    def test_default_auto_resolves_classic_on_a_non_optimized_host(self) -> None:
+        from s3transfer.manager import TransferManager
+
+        # conftest pins is_optimized_for_system to False; boto3's 'auto'
+        # answer there is the classic manager.
+        manager = self._transferrer(OpKind.UPLOAD, None)._get_manager()
+        assert isinstance(manager, TransferManager)
+
+    def test_explicit_crt_delegates_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from boto3_s3 import crtsupport
+
+        sentinel = object()
+        seen: list[Any] = []
+
+        def fake_create(client: Any, config: Any) -> Any:
+            seen.append((client, config))
+            return sentinel
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        config = TransferConfig(preferred_transfer_client="crt")
+        transferrer = self._transferrer(OpKind.UPLOAD, config)
+        assert transferrer._get_manager() is sentinel
+        assert seen and seen[0][1] is config
+
+    def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from s3transfer.manager import TransferManager
+
+        from boto3_s3 import crtsupport
+
+        def boom(client: Any, config: Any) -> Any:  # the CRT path must not run
+            raise AssertionError("copy reached the CRT path")
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", boom)
+        config = TransferConfig(preferred_transfer_client="crt")
+        manager = self._transferrer(OpKind.COPY, config)._get_manager()
+        assert isinstance(manager, TransferManager)
+
+    def test_crt_unavailable_falls_back_to_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from s3transfer.manager import TransferManager
+
+        from boto3_s3 import crtsupport
+
+        # boto3 semantics: a None from the CRT factory (lock held elsewhere,
+        # incompatible singleton) silently selects classic.
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", lambda c, cfg: None)
+        config = TransferConfig(preferred_transfer_client="crt")
+        manager = self._transferrer(OpKind.UPLOAD, config)._get_manager()
+        assert isinstance(manager, TransferManager)
+
+
+class TestCrtSubscriberCompat:
+    """The provide-size/etag subscribers guard for the CRT meta (aws-cli shape)."""
+
+    class _CrtLikeMeta:
+        pass  # no provide_transfer_size / provide_object_etag, like CRTTransferMeta
+
+    def test_provide_size_is_harmless_without_the_hook(self) -> None:
+        from boto3_s3.transfer import _ProvideSize
+
+        future = type("F", (), {"meta": self._CrtLikeMeta()})()
+        _ProvideSize(123).on_queued(future)  # must not raise
+
+    def test_provide_etag_is_harmless_without_the_hook(self) -> None:
+        from boto3_s3.transfer import _ProvideETag
+
+        future = type("F", (), {"meta": self._CrtLikeMeta()})()
+        _ProvideETag("abc").on_queued(future)  # must not raise
+
+
+class TestConditionalWriteSupport:
+    """The --no-overwrite (IfNoneMatch) old-botocore gate, library side.
+
+    IfNoneMatch reached the S3 write ops only in later botocore (PutObject in
+    1.35.16, CopyObject in 1.41.0); below that --no-overwrite must be rejected
+    with a clear message instead of an opaque botocore ParamValidationError.
+    """
+
+    def test_reason_none_when_upload_supported(self) -> None:
+        client = model_only_client({"PutObject", "CompleteMultipartUpload"})
+        assert conditional_write_unsupported_reason(client, is_copy=False) is None
+
+    def test_reason_none_when_copy_supported(self) -> None:
+        client = model_only_client({"CopyObject"})
+        assert conditional_write_unsupported_reason(client, is_copy=True) is None
+
+    def test_reason_names_min_botocore_for_upload(self) -> None:
+        reason = conditional_write_unsupported_reason(model_only_client(set()), is_copy=False)
+        assert reason is not None
+        assert "1.35.16" in reason and "PutObject" in reason
+
+    def test_reason_names_min_botocore_for_copy(self) -> None:
+        # PutObject present but CopyObject not: copy needs the later 1.41.0.
+        reason = conditional_write_unsupported_reason(
+            model_only_client({"PutObject"}), is_copy=True
+        )
+        assert reason is not None
+        assert "1.41.0" in reason and "CopyObject" in reason
+
+    def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
+        with pytest.raises(Boto3S3Error, match=r"1\.35\.16"):
+            Transferrer(OpKind.UPLOAD, model_only_client(set()), options={"no_overwrite": True})
+
+    def test_transferrer_rejects_no_overwrite_copy_on_old_botocore(self) -> None:
+        client = model_only_client({"PutObject"})  # upload ok, copy not yet
+        with pytest.raises(Boto3S3Error, match=r"1\.41\.0"):
+            Transferrer(OpKind.COPY, client, source_client=client, options={"no_overwrite": True})
+
+    def test_transferrer_allows_no_overwrite_download_on_old_botocore(self) -> None:
+        # Downloads never send IfNoneMatch, so an old model must not block them.
+        Transferrer(OpKind.DOWNLOAD, model_only_client(set()), options={"no_overwrite": True})
+
+    def test_transferrer_allows_no_overwrite_when_supported(self) -> None:
+        Transferrer(OpKind.UPLOAD, model_only_client({"PutObject"}), options={"no_overwrite": True})

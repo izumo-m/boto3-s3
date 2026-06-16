@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d",
+    "s3://<BUCKET>/moved/",
+    "--recursive"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "d-sibling.txt",
+    "d/marker/",
+    "moved/a.txt",
+    "moved/b.bin",
+    "moved/sub/c.txt"
+  ],
+  "scenario": "mv_copy_recursive",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/d/a.txt to s3://<BUCKET>/moved/a.txt",
+    "move: s3://<BUCKET>/d/b.bin to s3://<BUCKET>/moved/b.bin",
+    "move: s3://<BUCKET>/d/sub/c.txt to s3://<BUCKET>/moved/sub/c.txt"
+  ]
+}

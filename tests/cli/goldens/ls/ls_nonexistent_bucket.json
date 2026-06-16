@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "ls",
+    "s3://<BUCKET>-no-such/"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 254,
+  "remaining_keys": null,
+  "scenario": "ls_nonexistent_bucket",
+  "stdout_lines": []
+}

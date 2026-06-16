@@ -1,0 +1,305 @@
+"""Core typed value objects shared across boto3-s3 operations."""
+
+from __future__ import annotations
+
+import enum
+import os
+import threading
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from typing_extensions import TypedDict
+
+from boto3_s3.globsieve import Matcher
+
+
+class FileKind(enum.Enum):
+    """What a listing entry is. Backends map their native kinds onto these.
+
+    ``FILE`` is a real object/file with content (``size`` / ``mtime`` populated).
+    ``DIRECTORY`` is a prefix / sub-directory grouping with no backing object (an
+    S3 common prefix or a local sub-directory; ``size`` / ``mtime`` may be
+    ``None``). ``BUCKET`` is a top-level S3 bucket.
+    """
+
+    FILE = "file"
+    DIRECTORY = "directory"
+    BUCKET = "bucket"
+
+
+@dataclass(slots=True, kw_only=True)
+class FileInfo:
+    """Cross-backend listing entry returned by ``Storage.scan`` / ``S3.ls``.
+
+    One uniform type for every entry a backend can list: files, directories /
+    prefixes, and buckets are distinguished by :attr:`kind`, not by separate
+    classes - so a backend never widens ``scan``'s return type as it gains kinds.
+    Backend-specific detail lives on subclasses (``S3FileInfo`` / ``LocalFileInfo``);
+    local-only notions such as symlinks are attributes of ``LocalFileInfo`` rather
+    than distinct types.
+
+    ``key`` is the full, ``/``-separated identifier (object key, prefix, or
+    bucket name; never platform ``os.sep`` - ``LocalFileInfo`` translates it). It
+    doubles as the cross-backend merge/sort key: two ``Storage.scan`` streams
+    ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
+    is relativized to its scan root, so every backend must emit ``/``-separated
+    keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
+    populated for ``FILE`` entries and may be ``None`` for directories /
+    prefixes; ``BUCKET`` entries carry the bucket's ``CreationDate`` as ``mtime``
+    (``size`` stays ``None``). Producers enforce these invariants - the field
+    types alone do not.
+    """
+
+    key: str
+    kind: FileKind = FileKind.FILE
+    size: int | None = None
+    mtime: datetime | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class LocalFileInfo(FileInfo):
+    """``FileInfo`` for a local filesystem entry.
+
+    ``entry`` is the same object ``os.scandir()`` yields when the producer had
+    one, so callers can reuse its ``stat()`` cache and other methods without
+    additional syscalls. Producers without a ``DirEntry`` at hand - the walk
+    root, or the ``os.listdir``-based aws-cli-order walk - leave it ``None``.
+    """
+
+    entry: os.DirEntry[str] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class S3FileInfo(FileInfo):
+    """``FileInfo`` enriched with fields derived from an S3 object listing.
+
+    ``etag`` is the dequoted ETag (surrounding ``"`` stripped) when populated.
+    ``owner`` is the S3 canonical user ID (``Owner["ID"]``), present only when
+    the listing was made with ``fetch_owner=True`` - ``ListObjectsV2`` omits the
+    owner otherwise, and ``FetchOwner`` adds per-page latency. ``DisplayName`` is
+    deliberately not used (S3 returns it only in us-east-1). ``head`` is a cache
+    slot for a ``HeadObject`` response payload (or any partial dict with the same
+    keys), letting a custom enumerator or pre-fetch hook skip per-object HEAD
+    round-trips. All four fields are optional because aws-cli tolerates their
+    absence (parity).
+    """
+
+    etag: str | None = None
+    storage_class: str | None = None
+    owner: str | None = None
+    head: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScanOptions:
+    """Bundle of ``Storage.scan`` / ``Storage.scan_pages`` knobs, passed as one value.
+
+    Carrying a single immutable object - rather than re-threading keyword
+    arguments through ``scan`` -> ``scan_pages`` and every override - keeps the
+    enumeration seam tidy and lets ``sync`` build one set of options and apply it
+    to both sides. ``page_size`` / ``request_payer`` / ``fetch_owner`` are S3
+    listing knobs ignored by non-S3 backends. ``bucket_name_prefix`` /
+    ``bucket_region`` filter an S3 *bucket* listing (``ListBuckets`` ``Prefix`` /
+    ``BucketRegion``, scanned from the service root) and are ignored for object
+    listings - mirroring how inapplicable knobs are silently ignored elsewhere
+    (aws-cli parity). Values are not validated here: like aws-cli, they pass
+    through to the service, which decides (``page_size=0`` lists nothing,
+    negative values fail the call with ``InvalidArgument`` - the exit-code
+    charter requires reproducing both).
+
+    ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
+    ``scan`` itself - page by page on the prefetch worker, before pages cross
+    the hand-off queue - so ``scan_pages`` implementations and overrides keep
+    yielding raw pages and never handle it. It carries the item filter of
+    ``rm`` / ``cp`` / ``mv`` below the flatten loop, and sync's *visibility*
+    layer: each side's listing is pruned independently here (its own
+    ``--exclude`` / ``--include`` root) before the comparator pairs the
+    streams - which is exactly why filtered-out destination entries are
+    protected from ``--delete``. The predicate runs on the worker thread:
+    keep it thread-safe and fast.
+    """
+
+    recursive: bool = False
+    page_size: int = 1000
+    request_payer: str | None = None
+    fetch_owner: bool = False
+    bucket_name_prefix: str | None = None
+    bucket_region: str | None = None
+    filter: Callable[[FileInfo], bool] | None = None
+
+
+class OpKind(enum.Enum):
+    """Kind of byte-moving operation a result/progress record describes.
+
+    ``MOVE`` is a reporting kind only: an ``mv`` run still routes each item
+    as an upload/download/copy internally (the aws-cli ``operation_name``),
+    but every record it emits says ``move`` - exactly aws-cli's
+    ``transfer_type='move'`` relabeling.
+    """
+
+    UPLOAD = "upload"
+    DOWNLOAD = "download"
+    COPY = "copy"
+    MOVE = "move"
+    DELETE = "delete"
+
+
+class OpOutcome(enum.Enum):
+    """Per-item outcome. ``FAILED`` maps to CLI exit code 1, ``WARNED`` to 2.
+
+    ``SKIPPED`` is an informational, non-warning skip (e.g. sync up-to-date,
+    a ``no_overwrite`` rejection) and does not affect the exit code.
+    ``DRYRUN`` reports an item a dry run *would* have acted on - no API call
+    was made and the exit code is unaffected. ``NOTICE`` carries display-only
+    text on ``error`` (aws prints some advisories - the case-conflict
+    messages - straight to stderr without counting them as warnings); it
+    never affects counts or the exit code, and may precede the same item's
+    real outcome.
+    """
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    WARNED = "warned"
+    SKIPPED = "skipped"
+    DRYRUN = "dryrun"
+    NOTICE = "notice"
+
+
+class CaseConflictMode(enum.Enum):
+    """Policy for case-fold key collisions when writing to a local filesystem."""
+
+    IGNORE = "ignore"
+    SKIP = "skip"
+    WARN = "warn"
+    ERROR = "error"
+
+
+class CopyPropsMode(enum.Enum):
+    """Which source object properties to propagate on an S3-to-S3 copy."""
+
+    NONE = "none"
+    METADATA_DIRECTIVE = "metadata-directive"
+    DEFAULT = "default"
+
+
+@dataclass(slots=True, kw_only=True)
+class TransferProgress:
+    """Byte-level progress for one in-flight item, passed to ``on_progress``."""
+
+    kind: OpKind
+    key: str
+    bytes_done: int
+    bytes_total: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class OpResult:
+    """Per-item completion record, passed to ``on_result``.
+
+    ``src`` / ``dest`` are display-oriented endpoints (``s3://bucket/key`` or
+    a native local path) populated by the byte-moving operations so consumers
+    can render aws-style ``upload: {src} to {dest}`` lines without re-deriving
+    the pair; ``rm`` leaves them ``None``. ``key`` stays the operation-relative
+    identifier (the transfer ``compare_key`` / the deleted object key).
+    """
+
+    kind: OpKind
+    key: str
+    outcome: OpOutcome
+    bytes_transferred: int = 0
+    error: BaseException | None = None
+    src: str | None = None
+    dest: str | None = None
+
+
+class CancelToken:
+    """Thread-safe cancellation flag handed to a blocking operation.
+
+    ``cancel()`` may be called from any thread or a signal handler; the
+    operation observes it and raises ``CancelledError``.
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+class TransferOptions(TypedDict, total=False):
+    """Object-shaping / S3-request options shared by ``cp`` / ``mv`` / ``sync``.
+
+    Names are the snake_case form of the corresponding ``aws s3`` options; the
+    library translates them to S3 API PascalCase internally. Options that do not
+    apply to a given transfer direction are ignored (aws-cli parity).
+    """
+
+    acl: str
+    grants: Sequence[str]
+    storage_class: str
+    sse: str
+    sse_kms_key_id: str
+    sse_c: str
+    # str or raw bytes, like botocore's SSECustomerKey: aws passes the CLI
+    # string through verbatim (only fileb:// loads bytes).
+    sse_c_key: str | bytes
+    sse_c_copy_source: str
+    sse_c_copy_source_key: str | bytes
+    metadata: Mapping[str, str]
+    metadata_directive: str
+    copy_props: CopyPropsMode
+    cache_control: str
+    content_type: str
+    content_disposition: str
+    content_encoding: str
+    content_language: str
+    expires: str
+    website_redirect: str
+    checksum_algorithm: str
+    checksum_mode: str
+    request_payer: str
+    guess_mime_type: bool
+    force_glacier_transfer: bool
+    ignore_glacier_warnings: bool
+    case_conflict: CaseConflictMode
+    # Conditional write (--no-overwrite): IfNoneMatch="*" on uploads/copies
+    # (the server's PreconditionFailed becomes a silent skip), an existence
+    # check before downloads.
+    no_overwrite: bool
+
+
+ProgressCallback = Callable[[TransferProgress], None]
+ResultCallback = Callable[[OpResult], None]
+
+# A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
+# visibility, and ``sync``'s ``delete`` lane): either a compiled ``globsieve``
+# matcher - fed the key *relative to the operation's root*, aws-cli
+# --exclude/--include semantics - or a plain predicate fed the full ``FileInfo``
+# (richer: size / mtime / storage_class), returning True to keep the entry.
+FileFilter = Matcher | Callable[[FileInfo], bool]
+
+
+__all__ = [
+    "CancelToken",
+    "CaseConflictMode",
+    "CopyPropsMode",
+    "FileFilter",
+    "FileInfo",
+    "FileKind",
+    "LocalFileInfo",
+    "OpKind",
+    "OpOutcome",
+    "OpResult",
+    "ProgressCallback",
+    "ResultCallback",
+    "S3FileInfo",
+    "ScanOptions",
+    "TransferOptions",
+    "TransferProgress",
+]

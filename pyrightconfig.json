@@ -1,0 +1,8 @@
+{
+    "venvPath": ".",
+    "venv": ".venv",
+    "pythonVersion": "3.10",
+    "include": ["src", "cli/src"],
+    "exclude": ["vendor", "**/__pycache__", ".venv"],
+    "typeCheckingMode": "strict"
+}

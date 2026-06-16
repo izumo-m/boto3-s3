@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d/a.txt",
+    "dst/out.txt"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "out.txt:14:ebaee762"
+  ],
+  "rc": 0,
+  "remaining_keys": [],
+  "scenario": "mv_download_single",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/d/a.txt to dst/out.txt"
+  ]
+}

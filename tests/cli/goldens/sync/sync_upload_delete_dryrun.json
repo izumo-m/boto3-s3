@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "sync",
+    "src",
+    "s3://<BUCKET>/del",
+    "--delete",
+    "--dryrun"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "del-sibling.txt",
+    "del/extra.log",
+    "del/extra.txt",
+    "del/keep.txt",
+    "del/marker/"
+  ],
+  "scenario": "sync_upload_delete_dryrun",
+  "src_tree": null,
+  "stdout_lines": [
+    "(dryrun) delete: s3://<BUCKET>/del/extra.log",
+    "(dryrun) delete: s3://<BUCKET>/del/extra.txt"
+  ]
+}

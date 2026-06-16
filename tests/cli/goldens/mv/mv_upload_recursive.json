@@ -1,0 +1,29 @@
+{
+  "argv": [
+    "mv",
+    "src",
+    "s3://<BUCKET>/tree/",
+    "--recursive"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "tree/a.txt",
+    "tree/b.bin",
+    "tree/sub/c.txt",
+    "tree/sub/deep/d.txt",
+    "tree/z.txt"
+  ],
+  "scenario": "mv_upload_recursive",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: src/a.txt to s3://<BUCKET>/tree/a.txt",
+    "move: src/b.bin to s3://<BUCKET>/tree/b.bin",
+    "move: src/sub/c.txt to s3://<BUCKET>/tree/sub/c.txt",
+    "move: src/sub/deep/d.txt to s3://<BUCKET>/tree/sub/deep/d.txt",
+    "move: src/z.txt to s3://<BUCKET>/tree/z.txt"
+  ]
+}

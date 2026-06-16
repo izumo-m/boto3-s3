@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "website",
+    "s3://<BUCKET>",
+    "extra-arg",
+    "--index-document",
+    "index.html"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 252,
+  "remaining_keys": null,
+  "scenario": "website_extra_arg",
+  "stdout_lines": []
+}

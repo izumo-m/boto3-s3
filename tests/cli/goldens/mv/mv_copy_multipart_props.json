@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d/big.bin",
+    "s3://<BUCKET>/moved/big.bin"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": {
+    "ContentType": "text/css",
+    "Metadata": {
+      "team": "blue"
+    }
+  },
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "moved/big.bin"
+  ],
+  "scenario": "mv_copy_multipart_props",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/d/big.bin to s3://<BUCKET>/moved/big.bin"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "presign",
+    "s3://<BUCKET>/presign/basic.txt",
+    "--no-sign-request"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": null,
+  "scenario": "presign_no_sign_request",
+  "stdout_lines": [
+    "<ENDPOINT>/<BUCKET>/presign/basic.txt"
+  ]
+}

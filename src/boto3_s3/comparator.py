@@ -1,0 +1,212 @@
+"""Sync pairing and pair-decision material (the engine room of ``S3.sync``).
+
+``aws s3 sync`` is a two-layer pipeline. Layer one is *visibility*: each
+side's listing is pruned independently (``--exclude`` / ``--include``,
+folder markers) before the sides ever meet - that pruning lives in the
+scan path, not here. Layer two is *pair decisions*: the surviving streams
+are merge-joined by compare key, then per-pair decisions select what to
+copy or delete. This module is layer two's material:
+
+- :class:`Comparator` pairs two key-ordered streams into :class:`SyncPair`
+  records. It is a **pure pairer** - every key on either side comes out and
+  no copy/delete judgment happens here (unlike aws-cli's comparator, which
+  buries its strategy calls in the merge loop; splitting them keeps each
+  side replaceable). It only stamps the run's direction (``kind``) onto each
+  pair, as context for the filters.
+- A :data:`PairFilter` is the copy judgment: a predicate over a pair where
+  ``True`` copies the source, mirroring how every ``filter`` in this library
+  keeps items in an operation. (``S3.sync``'s delete lane instead narrows
+  with a ``FileFilter`` over the destination-only orphan.)
+- :class:`DefaultCopyFilter` is aws-cli's stock judgment (size +
+  last-modified, and the ``--size-only`` / ``--exact-timestamps`` /
+  ``--no-overwrite`` variants) - a callable :data:`PairFilter` that reads the
+  direction from ``pair.kind``, so one instance composes across routes. It is
+  ``S3.sync``'s default and a custom filter can defer to it.
+- :func:`all_of` / :func:`any_of` compose same-signature predicates, for
+  "the default, plus one more rule" filters without hand-rolled lambdas.
+
+Everything here is pure logic over :class:`~boto3_s3.types.FileInfo`; no
+AWS SDK module is imported.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from typing import TypeVar
+
+from boto3_s3.types import FileInfo, OpKind
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SyncPair:
+    """One compare key's pairing across the two sides of a sync.
+
+    ``key`` is the compare key - the entry's path relative to its side's
+    sync root, ``/``-separated on every platform - so name-based filters
+    need not care where either root lives. ``kind`` is the sync's transfer
+    direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a pair
+    filter can apply the direction-asymmetric rules without being told the
+    route. ``src`` / ``dst`` are the sides' listing entries; exactly one may
+    be ``None``:
+
+    - both set: the key exists on both sides (copy is an *update*),
+    - ``dst`` is ``None``: source-only (copy is a *new* transfer),
+    - ``src`` is ``None``: destination-only (the delete candidate).
+    """
+
+    key: str
+    kind: OpKind
+    src: FileInfo | None = None
+    dst: FileInfo | None = None
+
+
+PairFilter = Callable[[SyncPair], bool]
+"""A pair predicate: ``True`` performs the action the pair stands for."""
+
+
+@dataclass(frozen=True)
+class Comparator:
+    """Merge-join two key-ordered listing streams into :class:`SyncPair`s.
+
+    The classic sorted-merge (aws-cli ``Comparator.call``): advance whichever
+    side holds the smaller key, pair equal keys, and flush the survivor once
+    one side is exhausted.
+    Inputs must be ascending by compare key - that is the ``Storage.scan``
+    ordering contract (S3 byte order; the local walk sorts to match) - and
+    the merge itself never compares sizes or times: feed the resulting pairs
+    to a :data:`PairFilter` for that. ``kind`` (the run's direction) is
+    stamped onto every emitted pair - context, not a judgment.
+    """
+
+    kind: OpKind
+
+    def compare(
+        self,
+        src_entries: Iterable[tuple[str, FileInfo]],
+        dst_entries: Iterable[tuple[str, FileInfo]],
+    ) -> Iterator[SyncPair]:
+        """Yield every key on either side as a :class:`SyncPair`.
+
+        ``src_entries`` / ``dst_entries`` are ``(compare_key, info)``
+        streams, lazily consumed - pairing streams page-by-page listings
+        without materializing either side.
+        """
+        kind = self.kind
+        src_iter = iter(src_entries)
+        dst_iter = iter(dst_entries)
+        src = next(src_iter, None)
+        dst = next(dst_iter, None)
+        while src is not None and dst is not None:
+            if src[0] < dst[0]:
+                yield SyncPair(key=src[0], kind=kind, src=src[1])
+                src = next(src_iter, None)
+            elif src[0] > dst[0]:
+                yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
+                dst = next(dst_iter, None)
+            else:
+                yield SyncPair(key=src[0], kind=kind, src=src[1], dst=dst[1])
+                src = next(src_iter, None)
+                dst = next(dst_iter, None)
+        while src is not None:
+            yield SyncPair(key=src[0], kind=kind, src=src[1])
+            src = next(src_iter, None)
+        while dst is not None:
+            yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
+            dst = next(dst_iter, None)
+
+
+@dataclass(frozen=True)
+class DefaultCopyFilter:
+    """aws-cli's stock copy judgment for source-present pairs (a :data:`PairFilter`).
+
+    The transfer direction comes from ``pair.kind`` (the time rule is
+    direction-asymmetric), so one instance composes across routes -
+    ``copy_filter=DefaultCopyFilter()`` is ``S3.sync``'s default. A
+    source-only pair always copies (aws-cli's ``MissingFileSync``). For a pair
+    present on both sides:
+
+    - ``no_overwrite``: never copy (aws-cli's ``NoOverwriteSync``; takes
+      precedence over the other variants),
+    - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
+      Ignored when ``exact_timestamps`` is also set: the flags replace the
+      same aws-cli strategy slot and its override order makes
+      ``--exact-timestamps`` win,
+    - otherwise copy iff the sizes differ *or* last-modified does not rule
+      the copy out (aws-cli's ``SizeAndLastModifiedSync``): an upload/copy is
+      redundant when the destination is at least as new as the source, a
+      download when the destination is at least as old. ``exact_timestamps``
+      tightens the download rule to require exactly equal times (aws-cli's
+      ``ExactTimestampsSync``; uploads/copies are unaffected).
+
+    Comparisons run at full ``timedelta`` precision (aws-cli's
+    ``total_seconds``). A missing ``size`` or ``mtime`` on either side counts
+    as a difference - aws-cli never faces one (its listings always carry
+    both), so leaning toward copying is the permissive reading.
+    """
+
+    size_only: bool = False
+    exact_timestamps: bool = False
+    no_overwrite: bool = False
+
+    def __call__(self, pair: SyncPair) -> bool:
+        src, dst = pair.src, pair.dst
+        if src is None:
+            raise ValueError(f"copy filter consulted without a source entry: {pair.key!r}")
+        if dst is None:
+            return True
+        if self.no_overwrite:
+            return False
+        same_size = src.size is not None and src.size == dst.size
+        if self.size_only and not self.exact_timestamps:
+            return not same_size
+        return not same_size or not _times_match(src, dst, pair.kind, self.exact_timestamps)
+
+
+def _times_match(src: FileInfo, dst: FileInfo, kind: OpKind, exact: bool) -> bool:
+    """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
+    if src.mtime is None or dst.mtime is None:
+        return False
+    delta = (dst.mtime - src.mtime).total_seconds()
+    if kind is OpKind.DOWNLOAD:
+        return delta == 0 if exact else delta <= 0
+    return delta >= 0
+
+
+def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
+    """A predicate passing only when every given predicate passes.
+
+    Composes any same-signature single-argument predicates - pair filters
+    (:data:`PairFilter`) and plain ``FileInfo`` visibility predicates
+    alike. With no predicates it always passes (like ``all([])``).
+    """
+
+    def combined(value: _T) -> bool:
+        return all(predicate(value) for predicate in predicates)
+
+    return combined
+
+
+def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
+    """A predicate passing when at least one given predicate passes.
+
+    The ``or`` counterpart of :func:`all_of`. With no predicates it never
+    passes (like ``any([])``).
+    """
+
+    def combined(value: _T) -> bool:
+        return any(predicate(value) for predicate in predicates)
+
+    return combined
+
+
+__all__ = [
+    "Comparator",
+    "DefaultCopyFilter",
+    "PairFilter",
+    "SyncPair",
+    "all_of",
+    "any_of",
+]

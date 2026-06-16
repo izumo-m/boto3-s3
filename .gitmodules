@@ -1,0 +1,5 @@
+[submodule "vendor/aws-cli"]
+	path = vendor/aws-cli
+	url = https://github.com/aws/aws-cli.git
+	branch = v2
+	shallow = true

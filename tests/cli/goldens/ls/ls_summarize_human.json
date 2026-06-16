@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "ls",
+    "s3://<BUCKET>/data/",
+    "--summarize",
+    "--human-readable"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": null,
+  "scenario": "ls_summarize_human",
+  "stdout_lines": [
+    "                           PRE sub/",
+    "                           PRE sub2/",
+    "<TIMESTAMP>    3 Bytes a.txt",
+    "<TIMESTAMP>  100 Bytes b.txt",
+    "",
+    "Total Objects: 2",
+    "   Total Size: 103 Bytes"
+  ]
+}

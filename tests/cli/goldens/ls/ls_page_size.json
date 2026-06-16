@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "ls",
+    "s3://<BUCKET>/pg/",
+    "--page-size",
+    "5"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": null,
+  "scenario": "ls_page_size",
+  "stdout_lines": [
+    "<TIMESTAMP>          1 k00",
+    "<TIMESTAMP>          1 k01",
+    "<TIMESTAMP>          1 k02",
+    "<TIMESTAMP>          1 k03",
+    "<TIMESTAMP>          1 k04",
+    "<TIMESTAMP>          1 k05",
+    "<TIMESTAMP>          1 k06",
+    "<TIMESTAMP>          1 k07",
+    "<TIMESTAMP>          1 k08",
+    "<TIMESTAMP>          1 k09",
+    "<TIMESTAMP>          1 k10",
+    "<TIMESTAMP>          1 k11"
+  ]
+}

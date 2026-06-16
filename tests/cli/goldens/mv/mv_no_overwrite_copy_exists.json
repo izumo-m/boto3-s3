@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d/a.txt",
+    "s3://<BUCKET>/moved/a.txt",
+    "--no-overwrite"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "moved/a.txt"
+  ],
+  "scenario": "mv_no_overwrite_copy_exists",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/d/a.txt to s3://<BUCKET>/moved/a.txt"
+  ]
+}
