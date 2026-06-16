@@ -1,0 +1,311 @@
+# Testing
+
+How the test suite is organized, what runs by default, and how aws-cli parity
+is enforced. The exit-code charter this enforces lives in
+[`overview.md`](./overview.md) section 3.
+
+## 1. Tiers
+
+| location | what | mechanism | runs |
+|---|---|---|---|
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes | always |
+| `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
+| `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection | always |
+| `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
+| `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against MinIO / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
+
+Directory = provenance (awscli port vs own), subdirectory = mechanism
+(stub / moto / live server). `uv run pytest` with no setup runs everything
+except e2e (skipped with a reason): any CI would need no Docker, since e2e
+self-skips without `BOTO3_S3_E2E_BUCKET`.
+
+## 2. Exit-code charter enforcement
+
+The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
+`ours.rc == aws.rc` for **every** scenario, unconditionally - scenario flags
+can relax stdout comparison and golden handling, but by design there is no
+flag to relax the rc comparison. The scenario sets
+(`tests/utils/<cmd>_scenarios.py`) are the charter's detection surface:
+extend them whenever a subcommand or option is added, including error paths
+(nonexistent bucket, out-of-range values). Note the per-command exit-code
+shapes differ (docs/cli.md section 6): ls maps server errors to 254 while the
+transfer family (rm / cp / mv / sync) reports every post-start error as rc 1,
+with cp / mv / sync adding rc 2 for warnings-only runs (rm has no
+warnings-only path).
+
+Charter exceptions map naturally: extension options (e.g. `--help`) cannot
+run on the aws side, so they are unit-tested instead of diffed.
+
+## 3. Golden contract
+
+A golden (`tests/cli/goldens/<cmd>/<scenario>.json`) records what the real
+aws-cli did for one scenario: `{scenario, argv, rc, stdout_lines,
+aws_version}` - plus `remaining_keys` (the bucket end state) for destructive
+commands. Committed to git.
+
+- **Capture** - `UPDATE_GOLDENS=1 uv run pytest tests/cli/e2e` writes goldens
+  from the aws capture. Regenerate only against a clean MinIO (tmpfs state)
+  and review the diff before committing; `aws_version` gives provenance.
+- **Drift check** - without `UPDATE_GOLDENS`, the e2e suite asserts the live
+  aws output still matches the committed golden, so an aws-cli upgrade that
+  changes behavior fails visibly.
+- **Replay** - the functional suite seeds moto with the scenario's exact
+  layout, runs the CLI in-process, and compares against the golden.
+
+Normalization (`tests/utils/harness.py`): for **ls**
+(`normalize_ls_stdout`), leading timestamps are masked (`<TIMESTAMP>` -
+capture and replay happen at different times/timezones) and the bucket name
+becomes `<BUCKET>`; nothing else changes - lines are never sorted (ls order
+is deterministic and parity-relevant) and never dropped. For **rm**
+(`normalize_rm_stdout`) the lines are **sorted** instead: aws-cli emits
+delete lines in parallel-completion order, which is nondeterministic run to
+run (observed on MinIO), so the line *set* is the contract; the end-state
+comparison (`remaining_keys`) pins down what sorting relaxes. Console output
+is not byte-guaranteed
+([`aws-cli-option-handling.md`](./aws-cli-option-handling.md)); stderr is
+only checked for stable tokens, never compared byte-for-byte.
+
+Destructive commands cannot share one seeding between the two e2e sides:
+`test_rm_parity.py` seeds, runs aws, captures the end state, then resets and
+re-seeds before the boto3-s3 run, and finally compares rc / sorted stdout /
+end state. The functional replay verifies the moto end state against the
+golden's `remaining_keys` too.
+
+Bucket-lifecycle commands (**mb** / **rb**) extend the same model: their
+goldens additionally record `bucket_exists` (the scenario bucket's existence
+after the run; `remaining_keys` is `null` when it is gone), their stdout
+shares rm's sorted normalization (no timestamps; `rb --force` interleaves
+nondeterministically ordered delete lines), and they run against a
+**sibling** bucket derived from the suite's main bucket (`-mb` / `-rb`
+suffix) - the e2e main bucket must stay existing and empty, so the
+`mb_bucket` / `rb_bucket` fixtures force-delete the sibling around each test
+and `harness.force_delete_bucket` resets it between the aws and boto3-s3
+runs. Sibling names must not end in `-an` (account-regional BucketNamespace
+semantics are unverified against MinIO; covered by ports and unit tests
+instead).
+
+For **website** only the client-side-error scenarios (rc 252, no server
+contact) carry goldens - every server-reaching scenario is `diff_only`
+because MinIO rejects the operation outright (section 7) while a moto replay
+would succeed; the success path is verified directly on moto instead
+(`test_website_golden.py::TestWebsiteOnMoto`, asserting the
+`get_bucket_website` round trip). Website stdout is empty in every
+outcome and shares rm's normalization.
+
+For **cp** the scenario fixes the *local* tree too: each side of the e2e
+diff gets its own workdir (materialized from `local_src`), the CLI runs
+with `cwd` set there, and argv / result lines carry workdir-relative paths
+- goldens need no path masking. `normalize_cp_stdout` keeps, per physical
+line, only the segment after the last `\r` (aws repaints progress in place
+with no isatty gate, so piped stdout carries `Completed ...` segments and
+right-padding), drops those progress statements (time/speed-dependent), and
+**sorts** the remaining result lines (parallel completion order - the rm
+rationale). What sorting and masking relax, the end states pin: goldens
+record `remaining_keys` (bucket), `local_tree` (`dst/` as
+`relpath:size:sha256-prefix` entries), and `head_fields` (selected
+HeadObject fields of one probe key - how ContentType/Metadata/StorageClass
+passthrough and the copy-props chain are verified end-to-end). The download
+mtime stamp is asserted live per side (file mtime == object LastModified),
+never via goldens. Scenarios whose outcome is endpoint-relative are
+`diff_only` (`--sse` and `--storage-class GLACIER` fail on MinIO and
+succeed on real S3; both CLIs always agree); the glacier *gate* shapes run
+on moto instead (`TestCpGlacierOnMoto` - including the restored-object
+pass and force-glacier letting S3's InvalidObjectState through). The `-`
+streaming scenarios carry a `stdin` payload: the e2e driver feeds it to
+both CLIs through the stdin-capable subprocess runners, and the moto
+replay routes any scenario with a payload or a `-` in its argv through
+`run_cli_in_process_streaming`, whose buffer-backed `sys.stdin` /
+`sys.stdout` shims let the in-process CLI read stdin uploads and write
+raw download bytes (a plain `StringIO` has no `.buffer`). A streaming
+download's golden `stdout_lines` are the object body itself - the
+errors-only printer both CLIs force for streams keeps result/progress
+lines out of it.
+
+**mv** is cp's model plus the move's defining end state: goldens
+additionally record `src_tree` - the local *source* tree after the run,
+captured unconditionally by the mv runners (what the move deleted, or kept
+on dryrun / filter / no-overwrite / failure; bucket-side source survival is
+already pinned by `remaining_keys`). cp goldens predate the field and load
+it as `None` (not compared). The download-mtime expectation is read from
+the object *before* the run - a successful move deletes the key the cp
+harness re-reads afterwards. Scenarios reuse `CpScenario` verbatim
+(`tests/utils/mv_scenarios.py`); the `--validate-same-s3-paths` surface has
+no e2e lane (MinIO hosts no access points) and lives in the awscli port
+(per-service recording clients) and the unit tier, and the glacier-gated
+move shapes run on moto (`TestMvGlacierOnMoto` - a gated or failed move
+must never delete the source).
+
+**sync** is cp's model with both end states active at once -
+`remaining_keys` pins the bucket (uploads, copies, S3-side `--delete`) and
+`local_tree` pins `dst/` (downloads, local-side `--delete`); `src_tree` stays
+`None` (sync never mutates its source, so the inherited field is neither
+captured nor compared). The new scenario knob is
+`CpScenario.local_mtimes`: workdir-relative offsets (+/-1 day) applied with
+`os.utime` after materialization, so the size+time judgments are
+deterministic against objects seeded at ~now - identically on MinIO (e2e)
+and moto (replay). The at-both matrices pin the aws-cli rules from both
+directions (upload skips when the destination is newer; a same-size
+download runs only when the *local* side is newer; `--size-only` /
+`--exact-timestamps` variants, the latter winning when combined). The
+s3->s3 at-both scenarios rely on seed order only for the skip direction
+(destination seeded after source is at least as new); the copy-side time
+rules need no sleeps because they match upload's, already pinned there.
+Scenarios live in `tests/utils/sync_scenarios.py`; the glacier-gated sync
+shapes run on moto (`TestSyncGlacierOnMoto` - including the
+restored-object *skip*: sync judges from the listing, which carries no
+`Restore` status, aws-cli-faithfully).
+
+For **presign** the golden is one normalized URL line
+(`normalize_presign_stdout`): virtual-host URLs are canonicalized to
+path-style and the endpoint is masked (`<ENDPOINT>` - the functional replay
+runs with no endpoint override while the capture used MinIO's IP endpoint),
+and the time/credential-dependent query values are masked (`X-Amz-Date`,
+`X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`,
+whose region/service scope stays - `--region` must reach the credential
+scope). Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
+key path are compared verbatim. The functional replay needs no moto backend
+(presign never contacts a server) and deletes `AWS_SESSION_TOKEN` for the
+run - the root conftest exports one, which would add an
+`X-Amz-Security-Token` parameter the token-less MinIO capture lacks. The
+e2e suite adds a **fetch layer** for time-stable scenarios: both sides'
+URLs are actually GET and compared on status (and body when 200) - the
+endpoint accepting our signature like it accepts aws's is parity the URL
+string alone cannot prove.
+
+## 4. MinIO dev stack and the e2e gate
+
+```
+scripts/compose-up.sh          # idempotent; waits for bucket init
+source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
+uv run pytest                  # full suite including e2e
+scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
+```
+
+`scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
+`compose-up.sh` matches the exact container name, and its `mc-init` sidecar
+creates both `test-bucket` (manual play) and `boto3-s3-e2e` (e2e suite).
+Only one stack can own ports 9000/9001 - any other stack on those ports
+conflicts; `compose-up.sh` then fails loudly instead of mistaking it for ours.
+
+e2e safety contract: at collection time the suite probes that the `aws`
+binary exists and that the bucket is reachable and **empty** (refusing to run
+against a populated bucket); each test cleans up exactly the keys it seeded,
+and the `bucket` fixture asserts emptiness before and after every test.
+
+The suites isolate in both directions: the root `tests/conftest.py` forces
+fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
+everything except e2e, which overrides that fixture with a no-op; test
+fixtures build clients from fresh `boto3.session.Session()` objects because
+the process-global default session caches the first credentials it resolves.
+Two mechanisms pin classic, because the CLI tiers and the library-default
+path resolve the engine differently. The same root fixture points
+`AWS_CONFIG_FILE` at a session-scoped file pinning
+`[s3] preferred_transfer_client = classic`: now that cp/mv/sync read the
+profile's `[s3]` section (cli.md section 8), this stops the host config from
+leaking tuning into the moto/recorder tiers and - on a CRT-optimized host -
+keeps `auto` from silently resolving to an engine moto cannot intercept. That
+config file only covers the CLI transfer tiers (`resolve_transfer_client`),
+not the library's own default `auto` path, which consults
+`awscrt.s3.is_optimized_for_system()` directly (transfer.py); a second
+autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
+so the in-process/library transfer tests stay deterministic on a
+CRT-optimized host (`test_transferrer.py` depends on it).
+
+The dev environment is always CRT-present (the dev dependency group installs
+`botocore[crt]`), matching aws v2 - the condition every parity tier runs
+under. The opposite - an install without awscrt - is pinned by
+`tests/cli/functional/test_crt_optional.py`: botocore freezes `HAS_CRT` and
+its checksum registry at import, so the test drives the CLI in a fresh
+subprocess that blocks `awscrt` before botocore loads, asserting the
+documented degradation (transfer.md section 9): plain transfers and presign stay
+rc 0; only the CRT checksum family fails in-pipeline ("Missing Dependency",
+rc 1).
+
+The **CRT transfer engine** (crt.md) has its own e2e lane,
+`tests/cli/e2e/test_crt_parity.py`, because the CRT manager bypasses
+botocore's HTTP layer and cannot run on moto - only against a real endpoint.
+Both CLIs run with a temp `AWS_CONFIG_FILE` selecting
+`preferred_transfer_client = crt` (the harness subprocess runners gained an
+`env` overlay for this), and the aws side gets an explicit `--endpoint-url`
+(aws's CRT client reads `use_ssl` from the argument only, so an env-only
+endpoint dials TLS to http MinIO and dies - our client derives it from the
+resolved boto3 client and needs no flag). The lane is differential, no
+goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
+`s3handler` has no CRT branch), so the signal is that our CRT mode agrees
+with aws's CRT mode on rc / stdout / bucket state / local tree / download
+mtime across upload, download, mv, and sync (single-part and 9 MiB
+multipart). A separate `--debug` check pins that our side actually engaged
+the CRT engine by asserting the transfer-time breadcrumb
+`Transferrer._get_manager` emits (`transfer engine: CRTTransferManager`),
+which names the engine *after* any CRT->classic fallback - guarding against a
+silent classic fallback (the `s3transfer.crt` throughput log fires at CRT
+*client construction*, before the compatibility gate, so it cannot tell a
+real CRT transfer from a fallback). A further case
+(`test_crt_ignores_classic_only_config`) pins the charter: `[s3]` classic-only
+keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws, not a
+traceback. Gated by the e2e opt-in plus an `awscrt` import check. The selection matrix and `[s3]`
+parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
+`test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
+process lock monkeypatched.
+
+## 5. aws-cli test ports
+
+Ports keep aws-cli test names, canned responses, and expectations verbatim
+where possible (see the adaptation rules in each port's module docstring -
+e.g. `tests/cli/awscli/test_ls_command.py`). Genuine divergences are to be marked
+`xfail(strict=True)` with the open design question in the reason, never
+silently rewritten (none currently; all ports match aws-cli). The presign port freezes botocore's signing clock
+through the `get_current_datetime` seam - patched in both modules that
+bind it, `botocore.auth` and (when awscrt is importable - the dev
+environment always is, section 4) `botocore.crt.auth` - and keeps
+aws-cli's expected URLs - frozen-time signatures included - bit-for-bit.
+The cp port injects `Context.transfer_config` with `use_threads=False`
+(boto3's NonThreadedExecutor path) so multipart call order is deterministic
+against the positional canned list, and rewrites aws-cli's expected
+default `ChecksumAlgorithm: 'CRC64NVME'` to the `'CRC32'` that pip s3transfer
+injects on upload paths (both engines add a default integrity checksum;
+they just pick different algorithms - an explicit `--checksum-algorithm`
+makes them agree, and docs/transfer.md section 10 has the full wire-deviation
+list). Its case-conflict classes guard the existing-local-file variants
+with a live case-insensitivity probe of the test directory (aws-cli's
+`skip_if_case_sensitive`), so they run on macOS/Windows-like filesystems
+and skip on default Linux ones.
+
+## 6. Import contract
+
+`tests/lib/test_import_contract.py` and `tests/cli/unit/test_import_contract.py`
+pin the lazy-import policy ([`imports.md`](./imports.md)): `import boto3_s3` -
+and the CLI's `--help` / `--version` / usage-error paths - load no
+boto3 / botocore / s3transfer module, and reaching the `S3` entry point may
+load `botocore.exceptions` only. Module-loading cases run in fresh
+interpreters (`python -c` subprocesses) so imports already made by the test
+runner can't mask a regression; a resolve-every-symbol case guards the
+three-way `__all__` / `TYPE_CHECKING` / `_EXPORT_HOMES` mirror in the lazy
+`__init__`. When a subcommand is added, extend the CLI cases (its `--help`
+must stay SDK-free).
+
+## 7. Known limitations
+
+- **xdist** (not currently configured): if parallel runs are added, the e2e
+  tier shares one bucket with an empty-before/after invariant and would not be
+  xdist-safe (the other tiers would be). Move to per-worker key prefixes if
+  parallel e2e becomes necessary.
+- **moto fidelity**: moto raises an internal `IndexError` for `MaxKeys=-1`
+  instead of S3's `InvalidArgument`, so `ls_page_size_negative` and
+  `rm_page_size_negative` are `diff_only` (e2e only). Likewise `mb_existing`:
+  moto mirrors real S3's us-east-1 quirk (re-creating a bucket you own
+  succeeds) while MinIO answers `BucketAlreadyOwnedByYou` -> rc 1 on both live
+  sides, so a golden would freeze the MinIO-specific rc. Scenarios that hit
+  moto gaps should be flagged the same way, not papered over.
+- **MinIO fidelity (the inverse gap)**: MinIO rejects **every**
+  PutBucketWebsite with `MalformedXML` (index-only, both
+  documents, empty config, and nonexistent bucket alike - its
+  GetBucketWebsite answers `NoSuchWebsiteConfiguration` and its
+  DeleteBucketWebsite is a no-op success). Both CLIs exit 254 identically,
+  so the e2e rc comparison still holds, but the website success path cannot
+  run there: those scenarios are `diff_only` and the success path is
+  verified on moto (which supports the operation fully). Against real S3
+  the same scenarios exit 0 on both sides - rc parity is endpoint-relative
+  by design.
+- **Windows**: `scripts/minio-env.sh` is POSIX; set the variables manually
+  (or add a `.ps1` twin when Windows-native development starts).

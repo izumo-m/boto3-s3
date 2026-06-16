@@ -1,0 +1,28 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d",
+    "dst/",
+    "--recursive",
+    "--dryrun"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [],
+  "rc": 0,
+  "remaining_keys": [
+    "d-sibling.txt",
+    "d/a.txt",
+    "d/b.bin",
+    "d/marker/",
+    "d/sub/c.txt"
+  ],
+  "scenario": "mv_download_dryrun_recursive",
+  "src_tree": [],
+  "stdout_lines": [
+    "(dryrun) move: s3://<BUCKET>/d/a.txt to dst/a.txt",
+    "(dryrun) move: s3://<BUCKET>/d/b.bin to dst/b.bin",
+    "(dryrun) move: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+  ]
+}

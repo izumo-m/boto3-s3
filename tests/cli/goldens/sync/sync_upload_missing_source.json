@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "sync",
+    "src/none",
+    "s3://<BUCKET>/up"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 255,
+  "remaining_keys": [],
+  "scenario": "sync_upload_missing_source",
+  "src_tree": null,
+  "stdout_lines": []
+}

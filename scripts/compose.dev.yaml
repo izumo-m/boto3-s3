@@ -1,0 +1,45 @@
+# Ephemeral MinIO for boto3-s3 manual testing and the e2e parity suite.
+#
+# Usage (from repo root):
+#   scripts/compose-up.sh          # start the stack, wait for bucket init
+#   source scripts/minio-env.sh    # point AWS tooling (aws / boto3-s3) at it
+#   uv run pytest tests/cli/e2e    # run the e2e parity suite
+#   scripts/compose.sh down        # tear down (any compose subcommand works)
+#
+# Console: http://localhost:9001 (minioadmin / minioadmin)
+# API:     http://localhost:9000
+#
+# State lives in tmpfs and disappears on `down`. To persist between runs,
+# replace the tmpfs entry with a named volume (e.g. `volumes: [minio-data:/data]`).
+
+# Pinned so compose-up.sh can match the exact container name
+# (boto3-s3-dev-minio-1) rather than any compose stack with a minio service.
+name: boto3-s3-dev
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    tmpfs:
+      - /data
+
+  # Creates the buckets the dev workflow expects: test-bucket for manual
+  # play, boto3-s3-e2e for the e2e suite (which probes that it exists and is
+  # empty before running).
+  mc-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done &&
+      mc mb --ignore-existing local/test-bucket &&
+      mc mb --ignore-existing local/boto3-s3-e2e
+      "
+    restart: "no"

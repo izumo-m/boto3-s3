@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "presign",
+    "s3://<BUCKET>/presign/basic.txt",
+    "--expires-in",
+    "604801"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": null,
+  "scenario": "presign_expires_over_max",
+  "stdout_lines": [
+    "<ENDPOINT>/<BUCKET>/presign/basic.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<ACCESS_KEY>/<DATE>/us-east-1/s3/aws4_request&X-Amz-Date=<AMZ_DATE>&X-Amz-Expires=604801&X-Amz-SignedHeaders=host&X-Amz-Signature=<SIGNATURE>"
+  ]
+}

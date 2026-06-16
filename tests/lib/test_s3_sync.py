@@ -1,0 +1,501 @@
+"""``S3.sync``: the two-layer pipeline over a recording client.
+
+Behavioral parity pins (aws-cli refs in the implementation): the size+mtime
+judgment with its direction asymmetry,
+``--delete`` driven purely by the destination-only pairs (folder markers and
+filtered entries protected), the visibility layer pruning each side against
+its own root, dry runs that list but never act, the missing-source 255 shape,
+a source *file* degrading to the aws-cli's walk warning, and ``no_overwrite``
+handled wholly in the pair judgment (no ``IfNoneMatch`` on the wire).
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+from boto3.s3.transfer import TransferConfig
+
+from boto3_s3 import DefaultCopyFilter, GlobPattern, globsieve
+from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
+from boto3_s3.s3 import S3
+from boto3_s3.s3storage import S3Storage
+from boto3_s3.types import (
+    CancelToken,
+    CaseConflictMode,
+    OpKind,
+    OpOutcome,
+    OpResult,
+    TransferOptions,
+)
+from tests.utils.recorder import ApiCall, make_recording_client
+
+_SERIAL = TransferConfig(use_threads=False)
+_MTIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+_OLDER = _MTIME - timedelta(hours=1)
+_NEWER = _MTIME + timedelta(hours=1)
+
+
+def _ops(calls: list[ApiCall]) -> list[str]:
+    return [call.operation for call in calls]
+
+
+def _listing(*entries: tuple[str, int]) -> dict[str, Any]:
+    return {
+        "Contents": [
+            {"Key": key, "Size": size, "LastModified": _MTIME, "ETag": '"e"'}
+            for key, size in entries
+        ]
+    }
+
+
+def _get_response(body: bytes = b"payload") -> dict[str, Any]:
+    import io
+
+    return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
+
+
+def _write(root: Path, rel: str, body: bytes, *, mtime: datetime | None = None) -> Path:
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(body)
+    if mtime is not None:
+        os.utime(target, (mtime.timestamp(), mtime.timestamp()))
+    return target
+
+
+class TestSyncUpload:
+    def test_judges_each_pair_with_the_awscli_rules(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx", mtime=_OLDER)  # not at dest -> upload
+        _write(src, "same.txt", b"xx", mtime=_OLDER)  # dest newer -> skip
+        _write(src, "stale.txt", b"xx", mtime=_NEWER)  # dest older -> upload
+        _write(src, "bigger.txt", b"xxx", mtime=_OLDER)  # size differs -> upload
+        listing = _listing(("p/bigger.txt", 2), ("p/same.txt", 2), ("p/stale.txt", 2))
+        client, calls = make_recording_client([listing, {}, {}, {}])
+        S3().sync(str(src), S3Storage("s3://bucket/p", client=client), transfer_config=_SERIAL)
+        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
+        assert calls[0].params["Prefix"] == "p/"
+        assert [call.params["Key"] for call in calls[1:]] == [
+            "p/bigger.txt",
+            "p/new.txt",
+            "p/stale.txt",
+        ]
+
+    def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([_listing(("p/extra.txt", 2))])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+        assert results == []
+
+    def test_delete_batches_dest_only_keys_and_spares_markers(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "keep.txt", b"xx", mtime=_OLDER)
+        listing: dict[str, Any] = {
+            "Contents": [
+                {"Key": "p/extra1.txt", "Size": 2, "LastModified": _MTIME, "ETag": '"e"'},
+                {"Key": "p/keep.txt", "Size": 2, "LastModified": _NEWER, "ETag": '"e"'},
+                # A folder marker never surfaces on either side: not deleted.
+                {"Key": "p/marker/", "Size": 0, "LastModified": _MTIME, "ETag": '"m"'},
+                {"Key": "p/sub/extra2.txt", "Size": 2, "LastModified": _MTIME, "ETag": '"e"'},
+            ]
+        }
+        client, calls = make_recording_client([listing, {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+            request_payer="requester",
+        )
+        assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
+        assert calls[0].params["RequestPayer"] == "requester"
+        delete_params = calls[1].params
+        assert delete_params["RequestPayer"] == "requester"
+        keys = [entry["Key"] for entry in delete_params["Delete"]["Objects"]]
+        assert keys == ["p/extra1.txt", "p/sub/extra2.txt"]
+        deleted = [r for r in results if r.kind is OpKind.DELETE]
+        assert {r.outcome for r in deleted} == {OpOutcome.SUCCEEDED}
+        assert sorted(r.src for r in deleted if r.src) == [
+            "s3://bucket/p/extra1.txt",
+            "s3://bucket/p/sub/extra2.txt",
+        ]
+
+    def test_delete_predicate_narrows_the_lane(self, tmp_path: Path) -> None:
+        # A FileFilter predicate (the orphan's FileInfo) narrows which orphans
+        # are deleted - the delete lane is rm over the orphans.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client(
+            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
+        )
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=lambda info: info.key.endswith(".log"),
+            transfer_config=_SERIAL,
+        )
+        keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
+        assert keys == ["p/extra.log"]
+
+    def test_delete_matcher_narrows_by_name(self, tmp_path: Path) -> None:
+        # A globsieve Matcher narrows the delete lane by the orphan's compare
+        # key (relative), reusing rm's filter shape on the orphans.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client(
+            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
+        )
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.log")]),
+            transfer_config=_SERIAL,
+        )
+        keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
+        assert keys == ["p/extra.log"]
+
+    def test_excluded_dest_entries_are_protected_from_delete(self, tmp_path: Path) -> None:
+        # aws: "files excluded by filters are excluded from deletion" - the
+        # visibility layer prunes the destination stream before pairing.
+        src = tmp_path / "src"
+        src.mkdir()
+        matcher = globsieve.compile([GlobPattern.exclude("*.log")])
+        client, calls = make_recording_client(
+            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
+        )
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=True,
+            filter=matcher,
+            transfer_config=_SERIAL,
+        )
+        keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
+        assert keys == ["p/extra.txt"]
+
+    def test_dryrun_lists_but_never_acts(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("p/extra.txt", 2))])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=True,
+            dryrun=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+        outcomes = {(r.kind, r.key): r.outcome for r in results}
+        assert outcomes == {
+            (OpKind.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
+            (OpKind.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
+        }
+
+    def test_copy_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
+        listing = _listing(("p/same.txt", 2))
+        client, calls = make_recording_client([listing, {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            copy_filter=lambda pair: True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+
+    def test_no_overwrite_judges_without_if_none_match(self, tmp_path: Path) -> None:
+        # no_overwrite is a DefaultCopyFilter field for sync: the at-both pair
+        # is skipped by the judgment alone, and the new file's upload carries
+        # no conditional-write header (sync never sends IfNoneMatch).
+        src = tmp_path / "src"
+        _write(src, "exists.txt", b"xxx", mtime=_NEWER)  # differs, but never overwritten
+        _write(src, "new.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("p/exists.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            copy_filter=DefaultCopyFilter(no_overwrite=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/new.txt"
+        assert "IfNoneMatch" not in calls[1].params
+
+    def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
+        missing = str(tmp_path / "nope")
+        client, calls = make_recording_client([])
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().sync(missing, S3Storage("s3://bucket/p", client=client))
+        assert type(excinfo.value) is Boto3S3Error
+        assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
+        assert calls == []
+
+    def test_source_file_degrades_to_the_walk_warning(self, tmp_path: Path) -> None:
+        # `aws s3 sync ./file s3://...` treats the file as a
+        # directory root, warns "File does not exist." (trailing separator
+        # included) and exits 2 - no hard failure.
+        src = _write(tmp_path, "afile.txt", b"xx")
+        client, calls = make_recording_client([_listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
+
+    def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"xx")
+        client, _calls = make_recording_client([_listing()])
+        token = CancelToken()
+        token.cancel()
+        with pytest.raises(CancelledError):
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                transfer_config=_SERIAL,
+                cancel_token=token,
+            )
+
+
+class TestSyncDownload:
+    def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
+        # The aws-cli asymmetry: same-size pairs download only when the LOCAL
+        # side is newer than S3.
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
+        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
+        client, calls = make_recording_client([listing, _get_response(), _get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
+        assert (out / "new.txt").read_bytes() == b"payload"
+
+    def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            copy_filter=DefaultCopyFilter(exact_timestamps=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+
+    def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)
+        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            copy_filter=DefaultCopyFilter(size_only=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+
+    def test_copy_filter_true_copies_every_source(self, tmp_path: Path) -> None:
+        # copy_filter=True forces all source-present pairs through, even an
+        # up-to-date one the default would skip (cp-like).
+        src = tmp_path / "src"
+        _write(src, "same.txt", b"xx", mtime=_OLDER)  # same size, older -> default would skip
+        client, calls = make_recording_client([_listing(("p/same.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            copy_filter=True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+
+    def test_copy_filter_false_copies_nothing(self, tmp_path: Path) -> None:
+        # copy_filter=False skips every copy, even a brand-new source file.
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing()])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            copy_filter=False,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+
+    def test_copy_filter_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
+        # copy_filter=False + delete=True: prune orphans, copy nothing.
+        src = tmp_path / "src"
+        _write(src, "keep.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            copy_filter=False,
+            delete=True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
+        keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
+        assert keys == ["p/extra.txt"]
+
+    def test_destination_directory_is_created_even_when_empty(self, tmp_path: Path) -> None:
+        out = tmp_path / "fresh" / "nested"
+        client, _calls = make_recording_client([_listing()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert out.is_dir()
+
+    def test_delete_removes_local_files_synchronously(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        stale = _write(out, "stale.txt", b"xx")
+        nested = _write(out, "sub/stale2.txt", b"xx")
+        client, calls = make_recording_client([_listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            delete=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+        assert not stale.exists() and not nested.exists()
+        assert {(r.kind, r.outcome) for r in results} == {(OpKind.DELETE, OpOutcome.SUCCEEDED)}
+        assert sorted(r.src for r in results if r.src) == [str(stale), str(nested)]
+
+    def test_dryrun_delete_keeps_local_files(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        stale = _write(out, "stale.txt", b"xx")
+        client, _calls = make_recording_client([_listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            delete=True,
+            dryrun=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert stale.exists()
+        assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
+
+    def test_local_delete_failure_aggregates_into_batcherror(self, tmp_path: Path) -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root removes anything")
+        out = tmp_path / "out"
+        stale = _write(out, "locked/stale.txt", b"xx")
+        stale.parent.chmod(0o555)
+        client, _calls = make_recording_client([_listing()])
+        results: list[OpResult] = []
+        try:
+            with pytest.raises(BatchError) as excinfo:
+                S3().sync(
+                    S3Storage("s3://bucket/d", client=client),
+                    str(out),
+                    delete=True,
+                    transfer_config=_SERIAL,
+                    on_result=results.append,
+                )
+        finally:
+            stale.parent.chmod(0o755)
+        assert str(excinfo.value) == "1 of 1 operations failed"
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert "[Errno 13]" in str(results[0].error)
+
+    def test_glacier_source_warns_and_skips(self, tmp_path: Path) -> None:
+        listing: dict[str, Any] = {
+            "Contents": [
+                {
+                    "Key": "d/cold.bin",
+                    "Size": 2,
+                    "LastModified": _MTIME,
+                    "ETag": '"e"',
+                    "StorageClass": "GLACIER",
+                }
+            ]
+        }
+        client, calls = make_recording_client([listing])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(tmp_path / "out"),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert "Unable to perform download operations on GLACIER objects" in str(results[0].error)
+
+    def test_case_conflict_gate_guards_only_missing_pairs(self, tmp_path: Path) -> None:
+        # Two case twins, both missing at the destination: the first is
+        # admitted, the second hits the submitted-set and SKIP emits the
+        # aws-cli notice (uncounted; rc untouched).
+        out = tmp_path / "out"
+        listing = _listing(("d/A.txt", 2), ("d/a.txt", 2))
+        client, calls = make_recording_client([listing, _get_response()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+            **TransferOptions(case_conflict=CaseConflictMode.SKIP),
+        )
+        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert calls[1].params["Key"] == "d/A.txt"
+        notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
+        assert len(notices) == 1
+        assert str(notices[0].error).startswith("warning: Skipping bucket/d/a.txt -> ")
+
+
+class TestSyncCopy:
+    def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
+        src_client, src_calls = make_recording_client([_listing(("s/new.txt", 2))])
+        dst_client, dst_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
+        S3().sync(
+            S3Storage("s3://src-b/s", client=src_client),
+            S3Storage("s3://dst-b/t", client=dst_client),
+            delete=True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(src_calls) == ["ListObjectsV2"]
+        assert _ops(dst_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
+        copy = dst_calls[1].params
+        assert copy["CopySource"] == {"Bucket": "src-b", "Key": "s/new.txt"}
+        assert copy["Bucket"] == "dst-b"
+        assert copy["Key"] == "t/new.txt"
+        keys = [entry["Key"] for entry in dst_calls[2].params["Delete"]["Objects"]]
+        assert keys == ["t/extra.txt"]
+
+    def test_same_location_sync_is_a_silent_noop(self, tmp_path: Path) -> None:
+        # `aws s3 sync s3://b/p s3://b/p` exits 0 silently - every
+        # pair is identical, so the judgment skips all of them (no mv-style
+        # onto-itself guard exists for sync).
+        listing = _listing(("p/a.txt", 2))
+        client, calls = make_recording_client([listing, listing])
+        storage = S3Storage("s3://bucket/p", client=client)
+        results: list[OpResult] = []
+        S3().sync(storage, storage, delete=True, transfer_config=_SERIAL, on_result=results.append)
+        assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
+        assert results == []

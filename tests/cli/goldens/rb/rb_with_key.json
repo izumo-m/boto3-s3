@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "rb",
+    "s3://<BUCKET>/key"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": true,
+  "rc": 252,
+  "remaining_keys": [],
+  "scenario": "rb_with_key",
+  "stdout_lines": []
+}

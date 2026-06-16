@@ -1,0 +1,31 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/d",
+    "dst/",
+    "--recursive",
+    "--exclude",
+    "*",
+    "--include",
+    "*.txt"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "a.txt:13:48ec9dee",
+    "sub/c.txt:13:f8d67eb2"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d-sibling.txt",
+    "d/b.bin",
+    "d/marker/"
+  ],
+  "scenario": "mv_download_filters",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/d/a.txt to dst/a.txt",
+    "move: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+  ]
+}

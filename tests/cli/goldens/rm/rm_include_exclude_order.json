@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "rm",
+    "s3://<BUCKET>/f/",
+    "--recursive",
+    "--include",
+    "*.txt",
+    "--exclude",
+    "*"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": [
+    "f/a.txt",
+    "f/b.bin",
+    "f/sub/c.txt"
+  ],
+  "scenario": "rm_include_exclude_order",
+  "stdout_lines": []
+}

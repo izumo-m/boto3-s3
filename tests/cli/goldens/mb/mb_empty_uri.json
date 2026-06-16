@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "mb",
+    "s3://"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": false,
+  "rc": 1,
+  "remaining_keys": null,
+  "scenario": "mb_empty_uri",
+  "stdout_lines": []
+}

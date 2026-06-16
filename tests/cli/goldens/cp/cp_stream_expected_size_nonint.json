@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "cp",
+    "-",
+    "s3://<BUCKET>/stream.txt",
+    "--expected-size",
+    "abc"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 1,
+  "remaining_keys": [],
+  "scenario": "cp_stream_expected_size_nonint",
+  "stdout_lines": []
+}

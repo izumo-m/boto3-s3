@@ -1,0 +1,29 @@
+{
+  "argv": [
+    "cp",
+    "s3://<BUCKET>/d/",
+    "s3://<BUCKET>/cp/",
+    "--recursive"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "cp/a.txt",
+    "cp/b.bin",
+    "cp/sub/c.txt",
+    "d-sibling.txt",
+    "d/a.txt",
+    "d/b.bin",
+    "d/marker/",
+    "d/sub/c.txt"
+  ],
+  "scenario": "cp_copy_recursive",
+  "stdout_lines": [
+    "copy: s3://<BUCKET>/d/a.txt to s3://<BUCKET>/cp/a.txt",
+    "copy: s3://<BUCKET>/d/b.bin to s3://<BUCKET>/cp/b.bin",
+    "copy: s3://<BUCKET>/d/sub/c.txt to s3://<BUCKET>/cp/sub/c.txt"
+  ]
+}

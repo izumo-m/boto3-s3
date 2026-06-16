@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "rm",
+    "s3://<BUCKET>/data/",
+    "--recursive",
+    "--only-show-errors"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 0,
+  "remaining_keys": [
+    "data-sibling.txt"
+  ],
+  "scenario": "rm_only_show_errors",
+  "stdout_lines": []
+}

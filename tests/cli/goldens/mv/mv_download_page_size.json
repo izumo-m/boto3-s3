@@ -1,0 +1,31 @@
+{
+  "argv": [
+    "mv",
+    "s3://<BUCKET>/pg",
+    "dst/",
+    "--recursive",
+    "--page-size",
+    "2"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "k00:1:148de9c5",
+    "k01:1:148de9c5",
+    "k02:1:148de9c5",
+    "k03:1:148de9c5",
+    "k04:1:148de9c5"
+  ],
+  "rc": 0,
+  "remaining_keys": [],
+  "scenario": "mv_download_page_size",
+  "src_tree": [],
+  "stdout_lines": [
+    "move: s3://<BUCKET>/pg/k00 to dst/k00",
+    "move: s3://<BUCKET>/pg/k01 to dst/k01",
+    "move: s3://<BUCKET>/pg/k02 to dst/k02",
+    "move: s3://<BUCKET>/pg/k03 to dst/k03",
+    "move: s3://<BUCKET>/pg/k04 to dst/k04"
+  ]
+}

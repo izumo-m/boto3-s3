@@ -1,0 +1,99 @@
+# Build and publish a package to PyPI via Trusted Publishing (OIDC).
+# The two workspace packages are versioned independently; the tag selects which.
+#   boto3-s3-v<version>      -> publishes the boto3-s3 library
+#   boto3-s3-cli-v<version>  -> publishes the boto3-s3-cli CLI
+# A manual run (workflow_dispatch) can target TestPyPI for a dry run.
+# See docs/release.md for the full procedure and one-time setup.
+name: release
+
+on:
+  push:
+    tags:
+      - "boto3-s3-v*"
+      - "boto3-s3-cli-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build and publish
+        required: true
+        type: choice
+        options:
+          - boto3-s3
+          - boto3-s3-cli
+      repository:
+        description: Target index
+        required: true
+        default: testpypi
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions: {}
+
+jobs:
+  publish:
+    # Release only from the canonical repository: a fork that pushes a release
+    # tag (or dispatches this workflow) must never publish. The whole job -
+    # OIDC token request, build, publish - is skipped elsewhere.
+    if: github.repository == 'izumo-m/boto3-s3'
+    runs-on: ubuntu-latest
+    # The environment name must match the one registered as the trusted
+    # publisher on (Test)PyPI. Tag pushes always target the production index.
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.repository) || 'pypi' }}
+    permissions:
+      id-token: write # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.17"
+
+      - name: Resolve target package and version
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            package="$INPUT_PACKAGE"
+            repository="$INPUT_REPOSITORY"
+            tag_version=""
+          else
+            # Tag form: <package>-v<version>
+            package="${REF_NAME%-v*}"
+            tag_version="${REF_NAME##*-v}"
+            repository="pypi"
+          fi
+          case "$package" in
+            boto3-s3) pyproject="pyproject.toml" ;;
+            boto3-s3-cli) pyproject="cli/pyproject.toml" ;;
+            *) echo "::error::unknown package '$package'"; exit 1 ;;
+          esac
+          # First '^version =' line is the [project] version in these files.
+          proj_version="$(grep -m1 '^version = ' "$pyproject" | sed -E 's/^version = "([^"]+)"/\1/')"
+          if [ -n "$tag_version" ] && [ "$tag_version" != "$proj_version" ]; then
+            echo "::error::tag version ($tag_version) != $pyproject version ($proj_version)"
+            exit 1
+          fi
+          {
+            echo "package=$package"
+            echo "version=$proj_version"
+            echo "repository=$repository"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $package $proj_version to $repository"
+
+      - name: Build
+        run: uv build --package "${{ steps.target.outputs.package }}"
+
+      - name: Publish to PyPI
+        if: steps.target.outputs.repository == 'pypi'
+        run: uv publish --trusted-publishing always
+
+      - name: Publish to TestPyPI
+        if: steps.target.outputs.repository == 'testpypi'
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/

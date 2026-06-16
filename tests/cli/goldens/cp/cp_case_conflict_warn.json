@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "cp",
+    "s3://<BUCKET>/cc/",
+    "dst",
+    "--recursive",
+    "--case-conflict",
+    "warn"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "A.txt:5:aee61055",
+    "a.txt:5:8c6fb1e9"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "cc/A.txt",
+    "cc/a.txt"
+  ],
+  "scenario": "cp_case_conflict_warn",
+  "stdout_lines": [
+    "download: s3://<BUCKET>/cc/A.txt to dst/A.txt",
+    "download: s3://<BUCKET>/cc/a.txt to dst/a.txt"
+  ]
+}

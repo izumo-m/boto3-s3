@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "sync",
+    "s3://<BUCKET>/cs",
+    "s3://<BUCKET>/cd",
+    "--content-type",
+    "text/css",
+    "--metadata-directive",
+    "REPLACE"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "head_fields": {
+    "ContentType": "text/css"
+  },
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "cd/styled.txt",
+    "cs/styled.txt"
+  ],
+  "scenario": "sync_copy_content_type",
+  "src_tree": null,
+  "stdout_lines": [
+    "copy: s3://<BUCKET>/cs/styled.txt to s3://<BUCKET>/cd/styled.txt"
+  ]
+}

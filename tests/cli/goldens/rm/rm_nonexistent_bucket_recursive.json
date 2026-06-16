@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "rm",
+    "s3://<BUCKET>-no-such/",
+    "--recursive"
+  ],
+  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "bucket_exists": null,
+  "rc": 1,
+  "remaining_keys": [],
+  "scenario": "rm_nonexistent_bucket_recursive",
+  "stdout_lines": []
+}
