@@ -185,3 +185,42 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
   visible, so even a restored object is skip-warned - this is identical to
   aws-cli's behavior (they too look at the listing's response_data).
   `--force-glacier-transfer` is the only path.
+
+## 8. ETag content comparison (`ETagFilter`, opt-in)
+
+`copy_filter=DefaultCopyFilter()` decides by size + mtime. When the decision must
+follow **content**, `boto3_s3.etagfilter.ETagFilter` is a shipped `PairFilter`
+that compares S3's ETag against the ETag the source would carry. It is a
+standalone, opt-in building block - imported by submodule path, not part of the
+package root re-export:
+
+```python
+from boto3_s3.etagfilter import ETagFilter
+
+s3.sync(src, dst, copy_filter=ETagFilter(s3))            # part_size from the profile
+s3.sync(src, dst, copy_filter=ETagFilter())              # 8 MiB default part size
+s3.sync(src, dst, copy_filter=ETagFilter(part_size=16 * 1024 * 1024))      # explicit
+s3.sync(src, dst, copy_filter=any_of(DefaultCopyFilter(), ETagFilter(s3)))  # compose
+```
+
+- **s3->s3** compares the two listings' ETags directly (no bytes read);
+  **upload / download** reconstructs the local file's single- or multipart
+  S3-style ETag and compares. A source-only pair always copies; a missing /
+  non-MD5 ETag is treated as differing (never skip on an indeterminate compare).
+- **`part_size`** is the multipart chunk size, fixed at construction.
+  `ETagFilter(s3)` reads it from that `s3`'s active profile
+  (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read tied to the
+  `s3` you pass, not an ambient one (the library filter never reads config on its
+  own; `ETagFilter()` is a plain 8 MiB constant). An explicit `part_size=` wins
+  over `s3`. The value must match what the object was uploaded with, or every
+  multipart object reads as differing (the rclone `--s3-chunk-size` constraint);
+  the *effective* size has a 5 MiB floor / 5 GiB ceiling and auto-grows past S3's
+  10000-part limit.
+- **`check_size`** (default on) treats a known size mismatch as differing before
+  any ETag work. On s3->s3 this guards against an MD5/ETag collision (equal ETag
+  != equal content); on upload / download it also skips the local read + hash.
+  `check_size=False` restores pure-ETag semantics.
+- **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag, so
+  against such a bucket every object reads as differing - stay on (or compose
+  with) `DefaultCopyFilter`. The upload / download hash runs on sync's main
+  thread.

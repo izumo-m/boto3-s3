@@ -77,6 +77,18 @@ class TestLibraryImportContract:
             """
         )
 
+    def test_etagfilter_alone_stays_pure(self) -> None:
+        # The ETag content-comparison filter is an opt-in building block; its one
+        # SDK touch (s3transfer's ChunksizeAdjuster) is deferred into the compute
+        # path, so importing the module must not pull the SDK.
+        _run_fresh(
+            """
+            import boto3_s3.etagfilter
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
     def test_transfer_shape_helpers_stay_pure(self) -> None:
         # The cp path/param rules are pure string logic: the CLI imports them
         # on its run path and the library's tests exercise them SDK-free.
