@@ -58,6 +58,10 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import WebsiteConfigurationTypeDef
 
+    # Local + SDK-free, but kept annotation-only so `aws_config()` stays an
+    # opt-in module load (the reader's botocore touch is deferred into it).
+    from boto3_s3.awsconfig import AwsConfig
+
 # S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
 # for larger uploads; the size string is aws-cli's rendered constant
 # (human_readable_size(MAX_UPLOAD_SIZE)).
@@ -420,6 +424,10 @@ class S3:
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
+        # Memoized AwsConfig (aws_config()): resolve+parse the config file once
+        # per instance, since a sync filter may consult it per object. A benign,
+        # idempotent cache - concurrent first calls recompute the same reader.
+        self._aws_config: AwsConfig | None = None
 
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
@@ -453,6 +461,32 @@ class S3:
         if text.startswith("s3://"):
             return S3Storage(text, client=self.client())
         return LocalStorage(text)
+
+    def aws_config(self) -> AwsConfig:
+        """Read this instance's AWS config file (``~/.aws/config``) - an explicit opt-in.
+
+        Returns an :class:`~boto3_s3.awsconfig.AwsConfig` reader over the config
+        file resolved for this ``S3``'s ``session`` (or a default
+        ``AWS_PROFILE``-aware session when none was given - the same resolution
+        :meth:`client` uses). Use it to surface profile settings the application
+        did not set itself - e.g. the ``[s3]`` transfer tuning::
+
+            chunksize = s3.aws_config().get_size("s3.multipart_chunksize", 8 * 1024**2)
+
+        This is a building block offered **explicitly**: ``S3``'s own operations
+        (``cp`` / ``sync`` / ...) never read the config file on their own, so they
+        carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
+        memoized per instance (the file is parsed once). Matching ``aws s3``'s
+        ``[s3]`` semantics on top of these values (the defaults table, validation,
+        the engine decision) is the CLI distribution's job, not the library's.
+        """
+        # Deferred: the reader's botocore touch (and the boto3 default session)
+        # load only when a caller actually asks (import contract, docs/imports.md).
+        from boto3_s3.awsconfig import AwsConfig
+
+        if self._aws_config is None:
+            self._aws_config = AwsConfig.from_session(self._session)
+        return self._aws_config
 
     # -- listing ----------------------------------------------------------
 
