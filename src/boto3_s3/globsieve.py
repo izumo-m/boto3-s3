@@ -15,6 +15,11 @@ Usage (``re``-style)::
     m.included("foo.txt")  # True
     m.included("foo.log")  # False
 
+:class:`GlobFilter` is the ergonomic front end built on this engine - a
+chainable ``FileFilter`` (``GlobFilter().exclude("*").include("*.txt").compile()``)
+passed straight to ``S3.cp`` / ``mv`` / ``rm`` / ``sync`` as ``filter=``; it is
+sugar over the same :func:`compile`.
+
 Specialization happens at compile time. :func:`compile` first detects
 the *macro shape* of the pattern list (default-deny + includes,
 default-allow + excludes, mixed) and picks one of the
@@ -39,12 +44,16 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from boto3_s3.types import FileInfo
 
 __all__ = [
     "AlwaysExclude",
     "AlwaysInclude",
     "ExcludeOnly",
+    "GlobFilter",
     "GlobPattern",
     "IncludeOnly",
     "LiteralSet",
@@ -372,3 +381,75 @@ def _is_pure_prefix(pattern: str) -> bool:
     if not pattern.endswith("*"):
         return False
     return not any(c in pattern[:-1] for c in _WILDCARDS)
+
+
+# ----- ergonomic filter ----------------------------------------------------
+
+
+class GlobFilter:
+    """Fluent ``--exclude`` / ``--include`` builder; itself a ``FileFilter``.
+
+    The ergonomic front end for the engine above: accumulate ordered rules and
+    pass the result straight to ``S3.cp`` / ``mv`` / ``rm`` / ``sync`` as
+    ``filter=``. It is pure sugar over ``compile([GlobPattern...])`` - the same
+    last-match-wins semantics, the same compile-time specialization - exposed as
+    a chainable callable::
+
+        from boto3_s3 import GlobFilter
+
+        keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
+        s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
+
+    :meth:`exclude` / :meth:`include` each append one or more rules and return
+    ``self`` so calls chain; finish with :meth:`compile`, which builds the
+    underlying matcher eagerly and returns ``self`` - the recommended form, so
+    the cost is paid once and the filter reuses cleanly across operations.
+    :meth:`compile` is not mandatory: an un-compiled filter compiles lazily on
+    first use and re-compiles after a later ``exclude`` / ``include`` (in
+    ``sync`` both sides may then race to compile, which is harmless - the
+    patterns are read-only and every compilation is equivalent).
+
+    As a ``FileFilter`` it is invoked with a :class:`~boto3_s3.types.FileInfo`
+    and matches its ``compare_key`` (the root-relative key the operation stamps
+    before consulting the filter). Patterns are matched verbatim against that
+    ``/``-form compare key, exactly like :func:`compile`; route them through
+    :func:`translate_pattern_for_root` first if they need root anchoring or host
+    separator folding.
+    """
+
+    __slots__ = ("_compiled", "_patterns")
+
+    def __init__(self) -> None:
+        self._patterns: list[GlobPattern] = []
+        self._compiled: Matcher | None = None
+
+    def exclude(self, *patterns: str) -> GlobFilter:
+        """Append exclude rules (matching keys are dropped) and return ``self``."""
+        self._patterns.extend(GlobPattern.exclude(p) for p in patterns)
+        self._compiled = None
+        return self
+
+    def include(self, *patterns: str) -> GlobFilter:
+        """Append include rules (matching keys are kept) and return ``self``."""
+        self._patterns.extend(GlobPattern.include(p) for p in patterns)
+        self._compiled = None
+        return self
+
+    def compile(self) -> GlobFilter:
+        """Eagerly compile the accumulated rules and return ``self`` (no freeze)."""
+        self._compiled = compile(self._patterns)
+        return self
+
+    def __call__(self, info: FileInfo) -> bool:
+        key = info.compare_key
+        if key is None:
+            raise ValueError(
+                "GlobFilter matches FileInfo.compare_key, which an operation "
+                "stamps before consulting the filter; it is unset here. Apply "
+                "the filter through S3.cp / mv / rm / sync rather than calling "
+                "it directly."
+            )
+        compiled = self._compiled
+        if compiled is None:
+            compiled = self._compiled = compile(self._patterns)
+        return compiled.included(key)

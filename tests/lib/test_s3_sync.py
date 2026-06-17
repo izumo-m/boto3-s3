@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import DefaultCopyFilter, GlobPattern, globsieve
+from boto3_s3 import DefaultCopyFilter, GlobFilter
 from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -151,9 +151,9 @@ class TestSyncUpload:
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.log"]
 
-    def test_delete_matcher_narrows_by_name(self, tmp_path: Path) -> None:
-        # A globsieve Matcher narrows the delete lane by the orphan's compare
-        # key (relative), reusing rm's filter shape on the orphans.
+    def test_delete_filter_narrows_by_name(self, tmp_path: Path) -> None:
+        # A GlobFilter narrows the delete lane by the orphan's compare key
+        # (relative), reusing rm's filter shape on the orphans.
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client(
@@ -162,7 +162,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.log")]),
+            delete=GlobFilter().exclude("*").include("*.log").compile(),
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -173,7 +173,7 @@ class TestSyncUpload:
         # visibility layer prunes the destination stream before pairing.
         src = tmp_path / "src"
         src.mkdir()
-        matcher = globsieve.compile([GlobPattern.exclude("*.log")])
+        keep = GlobFilter().exclude("*.log").compile()
         client, calls = make_recording_client(
             [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
         )
@@ -181,7 +181,7 @@ class TestSyncUpload:
             str(src),
             S3Storage("s3://bucket/p", client=client),
             delete=True,
-            filter=matcher,
+            filter=keep,
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]

@@ -5,19 +5,23 @@ aws-cli evaluates the two options as ONE ordered rule list (its
 last-match-wins semantics, so the interleaved command-line order is
 significant: ``--exclude '*' --include '*.txt'`` keeps only ``.txt`` while
 the reverse keeps nothing. :class:`AppendFilterAction` preserves that order;
-:func:`build_matcher` resolves the patterns against the operation's root the
-way aws-cli's ``filters.py`` joins them, then compiles a
-:class:`boto3_s3.globsieve` matcher for ``S3.rm(filter=...)``.
+:func:`build_filter` resolves the patterns against the operation's root the
+way aws-cli's ``filters.py`` joins them, compiles a
+:class:`boto3_s3.globsieve` matcher, and wraps it as the ``FileFilter``
+``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume (matching ``info.compare_key``).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from boto3_s3 import GlobPattern, globsieve
 from boto3_s3.globsieve import Matcher, PatternKind
+
+if TYPE_CHECKING:
+    from boto3_s3.types import FileFilter, FileInfo
 
 
 class _CaseFoldMatcher:
@@ -58,8 +62,26 @@ class AppendFilterAction(argparse.Action):
         setattr(namespace, self.dest, items)
 
 
-def compile_for_root(patterns: list[GlobPattern] | None, *, root: str) -> Matcher | None:
-    """Compile ordered CLI patterns against an operation root.
+def _as_file_filter(matcher: Matcher) -> FileFilter:
+    """Wrap a compiled matcher as the ``FileFilter`` the operations consume.
+
+    The operation stamps ``info.compare_key`` (the root-relative key) before
+    consulting the filter, so the wrapper matches that key. It is always set in
+    a filter context; ``None`` would mean the filter was misapplied, so fail
+    loudly rather than silently matching the full key.
+    """
+
+    def keep(info: FileInfo) -> bool:
+        key = info.compare_key
+        if key is None:
+            raise ValueError("filter consulted without a stamped compare_key")
+        return matcher.included(key)
+
+    return keep
+
+
+def compile_for_root(patterns: list[GlobPattern] | None, *, root: str) -> FileFilter | None:
+    """Compile ordered CLI patterns into a ``FileFilter`` rooted at ``root``.
 
     aws-cli joins each pattern onto the source root (``filters.create_filter``)
     and fnmatches the joined form against the full source path; the library
@@ -83,16 +105,16 @@ def compile_for_root(patterns: list[GlobPattern] | None, *, root: str) -> Matche
         if relative is not None:
             translated.append(GlobPattern(pattern.kind, relative.lower() if fold else relative))
     matcher = globsieve.compile(translated)
-    return _CaseFoldMatcher(matcher) if fold else matcher
+    return _as_file_filter(_CaseFoldMatcher(matcher) if fold else matcher)
 
 
-def build_matcher(
+def build_filter(
     patterns: list[GlobPattern] | None,
     *,
     key: str,
     recursive: bool,
-) -> Matcher | None:
-    """Compile ordered CLI patterns into the matcher ``S3.rm`` consumes.
+) -> FileFilter | None:
+    """Compile ordered CLI patterns into the ``FileFilter`` ``S3.rm`` consumes.
 
     The bucket segment cancels out of the relativization, so the root here is
     just :func:`rm_filter_root` of the key (see :func:`compile_for_root`).

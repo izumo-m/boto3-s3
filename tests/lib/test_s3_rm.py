@@ -26,13 +26,12 @@ from boto3_s3 import (
     S3,
     BatchError,
     FileInfo,
-    GlobPattern,
+    GlobFilter,
     NotFoundError,
     OpOutcome,
     OpResult,
     S3Storage,
     ValidationError,
-    globsieve,
     rm_filter_root,
 )
 
@@ -170,16 +169,16 @@ class TestRmSingleKey:
 
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()
-        matcher = globsieve.compile([GlobPattern.exclude("*")])
-        results = _rm("s3://b/data/a.txt", client, filter=matcher)
+        keep = GlobFilter().exclude("*").compile()
+        results = _rm("s3://b/data/a.txt", client, filter=keep)
         assert client.delete_object_calls == []
         assert results == []
 
     def test_matcher_sees_parent_relative_key(self) -> None:
         # Root of "data/a.txt" is "data/": the pattern matches the basename.
         client = _FakeS3Client()
-        matcher = globsieve.compile([GlobPattern.exclude("a.*")])
-        assert _rm("s3://b/data/a.txt", client, filter=matcher) == []
+        keep = GlobFilter().exclude("a.*").compile()
+        assert _rm("s3://b/data/a.txt", client, filter=keep) == []
         assert client.delete_object_calls == []
 
 
@@ -224,16 +223,16 @@ class TestRmRecursive:
 
     def test_matcher_sees_prefix_relative_key(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("data/a.txt"), _obj("data/sub/x")]}])
-        matcher = globsieve.compile([GlobPattern.exclude("sub/*")])
-        results = _rm("s3://b/data/", client, recursive=True, filter=matcher)
+        keep = GlobFilter().exclude("sub/*").compile()
+        results = _rm("s3://b/data/", client, recursive=True, filter=keep)
         assert [r.key for r in results] == ["data/a.txt"]
 
     def test_interleaved_ordering_is_last_match_wins(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a.txt"), _obj("p/b.bin")]}])
-        matcher = globsieve.compile([GlobPattern.include("*.txt"), GlobPattern.exclude("*")])
-        assert _rm("s3://b/p/", client, recursive=True, filter=matcher) == []
-        matcher = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
-        results = _rm("s3://b/p/", client, recursive=True, filter=matcher)
+        keep = GlobFilter().include("*.txt").exclude("*").compile()
+        assert _rm("s3://b/p/", client, recursive=True, filter=keep) == []
+        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        results = _rm("s3://b/p/", client, recursive=True, filter=keep)
         assert [r.key for r in results] == ["p/a.txt"]
 
     def test_callable_filter_receives_fileinfo(self) -> None:

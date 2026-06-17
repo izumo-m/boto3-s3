@@ -71,7 +71,8 @@ S3().sync(src, dst, *,
 
 The naming is unified on the filter vocabulary: "a predicate that narrows the
 operation target = filter". Visibility and the delete
-lane are `FileInfo` predicates (`FileFilter` = a Matcher or callable, one side);
+lane are `FileInfo` predicates (`FileFilter = Callable[[FileInfo], bool]`, e.g.
+`GlobFilter`, one side);
 the copy decision is a `PairFilter = Callable[[SyncPair], bool]` that needs both
 sides (True = act).
 
@@ -174,7 +175,7 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
 - **filter cross-root edge**: aws-cli applies the pattern lists of both the src
   and dst roots to both streams. We compile the pattern list once (against the
   source root, aws's "evaluate against the source") and apply that single
-  matcher to both sides' compare keys. For ordinary **relative** patterns this
+  filter to both sides' compare keys. For ordinary **relative** patterns this
   is exactly equivalent (a relative pattern is root-independent); an **absolute**
   pattern anchored to one root is relativized once and applied to both sides
   rather than per-root - the only divergence, and only for the rare

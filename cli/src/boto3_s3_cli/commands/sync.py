@@ -111,10 +111,10 @@ class SyncCommand(Command):
         )
 
         plan = plan_transfer(src, dst, recursive=True)
-        # One symmetric matcher, compiled against the source root and applied to
+        # One symmetric filter, compiled against the source root and applied to
         # both sides by S3.sync (sync.md section 1; relative patterns are
         # root-independent, so one compilation suffices).
-        matcher = filters.compile_for_root(args.filters, root=plan.filter_root)
+        item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,
@@ -134,7 +134,7 @@ class SyncCommand(Command):
                     exact_timestamps=args.exact_timestamps,
                     no_overwrite=args.no_overwrite,
                 ),
-                filter=matcher,
+                filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,
                 page_size=page_size,

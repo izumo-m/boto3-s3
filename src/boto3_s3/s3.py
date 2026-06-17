@@ -29,7 +29,6 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from boto3_s3.globsieve import Matcher
 from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
 from boto3_s3.s3storage import S3Storage, s3_errors
 from boto3_s3.storage import Location, Storage
@@ -132,19 +131,23 @@ def _cp_text(storage: Storage, *, operation: str = "cp") -> str:
 
 
 def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
-    """Normalize the two ``filter`` shapes to one ``(info, compare_key)`` test.
+    """Adapt a ``FileFilter`` to the internal ``(info, compare_key)`` test.
 
-    A matcher is fed the compare key (the entry's key relative to its root -
-    the same space ``TransferPlan.filter_root``-translated patterns live in);
-    a plain predicate is fed the ``FileInfo``.
+    The scan computes each entry's compare key (its key relative to the
+    operation root - the space ``TransferPlan.filter_root``-translated patterns
+    live in); this stamps it onto ``info.compare_key`` before consulting the
+    predicate, so a glob filter matches the root-relative key while a richer
+    predicate still sees the full ``FileInfo``.
     """
     if item_filter is None:
         return None
-    if isinstance(item_filter, Matcher):
-        matcher = item_filter
-        return lambda _info, compare_key: matcher.included(compare_key)
     predicate = item_filter
-    return lambda info, _compare_key: predicate(info)
+
+    def keep(info: FileInfo, compare_key: str) -> bool:
+        info.compare_key = compare_key
+        return predicate(info)
+
+    return keep
 
 
 def _copy_all(_pair: SyncPair) -> bool:
@@ -582,10 +585,12 @@ class S3:
         without the requests).
 
         ``filter`` keeps an item in the operation (rm's contract): a
-        globsieve matcher is fed the item's *compare key* (the source path
-        relative to the transfer root - ``TransferPlan.filter_root`` is the
-        translation root for patterns); a plain predicate is fed the
-        ``FileInfo``. ``dryrun`` enumerates (listing and HeadObject still
+        ``FileFilter`` predicate over the item's ``FileInfo``, whose
+        ``compare_key`` is stamped to the source path relative to the transfer
+        root (``TransferPlan.filter_root`` is the translation root for
+        patterns) - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key
+        while a richer predicate can read size / mtime / storage_class.
+        ``dryrun`` enumerates (listing and HeadObject still
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
         still apply. ``expected_size`` is the multipart sizing hint for a
         streaming upload (stdin -> S3): it is forwarded to the stream path
@@ -1563,14 +1568,16 @@ class S3:
           only zero-byte ``/``-terminated "folder marker" objects (any depth)
           - aws-cli's manual-folder sweep, not a full wipe.
 
-        ``filter`` keeps an item in the deletion when it is *included*: either
-        a compiled :mod:`boto3_s3.globsieve` matcher - fed the key relative to
-        :func:`rm_filter_root` (the CLI maps ``--exclude`` / ``--include``
-        here) - or a plain ``Callable[[FileInfo], bool]`` predicate fed the
-        full ``FileInfo`` (on the blind single-key path only ``key`` is
+        ``filter`` keeps an item in the deletion when it is *included*: a
+        ``Callable[[FileInfo], bool]`` over the entry's ``FileInfo``. Its
+        ``compare_key`` is stamped to the key relative to :func:`rm_filter_root`
+        before the call, so a :class:`~boto3_s3.globsieve.GlobFilter` matches
+        that key (the CLI maps ``--exclude`` / ``--include`` here) while a
+        richer predicate can read ``size`` / ``mtime`` / ``storage_class`` (on
+        the blind single-key path only ``key`` and ``compare_key`` are
         populated). On the enumerating paths it is evaluated page by page on
         the scan prefetch worker (via ``ScanOptions.filter``), overlapped with
-        the listing I/O - keep a callable thread-safe and fast, like
+        the listing I/O - keep the filter thread-safe and fast, like
         ``on_result``. ``dryrun`` enumerates (the recursive listing still
         runs) and reports candidates as ``OpOutcome.DRYRUN`` without any
         delete calls.
@@ -1641,20 +1648,23 @@ class S3:
     def _rm_decider(
         item_filter: FileFilter | None, *, strip: int
     ) -> Callable[[FileInfo], bool] | None:
-        """Normalize the two ``filter`` shapes to one ``FileInfo`` predicate.
+        """Wrap a ``FileFilter`` to stamp the compare key before each test.
 
         ``None`` means "keep everything" - kept as ``None`` (not a tautology
-        lambda) so the unfiltered paths pay no per-object predicate call.
+        lambda) so the unfiltered paths pay no per-object predicate call. Every
+        candidate key starts with the root (the recursive listing uses it as
+        Prefix; a single key starts with its own parent), so a plain slice
+        yields the root-relative ``compare_key`` a glob filter matches against.
         """
         if item_filter is None:
             return None
-        if isinstance(item_filter, Matcher):
-            # Every candidate key starts with the root (the recursive listing
-            # uses it as Prefix; a single key starts with its own parent), so
-            # a plain slice yields the root-relative key the matcher contract
-            # specifies.
-            return lambda info: item_filter.included(info.key[strip:])
-        return item_filter
+        predicate = item_filter
+
+        def decide(info: FileInfo) -> bool:
+            info.compare_key = info.key[strip:]
+            return predicate(info)
+
+        return decide
 
     @staticmethod
     def _rm_scan_filter(

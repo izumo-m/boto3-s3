@@ -12,8 +12,6 @@ from typing import Any
 
 from typing_extensions import TypedDict
 
-from boto3_s3.globsieve import Matcher
-
 
 class FileKind(enum.Enum):
     """What a listing entry is. Backends map their native kinds onto these.
@@ -50,12 +48,22 @@ class FileInfo:
     prefixes; ``BUCKET`` entries carry the bucket's ``CreationDate`` as ``mtime``
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.
+
+    ``compare_key`` is the entry's key *relative to the current operation's
+    root* (the ``--exclude`` / ``--include`` matching space). It is ``None`` on a
+    bare listing entry and is stamped just before a :data:`FileFilter` is
+    consulted (``cp`` / ``mv`` / ``rm`` / ``sync``), so a filter - notably
+    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key while
+    ``key`` stays the full identifier the transfer / delete actually uses. Two
+    ``scan`` sides relativized to their roots share one ``compare_key`` space
+    (the basis of ``sync``'s merge-join); ``key`` differs per side.
     """
 
     key: str
     kind: FileKind = FileKind.FILE
     size: int | None = None
     mtime: datetime | None = None
+    compare_key: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -278,11 +286,13 @@ ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
-# visibility, and ``sync``'s ``delete`` lane): either a compiled ``globsieve``
-# matcher - fed the key *relative to the operation's root*, aws-cli
-# --exclude/--include semantics - or a plain predicate fed the full ``FileInfo``
-# (richer: size / mtime / storage_class), returning True to keep the entry.
-FileFilter = Matcher | Callable[[FileInfo], bool]
+# visibility, and ``sync``'s ``delete`` lane): a predicate over the ``FileInfo``
+# returning True to keep the entry. The operation stamps ``info.compare_key``
+# (the key relative to its root, aws-cli --exclude/--include space) before
+# consulting it, so a glob predicate matches ``compare_key`` while a richer
+# predicate can decide on ``size`` / ``mtime`` / ``storage_class`` / ``key``.
+# :class:`~boto3_s3.globsieve.GlobFilter` is the ready-made glob implementation.
+FileFilter = Callable[[FileInfo], bool]
 
 
 __all__ = [

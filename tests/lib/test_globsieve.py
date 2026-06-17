@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import pytest
 
-from boto3_s3 import globsieve
+from boto3_s3 import FileInfo, globsieve
 from boto3_s3.globsieve import (
     AlwaysExclude,
     AlwaysInclude,
     ExcludeOnly,
+    GlobFilter,
     GlobPattern,
     IncludeOnly,
     LiteralSet,
@@ -339,3 +340,57 @@ class TestTranslatePatternForRoot:
     def test_trailing_slash_in_rootdir_does_not_break_strip(self) -> None:
         # The translator must tolerate trailing separators on rootdir.
         assert globsieve.translate_pattern_for_root("/abs/data/sub/*", "/abs/data/") == "sub/*"
+
+
+class TestGlobFilter:
+    """The fluent ``GlobFilter`` front end: a ``FileFilter`` matching ``compare_key``."""
+
+    @staticmethod
+    def _info(compare_key: str) -> FileInfo:
+        return FileInfo(key=compare_key, compare_key=compare_key)
+
+    def test_chained_rules_are_last_match_wins(self) -> None:
+        keep = GlobFilter().exclude("*").include("*.txt")
+        assert keep(self._info("a.txt")) is True
+        assert keep(self._info("a.log")) is False
+
+    def test_reverse_order_excludes_everything(self) -> None:
+        keep = GlobFilter().include("*.txt").exclude("*")
+        assert keep(self._info("a.txt")) is False
+
+    def test_exclude_and_include_take_several_patterns(self) -> None:
+        keep = GlobFilter().exclude("*").include("*.tar.gz", "*.zip")
+        assert keep(self._info("x.tar.gz")) is True
+        assert keep(self._info("x.zip")) is True
+        assert keep(self._info("x.bin")) is False
+
+    def test_empty_filter_keeps_everything(self) -> None:
+        assert GlobFilter()(self._info("anything")) is True
+
+    def test_agrees_with_compile(self) -> None:
+        glob = GlobFilter().exclude("*").include("*.txt")
+        ref = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
+        for key in ("a.txt", "a.log", "sub/b.txt", ""):
+            assert glob(self._info(key)) == ref.included(key)
+
+    def test_builder_methods_return_self(self) -> None:
+        f = GlobFilter()
+        assert f.exclude("*") is f
+        assert f.include("*.txt") is f
+        assert f.compile() is f
+
+    def test_compile_is_eager_but_not_frozen(self) -> None:
+        # compile() forces compilation; a later rule re-dirties and the next
+        # call recompiles, changing the verdict (no freeze).
+        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        assert keep(self._info("a.log")) is False
+        keep.include("*.log")
+        assert keep(self._info("a.log")) is True
+
+    def test_uncompiled_filter_compiles_on_first_use(self) -> None:
+        # Passing a filter without calling compile() works: __call__ compiles lazily.
+        assert GlobFilter().exclude("*.log")(self._info("a.log")) is False
+
+    def test_missing_compare_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="compare_key"):
+            GlobFilter().exclude("*")(FileInfo(key="a.txt"))

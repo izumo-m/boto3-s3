@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         TransportError,
         ValidationError,
     )
-    from boto3_s3.globsieve import GlobPattern
+    from boto3_s3.globsieve import GlobFilter, GlobPattern
     from boto3_s3.localstorage import LocalStorage
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
@@ -91,6 +91,7 @@ __all__ = [
     "FileFilter",
     "FileInfo",
     "FileKind",
+    "GlobFilter",
     "GlobPattern",
     "LocalFileInfo",
     "LocalStorage",
@@ -156,6 +157,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "NotFoundError": "boto3_s3.exceptions",
     "TransportError": "boto3_s3.exceptions",
     "ValidationError": "boto3_s3.exceptions",
+    "GlobFilter": "boto3_s3.globsieve",
     "GlobPattern": "boto3_s3.globsieve",
     "LocalStorage": "boto3_s3.localstorage",
     "set_stream_logger": "boto3_s3.masking",

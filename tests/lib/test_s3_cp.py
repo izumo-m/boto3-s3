@@ -21,7 +21,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
-from boto3_s3 import GlobPattern, globsieve
+from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -166,16 +166,16 @@ class TestUploadRoute:
 
 
 class TestFilters:
-    def test_matcher_is_fed_compare_keys(self, tmp_path: Path) -> None:
+    def test_glob_filter_is_fed_compare_keys(self, tmp_path: Path) -> None:
         for name in ("keep.txt", "drop.bin"):
             (tmp_path / name).write_bytes(b"x")
-        matcher = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
+        keep = GlobFilter().exclude("*").include("*.txt").compile()
         client, calls = make_recording_client([{}])
         S3().cp(
             str(tmp_path),
             S3Storage("s3://b/t", client=client),
             recursive=True,
-            filter=matcher,
+            filter=keep,
             transfer_config=_SYNC,
         )
         assert [call.params["Key"] for call in calls] == ["t/keep.txt"]

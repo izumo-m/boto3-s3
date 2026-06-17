@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
+from boto3_s3 import FileInfo
 from boto3_s3.globsieve import GlobPattern, PatternKind
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
@@ -220,17 +221,17 @@ class TestAppendFilterAction:
             GlobPattern(PatternKind.INCLUDE, "c"),
         ]
 
-    def test_build_matcher_none_for_no_patterns(self) -> None:
-        assert filters.build_matcher(None, key="k", recursive=False) is None
-        assert filters.build_matcher([], key="k", recursive=False) is None
+    def test_build_filter_none_for_no_patterns(self) -> None:
+        assert filters.build_filter(None, key="k", recursive=False) is None
+        assert filters.build_filter([], key="k", recursive=False) is None
 
-    def test_build_matcher_drops_dead_absolute_patterns(self) -> None:
+    def test_build_filter_drops_dead_absolute_patterns(self) -> None:
         # A pattern anchored outside the root can never match (aws joins it
         # onto the root and fnmatch misses every listed key).
-        matcher = filters.build_matcher(
+        keep = filters.build_filter(
             [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
             key="data/",
             recursive=True,
         )
-        assert matcher is not None
-        assert matcher.included("anything") is False
+        assert keep is not None
+        assert keep(FileInfo(key="anything", compare_key="anything")) is False

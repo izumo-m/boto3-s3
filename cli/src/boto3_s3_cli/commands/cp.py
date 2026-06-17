@@ -113,10 +113,10 @@ class CpCommand(Command):
                 args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
             )
 
-        matcher = None
+        item_filter = None
         if not is_stream:
             plan = plan_transfer(src, dst, recursive=args.recursive)
-            matcher = filters.compile_for_root(args.filters, root=plan.filter_root)
+            item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,
@@ -144,7 +144,7 @@ class CpCommand(Command):
                 source,  # type: ignore[arg-type]
                 dst_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
-                filter=matcher,
+                filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,
                 page_size=page_size,
