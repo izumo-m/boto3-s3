@@ -88,9 +88,9 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
   `True` copies every source, `False` copies nothing; any `PairFilter` is a
   custom strategy - the content building blocks `by_etag` / `by_checksum`
   (sections 8-9) are drop-in replacements. `size_only` / `exact_timestamps` only
-  tune `compare=None` and raise if paired with any non-default `compare` (any
-  `compare is not None`, including `True` / `False`). Note `None` (default) !=
-  `False` (copy nothing).
+  tune `compare=None`; they are ignored whenever `compare` is anything else
+  (`True` / `False` / a custom strategy), since that compare replaces the
+  decision wholesale. Note `None` (default) != `False` (copy nothing).
 - `no_overwrite` is an orthogonal write-guard applied before `compare`: if a
   destination already exists it is never overwritten (a source-only pair still
   copies). It composes with any `compare`, and sync keeps it decision-only - no

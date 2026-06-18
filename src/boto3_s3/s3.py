@@ -1287,9 +1287,9 @@ class S3:
           ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
           strategy - the content building blocks ``by_etag`` / ``by_checksum``
           (submodule imports) are drop-in replacements that compare by content.
-          ``size_only`` / ``exact_timestamps`` only tune the default and raise
-          if combined with any non-default ``compare`` (any ``compare is not
-          None``, including ``True`` / ``False``). ``no_overwrite`` is an
+          ``size_only`` / ``exact_timestamps`` only tune the default
+          (``compare=None``); they are ignored whenever ``compare`` is anything
+          else (``True`` / ``False`` / a custom strategy). ``no_overwrite`` is an
           orthogonal write-guard applied *before* the strategy: an existing
           destination is never overwritten (source-only pairs still copy), and
           sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
@@ -1367,11 +1367,8 @@ class S3:
         # write ``sync(no_overwrite=True)``): strip it from the engine options
         # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
         no_overwrite = options.pop("no_overwrite", False)
-        if compare is not None and (size_only or exact_timestamps):
-            raise ValidationError(
-                "size_only / exact_timestamps only tune the default comparison (compare=None)",
-                operation="sync",
-            )
+        # size_only / exact_timestamps only tune the default (compare=None);
+        # any other compare replaces the decision, so they are simply ignored.
         decide: PairFilter
         if compare is None:
             decide = functools.partial(
