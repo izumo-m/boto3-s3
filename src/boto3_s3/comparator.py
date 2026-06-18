@@ -15,7 +15,7 @@ copy or delete. This module is layer two's material:
   pair, as context for the filters.
 - A :data:`PairFilter` is a copy judgment: a predicate over a pair where
   ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
-  the size+time default, a content strategy (``by_etag`` / ``by_checksum``),
+  the size+time default, a content strategy (``EtagComparison`` / ``ChecksumComparison``),
   or a caller's own. (``S3.sync``'s delete lane instead narrows with a
   ``FileFilter`` over the destination-only orphan.)
 - :func:`compare_size_time` is that size+time default (aws-cli's stock

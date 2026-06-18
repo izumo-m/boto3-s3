@@ -2,7 +2,7 @@
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
 copies the source). The default ``compare=None`` decides by size + last-modified,
-aws-cli style; :func:`by_etag` builds a strategy that decides by **content**,
+aws-cli style; :class:`EtagComparison` decides by **content**,
 comparing S3's ETag against the ETag the source would carry:
 
 - an s3-to-s3 (COPY) pair compares the two listings' ETags directly - both are
@@ -14,7 +14,7 @@ comparing S3's ETag against the ETag the source would carry:
   (the ``part_size`` argument, default :data:`DEFAULT_PART_SIZE`).
 
 This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.etagfilter import by_etag``), and
+imported by submodule path (``from boto3_s3.etagfilter import EtagComparison``), and
 is **not** part of the package's lazy root re-export. Like
 :mod:`~boto3_s3.comparator` it imports no AWS SDK module at import time; the one
 SDK touch - mirroring s3transfer's ``ChunksizeAdjuster`` so the reconstructed
@@ -27,7 +27,7 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   ``part_size`` fixed at construction, so an object uploaded with a non-default
   ``multipart_chunksize`` is recognized only when the same value is supplied;
   otherwise every multipart object reads as differing and is re-copied (the same
-  constraint rclone documents for its chunk size). ``by_etag(s3)`` is the
+  constraint rclone documents for its chunk size). ``EtagComparison(s3)`` is the
   convenience for the common case - it reads ``part_size`` from that ``s3``'s
   profile - but the value is still fixed at construction, not this sync's live
   transfer config. The *effective* part size has a 5 MiB floor and 5 GiB ceiling
@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from boto3_s3.comparator import SyncPair
@@ -66,10 +65,10 @@ _READ_CHUNK = 1024 * 1024
 """Streaming read granularity; bounds memory regardless of file size."""
 
 
-class _EtagComparison:
+class EtagComparison:
     """A content-comparison :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
-    The object :func:`by_etag` returns. Copies a pair when the destination's S3
+    Copies a pair when the destination's S3
     ETag does not match the source's content. A source-only pair (no destination)
     always copies; an s3-to-s3 pair compares the listings' ETags directly; an
     upload / download reconstructs the local file's single- or multipart ETag (at
@@ -82,15 +81,15 @@ class _EtagComparison:
     equal the ``multipart_chunksize`` the object was uploaded with (see the module
     docstring). Supply it one of three ways:
 
-    - ``by_etag(s3)`` reads it from that ``s3``'s active profile
+    - ``EtagComparison(s3)`` reads it from that ``s3``'s active profile
       (``[s3] multipart_chunksize``, falling back to :data:`DEFAULT_PART_SIZE`).
       The read is tied to the passed ``s3`` - an explicit injection, not an
       ambient / default-session read - and happens only when no ``part_size`` is
       given.
-    - ``by_etag(part_size=...)`` pins an explicit value. It overrides the
-      ``s3``-derived default, so ``by_etag(s3, part_size=...)`` uses the
+    - ``EtagComparison(part_size=...)`` pins an explicit value. It overrides the
+      ``s3``-derived default, so ``EtagComparison(s3, part_size=...)`` uses the
       explicit value and does not consult ``s3``.
-    - ``by_etag()`` uses :data:`DEFAULT_PART_SIZE` (boto3's 8 MiB).
+    - ``EtagComparison()`` uses :data:`DEFAULT_PART_SIZE` (boto3's 8 MiB).
 
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any ETag work.
@@ -162,18 +161,6 @@ class _EtagComparison:
         return remote_etag != computed
 
 
-def by_etag(
-    s3: S3 | None = None, *, part_size: int | None = None, check_size: bool = True
-) -> Callable[[SyncPair], bool]:
-    """An ETag content-comparison ``compare=`` strategy for ``S3.sync`` (``True`` = copy).
-
-    A replacement strategy (not composed with the default): pass it as
-    ``S3.sync(compare=by_etag(...))``. See the module docstring for the part-size
-    and SSE caveats. Submodule-only (``from boto3_s3.etagfilter import by_etag``).
-    """
-    return _EtagComparison(s3, part_size=part_size, check_size=check_size)
-
-
 def _s3_etag(info: object) -> str | None:
     """The dequoted ETag of an S3 listing entry, or ``None`` for any other side."""
     return info.etag if isinstance(info, S3FileInfo) else None
@@ -240,4 +227,4 @@ def _effective_part_size(part_size: int, file_size: int) -> int:
     return ChunksizeAdjuster().adjust_chunksize(part_size, file_size)
 
 
-__all__ = ["DEFAULT_PART_SIZE", "by_etag"]
+__all__ = ["DEFAULT_PART_SIZE", "EtagComparison"]

@@ -1,8 +1,8 @@
-"""``boto3_s3.checksumfilter``: a native-checksum content filter for ``S3.sync``.
+"""``boto3_s3.checksumfilter``: a native-checksum content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
 copies the source). The default ``compare=None`` decides by size + last-modified,
-aws-cli style; :func:`by_checksum` builds a strategy that decides by **content**,
+aws-cli style; :class:`ChecksumComparison` decides by **content**,
 comparing S3's stored native checksum against the checksum the local file would
 carry:
 
@@ -11,7 +11,7 @@ carry:
   ``ObjectParts`` boundaries;
 - it recomputes that same algorithm over the local file and compares.
 
-Unlike :func:`~boto3_s3.etagfilter.by_etag` this needs **no write side** (the
+Unlike :class:`~boto3_s3.etagfilter.EtagComparison` this needs **no write side** (the
 checksum is one S3 already stores), works against objects any tool uploaded with
 a checksum, is exact for multipart objects (the part sizes come back from
 GetObjectAttributes, so there is no part-size to guess), and works for SSE
@@ -20,13 +20,13 @@ one ``GetObjectAttributes`` round-trip per object compared.
 
 This is a standalone, opt-in building block: it lives in its own module, is
 imported by submodule path (``from boto3_s3.checksumfilter import
-by_checksum``), and is **not** part of the package's lazy root re-export. It
+ChecksumComparison``), and is **not** part of the package's lazy root re-export. It
 imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
 It is a replacement ``compare=`` strategy, not composed with the default:
-``S3.sync(compare=by_checksum(s3, src, dst))`` decides every pair by content.
+``S3.sync(compare=ChecksumComparison(s3, src, dst))`` decides every pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + local hash on
@@ -88,10 +88,10 @@ _POLY_CRC64NVME = 0x9A6C9329AC4BC9B5  # CRC-64/NVME, reflected
 _LITTLE = sys.byteorder == "little"
 
 
-class _ChecksumComparison:
+class ChecksumComparison:
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
-    The object :func:`by_checksum` returns. Copies a pair when the destination's
+    Copies a pair when the destination's
     stored S3 checksum does not match the source's content. A source-only pair
     (no destination) always copies. An upload / download reads the remote
     object's checksum via ``GetObjectAttributes`` and recomputes it over the
@@ -211,33 +211,6 @@ class _ChecksumComparison:
             request_payer=self._request_payer,
             need_parts=need_parts,
         )
-
-
-def by_checksum(
-    s3: S3,
-    src: Location,
-    dst: Location,
-    *,
-    check_size: bool = True,
-    pure_max_size: int | None = None,
-    request_payer: str | None = None,
-) -> Callable[[SyncPair], bool]:
-    """A native-checksum content ``compare=`` strategy for ``S3.sync`` (``True`` = copy).
-
-    A replacement strategy (not composed with the default): pass it as
-    ``S3.sync(compare=by_checksum(s3, src, dst))``. ``src`` / ``dst`` are the same
-    locations passed to ``sync`` and are resolved once here. See the module
-    docstring for the algorithm and indeterminate-copy semantics. Submodule-only
-    (``from boto3_s3.checksumfilter import by_checksum``).
-    """
-    return _ChecksumComparison(
-        s3,
-        src,
-        dst,
-        check_size=check_size,
-        pure_max_size=pure_max_size,
-        request_payer=request_payer,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,4 +483,4 @@ _PURE_CRC: dict[str, Callable[[bytes, int], int]] = {
 }
 
 
-__all__ = ["by_checksum"]
+__all__ = ["ChecksumComparison"]

@@ -1285,7 +1285,7 @@ class S3:
           ``exact_timestamps``; ``True`` copies every source (cp-like);
           ``False`` copies nothing (scan-only, or a delete-only sync with
           ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
-          strategy - the content building blocks ``by_etag`` / ``by_checksum``
+          strategy - the content building blocks ``EtagComparison`` / ``ChecksumComparison``
           (submodule imports) are drop-in replacements that compare by content.
           ``size_only`` / ``exact_timestamps`` only tune the default
           (``compare=None``); they are ignored whenever ``compare`` is anything

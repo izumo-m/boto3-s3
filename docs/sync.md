@@ -86,7 +86,7 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
   size + last-modified judgment (it reads the direction from `pair.kind`, so it
   works across routes), tuned by the `size_only` / `exact_timestamps` options;
   `True` copies every source, `False` copies nothing; any `PairFilter` is a
-  custom strategy - the content building blocks `by_etag` / `by_checksum`
+  custom strategy - the content building blocks `EtagComparison` / `ChecksumComparison`
   (sections 8-9) are drop-in replacements. `size_only` / `exact_timestamps` only
   tune `compare=None`; they are ignored whenever `compare` is anything else
   (`True` / `False` / a custom strategy), since that compare replaces the
@@ -105,10 +105,10 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
 Example (content-based sync + delete only old generations):
 
 ```python
-from boto3_s3.etagfilter import by_etag
+from boto3_s3.etagfilter import EtagComparison
 
 s3.sync(src, dst,
-    compare=by_etag(s3),                       # decide by content, not size + mtime
+    compare=EtagComparison(s3),                       # decide by content, not size + mtime
     delete=lambda info: info.mtime < cutoff)   # delete only old orphans
 ```
 
@@ -193,20 +193,20 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
   aws-cli's behavior (they too look at the listing's response_data).
   `--force-glacier-transfer` is the only path.
 
-## 8. ETag content comparison (`by_etag`, opt-in)
+## 8. ETag content comparison (`EtagComparison`, opt-in)
 
 `compare=None` decides by size + mtime. When the decision must follow
-**content**, `boto3_s3.etagfilter.by_etag(...)` builds a `compare=` strategy that
+**content**, `boto3_s3.etagfilter.EtagComparison(...)` builds a `compare=` strategy that
 compares S3's ETag against the ETag the source would carry. It is a standalone,
 opt-in building block - imported by submodule path, not part of the package root
 re-export:
 
 ```python
-from boto3_s3.etagfilter import by_etag
+from boto3_s3.etagfilter import EtagComparison
 
-s3.sync(src, dst, compare=by_etag(s3))          # part_size from the profile
-s3.sync(src, dst, compare=by_etag())            # 8 MiB default part size
-s3.sync(src, dst, compare=by_etag(part_size=16 * 1024 * 1024))   # explicit part size
+s3.sync(src, dst, compare=EtagComparison(s3))          # part_size from the profile
+s3.sync(src, dst, compare=EtagComparison())            # 8 MiB default part size
+s3.sync(src, dst, compare=EtagComparison(part_size=16 * 1024 * 1024))   # explicit part size
 ```
 
 - **s3->s3** compares the two listings' ETags directly (no bytes read);
@@ -214,10 +214,10 @@ s3.sync(src, dst, compare=by_etag(part_size=16 * 1024 * 1024))   # explicit part
   S3-style ETag and compares. A source-only pair always copies; a missing /
   non-MD5 ETag is treated as differing (never skip on an indeterminate compare).
 - **`part_size`** is the multipart chunk size, fixed at construction.
-  `by_etag(s3)` reads it from that `s3`'s active profile
+  `EtagComparison(s3)` reads it from that `s3`'s active profile
   (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read tied to the
   `s3` you pass, not an ambient one (the library never reads config on its
-  own; `by_etag()` is a plain 8 MiB constant). An explicit `part_size=` wins
+  own; `EtagComparison()` is a plain 8 MiB constant). An explicit `part_size=` wins
   over `s3`. The value must match what the object was uploaded with, or every
   multipart object reads as differing (the rclone `--s3-chunk-size` constraint);
   the *effective* size has a 5 MiB floor / 5 GiB ceiling and auto-grows past S3's
@@ -231,34 +231,34 @@ s3.sync(src, dst, compare=by_etag(part_size=16 * 1024 * 1024))   # explicit part
   `compare=None` there instead. The upload / download hash runs on sync's main
   thread.
 
-## 9. Native-checksum content comparison (`by_checksum`, opt-in)
+## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 
-Where `by_etag` reconstructs the S3 ETag (and so must be told the multipart
-part size), `boto3_s3.checksumfilter.by_checksum(...)` reads the object's
+Where `EtagComparison` reconstructs the S3 ETag (and so must be told the multipart
+part size), `boto3_s3.checksumfilter.ChecksumComparison(...)` reads the object's
 **native S3 checksum** with `GetObjectAttributes` and recomputes that same
 algorithm over the local file. It needs **no write side** (the checksum is one
 S3 already stores), works on objects any tool uploaded with a checksum, is
 **exact for multipart** objects (the part boundaries come back in `ObjectParts`,
 so nothing is guessed), and works for **SSE** objects (a checksum is independent
 of encryption). The cost is one `GetObjectAttributes` round-trip per object.
-Like `by_etag` it is a standalone, opt-in building block - imported by submodule
+Like `EtagComparison` it is a standalone, opt-in building block - imported by submodule
 path, not part of the package root re-export:
 
 ```python
-from boto3_s3.checksumfilter import by_checksum
+from boto3_s3.checksumfilter import ChecksumComparison
 
 # decide every both-sides pair by content (mtime is not consulted):
-s3.sync(src, dst, compare=by_checksum(s3, src, dst))
+s3.sync(src, dst, compare=ChecksumComparison(s3, src, dst))
 ```
 
 It is a **replacement** strategy, not composed with the size + time default.
-Composing it via `any_of(compare_size_time, by_checksum(...))` would be wrong:
+Composing it via `any_of(compare_size_time, ChecksumComparison(...))` would be wrong:
 `any_of` copies when *either* rule says copy, so it still copies every object
 size + mtime alone would copy - including a same-content object whose only
 change is its mtime - and reaches the content check only on the subset size +
 mtime already skips. Content comparison can then add copies but never prevent
 the mtime-driven ones, which defeats the reason to compare by content (mtime is
-exactly what content comparison must not trust). `compare=by_checksum(...)`
+exactly what content comparison must not trust). `compare=ChecksumComparison(...)`
 instead decides every both-sides pair by content; the only shortcut is the
 `check_size` size pre-check (a differing size copies for free). The cost is one
 `GetObjectAttributes` per both-sides pair, which the parallel stage (a later
@@ -285,7 +285,7 @@ step) removes.
   Because that fallback is slow, **`pure_max_size`** caps it: above the cap, with
   no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
   rather than being hashed. `None` (default) never caps.
-- **Endpoint injection.** `by_checksum(s3, src, dst)` resolves the S3 side(s)
+- **Endpoint injection.** `ChecksumComparison(s3, src, dst)` resolves the S3 side(s)
   for their client + bucket from the same `src` / `dst` passed to `sync`
   (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
   cross-account s3->s3 sync, exactly as `sync` does. The upload / download hash

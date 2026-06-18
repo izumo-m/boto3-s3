@@ -115,7 +115,7 @@ It supports the flags you know from the command:
 - **`compare=`** — how the source and destination are compared: `None` (default)
   uses size + mtime, tuned by the `size_only=True` / `exact_timestamps=True`
   options; `True` copies everything, `False` copies nothing; or pass a content
-  strategy like `by_etag(s3)` / `by_checksum(s3, src, dst)`.
+  strategy like `EtagComparison(s3)` / `ChecksumComparison(s3, src, dst)`.
 - **`filter=`** — include/exclude matching; **`dryrun=True`** to
   preview every transfer and deletion first.
 
@@ -288,7 +288,7 @@ per-item gating. `sync` adds `compare=` and `delete=` (`True` to remove all
 extras, or a filter to remove only matching ones). They answer different
 questions: `filter=` decides **which items take part at all**, while `compare=`
 then decides, for each matched source/destination pair, **whether it actually
-needs copying** (by size + mtime, or by content with `by_etag` / `by_checksum`).
+needs copying** (by size + mtime, or by content with `EtagComparison` / `ChecksumComparison`).
 
 ## Progress, results, cancellation, dry run
 
