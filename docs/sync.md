@@ -65,10 +65,9 @@ S3().sync(src, dst, *,
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
     compare: bool | PairFilter | None = None,      # None=size+time / True=all / False=none / callable=custom
     size_only=False, exact_timestamps=False,       # tune compare=None (the default strategy)
-    no_overwrite=False,                            # orthogonal write-guard (never overwrite an existing dst)
     follow_symlinks=True, dryrun=False, page_size=1000,
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
-    **options)                                # TransferOptions (acl / sse / metadata ...)
+    **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
 ```
 
 "Filter" is reserved for **visibility** - a predicate that narrows which entries
@@ -89,8 +88,9 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
   `True` copies every source, `False` copies nothing; any `PairFilter` is a
   custom strategy - the content building blocks `by_etag` / `by_checksum`
   (sections 8-9) are drop-in replacements. `size_only` / `exact_timestamps` only
-  tune `compare=None` and raise if paired with a custom `compare`. Note `None`
-  (default) != `False` (copy nothing).
+  tune `compare=None` and raise if paired with any non-default `compare` (any
+  `compare is not None`, including `True` / `False`). Note `None` (default) !=
+  `False` (copy nothing).
 - `no_overwrite` is an orthogonal write-guard applied before `compare`: if a
   destination already exists it is never overwritten (a source-only pair still
   copies). It composes with any `compare`, and sync keeps it decision-only - no
@@ -253,13 +253,16 @@ s3.sync(src, dst, compare=by_checksum(s3, src, dst))
 
 It is a **replacement** strategy, not composed with the size + time default.
 Composing it via `any_of(compare_size_time, by_checksum(...))` would be wrong:
-`any_of` consults the content check only on the subset the size + time rule
-already skips - i.e. it skips the content check whenever the mtime "matches",
-which defeats the reason to compare by content (mtime is exactly what content
-comparison must not trust). `compare=by_checksum(...)` instead decides every
-both-sides pair by content; the only shortcut is the `check_size` size pre-check
-(a differing size copies for free). The cost is one `GetObjectAttributes` per
-both-sides pair, which the parallel stage (a later step) removes.
+`any_of` copies when *either* rule says copy, so it still copies every object
+size + mtime alone would copy - including a same-content object whose only
+change is its mtime - and reaches the content check only on the subset size +
+mtime already skips. Content comparison can then add copies but never prevent
+the mtime-driven ones, which defeats the reason to compare by content (mtime is
+exactly what content comparison must not trust). `compare=by_checksum(...)`
+instead decides every both-sides pair by content; the only shortcut is the
+`check_size` size pre-check (a differing size copies for free). The cost is one
+`GetObjectAttributes` per both-sides pair, which the parallel stage (a later
+step) removes.
 
 - **upload / download** reads the remote object's checksum and recomputes it over
   the local file: whole-file for a `FULL_OBJECT` checksum (CRC32 / CRC32C /

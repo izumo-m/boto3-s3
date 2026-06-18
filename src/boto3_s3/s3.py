@@ -1275,7 +1275,7 @@ class S3:
           neither transferred nor deleted (aws's "files excluded by filters
           are excluded from deletion"); visibility is never one-sided, so it
           cannot manufacture a phantom new/delete pair. Per-side or per-lane
-          narrowing belongs in the pair layer below (``copy_filter`` /
+          narrowing belongs in the pair layer below (``compare`` /
           ``delete``).
         - **Pair decisions** - the surviving streams are merge-joined by
           compare key (:class:`~boto3_s3.comparator.Comparator`) and each
@@ -1288,7 +1288,8 @@ class S3:
           strategy - the content building blocks ``by_etag`` / ``by_checksum``
           (submodule imports) are drop-in replacements that compare by content.
           ``size_only`` / ``exact_timestamps`` only tune the default and raise
-          if combined with a custom ``compare``. ``no_overwrite`` is an
+          if combined with any non-default ``compare`` (any ``compare is not
+          None``, including ``True`` / ``False``). ``no_overwrite`` is an
           orthogonal write-guard applied *before* the strategy: an existing
           destination is never overwritten (source-only pairs still copy), and
           sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
