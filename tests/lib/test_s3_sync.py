@@ -13,6 +13,7 @@ the wire).
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import GlobFilter
-from boto3_s3.comparator import PairFilter, SyncPair
+from boto3_s3.comparator import PairFilter, ParallelCompare, SyncPair
 from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -554,3 +555,83 @@ class TestSyncCopy:
         S3().sync(storage, storage, delete=True, transfer_config=_SERIAL, on_result=results.append)
         assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
         assert results == []
+
+
+class TestParallelCompare:
+    """``compare=ParallelCompare(...)`` pools the both-sides (update) decision
+    while keeping new pairs and the case-conflict gate on the calling thread, so
+    it copies exactly what the bare strategy would - only faster."""
+
+    def test_workers_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            ParallelCompare(_always_copies, workers=0)
+
+    def test_default_workers_inherit_or_fall_back(self) -> None:
+        from boto3_s3.s3 import _compare_workers
+
+        assert _compare_workers(None) == 10
+        assert _compare_workers(TransferConfig(max_concurrency=7)) == 7
+
+    def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
+        # Update pairs (a/b/c already at the destination) are pooled; new.txt is
+        # new. The pool only changes WHERE decide runs, not WHAT it decides.
+        src = tmp_path / "src"
+        for name in ("a.txt", "b.txt", "c.txt", "new.txt"):
+            _write(src, name, b"xx")
+
+        def decide(pair: SyncPair) -> bool:
+            return pair.dst is None or pair.key in {"a.txt", "c.txt"}
+
+        listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
+        client, calls = make_recording_client([listing, {}, {}, {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=ParallelCompare(decide, workers=4),
+            transfer_config=_SERIAL,
+        )
+        puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
+        assert puts == {"p/a.txt", "p/c.txt", "p/new.txt"}
+
+    def test_new_pairs_decided_on_calling_thread_in_key_order(self, tmp_path: Path) -> None:
+        # New (destination-missing) pairs are decided inline, in compare-key
+        # order, so the case-conflict gate's "first key wins" stays deterministic
+        # even under a parallel compare.
+        src = tmp_path / "src"
+        for name in ("n1.txt", "n2.txt", "n3.txt"):
+            _write(src, name, b"xx")
+        main = threading.get_ident()
+        seen: list[str] = []
+
+        def decide(pair: SyncPair) -> bool:
+            assert pair.dst is None  # an empty listing leaves every pair new
+            assert threading.get_ident() == main
+            seen.append(pair.key)
+            return False  # copy nothing; the test only pins the call order
+
+        client, _calls = make_recording_client([_listing()])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=ParallelCompare(decide, workers=4),
+            transfer_config=_SERIAL,
+        )
+        assert seen == ["n1.txt", "n2.txt", "n3.txt"]
+
+    def test_inner_exception_aborts_the_sync(self, tmp_path: Path) -> None:
+        # A decision that raises aborts the sync (as the serial path does); the
+        # exception surfaces when its pooled result is consumed.
+        src = tmp_path / "src"
+        _write(src, "x.txt", b"xx")
+
+        def boom(_pair: SyncPair) -> bool:
+            raise ValueError("decide blew up")
+
+        client, _calls = make_recording_client([_listing(("p/x.txt", 2))])
+        with pytest.raises(ValueError, match="decide blew up"):
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                compare=ParallelCompare(boom, workers=2),
+                transfer_config=_SERIAL,
+            )

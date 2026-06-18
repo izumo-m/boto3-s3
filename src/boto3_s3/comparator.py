@@ -68,6 +68,32 @@ PairFilter = Callable[[SyncPair], bool]
 """A pair predicate: ``True`` performs the action the pair stands for."""
 
 
+@dataclass(frozen=True, slots=True)
+class ParallelCompare:
+    """Run a content ``compare=`` strategy on a thread pool (``S3.sync`` only).
+
+    A value container, **not** a callable: ``S3.sync`` recognizes it and runs
+    the wrapped ``compare`` concurrently on up to ``workers`` threads, deciding
+    the both-sides (update) pairs - the ones where a content strategy does its
+    I/O - in parallel. Passing it is observationally identical to passing
+    ``compare`` bare: the same pairs are copied and the exit is the same, only
+    faster. The wrapped ``compare`` must be thread-safe;
+    :class:`~boto3_s3.checksumfilter.ChecksumComparison` and
+    :class:`~boto3_s3.etagfilter.EtagComparison` are. New (destination-missing)
+    pairs and the ``--case-conflict`` check stay on the calling thread in
+    compare-key order, so they remain deterministic.
+
+    ``workers`` defaults to the sync's ``transfer_config.max_concurrency``.
+    """
+
+    compare: PairFilter
+    workers: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.workers is not None and self.workers < 1:
+            raise ValueError(f"ParallelCompare workers must be >= 1, got {self.workers}")
+
+
 @dataclass(frozen=True)
 class Comparator:
     """Merge-join two key-ordered listing streams into :class:`SyncPair`s.
@@ -198,6 +224,7 @@ def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 __all__ = [
     "Comparator",
     "PairFilter",
+    "ParallelCompare",
     "SyncPair",
     "all_of",
     "any_of",

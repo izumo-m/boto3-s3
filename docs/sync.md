@@ -228,8 +228,8 @@ s3.sync(src, dst, compare=EtagComparison(part_size=16 * 1024 * 1024))   # explic
   `check_size=False` restores pure-ETag semantics.
 - **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag, so
   against such a bucket every object reads as differing - use the default
-  `compare=None` there instead. The upload / download hash runs on sync's main
-  thread.
+  `compare=None` there instead. The upload / download hash runs on sync's
+  calling thread unless the strategy is wrapped in `ParallelCompare` (section 10).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 
@@ -261,8 +261,8 @@ the mtime-driven ones, which defeats the reason to compare by content (mtime is
 exactly what content comparison must not trust). `compare=ChecksumComparison(...)`
 instead decides every both-sides pair by content; the only shortcut is the
 `check_size` size pre-check (a differing size copies for free). The cost is one
-`GetObjectAttributes` per both-sides pair, which the parallel stage (a later
-step) removes.
+`GetObjectAttributes` (plus the local hash) per both-sides pair; wrap the
+strategy in `ParallelCompare` (section 10) to run those concurrently.
 
 - **upload / download** reads the remote object's checksum and recomputes it over
   the local file: whole-file for a `FULL_OBJECT` checksum (CRC32 / CRC32C /
@@ -289,4 +289,49 @@ step) removes.
   for their client + bucket from the same `src` / `dst` passed to `sync`
   (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
   cross-account s3->s3 sync, exactly as `sync` does. The upload / download hash
-  runs on sync's main thread.
+  runs on sync's calling thread unless the strategy is wrapped in
+  `ParallelCompare` (section 10).
+
+## 10. Parallelizing the content compare (`ParallelCompare`, opt-in)
+
+A content compare (`EtagComparison` / `ChecksumComparison`) does per-pair I/O - a
+`GetObjectAttributes` round-trip and/or a local hash - and by default `sync` runs
+every decision on its calling thread, one pair at a time. Wrapping the strategy
+in `boto3_s3.comparator.ParallelCompare` runs the **both-sides (update)**
+decisions on a thread pool instead:
+
+```python
+from boto3_s3.checksumfilter import ChecksumComparison
+from boto3_s3.comparator import ParallelCompare
+
+s3.sync(src, dst, compare=ParallelCompare(ChecksumComparison(s3, src, dst), workers=16))
+```
+
+`ParallelCompare` is a value container, not a callable: `sync` recognizes it,
+reads `.compare` and `.workers`, and drives the pool itself - it is **never
+invoked** as a `PairFilter`. Wrapping is a pure performance transform: the same
+pairs are copied and the exit is the same as the bare strategy, only faster. The
+wrapped strategy must therefore be thread-safe; `ChecksumComparison` and
+`EtagComparison` are (read-only over their fields; a botocore client is safe to
+share for concurrent calls).
+
+- **What is parallelized.** Only the both-sides (`dst is not None`) decision -
+  the one that does I/O. **New** pairs (`dst is None`) and the **delete** lane
+  stay on the calling thread in compare-key order. That is deliberate: a content
+  strategy returns "copy" for a new pair with no I/O, so there is nothing to
+  parallelize there; and keeping new pairs in key order keeps the
+  `--case-conflict` gate's "first key wins" deterministic (its seen-set is
+  order-sensitive, like aws-cli's `CaseConflictSync` in the not-at-dest slot).
+- **Ordering.** Pooled decisions are consumed in completion order, so transfers
+  submit out of compare-key order - already true of every sync (s3transfer moves
+  bytes on its own pool; `on_result` fires unordered). Exit parity is unaffected.
+- **`workers`** defaults to the sync's `transfer_config.max_concurrency` (10).
+  The pooled `GetObjectAttributes` calls use the strategy's own client, so for a
+  `workers` above its connection-pool size (botocore's default 10) build the
+  strategy with a client sized to match.
+- **Errors / cancel.** A decision that raises aborts the sync (as the serial path
+  does), surfacing when its result is consumed; `cancel_token` is polled between
+  pairs.
+
+`ParallelCompare` is a library-only building block: there is no `aws s3` flag for
+content comparison, so the CLI never sets it and parity is not at stake.

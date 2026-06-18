@@ -14,13 +14,21 @@ from __future__ import annotations
 import functools
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
+from queue import Queue
 from typing import TYPE_CHECKING, Any, BinaryIO, Concatenate, Literal, ParamSpec, TypeVar
 
 from typing_extensions import Unpack
 
 from boto3_s3 import naming, requestparams
-from boto3_s3.comparator import Comparator, PairFilter, SyncPair, compare_size_time
+from boto3_s3.comparator import (
+    Comparator,
+    PairFilter,
+    ParallelCompare,
+    SyncPair,
+    compare_size_time,
+)
 from boto3_s3.deleter import S3Deleter
 from boto3_s3.exceptions import (
     BatchError,
@@ -158,6 +166,93 @@ def _copy_all(_pair: SyncPair) -> bool:
 def _copy_none(_pair: SyncPair) -> bool:
     """``compare=False``: copy nothing (scan-only / delete-only sync)."""
     return False
+
+
+def _compare_workers(transfer_config: TransferConfig | None) -> int:
+    """A ``ParallelCompare``'s default thread count: the transfer config's
+    ``max_concurrency`` when explicitly set, else boto3's transfer default of 10
+    (boto3 sets the attribute dynamically, so it is read defensively)."""
+    configured: object = getattr(transfer_config, "max_concurrency", None)
+    return configured if isinstance(configured, int) and configured >= 1 else 10
+
+
+def _run_sync_pairs(
+    pairs: Iterator[SyncPair],
+    *,
+    decide: PairFilter,
+    submit_copy: Callable[[SyncPair], None],
+    submit_delete: Callable[[SyncPair], None],
+    no_overwrite: bool,
+    delete_on: bool,
+    cancel_token: CancelToken | None,
+    workers: int | None,
+) -> None:
+    """Drive ``S3.sync``'s compare/submit loop - serial, or pooled when ``workers``.
+
+    Only the both-sides copy decision (``decide`` on a pair that has a
+    destination) is parallelized: that is where a content compare does its I/O.
+    New (destination-missing) pairs and the delete lane stay on the calling
+    thread in compare-key order, so the case-conflict gate keeps its
+    deterministic "first key wins" order. ``submit_copy`` / ``submit_delete``
+    (and the gate they reach) therefore only ever run on this thread; the pool
+    runs nothing but ``decide``. A ``decide`` exception propagates here (aborting
+    the sync) when its result is consumed; ``cancel_token`` is polled between
+    pairs. Behaviour matches the serial path bar ordering of the pooled pairs.
+    """
+
+    def cancelled() -> bool:
+        return cancel_token is not None and cancel_token.cancelled
+
+    if workers is None:
+        for pair in pairs:
+            if cancelled():
+                raise CancelledError("sync was cancelled", operation="sync")
+            if pair.src is not None:
+                if no_overwrite and pair.dst is not None:
+                    continue
+                if decide(pair):
+                    submit_copy(pair)
+            elif delete_on:
+                submit_delete(pair)
+        return
+
+    done: Queue[tuple[SyncPair, Future[bool]]] = Queue()
+    with ThreadPoolExecutor(workers, thread_name_prefix="boto3-s3-compare") as pool:
+
+        def dispatch() -> bool:
+            # Pull pairs (compare-key order) until one needs a pooled decision;
+            # handle destination-missing and delete pairs inline, in order.
+            for pair in pairs:
+                if cancelled():
+                    raise CancelledError("sync was cancelled", operation="sync")
+                if pair.src is not None:
+                    if no_overwrite and pair.dst is not None:
+                        continue
+                    if pair.dst is not None:
+                        pool.submit(decide, pair).add_done_callback(
+                            lambda f, p=pair: done.put((p, f))
+                        )
+                        return True
+                    # Destination missing: a content compare does no I/O here,
+                    # so decide inline and keep the case-conflict gate in order.
+                    if decide(pair):
+                        submit_copy(pair)
+                elif delete_on:
+                    submit_delete(pair)
+            return False
+
+        inflight = 0
+        while inflight < workers and dispatch():
+            inflight += 1
+        while inflight:
+            if cancelled():
+                raise CancelledError("sync was cancelled", operation="sync")
+            pair, future = done.get()
+            inflight -= 1
+            if future.result():
+                submit_copy(pair)
+            if dispatch():
+                inflight += 1
 
 
 def _glacier_blocked(info: FileInfo, *, kind: OpKind, options: TransferOptions) -> bool:
@@ -1245,7 +1340,7 @@ class S3:
         *,
         delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
-        compare: bool | PairFilter | None = None,
+        compare: bool | PairFilter | ParallelCompare | None = None,
         size_only: bool = False,
         exact_timestamps: bool = False,
         follow_symlinks: bool = True,
@@ -1287,6 +1382,9 @@ class S3:
           ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
           strategy - the content building blocks ``EtagComparison`` / ``ChecksumComparison``
           (submodule imports) are drop-in replacements that compare by content.
+          Wrapping any strategy in :class:`~boto3_s3.comparator.ParallelCompare`
+          runs its both-sides (update) decisions on a thread pool - identical
+          results, only faster (the wrapped strategy must be thread-safe).
           ``size_only`` / ``exact_timestamps`` only tune the default
           (``compare=None``); they are ignored whenever ``compare`` is anything
           else (``True`` / ``False`` / a custom strategy). ``no_overwrite`` is an
@@ -1369,8 +1467,16 @@ class S3:
         no_overwrite = options.pop("no_overwrite", False)
         # size_only / exact_timestamps only tune the default (compare=None);
         # any other compare replaces the decision, so they are simply ignored.
+        compare_workers: int | None = None
         decide: PairFilter
-        if compare is None:
+        if isinstance(compare, ParallelCompare):
+            compare_workers = (
+                compare.workers
+                if compare.workers is not None
+                else _compare_workers(transfer_config)
+            )
+            decide = compare.compare
+        elif compare is None:
             decide = functools.partial(
                 compare_size_time, size_only=size_only, exact_timestamps=exact_timestamps
             )
@@ -1423,36 +1529,43 @@ class S3:
                 page_size=page_size,
                 options=options,
             )
-            for pair in Comparator(kind).compare(src_entries, dst_entries):
-                if cancel_token is not None and cancel_token.cancelled:
-                    raise CancelledError("sync was cancelled", operation="sync")
-                if pair.src is not None:
-                    if no_overwrite and pair.dst is not None:
-                        continue
-                    if not decide(pair):
-                        continue
-                    item = self._sync_transfer_item(
-                        plan,
-                        pair,
-                        kind=kind,
-                        src_bucket=src_storage.bucket if isinstance(src_storage, S3Storage) else "",
-                        dst_bucket=dst_bucket,
-                        transferrer=transferrer,
-                        options=options,
-                        case_gate=case_gate,
-                    )
-                    if item is None:
-                        continue
-                    if dryrun:
-                        transferrer.dryrun(item)
-                    else:
-                        transferrer.submit(item)
-                elif delete:  # on when delete is True or a FileFilter
-                    if delete_keep is not None:
-                        assert pair.dst is not None
-                        if not delete_keep(pair.dst, pair.key):
-                            continue
-                    deletes.submit(pair, plan)
+            src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
+
+            def submit_copy(pair: SyncPair) -> None:
+                item = self._sync_transfer_item(
+                    plan,
+                    pair,
+                    kind=kind,
+                    src_bucket=src_bucket,
+                    dst_bucket=dst_bucket,
+                    transferrer=transferrer,
+                    options=options,
+                    case_gate=case_gate,
+                )
+                if item is None:
+                    return
+                if dryrun:
+                    transferrer.dryrun(item)
+                else:
+                    transferrer.submit(item)
+
+            def submit_delete(pair: SyncPair) -> None:
+                if delete_keep is not None:
+                    assert pair.dst is not None
+                    if not delete_keep(pair.dst, pair.key):
+                        return
+                deletes.submit(pair, plan)
+
+            _run_sync_pairs(
+                Comparator(kind).compare(src_entries, dst_entries),
+                decide=decide,
+                submit_copy=submit_copy,
+                submit_delete=submit_delete,
+                no_overwrite=no_overwrite,
+                delete_on=bool(delete),
+                cancel_token=cancel_token,
+                workers=compare_workers,
+            )
 
         failed = transferrer.failed + deletes.failed
         if failed:

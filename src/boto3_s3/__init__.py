@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from boto3_s3.comparator import (
         Comparator,
         PairFilter,
+        ParallelCompare,
         SyncPair,
         all_of,
         any_of,
@@ -99,6 +100,7 @@ __all__ = [
     "OpOutcome",
     "OpResult",
     "PairFilter",
+    "ParallelCompare",
     "ProgressCallback",
     "ResultCallback",
     "S3Deleter",
@@ -141,6 +143,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "TransferConfig": "boto3_s3.transferconfig",
     "Comparator": "boto3_s3.comparator",
     "PairFilter": "boto3_s3.comparator",
+    "ParallelCompare": "boto3_s3.comparator",
     "SyncPair": "boto3_s3.comparator",
     "all_of": "boto3_s3.comparator",
     "any_of": "boto3_s3.comparator",

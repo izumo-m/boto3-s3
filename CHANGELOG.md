@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add content `compare=` strategies `boto3_s3.etagfilter.EtagComparison` and
   `boto3_s3.checksumfilter.ChecksumComparison` (native checksum via GetObjectAttributes,
   awscrt-accelerated with a pure-Python fallback).
+- Add `ParallelCompare`: run a content `compare=` strategy on a thread pool in `sync`.
 - Add `GlobFilter`: fluent `exclude`/`include` builder for `cp`/`mv`/`rm`/`sync` `filter=`.
   `filter=` is now uniformly a `FileInfo` predicate (a raw `globsieve` matcher is no
   longer accepted directly); `FileInfo` gains `compare_key`.
