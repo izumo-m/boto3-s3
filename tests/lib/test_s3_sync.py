@@ -21,6 +21,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import GlobFilter
+from boto3_s3.comparator import PairFilter, SyncPair
 from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -66,6 +67,10 @@ def _write(root: Path, rel: str, body: bytes, *, mtime: datetime | None = None) 
     if mtime is not None:
         os.utime(target, (mtime.timestamp(), mtime.timestamp()))
     return target
+
+
+def _always_copies(_pair: SyncPair) -> bool:
+    return True
 
 
 class TestSyncUpload:
@@ -257,17 +262,31 @@ class TestSyncUpload:
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
-    def test_compare_rejects_the_default_tuners(self, tmp_path: Path) -> None:
-        # size_only / exact_timestamps only tune the default; pairing them with
+    @pytest.mark.parametrize("strategy", [True, False, _always_copies])
+    @pytest.mark.parametrize(("size_only", "exact_timestamps"), [(True, False), (False, True)])
+    def test_compare_rejects_the_default_tuners(
+        self,
+        tmp_path: Path,
+        strategy: bool | PairFilter,
+        size_only: bool,
+        exact_timestamps: bool,
+    ) -> None:
+        # size_only / exact_timestamps only tune the default; pairing EITHER with
         # any non-None compare is the silently-ignored footgun we reject.
         src = tmp_path / "src"
         src.mkdir()
         client, _calls = make_recording_client([])
         dst = S3Storage("s3://bucket/p", client=client)
-        for strategy in (True, False, lambda pair: True):
-            with pytest.raises(ValidationError) as excinfo:
-                S3().sync(str(src), dst, compare=strategy, size_only=True, transfer_config=_SERIAL)
-            assert excinfo.value.operation == "sync"
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                str(src),
+                dst,
+                compare=strategy,
+                size_only=size_only,
+                exact_timestamps=exact_timestamps,
+                transfer_config=_SERIAL,
+            )
+        assert excinfo.value.operation == "sync"
 
     def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")

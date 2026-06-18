@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pytest
@@ -27,6 +28,7 @@ from boto3_s3.comparator import SyncPair
 from boto3_s3.etagfilter import (
     DEFAULT_PART_SIZE,
     _effective_part_size,  # pyright: ignore[reportPrivateUsage]
+    _EtagComparison,  # pyright: ignore[reportPrivateUsage]
     _file_md5_hex,  # pyright: ignore[reportPrivateUsage]
     _multipart_etag_at,  # pyright: ignore[reportPrivateUsage]
     by_etag,
@@ -99,18 +101,25 @@ class _FakeS3:
         return self.chunksize
 
 
+def _etag(s3: Any = None, **kw: Any) -> _EtagComparison:
+    """Build via the factory and narrow to the concrete type for attribute checks."""
+    f = by_etag(s3, **kw)
+    assert isinstance(f, _EtagComparison)
+    return f
+
+
 class TestConstruction:
     def test_default_part_size_and_check_size(self) -> None:
-        f = by_etag()
+        f = _etag()
         assert f.part_size == DEFAULT_PART_SIZE
         assert f.check_size is True
 
     def test_explicit_part_size(self) -> None:
-        assert by_etag(part_size=16 * _MIB).part_size == 16 * _MIB
+        assert _etag(part_size=16 * _MIB).part_size == 16 * _MIB
 
     def test_s3_derives_part_size_from_profile(self) -> None:
         fake = _FakeS3(32 * _MIB)
-        f = by_etag(fake)  # pyright: ignore[reportArgumentType]
+        f = _etag(fake)
         assert f.part_size == 32 * _MIB
         assert fake.get_size_calls == [("s3.multipart_chunksize", DEFAULT_PART_SIZE)]
 
@@ -118,12 +127,12 @@ class TestConstruction:
         # The permissive layer: passing both is not an error - the explicit value
         # wins and s3 is never consulted.
         fake = _FakeS3(32 * _MIB)
-        f = by_etag(fake, part_size=16 * _MIB)  # pyright: ignore[reportArgumentType]
+        f = _etag(fake, part_size=16 * _MIB)
         assert f.part_size == 16 * _MIB
         assert fake.aws_config_calls == 0
 
     def test_check_size_flag(self) -> None:
-        assert by_etag(check_size=False).check_size is False
+        assert _etag(check_size=False).check_size is False
 
 
 class TestS3Integration:
@@ -136,7 +145,7 @@ class TestS3Integration:
         cfg.write_text("[default]\ns3 =\n    multipart_chunksize = 16MB\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
         s3 = S3(session=boto3.Session())
-        assert by_etag(s3).part_size == 16 * _MIB
+        assert _etag(s3).part_size == 16 * _MIB
 
     def test_absent_key_falls_back_to_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -145,7 +154,7 @@ class TestS3Integration:
         cfg.write_text("[default]\nregion = us-east-1\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
         s3 = S3(session=boto3.Session())
-        assert by_etag(s3).part_size == DEFAULT_PART_SIZE
+        assert _etag(s3).part_size == DEFAULT_PART_SIZE
 
 
 class TestCopyDirectEtag:

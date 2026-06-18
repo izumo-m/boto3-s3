@@ -29,6 +29,7 @@ import pytest
 import boto3_s3.checksumfilter as cf
 from boto3_s3.checksumfilter import (
     _can_compute,  # pyright: ignore[reportPrivateUsage]
+    _ChecksumComparison,  # pyright: ignore[reportPrivateUsage]
     _composite_b64,  # pyright: ignore[reportPrivateUsage]
     _pure_crc32c,  # pyright: ignore[reportPrivateUsage]
     _pure_crc64nvme,  # pyright: ignore[reportPrivateUsage]
@@ -139,18 +140,18 @@ def _composite_resp(
     return respond
 
 
-def _upload_filter(
-    client: _FakeClient, *, key: str = "obj", **kw: Any
-) -> Callable[[SyncPair], bool]:
+def _upload_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> _ChecksumComparison:
     s3 = _FakeS3({"local": "LOCAL", f"s3://b/{key}": _FakeStorage("b", client)})
-    return by_checksum(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
+    f = by_checksum(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
+    assert isinstance(f, _ChecksumComparison)
+    return f
 
 
-def _download_filter(
-    client: _FakeClient, *, key: str = "obj", **kw: Any
-) -> Callable[[SyncPair], bool]:
+def _download_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> _ChecksumComparison:
     s3 = _FakeS3({f"s3://b/{key}": _FakeStorage("b", client), "local": "LOCAL"})
-    return by_checksum(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
+    f = by_checksum(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
+    assert isinstance(f, _ChecksumComparison)
+    return f
 
 
 def _write(tmp_path: Path, data: bytes = _DATA, name: str = "f") -> Path:
