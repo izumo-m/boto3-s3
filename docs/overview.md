@@ -117,7 +117,7 @@ written here.
 - [`crt.md`](./crt.md) - the design of the CRT transfer engine mode
   (`preferred_transfer_client`, library = boto3-faithful / CLI = aws-faithful).
 - [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
-  comparator, pair filter).
+  comparator, the `compare` strategy axis).
 - [`imports.md`](./imports.md) - import discipline (lazy re-export, lazy SDK
   loading, the contract for the CLI startup path).
 - [`masking.md`](./masking.md) - credential masking for debug logs

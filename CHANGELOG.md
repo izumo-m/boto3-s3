@@ -6,10 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add `S3.aws_config()`: read `~/.aws/config` with typed getters.
-- Add `boto3_s3.etagfilter.ETagFilter`: opt-in ETag content-comparison filter for `sync`.
-- Add `boto3_s3.checksumfilter.ChecksumFilter`: opt-in native-checksum
-  (GetObjectAttributes) content-comparison filter for `sync` (awscrt-accelerated,
-  pure-Python fallback).
+- Add `sync(compare=...)`: a single copy-decision axis (size+mtime default tuned
+  by the `size_only` / `exact_timestamps` options, or a content strategy).
+- Add content `compare=` strategies `boto3_s3.etagfilter.by_etag` and
+  `boto3_s3.checksumfilter.by_checksum` (native checksum via GetObjectAttributes,
+  awscrt-accelerated with a pure-Python fallback).
 - Add `GlobFilter`: fluent `exclude`/`include` builder for `cp`/`mv`/`rm`/`sync` `filter=`.
   `filter=` is now uniformly a `FileInfo` predicate (a raw `globsieve` matcher is no
   longer accepted directly); `FileInfo` gains `compare_key`.

@@ -586,8 +586,9 @@ recursive and has no streaming form). `add_transfer_arguments(include_recursive=
    `_validate_not_s3_express_bucket_for_sync`. The `--x-s3` suffix decision =
    `transferargs.is_s3express_path`. A **local** dir of the same name passes)
 8. case-conflict resolution (treated as `recursive=True` - sync has no flag)
-9. options conversion (`no_overwrite` is passed too, but the library side pops it
-   and folds it into the decision - sync does not attach IfNoneMatch. sync.md section 3)
+9. options conversion (`no_overwrite` is passed through in options; `S3.sync`
+   reads it as the write-guard and strips it before the engine - sync does not
+   attach IfNoneMatch. sync.md section 3)
 
 **The filter is compiled once**: the `--exclude` / `--include` sequence is turned
 into a single `FileFilter` against the source root (`plan.filter_root`) and passed

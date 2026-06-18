@@ -113,7 +113,7 @@ scan-level mechanism), while the local walk applies the predicate inline. The
 both sides are matched against the single `filter` (one symmetric predicate over
 each side's compare key). A destination entry pruned here
 is invisible to `--delete`, reproducing aws's "files excluded by filters are
-excluded from deletion". The pair-level judgments (`copy_filter` /
+excluded from deletion". The pair-level judgments (`compare` /
 `delete`) are a separate sync-specific layer applied after the
 merge-join; see sync.md.
 
