@@ -96,14 +96,11 @@ class SyncCommand(Command):
             args, src, paths_type, operation="sync", recursive=True
         )
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
-        # no_overwrite rides the copy decision (DefaultCopyFilter) for sync, not
-        # the engine options - drop it so it never reaches the transfer engine.
-        options.pop("no_overwrite", None)
 
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay
         # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, DefaultCopyFilter
+        from boto3_s3 import S3
 
         client = ctx.client_factory(args)
         src_location, dst_location = transferargs.resolve_locations(
@@ -129,11 +126,9 @@ class SyncCommand(Command):
                 src_location,  # type: ignore[arg-type]
                 dst_location,  # type: ignore[arg-type]
                 delete=args.delete,
-                copy_filter=DefaultCopyFilter(
-                    size_only=args.size_only,
-                    exact_timestamps=args.exact_timestamps,
-                    no_overwrite=args.no_overwrite,
-                ),
+                compare=None,
+                size_only=args.size_only,
+                exact_timestamps=args.exact_timestamps,
                 filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,

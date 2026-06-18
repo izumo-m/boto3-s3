@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Concatenate, Literal, ParamSpec
 from typing_extensions import Unpack
 
 from boto3_s3 import naming, requestparams
-from boto3_s3.comparator import Comparator, DefaultCopyFilter, PairFilter, SyncPair
+from boto3_s3.comparator import Comparator, PairFilter, SyncPair, compare_size_time
 from boto3_s3.deleter import S3Deleter
 from boto3_s3.exceptions import (
     BatchError,
@@ -151,12 +151,12 @@ def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
 
 
 def _copy_all(_pair: SyncPair) -> bool:
-    """``copy_filter=True``: copy every source-present pair (cp-like)."""
+    """``compare=True``: copy every source-present pair (cp-like)."""
     return True
 
 
 def _copy_none(_pair: SyncPair) -> bool:
-    """``copy_filter=False``: copy nothing (scan-only / delete-only sync)."""
+    """``compare=False``: copy nothing (scan-only / delete-only sync)."""
     return False
 
 
@@ -1245,7 +1245,9 @@ class S3:
         *,
         delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
-        copy_filter: bool | PairFilter | None = None,
+        compare: bool | PairFilter | None = None,
+        size_only: bool = False,
+        exact_timestamps: bool = False,
         follow_symlinks: bool = True,
         dryrun: bool = False,
         page_size: int = 1000,
@@ -1277,16 +1279,20 @@ class S3:
           ``delete``).
         - **Pair decisions** - the surviving streams are merge-joined by
           compare key (:class:`~boto3_s3.comparator.Comparator`) and each
-          :class:`~boto3_s3.comparator.SyncPair` is judged. ``copy_filter``
-          decides source-present pairs: ``None`` (default) uses aws's stock
-          judgment (:class:`~boto3_s3.comparator.DefaultCopyFilter`, which
-          reads the direction from ``pair.kind``); ``True`` copies every
-          source (cp-like); ``False`` copies nothing (scan-only, or a
-          delete-only sync with ``delete``); any other
-          :data:`~boto3_s3.comparator.PairFilter` is a custom decision. Tune
-          or compose the default explicitly as ``DefaultCopyFilter(size_only=
-          ..., exact_timestamps=..., no_overwrite=...)`` (e.g.
-          ``any_of(DefaultCopyFilter(), ...)``). ``delete`` is the deletion
+          :class:`~boto3_s3.comparator.SyncPair` is judged. ``compare`` picks
+          exactly one copy strategy for source-present pairs: ``None``
+          (default) compares by size + last-modified, tuned by ``size_only`` /
+          ``exact_timestamps``; ``True`` copies every source (cp-like);
+          ``False`` copies nothing (scan-only, or a delete-only sync with
+          ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
+          strategy - the content building blocks ``by_etag`` / ``by_checksum``
+          (submodule imports) are drop-in replacements that compare by content.
+          ``size_only`` / ``exact_timestamps`` only tune the default and raise
+          if combined with a custom ``compare``. ``no_overwrite`` is an
+          orthogonal write-guard applied *before* the strategy: an existing
+          destination is never overwritten (source-only pairs still copy), and
+          sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
+          ``delete`` is the deletion
           lane in one value: ``False`` (default) deletes nothing, ``True``
           deletes every destination-only pair (aws ``--delete``), and a
           :data:`~boto3_s3.types.FileFilter` deletes only the orphans it
@@ -1356,12 +1362,26 @@ class S3:
             source_client = src_storage.get_client()
             dst_bucket = dst_storage.bucket
 
-        if copy_filter is None:
-            copy_filter = DefaultCopyFilter()
-        elif copy_filter is True:
-            copy_filter = _copy_all
-        elif copy_filter is False:
-            copy_filter = _copy_none
+        # no_overwrite is an orthogonal write-guard (an option, so callers can
+        # write ``sync(no_overwrite=True)``): strip it from the engine options
+        # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
+        no_overwrite = options.pop("no_overwrite", False)
+        if compare is not None and (size_only or exact_timestamps):
+            raise ValidationError(
+                "size_only / exact_timestamps only tune the default comparison (compare=None)",
+                operation="sync",
+            )
+        decide: PairFilter
+        if compare is None:
+            decide = functools.partial(
+                compare_size_time, size_only=size_only, exact_timestamps=exact_timestamps
+            )
+        elif compare is True:
+            decide = _copy_all
+        elif compare is False:
+            decide = _copy_none
+        else:
+            decide = compare
         keep = _cp_keep(filter)
         # delete is False/True (no per-orphan filter) or a FileFilter that
         # narrows which destination-only orphans are deleted (matched like rm).
@@ -1409,7 +1429,9 @@ class S3:
                 if cancel_token is not None and cancel_token.cancelled:
                     raise CancelledError("sync was cancelled", operation="sync")
                 if pair.src is not None:
-                    if not copy_filter(pair):
+                    if no_overwrite and pair.dst is not None:
+                        continue
+                    if not decide(pair):
                         continue
                     item = self._sync_transfer_item(
                         plan,

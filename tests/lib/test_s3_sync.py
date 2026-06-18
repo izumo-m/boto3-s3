@@ -6,7 +6,8 @@ judgment with its direction asymmetry,
 filtered entries protected), the visibility layer pruning each side against
 its own root, dry runs that list but never act, the missing-source 255 shape,
 a source *file* degrading to the aws-cli's walk warning, and ``no_overwrite``
-handled wholly in the pair judgment (no ``IfNoneMatch`` on the wire).
+applied as an orthogonal write-guard in the sync loop (no ``IfNoneMatch`` on
+the wire).
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import DefaultCopyFilter, GlobFilter
-from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
+from boto3_s3 import GlobFilter
+from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -207,7 +208,7 @@ class TestSyncUpload:
             (OpKind.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
-    def test_copy_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
+    def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
         listing = _listing(("p/same.txt", 2))
@@ -215,15 +216,15 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=lambda pair: True,
+            compare=lambda pair: True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
     def test_no_overwrite_judges_without_if_none_match(self, tmp_path: Path) -> None:
-        # no_overwrite is a DefaultCopyFilter field for sync: the at-both pair
-        # is skipped by the judgment alone, and the new file's upload carries
-        # no conditional-write header (sync never sends IfNoneMatch).
+        # no_overwrite is an orthogonal sync write-guard: the at-both pair is
+        # skipped before the strategy, and the new file's upload carries no
+        # conditional-write header (sync never sends IfNoneMatch).
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_NEWER)  # differs, but never overwritten
         _write(src, "new.txt", b"xx", mtime=_OLDER)
@@ -231,12 +232,42 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=DefaultCopyFilter(no_overwrite=True),
+            no_overwrite=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
         assert "IfNoneMatch" not in calls[1].params
+
+    def test_no_overwrite_guards_any_compare_strategy(self, tmp_path: Path) -> None:
+        # The write-guard runs before the strategy: even compare=True (cp-like)
+        # never overwrites an existing destination, while a source-only pair
+        # still uploads.
+        src = tmp_path / "src"
+        _write(src, "exists.txt", b"xxx", mtime=_OLDER)  # at dest -> guarded
+        _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> uploaded
+        client, calls = make_recording_client([_listing(("p/exists.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=True,
+            no_overwrite=True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/new.txt"
+
+    def test_compare_rejects_the_default_tuners(self, tmp_path: Path) -> None:
+        # size_only / exact_timestamps only tune the default; pairing them with
+        # any non-None compare is the silently-ignored footgun we reject.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, _calls = make_recording_client([])
+        dst = S3Storage("s3://bucket/p", client=client)
+        for strategy in (True, False, lambda pair: True):
+            with pytest.raises(ValidationError) as excinfo:
+                S3().sync(str(src), dst, compare=strategy, size_only=True, transfer_config=_SERIAL)
+            assert excinfo.value.operation == "sync"
 
     def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")
@@ -300,7 +331,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            copy_filter=DefaultCopyFilter(exact_timestamps=True),
+            exact_timestamps=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
@@ -312,13 +343,13 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            copy_filter=DefaultCopyFilter(size_only=True),
+            size_only=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_copy_filter_true_copies_every_source(self, tmp_path: Path) -> None:
-        # copy_filter=True forces all source-present pairs through, even an
+    def test_compare_true_copies_every_source(self, tmp_path: Path) -> None:
+        # compare=True forces all source-present pairs through, even an
         # up-to-date one the default would skip (cp-like).
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # same size, older -> default would skip
@@ -326,33 +357,33 @@ class TestSyncDownload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=True,
+            compare=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
-    def test_copy_filter_false_copies_nothing(self, tmp_path: Path) -> None:
-        # copy_filter=False skips every copy, even a brand-new source file.
+    def test_compare_false_copies_nothing(self, tmp_path: Path) -> None:
+        # compare=False skips every copy, even a brand-new source file.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing()])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=False,
+            compare=False,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_copy_filter_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
-        # copy_filter=False + delete=True: prune orphans, copy nothing.
+    def test_compare_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
+        # compare=False + delete=True: prune orphans, copy nothing.
         src = tmp_path / "src"
         _write(src, "keep.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=False,
+            compare=False,
             delete=True,
             transfer_config=_SERIAL,
         )

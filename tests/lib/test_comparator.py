@@ -5,24 +5,26 @@ Ports the aws-cli semantics into the split design (pure pairing +
 test_comparator.py`` becomes the ``Comparator`` pairing matrix (their
 strategy-call assertions become filter-application cases), and the
 ``syncstrategy`` unit tests (``test_base`` / ``test_sizeonly`` /
-``test_exacttimestamps`` / ``test_nooverwrite``) become the
-``DefaultCopyFilter`` matrix - including the aws-cli's direction
-asymmetry: a same-size download syncs only when the *local* side is
-newer, which ``--exact-timestamps`` tightens to exact equality.
+``test_exacttimestamps``) become the ``compare_size_time`` matrix -
+including the aws-cli's direction asymmetry: a same-size download syncs
+only when the *local* side is newer, which ``exact_timestamps`` tightens
+to exact equality. (``no_overwrite`` is an orthogonal ``S3.sync``
+write-guard, exercised in ``test_s3_sync``.)
 """
 
 from __future__ import annotations
 
+import functools
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from boto3_s3.comparator import (
     Comparator,
-    DefaultCopyFilter,
     SyncPair,
     all_of,
     any_of,
+    compare_size_time,
 )
 from boto3_s3.types import FileInfo, OpKind
 
@@ -119,23 +121,20 @@ class TestComparatorPairing:
 
 
 def _both(kind: OpKind, src: FileInfo, dst: FileInfo, **flags: bool) -> bool:
-    decision = DefaultCopyFilter(**flags)
-    return decision(SyncPair(key=src.key, kind=kind, src=src, dst=dst))
+    return compare_size_time(SyncPair(key=src.key, kind=kind, src=src, dst=dst), **flags)
 
 
-class TestDefaultCopyFilter:
+class TestCompareSizeTime:
     """aws-cli syncstrategy matrix, by direction and variant flag."""
 
     def test_source_only_pair_always_copies(self) -> None:
         # aws-cli's MissingFileSync: no destination entry -> transfer.
         for kind in (OpKind.UPLOAD, OpKind.DOWNLOAD, OpKind.COPY):
-            decision = DefaultCopyFilter()
-            assert decision(SyncPair(key="k", kind=kind, src=_info())) is True
+            assert compare_size_time(SyncPair(key="k", kind=kind, src=_info())) is True
 
     def test_rejects_pair_without_source(self) -> None:
-        decision = DefaultCopyFilter()
         with pytest.raises(ValueError, match="without a source entry"):
-            decision(SyncPair(key="k", kind=OpKind.UPLOAD, dst=_info()))
+            compare_size_time(SyncPair(key="k", kind=OpKind.UPLOAD, dst=_info()))
 
     # -- size + last-modified (the default judgment) -----------------------
 
@@ -227,22 +226,6 @@ class TestDefaultCopyFilter:
         assert _both(OpKind.UPLOAD, src, newer, exact_timestamps=True) is False
         assert _both(OpKind.COPY, src, newer, exact_timestamps=True) is False
 
-    # -- no_overwrite --------------------------------------------------------
-
-    def test_no_overwrite_never_updates_an_existing_dest(self) -> None:
-        # aws-cli's NoOverwriteSync: both-sides pairs never sync, no matter
-        # how different; source-only pairs still transfer.
-        src = _info(size=10)
-        dst = _info(size=99, mtime=_TIME - timedelta(days=1))
-        assert _both(OpKind.UPLOAD, src, dst, no_overwrite=True) is False
-        decision = DefaultCopyFilter(no_overwrite=True)
-        assert decision(SyncPair(key="k", kind=OpKind.UPLOAD, src=src)) is True
-
-    def test_no_overwrite_takes_precedence_over_size_only(self) -> None:
-        src = _info(size=10)
-        dst = _info(size=99)
-        assert _both(OpKind.UPLOAD, src, dst, no_overwrite=True, size_only=True) is False
-
 
 def _json_only(pair: SyncPair) -> bool:
     return pair.key.endswith(".json")
@@ -250,15 +233,15 @@ def _json_only(pair: SyncPair) -> bool:
 
 class TestCombinators:
     def test_all_of_requires_every_predicate(self) -> None:
-        copy_all = DefaultCopyFilter()
+        copy_all = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = all_of(_json_only, copy_all)
         assert combined(SyncPair(key="a.json", kind=_KIND, src=_info("a.json"))) is True
         assert combined(SyncPair(key="a.txt", kind=_KIND, src=_info("a.txt"))) is False
 
     def test_any_of_passes_on_first_hit(self) -> None:
-        # The documented composition: the aws default, plus one more rule
-        # that forces certain keys through.
-        base = DefaultCopyFilter()
+        # A visibility-style override composed with the size+time default:
+        # one extra rule forces certain keys through.
+        base = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = any_of(_json_only, base)
         up_to_date = SyncPair(key="a.json", kind=_KIND, src=_info("a.json"), dst=_info("a.json"))
         assert base(up_to_date) is False

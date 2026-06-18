@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from boto3_s3 import globsieve
     from boto3_s3.comparator import (
         Comparator,
-        DefaultCopyFilter,
         PairFilter,
         SyncPair,
         all_of,
@@ -87,7 +86,6 @@ __all__ = [
     "Comparator",
     "ConfigurationError",
     "CopyPropsMode",
-    "DefaultCopyFilter",
     "FileFilter",
     "FileInfo",
     "FileKind",
@@ -146,7 +144,6 @@ _EXPORT_HOMES: dict[str, str] = {
     "SyncPair": "boto3_s3.comparator",
     "all_of": "boto3_s3.comparator",
     "any_of": "boto3_s3.comparator",
-    "DefaultCopyFilter": "boto3_s3.comparator",
     "prefetch": "boto3_s3.concurrency",
     "S3Deleter": "boto3_s3.deleter",
     "AccessDeniedError": "boto3_s3.exceptions",
