@@ -1,4 +1,4 @@
-"""Unit tests for ``boto3_s3.etagfilter``: the ETag content-comparison PairFilter.
+"""Unit tests for ``boto3_s3.etagcompare``: the ETag content-comparison PairFilter.
 
 Pins ``EtagComparison``'s construction (the ``s3`` / ``part_size`` / ``check_size``
 knobs), the s3->s3 direct-ETag comparison and its size collision-guard, the
@@ -25,7 +25,7 @@ import pytest
 
 from boto3_s3 import S3
 from boto3_s3.comparator import SyncPair
-from boto3_s3.etagfilter import (
+from boto3_s3.etagcompare import (
     DEFAULT_PART_SIZE,
     EtagComparison,
     _effective_part_size,  # pyright: ignore[reportPrivateUsage]

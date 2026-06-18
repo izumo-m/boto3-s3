@@ -105,7 +105,7 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
 Example (content-based sync + delete only old generations):
 
 ```python
-from boto3_s3.etagfilter import EtagComparison
+from boto3_s3.etagcompare import EtagComparison
 
 s3.sync(src, dst,
     compare=EtagComparison(s3),                       # decide by content, not size + mtime
@@ -196,13 +196,13 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
 ## 8. ETag content comparison (`EtagComparison`, opt-in)
 
 `compare=None` decides by size + mtime. When the decision must follow
-**content**, `boto3_s3.etagfilter.EtagComparison(...)` builds a `compare=` strategy that
+**content**, `boto3_s3.etagcompare.EtagComparison(...)` builds a `compare=` strategy that
 compares S3's ETag against the ETag the source would carry. It is a standalone,
 opt-in building block - imported by submodule path, not part of the package root
 re-export:
 
 ```python
-from boto3_s3.etagfilter import EtagComparison
+from boto3_s3.etagcompare import EtagComparison
 
 s3.sync(src, dst, compare=EtagComparison(s3))          # part_size from the profile
 s3.sync(src, dst, compare=EtagComparison())            # 8 MiB default part size
@@ -234,7 +234,7 @@ s3.sync(src, dst, compare=EtagComparison(part_size=16 * 1024 * 1024))   # explic
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 
 Where `EtagComparison` reconstructs the S3 ETag (and so must be told the multipart
-part size), `boto3_s3.checksumfilter.ChecksumComparison(...)` reads the object's
+part size), `boto3_s3.checksumcompare.ChecksumComparison(...)` reads the object's
 **native S3 checksum** with `GetObjectAttributes` and recomputes that same
 algorithm over the local file. It needs **no write side** (the checksum is one
 S3 already stores), works on objects any tool uploaded with a checksum, is
@@ -245,7 +245,7 @@ Like `EtagComparison` it is a standalone, opt-in building block - imported by su
 path, not part of the package root re-export:
 
 ```python
-from boto3_s3.checksumfilter import ChecksumComparison
+from boto3_s3.checksumcompare import ChecksumComparison
 
 # decide every both-sides pair by content (mtime is not consulted):
 s3.sync(src, dst, compare=ChecksumComparison(s3, src, dst))
@@ -301,7 +301,7 @@ in `boto3_s3.comparator.ParallelCompare` runs the **both-sides (update)**
 decisions on a thread pool instead:
 
 ```python
-from boto3_s3.checksumfilter import ChecksumComparison
+from boto3_s3.checksumcompare import ChecksumComparison
 from boto3_s3.comparator import ParallelCompare
 
 s3.sync(src, dst, compare=ParallelCompare(ChecksumComparison(s3, src, dst), workers=16))

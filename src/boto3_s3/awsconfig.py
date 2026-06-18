@@ -40,7 +40,7 @@ Resolution rules:
   ``ConfigurationError`` (botocore's ``ProfileNotFound``, converted at the
   boundary), matching ``aws``.
 
-Like :mod:`~boto3_s3.etagfilter` this is a standalone, opt-in building block:
+Like :mod:`~boto3_s3.etagcompare` this is a standalone, opt-in building block:
 imported by submodule path (``from boto3_s3.awsconfig import AwsConfig``), **not**
 part of the package's lazy root re-export, and SDK-free at import time - boto3 /
 botocore are loaded lazily on the read path, so ``import boto3_s3.awsconfig``

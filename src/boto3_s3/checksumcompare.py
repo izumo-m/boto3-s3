@@ -1,4 +1,4 @@
-"""``boto3_s3.checksumfilter``: a native-checksum content-comparison strategy for ``S3.sync``.
+"""``boto3_s3.checksumcompare``: a native-checksum content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
 copies the source). The default ``compare=None`` decides by size + last-modified,
@@ -11,7 +11,7 @@ carry:
   ``ObjectParts`` boundaries;
 - it recomputes that same algorithm over the local file and compares.
 
-Unlike :class:`~boto3_s3.etagfilter.EtagComparison` this needs **no write side** (the
+Unlike :class:`~boto3_s3.etagcompare.EtagComparison` this needs **no write side** (the
 checksum is one S3 already stores), works against objects any tool uploaded with
 a checksum, is exact for multipart objects (the part sizes come back from
 GetObjectAttributes, so there is no part-size to guess), and works for SSE
@@ -19,7 +19,7 @@ objects (a checksum is independent of encryption, unlike an ETag). The cost is
 one ``GetObjectAttributes`` round-trip per object compared.
 
 This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.checksumfilter import
+imported by submodule path (``from boto3_s3.checksumcompare import
 ChecksumComparison``), and is **not** part of the package's lazy root re-export. It
 imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast

@@ -77,26 +77,26 @@ class TestLibraryImportContract:
             """
         )
 
-    def test_etagfilter_alone_stays_pure(self) -> None:
+    def test_etagcompare_alone_stays_pure(self) -> None:
         # The ETag content-comparison filter is an opt-in building block; its one
         # SDK touch (s3transfer's ChunksizeAdjuster) is deferred into the compute
         # path, so importing the module must not pull the SDK.
         _run_fresh(
             """
-            import boto3_s3.etagfilter
+            import boto3_s3.etagcompare
 
             assert not sdk_modules(), sdk_modules()
             """
         )
 
-    def test_checksumfilter_alone_stays_pure(self) -> None:
+    def test_checksumcompare_alone_stays_pure(self) -> None:
         # The native-checksum filter is an opt-in building block; its SDK touches
         # (the boto3 client via s3.resolve, botocore's ClientError, and the
         # optional awscrt fast checksums) are deferred into the construct / compute
         # paths, so importing the module must not pull the SDK.
         _run_fresh(
             """
-            import boto3_s3.checksumfilter
+            import boto3_s3.checksumcompare
 
             assert not sdk_modules(), sdk_modules()
             """

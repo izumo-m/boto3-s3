@@ -78,8 +78,8 @@ class ParallelCompare:
     I/O - in parallel. Passing it is observationally identical to passing
     ``compare`` bare: the same pairs are copied and the exit is the same, only
     faster. The wrapped ``compare`` must be thread-safe;
-    :class:`~boto3_s3.checksumfilter.ChecksumComparison` and
-    :class:`~boto3_s3.etagfilter.EtagComparison` are. New (destination-missing)
+    :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
+    :class:`~boto3_s3.etagcompare.EtagComparison` are. New (destination-missing)
     pairs and the ``--case-conflict`` check stay on the calling thread in
     compare-key order, so they remain deterministic.
 

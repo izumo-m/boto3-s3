@@ -1,4 +1,4 @@
-"""Unit tests for ``boto3_s3.checksumfilter``: the native-checksum PairFilter.
+"""Unit tests for ``boto3_s3.checksumcompare``: the native-checksum PairFilter.
 
 Pins ``ChecksumComparison``'s construction (the resolved-endpoint injection, the
 ``check_size`` / ``pure_max_size`` knobs), the GetObjectAttributes read + parse
@@ -26,8 +26,8 @@ from typing import Any
 
 import pytest
 
-import boto3_s3.checksumfilter as cf
-from boto3_s3.checksumfilter import (
+import boto3_s3.checksumcompare as cf
+from boto3_s3.checksumcompare import (
     ChecksumComparison,
     _can_compute,  # pyright: ignore[reportPrivateUsage]
     _composite_b64,  # pyright: ignore[reportPrivateUsage]

@@ -1,4 +1,4 @@
-"""``boto3_s3.etagfilter``: an ETag content-comparison strategy for ``S3.sync``.
+"""``boto3_s3.etagcompare``: an ETag content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
 copies the source). The default ``compare=None`` decides by size + last-modified,
@@ -14,12 +14,12 @@ comparing S3's ETag against the ETag the source would carry:
   (the ``part_size`` argument, default :data:`DEFAULT_PART_SIZE`).
 
 This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.etagfilter import EtagComparison``), and
+imported by submodule path (``from boto3_s3.etagcompare import EtagComparison``), and
 is **not** part of the package's lazy root re-export. Like
 :mod:`~boto3_s3.comparator` it imports no AWS SDK module at import time; the one
 SDK touch - mirroring s3transfer's ``ChunksizeAdjuster`` so the reconstructed
 part size matches what an actual upload would chunk - is deferred into the
-compute path, so ``import boto3_s3.etagfilter`` stays SDK-free.
+compute path, so ``import boto3_s3.etagcompare`` stays SDK-free.
 
 Two caveats are inherent to ETag comparison and are the caller's to manage:
 
