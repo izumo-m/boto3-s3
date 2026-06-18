@@ -225,3 +225,58 @@ s3.sync(src, dst, copy_filter=any_of(DefaultCopyFilter(), ETagFilter(s3)))  # co
   against such a bucket every object reads as differing - stay on (or compose
   with) `DefaultCopyFilter`. The upload / download hash runs on sync's main
   thread.
+
+## 9. Native-checksum content comparison (`ChecksumFilter`, opt-in)
+
+Where `ETagFilter` reconstructs the S3 ETag (and so must be told the multipart
+part size), `boto3_s3.checksumfilter.ChecksumFilter` reads the object's **native
+S3 checksum** with `GetObjectAttributes` and recomputes that same algorithm over
+the local file. It needs **no write side** (the checksum is one S3 already
+stores), works on objects any tool uploaded with a checksum, is **exact for
+multipart** objects (the part boundaries come back in `ObjectParts`, so nothing
+is guessed), and works for **SSE** objects (a checksum is independent of
+encryption). The cost is one `GetObjectAttributes` round-trip per object. Like
+`ETagFilter` it is a standalone, opt-in building block - imported by submodule
+path, not part of the package root re-export:
+
+```python
+from boto3_s3.checksumfilter import ChecksumFilter
+
+# rescue the same-size content changes DefaultCopyFilter misses (the download
+# asymmetry), confirming by content only the pairs the default would skip:
+s3.sync(src, dst, copy_filter=any_of(DefaultCopyFilter(), ChecksumFilter(s3, src, dst)))
+```
+
+Compose it with `any_of`, not `all_of`: `DefaultCopyFilter` returns "skip" for a
+same-size pair its time rule deems redundant (notably the download asymmetry - a
+same-size object updated only on the S3 source is not pulled down), and `any_of`
+consults `ChecksumFilter` exactly on that skip subset. Note this means it is
+consulted for ~every up-to-date object, so each pays a `GetObjectAttributes`;
+that serial cost is what the parallel stage (a later step) removes.
+
+- **upload / download** reads the remote object's checksum and recomputes it over
+  the local file: whole-file for a `FULL_OBJECT` checksum (CRC32 / CRC32C /
+  CRC64NVME - the modern default), or part-by-part at the exact `ObjectParts`
+  sizes for a `COMPOSITE` one (a SHA-style multipart). **s3->s3** compares the
+  two objects' stored checksums directly (a `GetObjectAttributes` on each, no
+  bytes read). A source-only pair always copies.
+- **Indeterminate -> copy.** An object with no native checksum, a mismatched
+  algorithm across an s3->s3 pair, an algorithm that cannot be computed locally,
+  or any `GetObjectAttributes` error (a 404, a denied `s3:GetObjectAttributes`,
+  an SSE-C object that needs a key) is treated as differing - the filter never
+  skips on an indeterminate compare.
+- **`check_size`** (default on) treats a known size mismatch as differing before
+  any call or hash - a shortcut, and for s3->s3 a guard against a CRC collision.
+- **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` (hashlib) are
+  always available. `crc32c` / `crc64nvme` use **`awscrt`** when installed (a C
+  path ~1000x faster, the same one S3 uses) and fall back to a bundled
+  pure-Python implementation otherwise (~15-20 MiB/s) - on a par with the awscrt
+  extra elsewhere (crt.md section 6): without it these still work, just slowly.
+  Because that fallback is slow, **`pure_max_size`** caps it: above the cap, with
+  no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
+  rather than being hashed. `None` (default) never caps.
+- **Endpoint injection.** `ChecksumFilter(s3, src, dst)` resolves the S3 side(s)
+  for their client + bucket from the same `src` / `dst` passed to `sync`
+  (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
+  cross-account s3->s3 sync, exactly as `sync` does. The upload / download hash
+  runs on sync's main thread.
