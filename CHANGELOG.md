@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `GlobFilter`: fluent `exclude`/`include` builder for `cp`/`mv`/`rm`/`sync` `filter=`.
   `filter=` is now uniformly a `FileInfo` predicate (a raw `globsieve` matcher is no
   longer accepted directly); `FileInfo` gains `compare_key`.
+- Speed up mixed-shape `exclude`/`include` lists: `globsieve` partitions them by
+  shape into a folded `CompositeSet` instead of one big regex.
 
 ## [0.1.0] - 2026-06-16
 

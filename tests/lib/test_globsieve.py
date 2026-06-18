@@ -18,6 +18,7 @@ from boto3_s3 import FileInfo, globsieve
 from boto3_s3.globsieve import (
     AlwaysExclude,
     AlwaysInclude,
+    CompositeSet,
     ExcludeOnly,
     GlobFilter,
     GlobPattern,
@@ -101,6 +102,32 @@ class TestUnionRegex:
         assert m.matches("dir/foo123.tmp") is True
         assert m.matches("save.bak") is True
         assert m.matches("save.txt") is False
+
+
+class TestCompositeSet:
+    # CompositeSet takes pre-stripped buckets: literals verbatim, suffixes
+    # without the leading ``*``, prefixes without the trailing ``*``, and
+    # general patterns as raw fnmatch.
+    def test_ors_every_present_shape(self) -> None:
+        s = CompositeSet(
+            literals=[".lock"],
+            suffixes=[".elc"],  # from ``*.elc``
+            prefixes=["elpa/"],  # from ``elpa/*``
+            general=["**/foo*.bak"],
+        )
+        assert s.matches(".lock") is True  # literal
+        assert s.matches("a/b.elc") is True  # suffix (greedy across /)
+        assert s.matches("elpa/x/y.el") is True  # prefix
+        assert s.matches("deep/dir/foo1.bak") is True  # general
+        assert s.matches("init.el") is False  # none
+
+    def test_works_without_a_general_bucket(self) -> None:
+        # The common exclude-list shape: only literal/suffix/prefix, no regex.
+        s = CompositeSet(literals=[".x"], suffixes=[".elc"], prefixes=["lib/"], general=[])
+        assert s.matches(".x") is True
+        assert s.matches("a.elc") is True
+        assert s.matches("lib/native.so") is True
+        assert s.matches("keep.txt") is False
 
 
 # ----- compile: macro-shape detection --------------------------------------
@@ -198,12 +225,31 @@ class TestCompileSetSpecialization:
         assert isinstance(m.set_matcher, PrefixSet)
         assert m.set_matcher.prefixes == ("logs/", "tmp/")
 
-    def test_mixed_shapes_fall_back_to_union_regex(self) -> None:
+    def test_mixed_shapes_partition_into_composite_set(self) -> None:
+        # A suffix (``*.txt``) and a prefix (``logs/*``) together have no
+        # single uniform shape, so they fold into a CompositeSet rather than
+        # collapsing into one regex.
         m = globsieve.compile(
             [
                 GlobPattern.exclude("*"),
                 GlobPattern.include("*.txt"),
                 GlobPattern.include("logs/*"),
+            ]
+        )
+        assert isinstance(m, IncludeOnly)
+        assert isinstance(m.set_matcher, CompositeSet)
+        assert m.included("a.txt") is True
+        assert m.included("logs/x") is True
+        assert m.included("a.log") is False
+
+    def test_only_general_shapes_stay_union_regex(self) -> None:
+        # Patterns that are neither literal nor pure prefix/suffix remain a
+        # single UnionRegex (one populated bucket, no composite).
+        m = globsieve.compile(
+            [
+                GlobPattern.exclude("*"),
+                GlobPattern.include("a*b.txt"),
+                GlobPattern.include("c?d/*.log"),
             ]
         )
         assert isinstance(m, IncludeOnly)
@@ -256,6 +302,41 @@ class TestSemanticEquivalence:
             (
                 [GlobPattern.exclude("logs/*"), GlobPattern.exclude("tmp/*")],
                 ["logs/x", "tmp/y", "data/z"],
+            ),
+            # Mixed-shape all-exclude list (the .emacs.d backup case): a
+            # suffix + many ``dir/*`` prefixes + literals -> CompositeSet,
+            # which must agree with the naive last-match-wins walk.
+            (
+                [
+                    GlobPattern.exclude("*.elc"),
+                    GlobPattern.exclude("elpa/*"),
+                    GlobPattern.exclude("eln-cache/*"),
+                    GlobPattern.exclude(".cache/*"),
+                    GlobPattern.exclude(".persistent-scratch"),
+                    GlobPattern.exclude(".lsp-session-v1"),
+                ],
+                [
+                    "init.el",
+                    "a/b.elc",
+                    "elpa/magit/magit.el",
+                    "eln-cache/x.eln",
+                    ".cache/y",
+                    ".persistent-scratch",
+                    ".lsp-session-v1",
+                    "elpa/",
+                    "elpax",
+                ],
+            ),
+            # Mixed shapes that also exercise the general (regex) bucket.
+            (
+                [
+                    GlobPattern.exclude("*"),
+                    GlobPattern.include("*.txt"),
+                    GlobPattern.include("logs/*"),
+                    GlobPattern.include("keep.me"),
+                    GlobPattern.include("a*b.csv"),
+                ],
+                ["a.txt", "logs/x", "keep.me", "aXXb.csv", "ab.csv", "other.bin"],
             ),
         ],
     )

@@ -58,12 +58,21 @@ fastest Matcher:
 | `include "*"` + exclude group / exclude only | `ExcludeOnly` (default-allow) |
 | mixed order | `Sequential` (last-wins walk) |
 
-Within each set it specializes further by pattern shape (literal ->
-`LiteralSet` (frozenset), `*X` -> `SuffixSet` (tuple endswith), `X*` ->
-`PrefixSet`, otherwise -> `UnionRegex` (alternation of `fnmatch.translate`)).
-This optimization presumes that the **entire glob pattern sequence is visible**,
-which is why `GlobFilter` defers compilation until the full chain of `exclude` /
-`include` calls has been accumulated (lazily, on first use).
+Within each set it specializes further by **partitioning the patterns by
+shape** (literal -> `LiteralSet` (frozenset), `*X` -> `SuffixSet` (tuple
+endswith), `X*` -> `PrefixSet` (tuple startswith), anything else ->
+`UnionRegex` (alternation of `fnmatch.translate`)). A set that is uniformly one
+shape uses that shape's dedicated matcher directly. A **mixed** set - the usual
+case for a real exclude list (many `dir/*` directory excludes alongside a
+`*.ext` suffix and a couple of literals, e.g. a `.emacs.d` backup) - folds into
+a `CompositeSet`: one matcher per populated shape, OR-ed together. The OR is
+baked into a single closure (a few C-level `in` / `startswith` / `endswith`
+calls, each consuming the whole tuple at once) rather than a Python loop over
+sub-matcher objects, so it beats collapsing the mixed set into one big regex
+(the prior behavior). This optimization presumes that the **entire glob pattern
+sequence is visible**, which is why `GlobFilter` defers compilation until the
+full chain of `exclude` / `include` calls has been accumulated (lazily, on
+first use).
 
 ## 3. The contract of `S3.rm(filter=...)`
 

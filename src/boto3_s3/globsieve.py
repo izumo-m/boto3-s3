@@ -23,9 +23,10 @@ sugar over the same :func:`compile`.
 Specialization happens at compile time. :func:`compile` first detects
 the *macro shape* of the pattern list (default-deny + includes,
 default-allow + excludes, mixed) and picks one of the
-:class:`Matcher` implementations. Within each set, the per-pattern
-shape (literal, suffix, prefix, general fnmatch) further selects the
-fastest :class:`SetMatcher` backend.
+:class:`Matcher` implementations. Within each set, the patterns are
+partitioned by shape (literal, suffix, prefix, general fnmatch): a
+uniform set uses that shape's dedicated :class:`SetMatcher`, and a mixed
+set is folded into a :class:`CompositeSet` that ORs one matcher per shape.
 
 Keys are matched verbatim. ``S3.rm`` feeds root-stripped keys (relative
 to the operation's effective prefix root), so this module never needs to
@@ -41,7 +42,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AlwaysExclude",
     "AlwaysInclude",
+    "CompositeSet",
     "ExcludeOnly",
     "GlobFilter",
     "GlobPattern",
@@ -283,6 +285,52 @@ class UnionRegex:
         return self._regex.match(key) is not None
 
 
+class CompositeSet:
+    """Union of shape-partitioned matchers, folded into one predicate.
+
+    A heterogeneous set (e.g. ``*.elc`` + ``elpa/*`` + a literal) has no
+    single uniform shape, but each *shape* still has a dedicated fast
+    test. :func:`compile` partitions such a set into a literal frozenset,
+    a suffix tuple, a prefix tuple, and a leftover :class:`UnionRegex`,
+    and this matcher ORs them.
+
+    The OR is folded into one closure built at construction (and bound to
+    ``matches``) rather than a Python loop over sub-matcher objects: the
+    per-key cost is then a few C-level membership tests (``in`` /
+    ``str.startswith`` / ``str.endswith``, each consuming the whole tuple
+    in a single call) with no per-sub method dispatch - which is what lets
+    it beat the single ``UnionRegex`` it replaces. Prefixes are tested
+    first since directory excludes (``dir/*``) dominate real exclude lists,
+    so a matching key short-circuits soonest.
+    """
+
+    def __init__(
+        self,
+        literals: Iterable[str],
+        suffixes: Iterable[str],
+        prefixes: Iterable[str],
+        general: Sequence[str],
+    ) -> None:
+        lits = frozenset(literals)
+        sufs = tuple(suffixes)
+        prefs = tuple(prefixes)
+        # Bind the folded predicate as an instance attribute (not a method):
+        # an instance-level callable is invoked directly, so the captured
+        # tuples/frozenset are read as closure cells rather than via
+        # ``self``-attribute lookups - measurably faster on the per-key path.
+        matches: Callable[[str], bool]
+        if general:
+            regex_matches = UnionRegex(general).matches
+            matches = lambda key: (  # noqa: E731
+                key.startswith(prefs) or key.endswith(sufs) or key in lits or regex_matches(key)
+            )
+        else:
+            matches = lambda key: (  # noqa: E731
+                key.startswith(prefs) or key.endswith(sufs) or key in lits
+            )
+        self.matches = matches
+
+
 class _NeverMatch:
     """Empty set - never matches anything (internal)."""
 
@@ -336,16 +384,43 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
 
 
 def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
-    """Pick the fastest :class:`SetMatcher` for a uniformly-typed pattern list."""
-    if not patterns:
+    """Pick the fastest :class:`SetMatcher` for a pattern list.
+
+    Patterns are partitioned by shape (literal / ``*X`` suffix / ``X*``
+    prefix / general fnmatch). A set that is uniformly one shape uses that
+    shape's dedicated matcher (:class:`LiteralSet` / :class:`SuffixSet` /
+    :class:`PrefixSet` / :class:`UnionRegex`). A mixed set - the common
+    case for a real exclude list (``dir/*`` directory excludes alongside a
+    ``*.ext`` suffix and a couple of literals) - is folded into a
+    :class:`CompositeSet` that ORs one matcher per present shape, which is
+    faster than collapsing everything into one regex.
+    """
+    literals: list[str] = []
+    suffixes: list[str] = []
+    prefixes: list[str] = []
+    general: list[str] = []
+    for p in patterns:
+        if _is_literal(p):
+            literals.append(p)
+        elif _is_pure_suffix(p):
+            suffixes.append(p[1:])
+        elif _is_pure_prefix(p):
+            prefixes.append(p[:-1])
+        else:
+            general.append(p)
+
+    present = [bucket for bucket in (literals, suffixes, prefixes, general) if bucket]
+    if not present:
         return _NeverMatch()
-    if all(_is_literal(p) for p in patterns):
-        return LiteralSet(patterns)
-    if all(_is_pure_suffix(p) for p in patterns):
-        return SuffixSet(p[1:] for p in patterns)
-    if all(_is_pure_prefix(p) for p in patterns):
-        return PrefixSet(p[:-1] for p in patterns)
-    return UnionRegex(patterns)
+    if len(present) == 1:
+        if literals:
+            return LiteralSet(literals)
+        if suffixes:
+            return SuffixSet(suffixes)
+        if prefixes:
+            return PrefixSet(prefixes)
+        return UnionRegex(general)
+    return CompositeSet(literals, suffixes, prefixes, general)
 
 
 def _compile_one_set(pattern: str) -> SetMatcher:
