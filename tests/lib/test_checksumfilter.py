@@ -1,6 +1,6 @@
 """Unit tests for ``boto3_s3.checksumfilter``: the native-checksum PairFilter.
 
-Pins ``ChecksumFilter``'s construction (the resolved-endpoint injection, the
+Pins ``by_checksum``'s construction (the resolved-endpoint injection, the
 ``check_size`` / ``pure_max_size`` knobs), the GetObjectAttributes read + parse
 (FULL_OBJECT whole-file and COMPOSITE part-boundary reconstruction, pagination),
 the s3->s3 stored-checksum comparison, the size pre-check, the indeterminate ->
@@ -20,6 +20,7 @@ import base64
 import hashlib
 import os
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,12 @@ import pytest
 
 import boto3_s3.checksumfilter as cf
 from boto3_s3.checksumfilter import (
-    ChecksumFilter,
     _can_compute,  # pyright: ignore[reportPrivateUsage]
     _composite_b64,  # pyright: ignore[reportPrivateUsage]
     _pure_crc32c,  # pyright: ignore[reportPrivateUsage]
     _pure_crc64nvme,  # pyright: ignore[reportPrivateUsage]
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
+    by_checksum,
 )
 from boto3_s3.comparator import SyncPair
 from boto3_s3.types import FileInfo, LocalFileInfo, OpKind, S3FileInfo
@@ -138,14 +139,18 @@ def _composite_resp(
     return respond
 
 
-def _upload_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumFilter:
+def _upload_filter(
+    client: _FakeClient, *, key: str = "obj", **kw: Any
+) -> Callable[[SyncPair], bool]:
     s3 = _FakeS3({"local": "LOCAL", f"s3://b/{key}": _FakeStorage("b", client)})
-    return ChecksumFilter(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
+    return by_checksum(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
 
 
-def _download_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumFilter:
+def _download_filter(
+    client: _FakeClient, *, key: str = "obj", **kw: Any
+) -> Callable[[SyncPair], bool]:
     s3 = _FakeS3({f"s3://b/{key}": _FakeStorage("b", client), "local": "LOCAL"})
-    return ChecksumFilter(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
+    return by_checksum(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
 
 
 def _write(tmp_path: Path, data: bytes = _DATA, name: str = "f") -> Path:
@@ -193,7 +198,7 @@ class TestConstruction:
                 resolved.append(loc)
                 return "LOCAL" if loc == "local" else _FakeStorage("b", _FakeClient({}))
 
-        ChecksumFilter(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
+        by_checksum(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
         assert resolved == ["local", "s3://b/obj"]
 
 
@@ -331,14 +336,14 @@ class TestComposite:
 
 
 class TestCopyDirect:
-    def _copy(self, src_resp: Any, dst_resp: Any, **kw: Any) -> ChecksumFilter:
+    def _copy(self, src_resp: Any, dst_resp: Any, **kw: Any) -> Callable[[SyncPair], bool]:
         s3 = _FakeS3(
             {
                 "s3://b/src": _FakeStorage("b", _FakeClient({"src": src_resp})),
                 "s3://b/dst": _FakeStorage("b", _FakeClient({"dst": dst_resp})),
             }
         )
-        return ChecksumFilter(s3, "s3://b/src", "s3://b/dst", **kw)  # pyright: ignore[reportArgumentType]
+        return by_checksum(s3, "s3://b/src", "s3://b/dst", **kw)  # pyright: ignore[reportArgumentType]
 
     def _pair(self, **kw: Any) -> SyncPair:
         return SyncPair(key="k", kind=OpKind.COPY, src=_s3("src", **kw), dst=_s3("dst", **kw))
@@ -379,7 +384,7 @@ class TestCopyDirect:
         src = _FakeClient({"src": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)})
         dst = _FakeClient({"dst": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)})
         s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dst": _FakeStorage("b", dst)})
-        f = ChecksumFilter(s3, "s3://b/src", "s3://b/dst")  # pyright: ignore[reportArgumentType]
+        f = by_checksum(s3, "s3://b/src", "s3://b/dst")  # pyright: ignore[reportArgumentType]
         pair = SyncPair(key="k", kind=OpKind.COPY, src=_s3("src"), dst=_s3("dst"))
         assert f(pair) is False
         assert len(src.calls) == 1

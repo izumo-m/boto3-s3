@@ -1,17 +1,17 @@
 """``boto3_s3.checksumfilter``: a native-checksum content filter for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
-copies the source). The stock :class:`~boto3_s3.comparator.DefaultCopyFilter`
-decides by size + last-modified, aws-cli style; :class:`ChecksumFilter` decides
-by **content**, comparing S3's stored native checksum against the checksum the
-local file would carry:
+copies the source). The default ``compare=None`` decides by size + last-modified,
+aws-cli style; :func:`by_checksum` builds a strategy that decides by **content**,
+comparing S3's stored native checksum against the checksum the local file would
+carry:
 
 - it reads the S3 object's checksum with **GetObjectAttributes** - the
   ``Checksum`` (algorithm + value) and, for a multipart object, the exact
   ``ObjectParts`` boundaries;
 - it recomputes that same algorithm over the local file and compares.
 
-Unlike :class:`~boto3_s3.etagfilter.ETagFilter` this needs **no write side** (the
+Unlike :func:`~boto3_s3.etagfilter.by_etag` this needs **no write side** (the
 checksum is one S3 already stores), works against objects any tool uploaded with
 a checksum, is exact for multipart objects (the part sizes come back from
 GetObjectAttributes, so there is no part-size to guess), and works for SSE
@@ -20,29 +20,29 @@ one ``GetObjectAttributes`` round-trip per object compared.
 
 This is a standalone, opt-in building block: it lives in its own module, is
 imported by submodule path (``from boto3_s3.checksumfilter import
-ChecksumFilter``), and is **not** part of the package's lazy root re-export. It
+by_checksum``), and is **not** part of the package's lazy root re-export. It
 imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
-Compose it with the default judgment through
-:func:`~boto3_s3.comparator.any_of`. ``any_of(DefaultCopyFilter(),
-ChecksumFilter(s3, src, dst))`` rescues the content changes the size + mtime
-heuristic misses (notably the download asymmetry: a same-size object updated only
-on the S3 source is not pulled down by default), at the price of a
-GetObjectAttributes + local hash on every pair the default would skip.
+It is a replacement ``compare=`` strategy, not composed with the default:
+``S3.sync(compare=by_checksum(s3, src, dst))`` decides every pair by content.
+That catches what the size + mtime default misses (notably the download
+asymmetry: a same-size object updated only on the S3 source is never pulled
+down by the default), at the price of a GetObjectAttributes + local hash on
+every both-sides pair (the size pre-check still skips differing sizes for free).
 
 Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` (hashlib) are
 always available. ``crc32c`` / ``crc64nvme`` use ``awscrt`` when it is installed
 (a C path ~1000x faster than Python and the same one S3 uses) and fall back to a
 bundled pure-Python slicing-by-8 implementation otherwise (~15-20 MiB/s). Because
-that fallback is slow, :attr:`pure_max_size` can cap it: above the cap, with no
+that fallback is slow, the ``pure_max_size`` arg can cap it: above the cap, with no
 ``awscrt``, a ``crc32c`` / ``crc64nvme`` object is treated as indeterminate
 (copied) rather than hashed.
 
 Caveats. An object with **no** native checksum, or one whose algorithm cannot be
 computed locally (``crc32c`` / ``crc64nvme`` without ``awscrt``, or past
-:attr:`pure_max_size`), is treated as differing (copied) - the filter never skips
+``pure_max_size``), is treated as differing (copied) - the strategy never skips
 on an indeterminate comparison. An upload / download comparison reads the local
 file on ``sync``'s main thread, so it raises ``OSError`` if that file is
 unreadable. SSE-C objects need the customer key to ``GetObjectAttributes`` and
@@ -88,20 +88,20 @@ _POLY_CRC64NVME = 0x9A6C9329AC4BC9B5  # CRC-64/NVME, reflected
 _LITTLE = sys.byteorder == "little"
 
 
-class ChecksumFilter:
+class _ChecksumComparison:
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
-    Copies a pair when the destination's stored S3 checksum does not match the
-    source's content. A source-only pair (no destination) always copies. An
-    upload / download reads the remote object's checksum via
-    ``GetObjectAttributes`` and recomputes it over the local file (whole-file for
-    a ``FULL_OBJECT`` checksum, or part-by-part at the returned ``ObjectParts``
-    sizes for a ``COMPOSITE`` one). An s3-to-s3 (COPY) pair compares the two
-    objects' stored checksums directly (both via ``GetObjectAttributes``; no
-    bytes read). A missing checksum, a mismatched algorithm, or an algorithm that
-    cannot be computed locally is treated as differing (copy), so the filter
-    never skips on an indeterminate comparison. Compose it with the default
-    judgment through :func:`~boto3_s3.comparator.any_of`.
+    The object :func:`by_checksum` returns. Copies a pair when the destination's
+    stored S3 checksum does not match the source's content. A source-only pair
+    (no destination) always copies. An upload / download reads the remote
+    object's checksum via ``GetObjectAttributes`` and recomputes it over the
+    local file (whole-file for a ``FULL_OBJECT`` checksum, or part-by-part at the
+    returned ``ObjectParts`` sizes for a ``COMPOSITE`` one). An s3-to-s3 (COPY)
+    pair compares the two objects' stored checksums directly (both via
+    ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched
+    algorithm, or an algorithm that cannot be computed locally is treated as
+    differing (copy), so it never skips on an indeterminate comparison. It is a
+    replacement ``compare=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
     ``dst`` against ``s3`` (``s3.resolve`` - the same values passed to
@@ -109,12 +109,12 @@ class ChecksumFilter:
     exactly as ``sync`` does. ``bucket`` is not on a ``FileInfo``, which is why
     the endpoint is injected explicitly here rather than read from the pair.
 
-    When :attr:`check_size` is true (the default) a pair whose two sides have
+    When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any
     ``GetObjectAttributes`` or hashing - a shortcut on upload / download and, for
     an s3-to-s3 pair, a guard against a CRC collision (a 32-bit CRC can collide).
 
-    :attr:`pure_max_size` bounds the pure-Python ``crc32c`` / ``crc64nvme``
+    ``pure_max_size`` bounds the pure-Python ``crc32c`` / ``crc64nvme``
     fallback (used only when ``awscrt`` is absent, ~15-20 MiB/s): a larger object
     of that algorithm is treated as indeterminate (copy) instead of being hashed.
     ``None`` (the default) never caps - the comparison is always exact, just slow
@@ -152,7 +152,7 @@ class ChecksumFilter:
     def __call__(self, pair: SyncPair) -> bool:
         src, dst = pair.src, pair.dst
         if src is None:
-            raise ValueError(f"copy filter consulted without a source entry: {pair.key!r}")
+            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
         if dst is None:
             return True
         if (
@@ -169,11 +169,13 @@ class ChecksumFilter:
             local, remote_key, storage = src, dst.key, self._dst_storage
         elif kind is OpKind.DOWNLOAD:
             local, remote_key, storage = dst, src.key, self._src_storage
-        else:  # MOVE / DELETE never reach a copy filter; guard defensively.
-            raise ValueError(f"ChecksumFilter cannot judge a {kind.value!r} pair: {pair.key!r}")
+        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
+            raise ValueError(
+                f"checksum comparison cannot judge a {kind.value!r} pair: {pair.key!r}"
+            )
         if not isinstance(local, LocalFileInfo):
             raise ValueError(
-                f"ChecksumFilter: no local side for pair {pair.key!r} (kind={kind.value})"
+                f"checksum comparison: no local side for pair {pair.key!r} (kind={kind.value})"
             )
         remote = self._remote_checksum(storage, remote_key)
         if remote is None:
@@ -209,6 +211,33 @@ class ChecksumFilter:
             request_payer=self._request_payer,
             need_parts=need_parts,
         )
+
+
+def by_checksum(
+    s3: S3,
+    src: Location,
+    dst: Location,
+    *,
+    check_size: bool = True,
+    pure_max_size: int | None = None,
+    request_payer: str | None = None,
+) -> Callable[[SyncPair], bool]:
+    """A native-checksum content ``compare=`` strategy for ``S3.sync`` (``True`` = copy).
+
+    A replacement strategy (not composed with the default): pass it as
+    ``S3.sync(compare=by_checksum(s3, src, dst))``. ``src`` / ``dst`` are the same
+    locations passed to ``sync`` and are resolved once here. See the module
+    docstring for the algorithm and indeterminate-copy semantics. Submodule-only
+    (``from boto3_s3.checksumfilter import by_checksum``).
+    """
+    return _ChecksumComparison(
+        s3,
+        src,
+        dst,
+        check_size=check_size,
+        pure_max_size=pure_max_size,
+        request_payer=request_payer,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,4 +510,4 @@ _PURE_CRC: dict[str, Callable[[bytes, int], int]] = {
 }
 
 
-__all__ = ["ChecksumFilter"]
+__all__ = ["by_checksum"]
