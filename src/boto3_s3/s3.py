@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Concatenate, Literal, ParamSpec
 from typing_extensions import Unpack
 
 from boto3_s3 import naming, requestparams
+from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     Comparator,
     PairFilter,
     ParallelCompare,
     SyncPair,
-    compare_size_time,
 )
 from boto3_s3.deleter import S3Deleter
 from boto3_s3.exceptions import (
@@ -1341,8 +1341,6 @@ class S3:
         delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
         compare: bool | PairFilter | ParallelCompare | None = None,
-        size_only: bool = False,
-        exact_timestamps: bool = False,
         follow_symlinks: bool = True,
         dryrun: bool = False,
         page_size: int = 1000,
@@ -1376,8 +1374,9 @@ class S3:
           compare key (:class:`~boto3_s3.comparator.Comparator`) and each
           :class:`~boto3_s3.comparator.SyncPair` is judged. ``compare`` picks
           exactly one copy strategy for source-present pairs: ``None``
-          (default) compares by size + last-modified, tuned by ``size_only`` /
-          ``exact_timestamps``; ``True`` copies every source (cp-like);
+          (default) is the aws-cli size + last-modified judgment, equivalently
+          ``AwsCliComparison()`` - tune it with ``AwsCliComparison(size_only=...)``
+          / ``(exact_timestamps=...)``; ``True`` copies every source (cp-like);
           ``False`` copies nothing (scan-only, or a delete-only sync with
           ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
           strategy - the content building blocks ``EtagComparison`` / ``ChecksumComparison``
@@ -1385,9 +1384,7 @@ class S3:
           Wrapping any strategy in :class:`~boto3_s3.comparator.ParallelCompare`
           runs its both-sides (update) decisions on a thread pool - identical
           results, only faster (the wrapped strategy must be thread-safe).
-          ``size_only`` / ``exact_timestamps`` only tune the default
-          (``compare=None``); they are ignored whenever ``compare`` is anything
-          else (``True`` / ``False`` / a custom strategy). ``no_overwrite`` is an
+          ``no_overwrite`` is an
           orthogonal write-guard applied *before* the strategy: an existing
           destination is never overwritten (source-only pairs still copy), and
           sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
@@ -1465,8 +1462,8 @@ class S3:
         # write ``sync(no_overwrite=True)``): strip it from the engine options
         # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
         no_overwrite = options.pop("no_overwrite", False)
-        # size_only / exact_timestamps only tune the default (compare=None);
-        # any other compare replaces the decision, so they are simply ignored.
+        # compare picks exactly one copy strategy; compare=None is the aws-cli
+        # size + last-modified default, equivalently AwsCliComparison().
         compare_workers: int | None = None
         decide: PairFilter
         if isinstance(compare, ParallelCompare):
@@ -1477,9 +1474,7 @@ class S3:
             )
             decide = compare.compare
         elif compare is None:
-            decide = functools.partial(
-                compare_size_time, size_only=size_only, exact_timestamps=exact_timestamps
-            )
+            decide = AwsCliComparison()
         elif compare is True:
             decide = _copy_all
         elif compare is False:

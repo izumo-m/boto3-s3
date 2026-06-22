@@ -6,8 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add `S3.aws_config()`: read `~/.aws/config` with typed getters.
-- Add `sync(compare=...)`: a single copy-decision axis (size+mtime default tuned
-  by the `size_only` / `exact_timestamps` options, or a content strategy).
+- Add `sync(compare=...)`: a single copy-decision axis - the size+mtime default
+  is `AwsCliComparison()` (tuned via `AwsCliComparison(size_only=...)` /
+  `(exact_timestamps=...)`), or a content strategy.
 - Add content `compare=` strategies `boto3_s3.etagcompare.EtagComparison` and
   `boto3_s3.checksumcompare.ChecksumComparison` (native checksum via GetObjectAttributes,
   awscrt-accelerated with a pure-Python fallback).

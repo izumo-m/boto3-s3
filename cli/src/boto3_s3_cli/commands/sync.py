@@ -9,6 +9,7 @@ import os
 # path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
+from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.naming import classify, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -126,9 +127,9 @@ class SyncCommand(Command):
                 src_location,  # type: ignore[arg-type]
                 dst_location,  # type: ignore[arg-type]
                 delete=args.delete,
-                compare=None,
-                size_only=args.size_only,
-                exact_timestamps=args.exact_timestamps,
+                compare=AwsCliComparison(
+                    size_only=args.size_only, exact_timestamps=args.exact_timestamps
+                ),
                 filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,

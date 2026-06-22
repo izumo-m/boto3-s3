@@ -63,8 +63,7 @@ at_both + not_at_dest; it can branch on whether a dst exists) and `delete`
 S3().sync(src, dst, *,
     delete: bool | FileFilter = False,             # False / True / predicate: lane + scope
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
-    compare: bool | PairFilter | None = None,      # None=size+time / True=all / False=none / callable=custom
-    size_only=False, exact_timestamps=False,       # tune compare=None (the default strategy)
+    compare: bool | PairFilter | None = None,      # None=AwsCliComparison() / True=all / False=none / callable=custom
     follow_symlinks=True, dryrun=False, page_size=1000,
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
@@ -83,14 +82,16 @@ Callable[[SyncPair], bool]` that needs both sides (True = copy).
   route. `dst is None` = new, `src is None` = deletion candidate, both present =
   update decision.
 - `compare` is the copy decision, a single strategy: `None` (default) is the aws
-  size + last-modified judgment (it reads the direction from `pair.kind`, so it
-  works across routes), tuned by the `size_only` / `exact_timestamps` options;
-  `True` copies every source, `False` copies nothing; any `PairFilter` is a
-  custom strategy - the content building blocks `EtagComparison` / `ChecksumComparison`
-  (sections 8-9) are drop-in replacements. `size_only` / `exact_timestamps` only
-  tune `compare=None`; they are ignored whenever `compare` is anything else
-  (`True` / `False` / a custom strategy), since that compare replaces the
-  decision wholesale. Note `None` (default) != `False` (copy nothing).
+  size + last-modified judgment, equivalently `AwsCliComparison()` (it reads the
+  direction from `pair.kind`, so it works across routes); `True` copies every
+  source, `False` copies nothing; any `PairFilter` is a custom strategy - the
+  building blocks `AwsCliComparison` (section 4) / `EtagComparison` /
+  `ChecksumComparison` (sections 8-9) are drop-in replacements. The aws-cli
+  `--size-only` / `--exact-timestamps` tuners are **constructor arguments of
+  `AwsCliComparison`** (`AwsCliComparison(size_only=True)`), not `sync` options:
+  a content compare replaces the judgment wholesale, so there is nothing for them
+  to tune there, and the combination is simply unrepresentable. Note `None`
+  (default) != `False` (copy nothing).
 - `no_overwrite` is an orthogonal write-guard applied before `compare`: if a
   destination already exists it is never overwritten (a source-only pair still
   copies). It composes with any `compare`, and sync keeps it decision-only - no
@@ -114,9 +115,11 @@ s3.sync(src, dst,
 
 ## 4. The default decision (ported from aws-cli, pinned by measurement)
 
-`compare=None` is the internal `compare_size_time(pair, size_only,
-exact_timestamps)` (direction from `pair.kind`). `no_overwrite` is not part of
-it - it is the orthogonal write-guard the sync loop applies first (section 3):
+`compare=None` is `AwsCliComparison()`, the public form of the internal
+`compare_size_time(pair, size_only, exact_timestamps)` (direction from
+`pair.kind`); tune it with `AwsCliComparison(size_only=...)` /
+`(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
+write-guard the sync loop applies first (section 3):
 
 | condition | decision |
 |---|---|

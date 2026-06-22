@@ -113,10 +113,11 @@ It supports the flags you know from the command:
 - **`delete=True`** — remove destination entries the source no longer has. Items
   hidden by a filter stay out of deletion too, exactly like `aws s3 sync`.
 - **`compare=`** — how the source and destination are compared: `None` (default)
-  uses size + mtime, tuned by the `size_only=True` / `exact_timestamps=True`
-  options; `True` copies everything, `False` copies nothing; or pass a content
-  strategy like `EtagComparison(s3)` / `ChecksumComparison(s3, src, dst)` (wrap
-  either in `ParallelCompare(...)` to decide on a thread pool).
+  uses size + mtime (equivalently `AwsCliComparison()`, tuned via
+  `AwsCliComparison(size_only=True)` / `(exact_timestamps=True)`); `True` copies
+  everything, `False` copies nothing; or pass a content strategy like
+  `EtagComparison(s3)` / `ChecksumComparison(s3, src, dst)` (wrap either in
+  `ParallelCompare(...)` to decide on a thread pool).
 - **`filter=`** — include/exclude matching; **`dryrun=True`** to
   preview every transfer and deletion first.
 
@@ -149,7 +150,7 @@ below — each mirrors an `aws s3` subcommand.
 | `ls(target="s3://", *, recursive, page_size, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. |
 | `cp(src, dst, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dst` may be a path/URI or a binary stream for streaming. |
 | `mv(src, dst, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
-| `sync(src, dst, *, delete, filter, compare, size_only, …, **options)` | `sync` | Recursively synchronize `src` into `dst`. |
+| `sync(src, dst, *, delete, filter, compare, …, **options)` | `sync` | Recursively synchronize `src` into `dst`. |
 | `rm(target, *, recursive, filter, dryrun, request_payer, …)` | `rm` | Delete objects (a single key, a recursive prefix, or the folder-marker sweep). |
 | `mb(target, *, tags)` | `mb` | Create the bucket of `target`. |
 | `rb(target)` | `rb` | Delete the (empty) bucket of `target`. |

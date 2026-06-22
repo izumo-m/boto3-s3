@@ -22,7 +22,8 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import GlobFilter
-from boto3_s3.comparator import PairFilter, ParallelCompare, SyncPair
+from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3.comparator import ParallelCompare, SyncPair
 from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -263,37 +264,6 @@ class TestSyncUpload:
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
-    @pytest.mark.parametrize("strategy", [True, False, _always_copies])
-    @pytest.mark.parametrize(
-        ("size_only", "exact_timestamps"), [(True, False), (False, True), (True, True)]
-    )
-    def test_non_default_compare_ignores_the_tuners(
-        self,
-        tmp_path: Path,
-        strategy: bool | PairFilter,
-        size_only: bool,
-        exact_timestamps: bool,
-    ) -> None:
-        # A non-None compare replaces the decision wholesale, so size_only /
-        # exact_timestamps are silently ignored - no raise, and the strategy
-        # alone drives the outcome. The probe is a brand-new file, which the
-        # default compare=None would always copy (MissingFileSync); compare=False
-        # still copies nothing, proving the strategy overrides the tuners.
-        src = tmp_path / "src"
-        _write(src, "new.txt", b"xx", mtime=_OLDER)
-        copies = strategy is not False
-        client, calls = make_recording_client([_listing(), {}] if copies else [_listing()])
-        S3().sync(
-            str(src),
-            S3Storage("s3://bucket/p", client=client),
-            compare=strategy,
-            size_only=size_only,
-            exact_timestamps=exact_timestamps,
-            transfer_config=_SERIAL,
-        )
-        expected = ["ListObjectsV2", "PutObject"] if copies else ["ListObjectsV2"]
-        assert _ops(calls) == expected
-
     def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")
         client, calls = make_recording_client([])
@@ -356,7 +326,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            exact_timestamps=True,
+            compare=AwsCliComparison(exact_timestamps=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
@@ -368,7 +338,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            size_only=True,
+            compare=AwsCliComparison(size_only=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
