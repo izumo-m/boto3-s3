@@ -1194,6 +1194,14 @@ class S3:
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
+        if dst_stream is not None and options.get("no_overwrite"):
+            # A streaming download has no existing destination to guard, so
+            # no_overwrite is meaningless here (aws-cli rejects it too); fail
+            # loud rather than silently ignore. Uploads keep IfNoneMatch.
+            raise ValidationError(
+                "no_overwrite is not supported for streaming downloads",
+                operation="cp",
+            )
         if src_stream is not None:
             storage = self._resolve_s3_target(dst, operation="cp")  # type: ignore[arg-type]
             kind = OpKind.UPLOAD

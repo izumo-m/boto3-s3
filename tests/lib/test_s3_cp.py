@@ -419,6 +419,19 @@ class TestStreamRoutes:
         with pytest.raises(ValidationError):
             S3().cp(io.BytesIO(b"x"), io.BytesIO())
 
+    def test_stream_download_with_no_overwrite_is_rejected(self) -> None:
+        # A streaming download has no existing destination to guard, so
+        # no_overwrite is meaningless and rejected (aws-cli rejects it too).
+        # An upload stream keeps no_overwrite (IfNoneMatch), so dst_stream gates it.
+        client, _ = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                S3Storage("s3://bucket/k", client=client),
+                io.BytesIO(),
+                no_overwrite=True,
+            )
+        assert "no_overwrite is not supported for streaming downloads" in str(excinfo.value)
+
 
 class TestNoOverwriteDownload:
     def test_existing_destination_is_a_silent_skip(self, tmp_path: Path) -> None:

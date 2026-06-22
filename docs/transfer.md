@@ -141,6 +141,14 @@ on one side of src / dst. This is the building block for `aws s3 cp`'s `-`
   `ValidationError` with aws-cli's wording (`Streaming currently is only
   compatible with non-recursive cp commands`), and a stream on both sides is
   also rejected. The glacier / parent-ref gates are not run.
+- **Stream option policy (follows aws-cli per option)**: a meaningless option is
+  rejected, an additive one that degrades to a no-op is ignored. `recursive`
+  (above) and `no_overwrite` on a streaming **download** raise (`no_overwrite is
+  not supported for streaming downloads`) - a stream has no existing destination
+  to guard, the same combinations aws-cli rejects. An upload stream keeps
+  `no_overwrite` (IfNoneMatch). `filter` is silently ignored on a stream (a single
+  object has nothing to filter; aws rc 0). `expected_size` applies to an upload
+  stream and is ignored elsewhere.
 - **The key is verbatim**: the key of the S3-side `S3Storage` is used as-is.
   aws's naming where "in the form where the dest takes the source name
   (`s3://bucket` / `s3://bucket/pre/`) the literal `-` becomes the basename"
