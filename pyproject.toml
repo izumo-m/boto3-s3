@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python library providing `aws s3` operations with a boto3-like API."
 readme = "README.md"
 requires-python = ">=3.10"

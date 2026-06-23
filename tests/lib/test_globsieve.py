@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import pytest
 
-from boto3_s3 import globsieve
+from boto3_s3 import FileInfo, globsieve
 from boto3_s3.globsieve import (
     AlwaysExclude,
     AlwaysInclude,
+    CompositeSet,
     ExcludeOnly,
+    GlobFilter,
     GlobPattern,
     IncludeOnly,
     LiteralSet,
@@ -100,6 +102,32 @@ class TestUnionRegex:
         assert m.matches("dir/foo123.tmp") is True
         assert m.matches("save.bak") is True
         assert m.matches("save.txt") is False
+
+
+class TestCompositeSet:
+    # CompositeSet takes pre-stripped buckets: literals verbatim, suffixes
+    # without the leading ``*``, prefixes without the trailing ``*``, and
+    # general patterns as raw fnmatch.
+    def test_ors_every_present_shape(self) -> None:
+        s = CompositeSet(
+            literals=[".lock"],
+            suffixes=[".elc"],  # from ``*.elc``
+            prefixes=["elpa/"],  # from ``elpa/*``
+            general=["**/foo*.bak"],
+        )
+        assert s.matches(".lock") is True  # literal
+        assert s.matches("a/b.elc") is True  # suffix (greedy across /)
+        assert s.matches("elpa/x/y.el") is True  # prefix
+        assert s.matches("deep/dir/foo1.bak") is True  # general
+        assert s.matches("init.el") is False  # none
+
+    def test_works_without_a_general_bucket(self) -> None:
+        # The common exclude-list shape: only literal/suffix/prefix, no regex.
+        s = CompositeSet(literals=[".x"], suffixes=[".elc"], prefixes=["lib/"], general=[])
+        assert s.matches(".x") is True
+        assert s.matches("a.elc") is True
+        assert s.matches("lib/native.so") is True
+        assert s.matches("keep.txt") is False
 
 
 # ----- compile: macro-shape detection --------------------------------------
@@ -197,12 +225,31 @@ class TestCompileSetSpecialization:
         assert isinstance(m.set_matcher, PrefixSet)
         assert m.set_matcher.prefixes == ("logs/", "tmp/")
 
-    def test_mixed_shapes_fall_back_to_union_regex(self) -> None:
+    def test_mixed_shapes_partition_into_composite_set(self) -> None:
+        # A suffix (``*.txt``) and a prefix (``logs/*``) together have no
+        # single uniform shape, so they fold into a CompositeSet rather than
+        # collapsing into one regex.
         m = globsieve.compile(
             [
                 GlobPattern.exclude("*"),
                 GlobPattern.include("*.txt"),
                 GlobPattern.include("logs/*"),
+            ]
+        )
+        assert isinstance(m, IncludeOnly)
+        assert isinstance(m.set_matcher, CompositeSet)
+        assert m.included("a.txt") is True
+        assert m.included("logs/x") is True
+        assert m.included("a.log") is False
+
+    def test_only_general_shapes_stay_union_regex(self) -> None:
+        # Patterns that are neither literal nor pure prefix/suffix remain a
+        # single UnionRegex (one populated bucket, no composite).
+        m = globsieve.compile(
+            [
+                GlobPattern.exclude("*"),
+                GlobPattern.include("a*b.txt"),
+                GlobPattern.include("c?d/*.log"),
             ]
         )
         assert isinstance(m, IncludeOnly)
@@ -255,6 +302,41 @@ class TestSemanticEquivalence:
             (
                 [GlobPattern.exclude("logs/*"), GlobPattern.exclude("tmp/*")],
                 ["logs/x", "tmp/y", "data/z"],
+            ),
+            # Mixed-shape all-exclude list (the .emacs.d backup case): a
+            # suffix + many ``dir/*`` prefixes + literals -> CompositeSet,
+            # which must agree with the naive last-match-wins walk.
+            (
+                [
+                    GlobPattern.exclude("*.elc"),
+                    GlobPattern.exclude("elpa/*"),
+                    GlobPattern.exclude("eln-cache/*"),
+                    GlobPattern.exclude(".cache/*"),
+                    GlobPattern.exclude(".persistent-scratch"),
+                    GlobPattern.exclude(".lsp-session-v1"),
+                ],
+                [
+                    "init.el",
+                    "a/b.elc",
+                    "elpa/magit/magit.el",
+                    "eln-cache/x.eln",
+                    ".cache/y",
+                    ".persistent-scratch",
+                    ".lsp-session-v1",
+                    "elpa/",
+                    "elpax",
+                ],
+            ),
+            # Mixed shapes that also exercise the general (regex) bucket.
+            (
+                [
+                    GlobPattern.exclude("*"),
+                    GlobPattern.include("*.txt"),
+                    GlobPattern.include("logs/*"),
+                    GlobPattern.include("keep.me"),
+                    GlobPattern.include("a*b.csv"),
+                ],
+                ["a.txt", "logs/x", "keep.me", "aXXb.csv", "ab.csv", "other.bin"],
             ),
         ],
     )
@@ -339,3 +421,57 @@ class TestTranslatePatternForRoot:
     def test_trailing_slash_in_rootdir_does_not_break_strip(self) -> None:
         # The translator must tolerate trailing separators on rootdir.
         assert globsieve.translate_pattern_for_root("/abs/data/sub/*", "/abs/data/") == "sub/*"
+
+
+class TestGlobFilter:
+    """The fluent ``GlobFilter`` front end: a ``FileFilter`` matching ``compare_key``."""
+
+    @staticmethod
+    def _info(compare_key: str) -> FileInfo:
+        return FileInfo(key=compare_key, compare_key=compare_key)
+
+    def test_chained_rules_are_last_match_wins(self) -> None:
+        keep = GlobFilter().exclude("*").include("*.txt")
+        assert keep(self._info("a.txt")) is True
+        assert keep(self._info("a.log")) is False
+
+    def test_reverse_order_excludes_everything(self) -> None:
+        keep = GlobFilter().include("*.txt").exclude("*")
+        assert keep(self._info("a.txt")) is False
+
+    def test_exclude_and_include_take_several_patterns(self) -> None:
+        keep = GlobFilter().exclude("*").include("*.tar.gz", "*.zip")
+        assert keep(self._info("x.tar.gz")) is True
+        assert keep(self._info("x.zip")) is True
+        assert keep(self._info("x.bin")) is False
+
+    def test_empty_filter_keeps_everything(self) -> None:
+        assert GlobFilter()(self._info("anything")) is True
+
+    def test_agrees_with_compile(self) -> None:
+        glob = GlobFilter().exclude("*").include("*.txt")
+        ref = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
+        for key in ("a.txt", "a.log", "sub/b.txt", ""):
+            assert glob(self._info(key)) == ref.included(key)
+
+    def test_builder_methods_return_self(self) -> None:
+        f = GlobFilter()
+        assert f.exclude("*") is f
+        assert f.include("*.txt") is f
+        assert f.compile() is f
+
+    def test_compile_is_eager_but_not_frozen(self) -> None:
+        # compile() forces compilation; a later rule re-dirties and the next
+        # call recompiles, changing the verdict (no freeze).
+        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        assert keep(self._info("a.log")) is False
+        keep.include("*.log")
+        assert keep(self._info("a.log")) is True
+
+    def test_uncompiled_filter_compiles_on_first_use(self) -> None:
+        # Passing a filter without calling compile() works: __call__ compiles lazily.
+        assert GlobFilter().exclude("*.log")(self._info("a.log")) is False
+
+    def test_missing_compare_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="compare_key"):
+            GlobFilter().exclude("*")(FileInfo(key="a.txt"))

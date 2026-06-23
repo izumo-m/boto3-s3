@@ -98,11 +98,14 @@ section 1).
 - **Option after the second path**: cp/mv/sync take two paths, but the source
   set `current_args` to None at the second path and dropped subsequent options
   into `unparsed_items`, stopping completion -> fixed to **keep the command's
-  options alive**. With this, option-name completion, value completion, and
-  dedup (excluding already-present options) all work correctly even after the
-  second path. An empty fragment offers all options, and `--frag` narrows them
-  down (the source fuzzy-matched against the command name and offered only a
-  subset).
+  options alive after a path-like second positional**. So after an `s3://` URI or
+  a `./` / `/` / `file://` path (the realistic forms), option-name completion,
+  value completion, and dedup (excluding already-present options) all work: an
+  empty fragment offers all options and `--frag` narrows them. A bare second
+  positional with no path character (e.g. a plain local name `outdir`) keeps
+  aws-cli's behavior - no option-name completion (the completer's path-likeness
+  heuristic is a faithful port; prefix `./` to opt in). The source fuzzy-matched
+  against the command name and offered only a subset.
 
 These are **deliberate deviations** from aws's behavior (usability first), and
 they are guaranteed by

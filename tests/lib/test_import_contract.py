@@ -65,6 +65,43 @@ class TestLibraryImportContract:
             """
         )
 
+    def test_awsconfig_alone_stays_pure(self) -> None:
+        # The AWS-config-file reader is an opt-in building block; its botocore
+        # touch (and the default boto3 session) are deferred into the read path,
+        # so importing the module must not pull the SDK.
+        _run_fresh(
+            """
+            import boto3_s3.awsconfig
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_etagcompare_alone_stays_pure(self) -> None:
+        # The ETag content-comparison filter is an opt-in building block; its one
+        # SDK touch (s3transfer's ChunksizeAdjuster) is deferred into the compute
+        # path, so importing the module must not pull the SDK.
+        _run_fresh(
+            """
+            import boto3_s3.etagcompare
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_checksumcompare_alone_stays_pure(self) -> None:
+        # The native-checksum filter is an opt-in building block; its SDK touches
+        # (the boto3 client via s3.resolve, botocore's ClientError, and the
+        # optional awscrt fast checksums) are deferred into the construct / compute
+        # paths, so importing the module must not pull the SDK.
+        _run_fresh(
+            """
+            import boto3_s3.checksumcompare
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
     def test_transfer_shape_helpers_stay_pure(self) -> None:
         # The cp path/param rules are pure string logic: the CLI imports them
         # on its run path and the library's tests exercise them SDK-free.

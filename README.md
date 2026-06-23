@@ -112,9 +112,12 @@ It supports the flags you know from the command:
 
 - **`delete=True`** — remove destination entries the source no longer has. Items
   hidden by a filter stay out of deletion too, exactly like `aws s3 sync`.
-- **`copy_filter=`** — how the source and destination are compared:
-  `DefaultCopyFilter(size_only=True)` / `(exact_timestamps=True)` tune the
-  default; `True` copies everything, `False` copies nothing.
+- **`compare=`** — how the source and destination are compared: `None` (default)
+  uses size + mtime (equivalently `AwsCliComparison()`, tuned via
+  `AwsCliComparison(size_only=True)` / `(exact_timestamps=True)`); `True` copies
+  everything, `False` copies nothing; or pass a content strategy like
+  `EtagComparison(s3)` / `ChecksumComparison(s3, src, dst)` (wrap either in
+  `ParallelCompare(...)` to decide on a thread pool).
 - **`filter=`** — include/exclude matching; **`dryrun=True`** to
   preview every transfer and deletion first.
 
@@ -145,9 +148,9 @@ below — each mirrors an `aws s3` subcommand.
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
 | `ls(target="s3://", *, recursive, page_size, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. |
-| `cp(src, dst, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dst` may be a path/URI or a binary stream for streaming. |
+| `cp(src, dst, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dst` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dst, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
-| `sync(src, dst, *, delete, filter, copy_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dst`. |
+| `sync(src, dst, *, delete, filter, compare, …, **options)` | `sync` | Recursively synchronize `src` into `dst`. |
 | `rm(target, *, recursive, filter, dryrun, request_payer, …)` | `rm` | Delete objects (a single key, a recursive prefix, or the folder-marker sweep). |
 | `mb(target, *, tags)` | `mb` | Create the bucket of `target`. |
 | `rb(target)` | `rb` | Delete the (empty) bucket of `target`. |
@@ -157,24 +160,38 @@ below — each mirrors an `aws s3` subcommand.
 ## Choosing the client (profile, region, endpoint, cross-account)
 
 A path argument is a `str`, an `os.PathLike`, or an `S3Storage`. A bare
-`"s3://..."` string uses a default `boto3.client("s3")`.
+`"s3://..."` string uses the client the `S3` instance builds from its own
+defaults — `boto3.client("s3")` for a zero-config `S3()`.
 
-To pick a specific **profile, region, or endpoint** (e.g. MinIO), or a
-**second account** for an S3-to-S3 copy, build the client yourself and wrap the
-URL in an `S3Storage`:
+For a specific **profile, region, or endpoint**, hand the `S3` object a
+`boto3.Session` (and/or an `endpoint_url` / `config`); every bare `"s3://..."`
+string then inherits it:
 
 ```python
 import boto3
 from boto3_s3 import S3, S3Storage
 
-session = boto3.Session(profile_name="prod")
-client = session.client("s3", region_name="eu-west-1")
-
-s3 = S3()
-s3.cp("./artifact.tar.gz", S3Storage("s3://prod-bucket/artifacts/", client=client))
+session = boto3.Session(profile_name="prod", region_name="eu-west-1")
+s3 = S3(session=session)
+s3.cp("./artifact.tar.gz", "s3://prod-bucket/artifacts/")
 ```
 
-An S3-compatible endpoint such as MinIO is just a differently-built client:
+When a single operation needs **more than one client** — a cross-account
+S3-to-S3 copy is the clearest case — the instance default can't express it.
+Build each client yourself and wrap the URL in an `S3Storage`, which is used
+verbatim with its own client:
+
+```python
+s3.cp(
+    S3Storage("s3://src-bucket/data/", client=src_client),
+    S3Storage("s3://dst-bucket/data/", client=dst_client),
+    recursive=True,
+)
+```
+
+An S3-compatible endpoint such as MinIO is just a differently-built client —
+set it on the `S3` for every location, or pass a single
+`S3Storage(url, client=minio)` when only one side needs it:
 
 ```python
 minio = boto3.client(
@@ -187,18 +204,40 @@ for info in S3().ls(S3Storage("s3://bucket/", client=minio)):
     print(info.key)
 ```
 
-A cross-account S3-to-S3 copy uses one client per side:
-
-```python
-s3.cp(
-    S3Storage("s3://src-bucket/data/", client=src_client),
-    S3Storage("s3://dst-bucket/data/", client=dst_client),
-    recursive=True,
-)
-```
-
 The bucket part of an S3 URI may also be an access-point ARN (plain or
 Outposts), passed through as the `Bucket`, like `aws s3`.
+
+## Running operations across threads
+
+An `S3` object carries only immutable defaults plus one benign, idempotent cache
+(the `aws_config()` reader — concurrent first reads just recompute the same
+value), so the object itself is safe to share across threads. The catch is
+**building** a boto3 client: boto3 documents that a session is not thread-safe,
+and creating clients concurrently from one session can resolve credentials more
+than once and can fail while copying the session's shared event hooks. A bare
+`"s3://..."` argument builds a fresh client on every call, so firing those
+operations from many threads at once is exactly that unsupported pattern.
+
+An already-built client is safe to *use* concurrently — which is why building one
+up front and sharing it works. Pass a prebuilt client through
+`S3Storage(url, client=client)`; the threaded calls then create nothing:
+
+```python
+import concurrent.futures
+import boto3
+from boto3_s3 import S3, S3Storage
+
+s3 = S3()
+client = boto3.Session(profile_name="prod", region_name="eu-west-1").client("s3")
+
+with concurrent.futures.ThreadPoolExecutor() as pool:
+    for path in paths:  # paths: an iterable of pathlib.Path
+        dst = S3Storage(f"s3://prod-bucket/{path.name}", client=client)
+        pool.submit(s3.cp, str(path), dst)
+```
+
+Alternatively, subclass `S3` and override `client()` to return a single
+memoized client — then bare `"s3://..."` strings are concurrency-safe too.
 
 ## Options
 
@@ -247,11 +286,11 @@ s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
 ```
 
 `filter=` also accepts a plain `Callable[[FileInfo], bool]` for arbitrary
-per-item gating. `sync` adds `copy_filter=` and `delete=` (`True` to remove all
-extras, or a filter to remove only matching ones). The two filters answer
-different questions: `filter=` decides **which items take part at all**, while
-`copy_filter=` then decides, for each matched source/destination pair,
-**whether it actually needs copying**.
+per-item gating. `sync` adds `compare=` and `delete=` (`True` to remove all
+extras, or a filter to remove only matching ones). They answer different
+questions: `filter=` decides **which items take part at all**, while `compare=`
+then decides, for each matched source/destination pair, **whether it actually
+needs copying** (by size + mtime, or by content with `EtagComparison` / `ChecksumComparison`).
 
 ## Progress, results, cancellation, dry run
 

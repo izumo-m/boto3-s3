@@ -49,7 +49,7 @@ solidified design is added here.
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
 | `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
-| `filters.py` | The order-preserving action for `--exclude` / `--include` + globsieve matcher construction (`compile_for_root`. rm uses a key-derived root, cp / mv use a naming-derived root, sync's single matcher is compiled against the source root and applied to both sides) |
+| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_for_root` / `build_filter`: compile a globsieve matcher and wrap it to match `FileInfo.compare_key`. rm uses a key-derived root, cp / mv use a naming-derived root, sync's single filter is compiled against the source root and applied to both sides) |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. A lock-guarded aggregator called from worker threads. The verb is `OpKind.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form) |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
@@ -586,13 +586,14 @@ recursive and has no streaming form). `add_transfer_arguments(include_recursive=
    `_validate_not_s3_express_bucket_for_sync`. The `--x-s3` suffix decision =
    `transferargs.is_s3express_path`. A **local** dir of the same name passes)
 8. case-conflict resolution (treated as `recursive=True` - sync has no flag)
-9. options conversion (`no_overwrite` is passed too, but the library side pops it
-   and folds it into the decision - sync does not attach IfNoneMatch. sync.md section 3)
+9. options conversion (`no_overwrite` is passed through in options; `S3.sync`
+   reads it as the write-guard and strips it before the engine - sync does not
+   attach IfNoneMatch. sync.md section 3)
 
 **The filter is compiled once**: the `--exclude` / `--include` sequence is turned
-into a single matcher against the source root (`plan.filter_root`) and passed to
-`S3.sync(filter=)`, which applies it symmetrically to both sides. Because the
-same matcher prunes the destination too, "what the filter excludes is also
+into a single `FileFilter` against the source root (`plan.filter_root`) and passed
+to `S3.sync(filter=)`, which applies it symmetrically to both sides. Because the
+same filter prunes the destination too, "what the filter excludes is also
 excluded from `--delete`" falls out (sync.md section 1). A relative pattern is
 root-independent so one compilation suffices; an absolute pattern is relativized
 against the source only (sync.md section 7).

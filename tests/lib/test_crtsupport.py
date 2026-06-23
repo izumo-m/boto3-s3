@@ -168,6 +168,26 @@ class TestShouldUseCrt:
             crtsupport.should_use_crt("crt")
         assert "CRT installed: True, with version: 0.19.17" in str(exc_info.value)
 
+    def test_auto_without_crt_s3transfer_is_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # awscrt present + host optimized, but the floor s3transfer (< 0.8.0)
+        # lacks the CRT surface -> degrade to classic, do not crash.
+        set_optimized(monkeypatch, True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: False)
+        assert crtsupport.should_use_crt("auto") is False
+
+    def test_explicit_crt_with_old_s3transfer_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        set_optimized(monkeypatch, True)  # awscrt present
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: False)
+        with pytest.raises(MissingDependencyException) as exc_info:
+            crtsupport.should_use_crt("crt")
+        assert "s3transfer" in str(exc_info.value)
+
+    def test_has_crt_s3transfer_false_when_lock_symbol_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delattr(s3transfer_crt, "acquire_crt_s3_process_lock", raising=False)
+        assert crtsupport.has_crt_s3transfer() is False
+
 
 class TestCreateCrtTransferManager:
     def test_creates_manager_with_derived_wiring(self, stubs: CrtStubs) -> None:

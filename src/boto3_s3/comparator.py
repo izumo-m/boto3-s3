@@ -13,17 +13,18 @@ copy or delete. This module is layer two's material:
   buries its strategy calls in the merge loop; splitting them keeps each
   side replaceable). It only stamps the run's direction (``kind``) onto each
   pair, as context for the filters.
-- A :data:`PairFilter` is the copy judgment: a predicate over a pair where
-  ``True`` copies the source, mirroring how every ``filter`` in this library
-  keeps items in an operation. (``S3.sync``'s delete lane instead narrows
-  with a ``FileFilter`` over the destination-only orphan.)
-- :class:`DefaultCopyFilter` is aws-cli's stock judgment (size +
-  last-modified, and the ``--size-only`` / ``--exact-timestamps`` /
-  ``--no-overwrite`` variants) - a callable :data:`PairFilter` that reads the
-  direction from ``pair.kind``, so one instance composes across routes. It is
-  ``S3.sync``'s default and a custom filter can defer to it.
-- :func:`all_of` / :func:`any_of` compose same-signature predicates, for
-  "the default, plus one more rule" filters without hand-rolled lambdas.
+- A :data:`PairFilter` is a copy judgment: a predicate over a pair where
+  ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
+  the size+time default, a content strategy (``EtagComparison`` / ``ChecksumComparison``),
+  or a caller's own. (``S3.sync``'s delete lane instead narrows with a
+  ``FileFilter`` over the destination-only orphan.)
+- :func:`compare_size_time` is that size+time default (aws-cli's stock
+  judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
+  re-exported building block (kept out of ``__all__``); ``S3.sync`` selects it
+  for ``compare=None`` and reads the direction from ``pair.kind``.
+- :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
+  the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
+  (a copy strategy is *chosen*, not composed).
 
 Everything here is pure logic over :class:`~boto3_s3.types.FileInfo`; no
 AWS SDK module is imported.
@@ -65,6 +66,32 @@ class SyncPair:
 
 PairFilter = Callable[[SyncPair], bool]
 """A pair predicate: ``True`` performs the action the pair stands for."""
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelCompare:
+    """Run a content ``compare=`` strategy on a thread pool (``S3.sync`` only).
+
+    A value container, **not** a callable: ``S3.sync`` recognizes it and runs
+    the wrapped ``compare`` concurrently on up to ``workers`` threads, deciding
+    the both-sides (update) pairs - the ones where a content strategy does its
+    I/O - in parallel. Passing it is observationally identical to passing
+    ``compare`` bare: the same pairs are copied and the exit is the same, only
+    faster. The wrapped ``compare`` must be thread-safe;
+    :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
+    :class:`~boto3_s3.etagcompare.EtagComparison` are. New (destination-missing)
+    pairs and the ``--case-conflict`` check stay on the calling thread in
+    compare-key order, so they remain deterministic.
+
+    ``workers`` defaults to the sync's ``transfer_config.max_concurrency``.
+    """
+
+    compare: PairFilter
+    workers: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.workers is not None and self.workers < 1:
+            raise ValueError(f"ParallelCompare workers must be >= 1, got {self.workers}")
 
 
 @dataclass(frozen=True)
@@ -118,22 +145,20 @@ class Comparator:
             dst = next(dst_iter, None)
 
 
-@dataclass(frozen=True)
-class DefaultCopyFilter:
-    """aws-cli's stock copy judgment for source-present pairs (a :data:`PairFilter`).
+def compare_size_time(
+    pair: SyncPair, *, size_only: bool = False, exact_timestamps: bool = False
+) -> bool:
+    """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
 
+    Not a public building block: ``S3.sync`` selects it for ``compare=None``.
     The transfer direction comes from ``pair.kind`` (the time rule is
-    direction-asymmetric), so one instance composes across routes -
-    ``copy_filter=DefaultCopyFilter()`` is ``S3.sync``'s default. A
-    source-only pair always copies (aws-cli's ``MissingFileSync``). For a pair
-    present on both sides:
+    direction-asymmetric). A source-only pair always copies (aws-cli's
+    ``MissingFileSync``). For a pair present on both sides:
 
-    - ``no_overwrite``: never copy (aws-cli's ``NoOverwriteSync``; takes
-      precedence over the other variants),
     - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
-      Ignored when ``exact_timestamps`` is also set: the flags replace the
-      same aws-cli strategy slot and its override order makes
-      ``--exact-timestamps`` win,
+      Ignored when ``exact_timestamps`` is also set: the flags fill the same
+      aws-cli strategy slot and its override order makes ``exact_timestamps``
+      win,
     - otherwise copy iff the sizes differ *or* last-modified does not rule
       the copy out (aws-cli's ``SizeAndLastModifiedSync``): an upload/copy is
       redundant when the destination is at least as new as the source, a
@@ -141,28 +166,22 @@ class DefaultCopyFilter:
       tightens the download rule to require exactly equal times (aws-cli's
       ``ExactTimestampsSync``; uploads/copies are unaffected).
 
-    Comparisons run at full ``timedelta`` precision (aws-cli's
-    ``total_seconds``). A missing ``size`` or ``mtime`` on either side counts
-    as a difference - aws-cli never faces one (its listings always carry
-    both), so leaning toward copying is the permissive reading.
+    The ``no_overwrite`` write-guard is orthogonal and lives in the ``S3.sync``
+    loop, not here, so it composes with any ``compare=`` strategy. Comparisons
+    run at full ``timedelta`` precision (aws-cli's ``total_seconds``). A missing
+    ``size`` or ``mtime`` on either side counts as a difference - aws-cli never
+    faces one (its listings always carry both), so leaning toward copying is the
+    permissive reading.
     """
-
-    size_only: bool = False
-    exact_timestamps: bool = False
-    no_overwrite: bool = False
-
-    def __call__(self, pair: SyncPair) -> bool:
-        src, dst = pair.src, pair.dst
-        if src is None:
-            raise ValueError(f"copy filter consulted without a source entry: {pair.key!r}")
-        if dst is None:
-            return True
-        if self.no_overwrite:
-            return False
-        same_size = src.size is not None and src.size == dst.size
-        if self.size_only and not self.exact_timestamps:
-            return not same_size
-        return not same_size or not _times_match(src, dst, pair.kind, self.exact_timestamps)
+    src, dst = pair.src, pair.dst
+    if src is None:
+        raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
+    if dst is None:
+        return True
+    same_size = src.size is not None and src.size == dst.size
+    if size_only and not exact_timestamps:
+        return not same_size
+    return not same_size or not _times_match(src, dst, pair.kind, exact_timestamps)
 
 
 def _times_match(src: FileInfo, dst: FileInfo, kind: OpKind, exact: bool) -> bool:
@@ -204,8 +223,8 @@ def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 
 __all__ = [
     "Comparator",
-    "DefaultCopyFilter",
     "PairFilter",
+    "ParallelCompare",
     "SyncPair",
     "all_of",
     "any_of",

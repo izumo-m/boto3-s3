@@ -49,6 +49,7 @@ __all__ = [
     "PROCESS_LOCK_NAME",
     "acquire_process_lock",
     "create_crt_transfer_manager",
+    "has_crt_s3transfer",
     "has_minimum_crt_version",
     "is_optimized_for_system",
     "should_use_crt",
@@ -112,6 +113,22 @@ def has_minimum_crt_version() -> bool:
     return version >= _MINIMUM_CRT_VERSION
 
 
+def has_crt_s3transfer() -> bool:
+    """Whether the installed ``s3transfer.crt`` exposes the surface the CRT path
+    needs. The process lock, the botocore credentials wrapper, and the
+    ``create_s3_crt_client(crt_credentials_provider=...)`` parameter all landed in
+    s3transfer 0.8.0; below it (the floor is 0.6.2) they are absent, so the CRT
+    manager cannot be built and the engine must degrade to classic. Probed here
+    so the CRT decision (library and CLI) never reaches an ImportError."""
+    try:
+        import s3transfer.crt as crt
+    except ImportError:
+        return False
+    return hasattr(crt, "acquire_crt_s3_process_lock") and hasattr(
+        crt, "BotocoreCRTCredentialsWrapper"
+    )
+
+
 def is_optimized_for_system() -> bool:
     """awscrt's host-optimization probe; ``False`` without a usable awscrt.
 
@@ -151,25 +168,36 @@ def should_use_crt(preferred: str) -> bool:
     """
     pref = preferred.lower()
     has_min_crt = has_minimum_crt_version()
-    if pref == "crt" and not has_min_crt:
-        try:
-            import awscrt
-
-            installed = True
-            msg_version = f", with version: {awscrt.__version__}"
-        except ImportError:
-            installed = False
-            msg_version = ""
+    # The floor s3transfer (< 0.8.0) lacks the CRT lock / credentials surface, so
+    # even with awscrt present the CRT manager cannot be built - treat it as not
+    # ready (degrade for auto, clear error for explicit crt) instead of crashing.
+    crt_ready = has_min_crt and has_crt_s3transfer()
+    if pref == "crt" and not crt_ready:
         from botocore.exceptions import MissingDependencyException
 
+        if not has_min_crt:
+            try:
+                import awscrt
+
+                installed = True
+                msg_version = f", with version: {awscrt.__version__}"
+            except ImportError:
+                installed = False
+                msg_version = ""
+            raise MissingDependencyException(
+                msg=(
+                    "CRT transfer client is configured but is missing minimum CRT "
+                    f"version. CRT installed: {installed}{msg_version}"
+                )
+            )
         raise MissingDependencyException(
             msg=(
-                "CRT transfer client is configured but is missing minimum CRT "
-                f"version. CRT installed: {installed}{msg_version}"
+                "CRT transfer client is configured but the installed s3transfer is "
+                "too old for it (needs s3transfer >= 0.8.0; the floor is 0.6.2)."
             )
         )
     is_optimized = False
-    if has_min_crt:
+    if crt_ready:
         import awscrt.s3
 
         is_optimized = bool(awscrt.s3.is_optimized_for_system())

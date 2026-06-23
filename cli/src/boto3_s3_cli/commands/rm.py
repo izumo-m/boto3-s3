@@ -128,7 +128,7 @@ class RmCommand(Command):
         # rc 252, matching aws's parse-time rejection.
         storage = S3Storage(target, client=ctx.client_factory(args))
 
-        matcher = filters.build_matcher(args.filters, key=storage.key, recursive=args.recursive)
+        item_filter = filters.build_filter(args.filters, key=storage.key, recursive=args.recursive)
         printer = _DeletePrinter(
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )
@@ -136,7 +136,7 @@ class RmCommand(Command):
             S3().rm(
                 storage,
                 recursive=args.recursive,
-                filter=matcher,
+                filter=item_filter,
                 dryrun=args.dryrun,
                 page_size=page_size,
                 request_payer=args.request_payer,

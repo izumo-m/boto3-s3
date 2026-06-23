@@ -21,7 +21,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
-from boto3_s3 import GlobPattern, globsieve
+from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -29,6 +29,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -166,16 +167,16 @@ class TestUploadRoute:
 
 
 class TestFilters:
-    def test_matcher_is_fed_compare_keys(self, tmp_path: Path) -> None:
+    def test_glob_filter_is_fed_compare_keys(self, tmp_path: Path) -> None:
         for name in ("keep.txt", "drop.bin"):
             (tmp_path / name).write_bytes(b"x")
-        matcher = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
+        keep = GlobFilter().exclude("*").include("*.txt").compile()
         client, calls = make_recording_client([{}])
         S3().cp(
             str(tmp_path),
             S3Storage("s3://b/t", client=client),
             recursive=True,
-            filter=matcher,
+            filter=keep,
             transfer_config=_SYNC,
         )
         assert [call.params["Key"] for call in calls] == ["t/keep.txt"]
@@ -262,6 +263,31 @@ class TestDownloadRoute:
         assert outcomes["../evil"] is OpOutcome.WARNED
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
         assert str(warned.error) == ("Skipping file ../evil. File references a parent directory.")
+
+    def test_recursive_download_skips_a_leading_slash_parent_escape(self, tmp_path: Path) -> None:
+        # An S3 key with a double slash after the prefix relativizes to a
+        # leading-slash compare_key ("/../secret"); the parent-ref gate must
+        # still skip it (aws-cli anchors with "./" before normpath - a bare
+        # normpath("/../secret") == "/secret" would slip the ".." and write
+        # outside the target directory).
+        listing = {
+            "Contents": [
+                {"Key": "pre//../secret", "Size": 1, "LastModified": _MTIME, "ETag": '"e"'},
+            ]
+        }
+        client, calls = make_recording_client([listing])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            str(tmp_path / "out"),
+            recursive=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]  # skipped, never fetched
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert "references a parent directory" in str(results[0].error)
+        assert not (tmp_path / "secret").exists()
 
     def test_recursive_download_to_existing_file_dest_empty_source(self, tmp_path: Path) -> None:
         # aws skips the dest makedirs when the path already exists, so a
@@ -375,7 +401,7 @@ class TestStreamRoutes:
         client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(
-            io.BytesIO(b"foo\n"),
+            IOStorage(io.BytesIO(b"foo\n")),
             S3Storage("s3://bucket/streaming.txt", client=client),
             transfer_config=_SYNC,
             on_result=results.append,
@@ -393,15 +419,32 @@ class TestStreamRoutes:
                 {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
             ]
         )
-        S3().cp(S3Storage("s3://bucket/streaming.txt", client=client), sink, transfer_config=_SYNC)
+        S3().cp(
+            S3Storage("s3://bucket/streaming.txt", client=client),
+            IOStorage(sink),
+            transfer_config=_SYNC,
+        )
         assert [call.operation for call in calls] == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"foo\n"
+
+    def test_stream_download_to_a_text_storage_decodes(self) -> None:
+        sink = io.StringIO()
+        client, _ = make_recording_client(
+            [
+                {"ContentLength": 6, "ETag": '"x"'},
+                {"Body": io.BytesIO("héllo".encode()), "ContentLength": 6, "ETag": '"x"'},
+            ]
+        )
+        S3().cp(
+            S3Storage("s3://bucket/t.txt", client=client), IOStorage(sink), transfer_config=_SYNC
+        )
+        assert sink.getvalue() == "héllo"
 
     def test_stream_dryrun_makes_no_calls(self) -> None:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
         S3().cp(
-            io.BytesIO(b"x"),
+            IOStorage(io.BytesIO(b"x")),
             S3Storage("s3://bucket/k", client=client),
             dryrun=True,
             on_result=results.append,
@@ -412,12 +455,29 @@ class TestStreamRoutes:
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().cp(io.BytesIO(b"x"), S3Storage("s3://bucket/k", client=client), recursive=True)
+            S3().cp(
+                IOStorage(io.BytesIO(b"x")),
+                S3Storage("s3://bucket/k", client=client),
+                recursive=True,
+            )
         assert "only compatible with non-recursive cp commands" in str(excinfo.value)
 
     def test_stream_to_stream_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            S3().cp(io.BytesIO(b"x"), io.BytesIO())
+            S3().cp(IOStorage(io.BytesIO(b"x")), IOStorage(io.BytesIO()))
+
+    def test_stream_download_with_no_overwrite_is_rejected(self) -> None:
+        # A streaming download has no existing destination to guard, so
+        # no_overwrite is meaningless and rejected (aws-cli rejects it too).
+        # An upload stream keeps no_overwrite (IfNoneMatch), so dst_stream gates it.
+        client, _ = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                S3Storage("s3://bucket/k", client=client),
+                IOStorage(io.BytesIO()),
+                no_overwrite=True,
+            )
+        assert "no_overwrite is not supported for streaming downloads" in str(excinfo.value)
 
 
 class TestNoOverwriteDownload:

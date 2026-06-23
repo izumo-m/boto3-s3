@@ -117,6 +117,29 @@ class TestExplicitCrtDegradation:
         runtime_config = _runtime_config(preferred_transfer_client="crt")
         assert runtimeconfig.resolve_transfer_client(runtime_config, paths_type="s3s3") == "classic"
 
+    def test_explicit_crt_with_old_s3transfer_raises_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # awscrt present, but the floor s3transfer (< 0.8.0) lacks the CRT
+        # surface: a clean ConfigurationError (rc 253), not an ImportError.
+        monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: False)
+        runtime_config = _runtime_config(preferred_transfer_client="crt")
+        with pytest.raises(ConfigurationError) as exc_info:
+            runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3")
+        assert "s3transfer" in str(exc_info.value)
+
+    def test_auto_with_old_s3transfer_degrades_to_classic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
+        monkeypatch.setattr(crtsupport, "is_optimized_for_system", lambda: True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: False)
+        runtime_config = _runtime_config(preferred_transfer_client="auto")
+        assert (
+            runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3") == "classic"
+        )
+
 
 class TestBuildTransferConfig:
     def test_only_explicit_keys_reach_the_constructor(self) -> None:

@@ -9,6 +9,7 @@ import os
 # path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
+from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.naming import classify, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -96,14 +97,11 @@ class SyncCommand(Command):
             args, src, paths_type, operation="sync", recursive=True
         )
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
-        # no_overwrite rides the copy decision (DefaultCopyFilter) for sync, not
-        # the engine options - drop it so it never reaches the transfer engine.
-        options.pop("no_overwrite", None)
 
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay
         # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, DefaultCopyFilter
+        from boto3_s3 import S3
 
         client = ctx.client_factory(args)
         src_location, dst_location = transferargs.resolve_locations(
@@ -111,10 +109,10 @@ class SyncCommand(Command):
         )
 
         plan = plan_transfer(src, dst, recursive=True)
-        # One symmetric matcher, compiled against the source root and applied to
+        # One symmetric filter, compiled against the source root and applied to
         # both sides by S3.sync (sync.md section 1; relative patterns are
         # root-independent, so one compilation suffices).
-        matcher = filters.compile_for_root(args.filters, root=plan.filter_root)
+        item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,
@@ -129,12 +127,10 @@ class SyncCommand(Command):
                 src_location,  # type: ignore[arg-type]
                 dst_location,  # type: ignore[arg-type]
                 delete=args.delete,
-                copy_filter=DefaultCopyFilter(
-                    size_only=args.size_only,
-                    exact_timestamps=args.exact_timestamps,
-                    no_overwrite=args.no_overwrite,
+                compare=AwsCliComparison(
+                    size_only=args.size_only, exact_timestamps=args.exact_timestamps
                 ),
-                filter=matcher,
+                filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,
                 page_size=page_size,

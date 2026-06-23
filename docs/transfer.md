@@ -18,7 +18,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
 | `pathresolver.py` | A port of aws's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `mv --validate-same-s3-paths` (cli.md section 5.8) |
-| `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / `SyncPair` / `PairFilter` / `DefaultCopyFilter` / combinators). The design is in [`sync.md`](./sync.md) |
+| `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / `SyncPair` / `PairFilter` / `compare_size_time` / combinators). The design is in [`sync.md`](./sync.md) |
 | `S3.cp` / `S3.mv` / `S3.sync` in `s3.py` | orchestration: path classification -> pre-validation -> enumeration -> gates (glacier / parent-ref / dryrun) -> submit -> `BatchError` aggregation (cp / mv share `_run_transfer`). mv adds a same-path guard and `is_move` ahead of that. sync forks the enumeration into two streams, inserts pair decisions in between, and shares the per-info item builder and the gates with cp |
 
 ## 2. Engine selection and lifetime
@@ -129,25 +129,40 @@ chain:
   performs a filename-specified download via a temp file + rename is also
   identical to aws (parity is automatic because it is the same library).
 
-## 6. streaming (`-` / any binary stream)
+## 6. streaming (`IOStorage` / `StdioStorage`)
 
-`S3.cp` accepts a **binary stream** (a file-like object with `read` / `write`)
-on one side of src / dst. This is the building block for `aws s3 cp`'s `-`
-(stdin / stdout); the CLI merely passes `sys.stdin.buffer` /
-`sys.stdout.buffer`.
+`S3.cp` streams when one side is an `IOStorage` - a `Storage` (`storage.py` /
+`iostorage.py`) wrapping a single in-hand file-like object - or the
+`StdioStorage` convenience for `sys.stdin` / `sys.stdout`. `cp` accepts only a
+`Location` (`str | PathLike | Storage`), so a caller wraps the stream
+(`cp("s3://b/k", IOStorage(buf))`, `cp(IOStorage(buf), "s3://b/k")`); the CLI
+wraps `-` in `StdioStorage`. The S3 side rides `s3transfer` as usual; the stream
+side hands `s3transfer` the **binary** fileobj that `IOStorage.open` returns - a
+text stream (`io.StringIO`, a text-mode file) is encoded on read / decoded on
+write there, so the s3transfer boundary is always bytes (like `StreamingBody`).
+The caller's stream is never closed by `IOStorage`.
 
 - **Single item, no gates**: a stream is always a single transfer (the same as
   aws's stream path, which does not go through the generator). `recursive` is a
   `ValidationError` with aws-cli's wording (`Streaming currently is only
-  compatible with non-recursive cp commands`), and a stream on both sides is
-  also rejected. The glacier / parent-ref gates are not run.
+  compatible with non-recursive cp commands`), and an `IOStorage` on both sides
+  is also rejected. The glacier / parent-ref gates are not run.
+- **Stream option policy (follows aws-cli per option)**: a meaningless option is
+  rejected, an additive one that degrades to a no-op is ignored. `recursive`
+  (above) and `no_overwrite` on a streaming **download** raise (`no_overwrite is
+  not supported for streaming downloads`) - a stream has no existing destination
+  to guard, the same combinations aws-cli rejects. An upload stream keeps
+  `no_overwrite` (IfNoneMatch). `filter` is silently ignored on a stream (a single
+  object has nothing to filter; aws rc 0). `expected_size` applies to an upload
+  stream and is ignored elsewhere.
 - **The key is verbatim**: the key of the S3-side `S3Storage` is used as-is.
   aws's naming where "in the form where the dest takes the source name
   (`s3://bucket` / `s3://bucket/pre/`) the literal `-` becomes the basename"
   (`pre/-`) is **derived by the CLI layer with naming.py before being passed in**
   (the library is permissive; the quirk is owned by the CLI).
-- **upload**: passes `src_fileobj` to s3transfer as-is. No ContentType guess
-  (there is no filename). `expected_size` is a chunk-design hint for multipart
+- **upload**: hands s3transfer the fileobj from `IOStorage.open(key, "rb")` (the
+  open ignores the key - a single endpoint). No ContentType guess (there is no
+  filename). `expected_size` is a chunk-design hint for multipart
   (TransferItem.size) - if unspecified, the engine buffers up to the threshold to
   decide (s3transfer's non-seekable handling = the same implementation as aws).
 - **download**: provides neither size nor etag -> s3transfer self-probes with

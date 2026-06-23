@@ -82,6 +82,7 @@ group (`aws s3`).
   sides of a sync share one merge/sort key space. (`FileInfo.key`.)
 - **compare key** - the **key** relative to the operation's scan root (the full
   key with the root prefix stripped), `/`-separated. It is what sync's merge-join
-  pairs on and what a glob Matcher (`--exclude` / `--include`) is matched
-  against; pattern form and OS handling are in
+  pairs on and what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`)
+  is matched against; it is carried on `FileInfo.compare_key`, stamped just
+  before a filter runs. Pattern form and OS handling are in
   [`globsieve.md`](./globsieve.md) section 4.

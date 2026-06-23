@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from boto3_s3 import globsieve
     from boto3_s3.comparator import (
         Comparator,
-        DefaultCopyFilter,
         PairFilter,
+        ParallelCompare,
         SyncPair,
         all_of,
         any_of,
@@ -35,7 +35,8 @@ if TYPE_CHECKING:
         TransportError,
         ValidationError,
     )
-    from boto3_s3.globsieve import GlobPattern
+    from boto3_s3.globsieve import GlobFilter, GlobPattern
+    from boto3_s3.iostorage import IOStorage, StdioStorage
     from boto3_s3.localstorage import LocalStorage
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
@@ -87,11 +88,12 @@ __all__ = [
     "Comparator",
     "ConfigurationError",
     "CopyPropsMode",
-    "DefaultCopyFilter",
     "FileFilter",
     "FileInfo",
     "FileKind",
+    "GlobFilter",
     "GlobPattern",
+    "IOStorage",
     "LocalFileInfo",
     "LocalStorage",
     "Location",
@@ -100,6 +102,7 @@ __all__ = [
     "OpOutcome",
     "OpResult",
     "PairFilter",
+    "ParallelCompare",
     "ProgressCallback",
     "ResultCallback",
     "S3Deleter",
@@ -107,6 +110,7 @@ __all__ = [
     "S3PathResolver",
     "S3Storage",
     "ScanOptions",
+    "StdioStorage",
     "Storage",
     "SyncPair",
     "TransferConfig",
@@ -142,10 +146,10 @@ _EXPORT_HOMES: dict[str, str] = {
     "TransferConfig": "boto3_s3.transferconfig",
     "Comparator": "boto3_s3.comparator",
     "PairFilter": "boto3_s3.comparator",
+    "ParallelCompare": "boto3_s3.comparator",
     "SyncPair": "boto3_s3.comparator",
     "all_of": "boto3_s3.comparator",
     "any_of": "boto3_s3.comparator",
-    "DefaultCopyFilter": "boto3_s3.comparator",
     "prefetch": "boto3_s3.concurrency",
     "S3Deleter": "boto3_s3.deleter",
     "AccessDeniedError": "boto3_s3.exceptions",
@@ -156,7 +160,10 @@ _EXPORT_HOMES: dict[str, str] = {
     "NotFoundError": "boto3_s3.exceptions",
     "TransportError": "boto3_s3.exceptions",
     "ValidationError": "boto3_s3.exceptions",
+    "GlobFilter": "boto3_s3.globsieve",
     "GlobPattern": "boto3_s3.globsieve",
+    "IOStorage": "boto3_s3.iostorage",
+    "StdioStorage": "boto3_s3.iostorage",
     "LocalStorage": "boto3_s3.localstorage",
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",

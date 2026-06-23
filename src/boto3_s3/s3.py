@@ -14,13 +14,21 @@ from __future__ import annotations
 import functools
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
-from typing import TYPE_CHECKING, Any, BinaryIO, Concatenate, Literal, ParamSpec, TypeVar
+from queue import Queue
+from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
 from typing_extensions import Unpack
 
 from boto3_s3 import naming, requestparams
-from boto3_s3.comparator import Comparator, DefaultCopyFilter, PairFilter, SyncPair
+from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3.comparator import (
+    Comparator,
+    PairFilter,
+    ParallelCompare,
+    SyncPair,
+)
 from boto3_s3.deleter import S3Deleter
 from boto3_s3.exceptions import (
     BatchError,
@@ -29,7 +37,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from boto3_s3.globsieve import Matcher
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
 from boto3_s3.s3storage import S3Storage, s3_errors
 from boto3_s3.storage import Location, Storage
@@ -57,6 +65,10 @@ if TYPE_CHECKING:
     from botocore.config import Config
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import WebsiteConfigurationTypeDef
+
+    # Local + SDK-free, but kept annotation-only so `aws_config()` stays an
+    # opt-in module load (the reader's botocore touch is deferred into it).
+    from boto3_s3.awsconfig import AwsConfig
 
 # S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
 # for larger uploads; the size string is aws-cli's rendered constant
@@ -128,29 +140,120 @@ def _cp_text(storage: Storage, *, operation: str = "cp") -> str:
 
 
 def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
-    """Normalize the two ``filter`` shapes to one ``(info, compare_key)`` test.
+    """Adapt a ``FileFilter`` to the internal ``(info, compare_key)`` test.
 
-    A matcher is fed the compare key (the entry's key relative to its root -
-    the same space ``TransferPlan.filter_root``-translated patterns live in);
-    a plain predicate is fed the ``FileInfo``.
+    The scan computes each entry's compare key (its key relative to the
+    operation root - the space ``TransferPlan.filter_root``-translated patterns
+    live in); this stamps it onto ``info.compare_key`` before consulting the
+    predicate, so a glob filter matches the root-relative key while a richer
+    predicate still sees the full ``FileInfo``.
     """
     if item_filter is None:
         return None
-    if isinstance(item_filter, Matcher):
-        matcher = item_filter
-        return lambda _info, compare_key: matcher.included(compare_key)
     predicate = item_filter
-    return lambda info, _compare_key: predicate(info)
+
+    def keep(info: FileInfo, compare_key: str) -> bool:
+        info.compare_key = compare_key
+        return predicate(info)
+
+    return keep
 
 
 def _copy_all(_pair: SyncPair) -> bool:
-    """``copy_filter=True``: copy every source-present pair (cp-like)."""
+    """``compare=True``: copy every source-present pair (cp-like)."""
     return True
 
 
 def _copy_none(_pair: SyncPair) -> bool:
-    """``copy_filter=False``: copy nothing (scan-only / delete-only sync)."""
+    """``compare=False``: copy nothing (scan-only / delete-only sync)."""
     return False
+
+
+def _compare_workers(transfer_config: TransferConfig | None) -> int:
+    """A ``ParallelCompare``'s default thread count: the transfer config's
+    ``max_concurrency`` when explicitly set, else boto3's transfer default of 10
+    (boto3 sets the attribute dynamically, so it is read defensively)."""
+    configured: object = getattr(transfer_config, "max_concurrency", None)
+    return configured if isinstance(configured, int) and configured >= 1 else 10
+
+
+def _run_sync_pairs(
+    pairs: Iterator[SyncPair],
+    *,
+    decide: PairFilter,
+    submit_copy: Callable[[SyncPair], None],
+    submit_delete: Callable[[SyncPair], None],
+    no_overwrite: bool,
+    delete_on: bool,
+    cancel_token: CancelToken | None,
+    workers: int | None,
+) -> None:
+    """Drive ``S3.sync``'s compare/submit loop - serial, or pooled when ``workers``.
+
+    Only the both-sides copy decision (``decide`` on a pair that has a
+    destination) is parallelized: that is where a content compare does its I/O.
+    New (destination-missing) pairs and the delete lane stay on the calling
+    thread in compare-key order, so the case-conflict gate keeps its
+    deterministic "first key wins" order. ``submit_copy`` / ``submit_delete``
+    (and the gate they reach) therefore only ever run on this thread; the pool
+    runs nothing but ``decide``. A ``decide`` exception propagates here (aborting
+    the sync) when its result is consumed; ``cancel_token`` is polled between
+    pairs. Behaviour matches the serial path bar ordering of the pooled pairs.
+    """
+
+    def cancelled() -> bool:
+        return cancel_token is not None and cancel_token.cancelled
+
+    if workers is None:
+        for pair in pairs:
+            if cancelled():
+                raise CancelledError("sync was cancelled", operation="sync")
+            if pair.src is not None:
+                if no_overwrite and pair.dst is not None:
+                    continue
+                if decide(pair):
+                    submit_copy(pair)
+            elif delete_on:
+                submit_delete(pair)
+        return
+
+    done: Queue[tuple[SyncPair, Future[bool]]] = Queue()
+    with ThreadPoolExecutor(workers, thread_name_prefix="boto3-s3-compare") as pool:
+
+        def dispatch() -> bool:
+            # Pull pairs (compare-key order) until one needs a pooled decision;
+            # handle destination-missing and delete pairs inline, in order.
+            for pair in pairs:
+                if cancelled():
+                    raise CancelledError("sync was cancelled", operation="sync")
+                if pair.src is not None:
+                    if no_overwrite and pair.dst is not None:
+                        continue
+                    if pair.dst is not None:
+                        pool.submit(decide, pair).add_done_callback(
+                            lambda f, p=pair: done.put((p, f))
+                        )
+                        return True
+                    # Destination missing: a content compare does no I/O here,
+                    # so decide inline and keep the case-conflict gate in order.
+                    if decide(pair):
+                        submit_copy(pair)
+                elif delete_on:
+                    submit_delete(pair)
+            return False
+
+        inflight = 0
+        while inflight < workers and dispatch():
+            inflight += 1
+        while inflight:
+            if cancelled():
+                raise CancelledError("sync was cancelled", operation="sync")
+            pair, future = done.get()
+            inflight -= 1
+            if future.result():
+                submit_copy(pair)
+            if dispatch():
+                inflight += 1
 
 
 def _glacier_blocked(info: FileInfo, *, kind: OpKind, options: TransferOptions) -> bool:
@@ -183,18 +286,6 @@ def _glacier_warning(src_display: str, kind: OpKind) -> str:
         f"s3 {op} help for additional parameter options to ignore or force "
         "these transfers."
     )
-
-
-def _as_binary_stream(value: object, attr: str) -> Any | None:
-    """The value itself when it is a caller-supplied binary stream, else None.
-
-    Anything that is not a path-like ``Location`` and quacks like a binary
-    stream (``read`` for sources, ``write`` for destinations) is treated as
-    one - how ``cp`` accepts stdin/stdout and arbitrary file-likes.
-    """
-    if isinstance(value, (str, os.PathLike, Storage)):
-        return None
-    return value if hasattr(value, attr) else None
 
 
 class _CaseConflictGate:
@@ -404,8 +495,10 @@ class S3:
     test double), or ``resolve`` to interpret new URL schemes (e.g. ``http://``).
     A second account for S3-to-S3, or a per-location client, is expressed by an
     explicit ``S3Storage(url, client=...)``. Debug-log secret masking is
-    configured via :func:`boto3_s3.set_stream_logger`. The instance is safe for
-    concurrent use across threads.
+    configured via :func:`boto3_s3.set_stream_logger`. The instance is safe to
+    share across threads (immutable defaults plus one benign cache); building
+    clients concurrently is bounded by boto3's own thread-safety, so for heavy
+    parallelism reuse a prebuilt client via ``S3Storage(url, client=...)``.
     """
 
     def __init__(
@@ -420,6 +513,10 @@ class S3:
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
+        # Memoized AwsConfig (aws_config()): resolve+parse the config file once
+        # per instance, since a sync filter may consult it per object. A benign,
+        # idempotent cache - concurrent first calls recompute the same reader.
+        self._aws_config: AwsConfig | None = None
 
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
@@ -453,6 +550,32 @@ class S3:
         if text.startswith("s3://"):
             return S3Storage(text, client=self.client())
         return LocalStorage(text)
+
+    def aws_config(self) -> AwsConfig:
+        """Read this instance's AWS config file (``~/.aws/config``) - an explicit opt-in.
+
+        Returns an :class:`~boto3_s3.awsconfig.AwsConfig` reader over the config
+        file resolved for this ``S3``'s ``session`` (or a default
+        ``AWS_PROFILE``-aware session when none was given - the same resolution
+        :meth:`client` uses). Use it to surface profile settings the application
+        did not set itself - e.g. the ``[s3]`` transfer tuning::
+
+            chunksize = s3.aws_config().get_size("s3.multipart_chunksize", 8 * 1024**2)
+
+        This is a building block offered **explicitly**: ``S3``'s own operations
+        (``cp`` / ``sync`` / ...) never read the config file on their own, so they
+        carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
+        memoized per instance (the file is parsed once). Matching ``aws s3``'s
+        ``[s3]`` semantics on top of these values (the defaults table, validation,
+        the engine decision) is the CLI distribution's job, not the library's.
+        """
+        # Deferred: the reader's botocore touch (and the boto3 default session)
+        # load only when a caller actually asks (import contract, docs/imports.md).
+        from boto3_s3.awsconfig import AwsConfig
+
+        if self._aws_config is None:
+            self._aws_config = AwsConfig.from_session(self._session)
+        return self._aws_config
 
     # -- listing ----------------------------------------------------------
 
@@ -491,6 +614,10 @@ class S3:
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         if isinstance(target, S3Storage):
             return target
+        if isinstance(target, os.PathLike):
+            # Honor the Location os.PathLike[str] contract, like resolve() does;
+            # a non-S3 Storage (no __fspath__) still falls through to the raise.
+            target = os.fspath(target)
         if not isinstance(target, str):
             raise ValidationError(
                 f"{operation} accepts an 's3://...' URI string or an S3Storage",
@@ -505,8 +632,8 @@ class S3:
 
     def cp(
         self,
-        src: Location | BinaryIO,
-        dst: Location | BinaryIO,
+        src: Location,
+        dst: Location,
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
@@ -546,10 +673,12 @@ class S3:
         without the requests).
 
         ``filter`` keeps an item in the operation (rm's contract): a
-        globsieve matcher is fed the item's *compare key* (the source path
-        relative to the transfer root - ``TransferPlan.filter_root`` is the
-        translation root for patterns); a plain predicate is fed the
-        ``FileInfo``. ``dryrun`` enumerates (listing and HeadObject still
+        ``FileFilter`` predicate over the item's ``FileInfo``, whose
+        ``compare_key`` is stamped to the source path relative to the transfer
+        root (``TransferPlan.filter_root`` is the translation root for
+        patterns) - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key
+        while a richer predicate can read size / mtime / storage_class.
+        ``dryrun`` enumerates (listing and HeadObject still
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
         still apply. ``expected_size`` is the multipart sizing hint for a
         streaming upload (stdin -> S3): it is forwarded to the stream path
@@ -568,14 +697,12 @@ class S3:
         """
         if transfer_config is None:
             transfer_config = self._transfer_config
-        src_stream = _as_binary_stream(src, "read")
-        dst_stream = _as_binary_stream(dst, "write")
-        if src_stream is not None or dst_stream is not None:
+        src_storage = self.resolve(src)
+        dst_storage = self.resolve(dst)
+        if isinstance(src_storage, IOStorage) or isinstance(dst_storage, IOStorage):
             self._cp_stream(
-                src,
-                dst,
-                src_stream=src_stream,
-                dst_stream=dst_stream,
+                src_storage,
+                dst_storage,
                 recursive=recursive,
                 dryrun=dryrun,
                 expected_size=expected_size,
@@ -585,9 +712,6 @@ class S3:
                 options=options,
             )
             return
-        # The stream shapes were handled above; what remains is a Location.
-        src_storage = self.resolve(src)  # type: ignore[arg-type]
-        dst_storage = self.resolve(dst)  # type: ignore[arg-type]
         self._run_transfer(
             src_storage,
             dst_storage,
@@ -894,7 +1018,11 @@ class S3:
             else:
                 transferrer.warn(_glacier_warning(src_display, OpKind.DOWNLOAD), key=compare_key)
             return None
-        if os.path.normpath(compare_key).startswith(".." + os.sep):
+        # Anchor with "./" before normpath (aws-cli's _warn_parent_reference): a
+        # compare_key that relativizes to a leading slash (e.g. "/../secret" from
+        # an S3 key "data//../secret") must still be caught - bare
+        # normpath("/../secret") == "/secret" would slip the "..".
+        if os.path.normpath("." + os.sep + compare_key).startswith(".." + os.sep):
             transferrer.warn(
                 f"Skipping file {compare_key}. File references a parent directory.",
                 key=compare_key,
@@ -1024,11 +1152,9 @@ class S3:
 
     def _cp_stream(
         self,
-        src: object,
-        dst: object,
+        src_storage: Storage,
+        dst_storage: Storage,
         *,
-        src_stream: Any | None,
-        dst_stream: Any | None,
         recursive: bool,
         dryrun: bool,
         expected_size: int | None,
@@ -1037,47 +1163,57 @@ class S3:
         transfer_config: TransferConfig | None,
         options: TransferOptions,
     ) -> None:
-        """One streaming transfer: a binary stream on exactly one side.
+        """One streaming transfer: an ``IOStorage`` on exactly one side.
 
-        The S3 side must resolve to an ``S3Storage`` whose key is taken
-        verbatim (the CLI owns aws's ``-``-basename naming quirk). Uploads
-        honor ``expected_size`` as the multipart sizing hint (without it the
-        engine buffers up to the threshold and decides); downloads provide
-        neither size nor etag, so s3transfer probes the object itself with a
-        HeadObject - the aws stream wire shape. Streams are single items:
-        gates (glacier, parent-ref) do not apply, exactly like aws's
-        generator-less stream path; displays render as ``-``.
+        The other side must be S3; its key is taken verbatim (the CLI owns aws's
+        ``-``-basename naming quirk). The stream's fileobj comes from
+        ``IOStorage.open`` and is handed straight to ``s3transfer``. Uploads honor
+        ``expected_size`` as the multipart sizing hint (without it the engine
+        buffers up to the threshold and decides); downloads provide neither size
+        nor etag, so s3transfer probes the object with a HeadObject - the aws
+        stream wire shape. Streams are single items: the glacier / parent-ref
+        gates do not apply; displays render as ``-``.
         """
+        src_is_stream = isinstance(src_storage, IOStorage)
+        dst_is_stream = isinstance(dst_storage, IOStorage)
         if recursive:
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="cp",
             )
-        if src_stream is not None and dst_stream is not None:
+        if src_is_stream and dst_is_stream:
             raise ValidationError(
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        if src_stream is not None:
-            storage = self._resolve_s3_target(dst, operation="cp")  # type: ignore[arg-type]
+        if dst_is_stream and options.get("no_overwrite"):
+            # A streaming download has no existing destination to guard, so
+            # no_overwrite is meaningless here (aws-cli rejects it too); fail
+            # loud rather than silently ignore. Uploads keep IfNoneMatch.
+            raise ValidationError(
+                "no_overwrite is not supported for streaming downloads",
+                operation="cp",
+            )
+        if src_is_stream:
+            storage = self._resolve_s3_target(dst_storage, operation="cp")
             kind = OpKind.UPLOAD
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
-                src_fileobj=src_stream,
+                src_fileobj=src_storage.open(storage.key, "rb"),
                 dst_bucket=storage.bucket,
                 dst_key=storage.key,
                 src_display="-",
                 dst_display=f"s3://{storage.bucket}/{storage.key}",
             )
         else:
-            storage = self._resolve_s3_target(src, operation="cp")  # type: ignore[arg-type]
+            storage = self._resolve_s3_target(src_storage, operation="cp")
             kind = OpKind.DOWNLOAD
             item = TransferItem(
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                dst_fileobj=dst_stream,
+                dst_fileobj=dst_storage.open(storage.key, "wb"),
                 src_display=f"s3://{storage.bucket}/{storage.key}",
                 dst_display="-",
             )
@@ -1204,7 +1340,7 @@ class S3:
         *,
         delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
-        copy_filter: bool | PairFilter | None = None,
+        compare: bool | PairFilter | ParallelCompare | None = None,
         follow_symlinks: bool = True,
         dryrun: bool = False,
         page_size: int = 1000,
@@ -1232,20 +1368,27 @@ class S3:
           neither transferred nor deleted (aws's "files excluded by filters
           are excluded from deletion"); visibility is never one-sided, so it
           cannot manufacture a phantom new/delete pair. Per-side or per-lane
-          narrowing belongs in the pair layer below (``copy_filter`` /
+          narrowing belongs in the pair layer below (``compare`` /
           ``delete``).
         - **Pair decisions** - the surviving streams are merge-joined by
           compare key (:class:`~boto3_s3.comparator.Comparator`) and each
-          :class:`~boto3_s3.comparator.SyncPair` is judged. ``copy_filter``
-          decides source-present pairs: ``None`` (default) uses aws's stock
-          judgment (:class:`~boto3_s3.comparator.DefaultCopyFilter`, which
-          reads the direction from ``pair.kind``); ``True`` copies every
-          source (cp-like); ``False`` copies nothing (scan-only, or a
-          delete-only sync with ``delete``); any other
-          :data:`~boto3_s3.comparator.PairFilter` is a custom decision. Tune
-          or compose the default explicitly as ``DefaultCopyFilter(size_only=
-          ..., exact_timestamps=..., no_overwrite=...)`` (e.g.
-          ``any_of(DefaultCopyFilter(), ...)``). ``delete`` is the deletion
+          :class:`~boto3_s3.comparator.SyncPair` is judged. ``compare`` picks
+          exactly one copy strategy for source-present pairs: ``None``
+          (default) is the aws-cli size + last-modified judgment, equivalently
+          ``AwsCliComparison()`` - tune it with ``AwsCliComparison(size_only=...)``
+          / ``(exact_timestamps=...)``; ``True`` copies every source (cp-like);
+          ``False`` copies nothing (scan-only, or a delete-only sync with
+          ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
+          strategy - the content building blocks ``EtagComparison`` / ``ChecksumComparison``
+          (submodule imports) are drop-in replacements that compare by content.
+          Wrapping any strategy in :class:`~boto3_s3.comparator.ParallelCompare`
+          runs its both-sides (update) decisions on a thread pool - identical
+          results, only faster (the wrapped strategy must be thread-safe).
+          ``no_overwrite`` is an
+          orthogonal write-guard applied *before* the strategy: an existing
+          destination is never overwritten (source-only pairs still copy), and
+          sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
+          ``delete`` is the deletion
           lane in one value: ``False`` (default) deletes nothing, ``True``
           deletes every destination-only pair (aws ``--delete``), and a
           :data:`~boto3_s3.types.FileFilter` deletes only the orphans it
@@ -1315,12 +1458,29 @@ class S3:
             source_client = src_storage.get_client()
             dst_bucket = dst_storage.bucket
 
-        if copy_filter is None:
-            copy_filter = DefaultCopyFilter()
-        elif copy_filter is True:
-            copy_filter = _copy_all
-        elif copy_filter is False:
-            copy_filter = _copy_none
+        # no_overwrite is an orthogonal write-guard (an option, so callers can
+        # write ``sync(no_overwrite=True)``): strip it from the engine options
+        # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
+        no_overwrite = options.pop("no_overwrite", False)
+        # compare picks exactly one copy strategy; compare=None is the aws-cli
+        # size + last-modified default, equivalently AwsCliComparison().
+        compare_workers: int | None = None
+        decide: PairFilter
+        if isinstance(compare, ParallelCompare):
+            compare_workers = (
+                compare.workers
+                if compare.workers is not None
+                else _compare_workers(transfer_config)
+            )
+            decide = compare.compare
+        elif compare is None:
+            decide = AwsCliComparison()
+        elif compare is True:
+            decide = _copy_all
+        elif compare is False:
+            decide = _copy_none
+        else:
+            decide = compare
         keep = _cp_keep(filter)
         # delete is False/True (no per-orphan filter) or a FileFilter that
         # narrows which destination-only orphans are deleted (matched like rm).
@@ -1364,34 +1524,43 @@ class S3:
                 page_size=page_size,
                 options=options,
             )
-            for pair in Comparator(kind).compare(src_entries, dst_entries):
-                if cancel_token is not None and cancel_token.cancelled:
-                    raise CancelledError("sync was cancelled", operation="sync")
-                if pair.src is not None:
-                    if not copy_filter(pair):
-                        continue
-                    item = self._sync_transfer_item(
-                        plan,
-                        pair,
-                        kind=kind,
-                        src_bucket=src_storage.bucket if isinstance(src_storage, S3Storage) else "",
-                        dst_bucket=dst_bucket,
-                        transferrer=transferrer,
-                        options=options,
-                        case_gate=case_gate,
-                    )
-                    if item is None:
-                        continue
-                    if dryrun:
-                        transferrer.dryrun(item)
-                    else:
-                        transferrer.submit(item)
-                elif delete:  # on when delete is True or a FileFilter
-                    if delete_keep is not None:
-                        assert pair.dst is not None
-                        if not delete_keep(pair.dst, pair.key):
-                            continue
-                    deletes.submit(pair, plan)
+            src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
+
+            def submit_copy(pair: SyncPair) -> None:
+                item = self._sync_transfer_item(
+                    plan,
+                    pair,
+                    kind=kind,
+                    src_bucket=src_bucket,
+                    dst_bucket=dst_bucket,
+                    transferrer=transferrer,
+                    options=options,
+                    case_gate=case_gate,
+                )
+                if item is None:
+                    return
+                if dryrun:
+                    transferrer.dryrun(item)
+                else:
+                    transferrer.submit(item)
+
+            def submit_delete(pair: SyncPair) -> None:
+                if delete_keep is not None:
+                    assert pair.dst is not None
+                    if not delete_keep(pair.dst, pair.key):
+                        return
+                deletes.submit(pair, plan)
+
+            _run_sync_pairs(
+                Comparator(kind).compare(src_entries, dst_entries),
+                decide=decide,
+                submit_copy=submit_copy,
+                submit_delete=submit_delete,
+                no_overwrite=no_overwrite,
+                delete_on=bool(delete),
+                cancel_token=cancel_token,
+                workers=compare_workers,
+            )
 
         failed = transferrer.failed + deletes.failed
         if failed:
@@ -1527,14 +1696,16 @@ class S3:
           only zero-byte ``/``-terminated "folder marker" objects (any depth)
           - aws-cli's manual-folder sweep, not a full wipe.
 
-        ``filter`` keeps an item in the deletion when it is *included*: either
-        a compiled :mod:`boto3_s3.globsieve` matcher - fed the key relative to
-        :func:`rm_filter_root` (the CLI maps ``--exclude`` / ``--include``
-        here) - or a plain ``Callable[[FileInfo], bool]`` predicate fed the
-        full ``FileInfo`` (on the blind single-key path only ``key`` is
+        ``filter`` keeps an item in the deletion when it is *included*: a
+        ``Callable[[FileInfo], bool]`` over the entry's ``FileInfo``. Its
+        ``compare_key`` is stamped to the key relative to :func:`rm_filter_root`
+        before the call, so a :class:`~boto3_s3.globsieve.GlobFilter` matches
+        that key (the CLI maps ``--exclude`` / ``--include`` here) while a
+        richer predicate can read ``size`` / ``mtime`` / ``storage_class`` (on
+        the blind single-key path only ``key`` and ``compare_key`` are
         populated). On the enumerating paths it is evaluated page by page on
         the scan prefetch worker (via ``ScanOptions.filter``), overlapped with
-        the listing I/O - keep a callable thread-safe and fast, like
+        the listing I/O - keep the filter thread-safe and fast, like
         ``on_result``. ``dryrun`` enumerates (the recursive listing still
         runs) and reports candidates as ``OpOutcome.DRYRUN`` without any
         delete calls.
@@ -1605,20 +1776,23 @@ class S3:
     def _rm_decider(
         item_filter: FileFilter | None, *, strip: int
     ) -> Callable[[FileInfo], bool] | None:
-        """Normalize the two ``filter`` shapes to one ``FileInfo`` predicate.
+        """Wrap a ``FileFilter`` to stamp the compare key before each test.
 
         ``None`` means "keep everything" - kept as ``None`` (not a tautology
-        lambda) so the unfiltered paths pay no per-object predicate call.
+        lambda) so the unfiltered paths pay no per-object predicate call. Every
+        candidate key starts with the root (the recursive listing uses it as
+        Prefix; a single key starts with its own parent), so a plain slice
+        yields the root-relative ``compare_key`` a glob filter matches against.
         """
         if item_filter is None:
             return None
-        if isinstance(item_filter, Matcher):
-            # Every candidate key starts with the root (the recursive listing
-            # uses it as Prefix; a single key starts with its own parent), so
-            # a plain slice yields the root-relative key the matcher contract
-            # specifies.
-            return lambda info: item_filter.included(info.key[strip:])
-        return item_filter
+        predicate = item_filter
+
+        def decide(info: FileInfo) -> bool:
+            info.compare_key = info.key[strip:]
+            return predicate(info)
+
+        return decide
 
     @staticmethod
     def _rm_scan_filter(

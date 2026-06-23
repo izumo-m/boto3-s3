@@ -124,18 +124,18 @@ class TestUploadMove:
         assert all(result.kind is OpKind.MOVE for result in results)
 
     def test_filtered_out_files_are_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
-        from boto3_s3 import GlobPattern, globsieve
+        from boto3_s3 import GlobFilter
         from tests.utils.recorder import make_recording_client
 
         (tmp_path / "keep.txt").write_bytes(b"k")
         (tmp_path / "skip.log").write_bytes(b"s")
         client, calls = make_recording_client([{}])
-        matcher = globsieve.compile([GlobPattern.exclude("*.log")])
+        keep = GlobFilter().exclude("*.log").compile()
         S3().mv(
             str(tmp_path),
             S3Storage("s3://b/tree/", client=client),
             recursive=True,
-            filter=matcher,
+            filter=keep,
             transfer_config=_SYNC,
         )
         assert _ops(calls) == ["PutObject"]

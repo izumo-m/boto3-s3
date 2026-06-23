@@ -6,12 +6,14 @@ judgment with its direction asymmetry,
 filtered entries protected), the visibility layer pruning each side against
 its own root, dry runs that list but never act, the missing-source 255 shape,
 a source *file* degrading to the aws-cli's walk warning, and ``no_overwrite``
-handled wholly in the pair judgment (no ``IfNoneMatch`` on the wire).
+applied as an orthogonal write-guard in the sync loop (no ``IfNoneMatch`` on
+the wire).
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,9 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import DefaultCopyFilter, GlobPattern, globsieve
+from boto3_s3 import GlobFilter
+from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3.comparator import ParallelCompare, SyncPair
 from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -65,6 +69,10 @@ def _write(root: Path, rel: str, body: bytes, *, mtime: datetime | None = None) 
     if mtime is not None:
         os.utime(target, (mtime.timestamp(), mtime.timestamp()))
     return target
+
+
+def _always_copies(_pair: SyncPair) -> bool:
+    return True
 
 
 class TestSyncUpload:
@@ -151,9 +159,9 @@ class TestSyncUpload:
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.log"]
 
-    def test_delete_matcher_narrows_by_name(self, tmp_path: Path) -> None:
-        # A globsieve Matcher narrows the delete lane by the orphan's compare
-        # key (relative), reusing rm's filter shape on the orphans.
+    def test_delete_filter_narrows_by_name(self, tmp_path: Path) -> None:
+        # A GlobFilter narrows the delete lane by the orphan's compare key
+        # (relative), reusing rm's filter shape on the orphans.
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client(
@@ -162,7 +170,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.log")]),
+            delete=GlobFilter().exclude("*").include("*.log").compile(),
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -173,7 +181,7 @@ class TestSyncUpload:
         # visibility layer prunes the destination stream before pairing.
         src = tmp_path / "src"
         src.mkdir()
-        matcher = globsieve.compile([GlobPattern.exclude("*.log")])
+        keep = GlobFilter().exclude("*.log").compile()
         client, calls = make_recording_client(
             [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
         )
@@ -181,7 +189,7 @@ class TestSyncUpload:
             str(src),
             S3Storage("s3://bucket/p", client=client),
             delete=True,
-            filter=matcher,
+            filter=keep,
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -207,7 +215,7 @@ class TestSyncUpload:
             (OpKind.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
-    def test_copy_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
+    def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
         listing = _listing(("p/same.txt", 2))
@@ -215,15 +223,15 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=lambda pair: True,
+            compare=lambda pair: True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
     def test_no_overwrite_judges_without_if_none_match(self, tmp_path: Path) -> None:
-        # no_overwrite is a DefaultCopyFilter field for sync: the at-both pair
-        # is skipped by the judgment alone, and the new file's upload carries
-        # no conditional-write header (sync never sends IfNoneMatch).
+        # no_overwrite is an orthogonal sync write-guard: the at-both pair is
+        # skipped before the strategy, and the new file's upload carries no
+        # conditional-write header (sync never sends IfNoneMatch).
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_NEWER)  # differs, but never overwritten
         _write(src, "new.txt", b"xx", mtime=_OLDER)
@@ -231,12 +239,30 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=DefaultCopyFilter(no_overwrite=True),
+            no_overwrite=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
         assert "IfNoneMatch" not in calls[1].params
+
+    def test_no_overwrite_guards_any_compare_strategy(self, tmp_path: Path) -> None:
+        # The write-guard runs before the strategy: even compare=True (cp-like)
+        # never overwrites an existing destination, while a source-only pair
+        # still uploads.
+        src = tmp_path / "src"
+        _write(src, "exists.txt", b"xxx", mtime=_OLDER)  # at dest -> guarded
+        _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> uploaded
+        client, calls = make_recording_client([_listing(("p/exists.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=True,
+            no_overwrite=True,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/new.txt"
 
     def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")
@@ -300,7 +326,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            copy_filter=DefaultCopyFilter(exact_timestamps=True),
+            compare=AwsCliComparison(exact_timestamps=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
@@ -312,13 +338,13 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            copy_filter=DefaultCopyFilter(size_only=True),
+            compare=AwsCliComparison(size_only=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_copy_filter_true_copies_every_source(self, tmp_path: Path) -> None:
-        # copy_filter=True forces all source-present pairs through, even an
+    def test_compare_true_copies_every_source(self, tmp_path: Path) -> None:
+        # compare=True forces all source-present pairs through, even an
         # up-to-date one the default would skip (cp-like).
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # same size, older -> default would skip
@@ -326,33 +352,33 @@ class TestSyncDownload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=True,
+            compare=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
-    def test_copy_filter_false_copies_nothing(self, tmp_path: Path) -> None:
-        # copy_filter=False skips every copy, even a brand-new source file.
+    def test_compare_false_copies_nothing(self, tmp_path: Path) -> None:
+        # compare=False skips every copy, even a brand-new source file.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing()])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=False,
+            compare=False,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_copy_filter_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
-        # copy_filter=False + delete=True: prune orphans, copy nothing.
+    def test_compare_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
+        # compare=False + delete=True: prune orphans, copy nothing.
         src = tmp_path / "src"
         _write(src, "keep.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            copy_filter=False,
+            compare=False,
             delete=True,
             transfer_config=_SERIAL,
         )
@@ -499,3 +525,83 @@ class TestSyncCopy:
         S3().sync(storage, storage, delete=True, transfer_config=_SERIAL, on_result=results.append)
         assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
         assert results == []
+
+
+class TestParallelCompare:
+    """``compare=ParallelCompare(...)`` pools the both-sides (update) decision
+    while keeping new pairs and the case-conflict gate on the calling thread, so
+    it copies exactly what the bare strategy would - only faster."""
+
+    def test_workers_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            ParallelCompare(_always_copies, workers=0)
+
+    def test_default_workers_inherit_or_fall_back(self) -> None:
+        from boto3_s3.s3 import _compare_workers
+
+        assert _compare_workers(None) == 10
+        assert _compare_workers(TransferConfig(max_concurrency=7)) == 7
+
+    def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
+        # Update pairs (a/b/c already at the destination) are pooled; new.txt is
+        # new. The pool only changes WHERE decide runs, not WHAT it decides.
+        src = tmp_path / "src"
+        for name in ("a.txt", "b.txt", "c.txt", "new.txt"):
+            _write(src, name, b"xx")
+
+        def decide(pair: SyncPair) -> bool:
+            return pair.dst is None or pair.key in {"a.txt", "c.txt"}
+
+        listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
+        client, calls = make_recording_client([listing, {}, {}, {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=ParallelCompare(decide, workers=4),
+            transfer_config=_SERIAL,
+        )
+        puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
+        assert puts == {"p/a.txt", "p/c.txt", "p/new.txt"}
+
+    def test_new_pairs_decided_on_calling_thread_in_key_order(self, tmp_path: Path) -> None:
+        # New (destination-missing) pairs are decided inline, in compare-key
+        # order, so the case-conflict gate's "first key wins" stays deterministic
+        # even under a parallel compare.
+        src = tmp_path / "src"
+        for name in ("n1.txt", "n2.txt", "n3.txt"):
+            _write(src, name, b"xx")
+        main = threading.get_ident()
+        seen: list[str] = []
+
+        def decide(pair: SyncPair) -> bool:
+            assert pair.dst is None  # an empty listing leaves every pair new
+            assert threading.get_ident() == main
+            seen.append(pair.key)
+            return False  # copy nothing; the test only pins the call order
+
+        client, _calls = make_recording_client([_listing()])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            compare=ParallelCompare(decide, workers=4),
+            transfer_config=_SERIAL,
+        )
+        assert seen == ["n1.txt", "n2.txt", "n3.txt"]
+
+    def test_inner_exception_aborts_the_sync(self, tmp_path: Path) -> None:
+        # A decision that raises aborts the sync (as the serial path does); the
+        # exception surfaces when its pooled result is consumed.
+        src = tmp_path / "src"
+        _write(src, "x.txt", b"xx")
+
+        def boom(_pair: SyncPair) -> bool:
+            raise ValueError("decide blew up")
+
+        client, _calls = make_recording_client([_listing(("p/x.txt", 2))])
+        with pytest.raises(ValueError, match="decide blew up"):
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                compare=ParallelCompare(boom, workers=2),
+                transfer_config=_SERIAL,
+            )

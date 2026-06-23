@@ -95,6 +95,13 @@ maintaining high functional compatibility (parity).
   (degradation is covered in transfer.md section 9 / crt.md section 6).
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
+- **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
+  meaningless option combination **unrepresentable in the API** over policing it
+  at runtime - e.g. `sync`'s size/timestamp tuners live inside `AwsCliComparison`
+  (the `compare=None` default), so they cannot be paired with a content
+  `compare=`. Where a combination cannot be designed away, raise vs ignore is
+  decided per case and discussed beforehand (the library may fail loud where
+  aws-cli is silent; the CLI keeps aws exit-code parity).
 - **Versioning**: `boto3-s3` and `boto3-s3-cli` are versioned independently.
 - Changes that might break aws-cli compatibility are not undertaken
   unilaterally; discuss them beforehand.
@@ -117,7 +124,7 @@ written here.
 - [`crt.md`](./crt.md) - the design of the CRT transfer engine mode
   (`preferred_transfer_client`, library = boto3-faithful / CLI = aws-faithful).
 - [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
-  comparator, pair filter).
+  comparator, the `compare` strategy axis).
 - [`imports.md`](./imports.md) - import discipline (lazy re-export, lazy SDK
   loading, the contract for the CLI startup path).
 - [`masking.md`](./masking.md) - credential masking for debug logs
