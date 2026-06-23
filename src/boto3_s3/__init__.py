@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         ValidationError,
     )
     from boto3_s3.globsieve import GlobFilter, GlobPattern
+    from boto3_s3.iostorage import IOStorage, StdioStorage
     from boto3_s3.localstorage import LocalStorage
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
@@ -92,6 +93,7 @@ __all__ = [
     "FileKind",
     "GlobFilter",
     "GlobPattern",
+    "IOStorage",
     "LocalFileInfo",
     "LocalStorage",
     "Location",
@@ -108,6 +110,7 @@ __all__ = [
     "S3PathResolver",
     "S3Storage",
     "ScanOptions",
+    "StdioStorage",
     "Storage",
     "SyncPair",
     "TransferConfig",
@@ -159,6 +162,8 @@ _EXPORT_HOMES: dict[str, str] = {
     "ValidationError": "boto3_s3.exceptions",
     "GlobFilter": "boto3_s3.globsieve",
     "GlobPattern": "boto3_s3.globsieve",
+    "IOStorage": "boto3_s3.iostorage",
+    "StdioStorage": "boto3_s3.iostorage",
     "LocalStorage": "boto3_s3.localstorage",
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",

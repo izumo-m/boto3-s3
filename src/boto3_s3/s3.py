@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from queue import Queue
-from typing import TYPE_CHECKING, Any, BinaryIO, Concatenate, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
 from typing_extensions import Unpack
 
@@ -37,6 +37,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
 from boto3_s3.s3storage import S3Storage, s3_errors
 from boto3_s3.storage import Location, Storage
@@ -285,18 +286,6 @@ def _glacier_warning(src_display: str, kind: OpKind) -> str:
         f"s3 {op} help for additional parameter options to ignore or force "
         "these transfers."
     )
-
-
-def _as_binary_stream(value: object, attr: str) -> Any | None:
-    """The value itself when it is a caller-supplied binary stream, else None.
-
-    Anything that is not a path-like ``Location`` and quacks like a binary
-    stream (``read`` for sources, ``write`` for destinations) is treated as
-    one - how ``cp`` accepts stdin/stdout and arbitrary file-likes.
-    """
-    if isinstance(value, (str, os.PathLike, Storage)):
-        return None
-    return value if hasattr(value, attr) else None
 
 
 class _CaseConflictGate:
@@ -639,8 +628,8 @@ class S3:
 
     def cp(
         self,
-        src: Location | BinaryIO,
-        dst: Location | BinaryIO,
+        src: Location,
+        dst: Location,
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
@@ -704,14 +693,12 @@ class S3:
         """
         if transfer_config is None:
             transfer_config = self._transfer_config
-        src_stream = _as_binary_stream(src, "read")
-        dst_stream = _as_binary_stream(dst, "write")
-        if src_stream is not None or dst_stream is not None:
+        src_storage = self.resolve(src)
+        dst_storage = self.resolve(dst)
+        if isinstance(src_storage, IOStorage) or isinstance(dst_storage, IOStorage):
             self._cp_stream(
-                src,
-                dst,
-                src_stream=src_stream,
-                dst_stream=dst_stream,
+                src_storage,
+                dst_storage,
                 recursive=recursive,
                 dryrun=dryrun,
                 expected_size=expected_size,
@@ -721,9 +708,6 @@ class S3:
                 options=options,
             )
             return
-        # The stream shapes were handled above; what remains is a Location.
-        src_storage = self.resolve(src)  # type: ignore[arg-type]
-        dst_storage = self.resolve(dst)  # type: ignore[arg-type]
         self._run_transfer(
             src_storage,
             dst_storage,
@@ -1160,11 +1144,9 @@ class S3:
 
     def _cp_stream(
         self,
-        src: object,
-        dst: object,
+        src_storage: Storage,
+        dst_storage: Storage,
         *,
-        src_stream: Any | None,
-        dst_stream: Any | None,
         recursive: bool,
         dryrun: bool,
         expected_size: int | None,
@@ -1173,28 +1155,30 @@ class S3:
         transfer_config: TransferConfig | None,
         options: TransferOptions,
     ) -> None:
-        """One streaming transfer: a binary stream on exactly one side.
+        """One streaming transfer: an ``IOStorage`` on exactly one side.
 
-        The S3 side must resolve to an ``S3Storage`` whose key is taken
-        verbatim (the CLI owns aws's ``-``-basename naming quirk). Uploads
-        honor ``expected_size`` as the multipart sizing hint (without it the
-        engine buffers up to the threshold and decides); downloads provide
-        neither size nor etag, so s3transfer probes the object itself with a
-        HeadObject - the aws stream wire shape. Streams are single items:
-        gates (glacier, parent-ref) do not apply, exactly like aws's
-        generator-less stream path; displays render as ``-``.
+        The other side must be S3; its key is taken verbatim (the CLI owns aws's
+        ``-``-basename naming quirk). The stream's fileobj comes from
+        ``IOStorage.open`` and is handed straight to ``s3transfer``. Uploads honor
+        ``expected_size`` as the multipart sizing hint (without it the engine
+        buffers up to the threshold and decides); downloads provide neither size
+        nor etag, so s3transfer probes the object with a HeadObject - the aws
+        stream wire shape. Streams are single items: the glacier / parent-ref
+        gates do not apply; displays render as ``-``.
         """
+        src_is_stream = isinstance(src_storage, IOStorage)
+        dst_is_stream = isinstance(dst_storage, IOStorage)
         if recursive:
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="cp",
             )
-        if src_stream is not None and dst_stream is not None:
+        if src_is_stream and dst_is_stream:
             raise ValidationError(
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        if dst_stream is not None and options.get("no_overwrite"):
+        if dst_is_stream and options.get("no_overwrite"):
             # A streaming download has no existing destination to guard, so
             # no_overwrite is meaningless here (aws-cli rejects it too); fail
             # loud rather than silently ignore. Uploads keep IfNoneMatch.
@@ -1202,26 +1186,26 @@ class S3:
                 "no_overwrite is not supported for streaming downloads",
                 operation="cp",
             )
-        if src_stream is not None:
-            storage = self._resolve_s3_target(dst, operation="cp")  # type: ignore[arg-type]
+        if src_is_stream:
+            storage = self._resolve_s3_target(dst_storage, operation="cp")
             kind = OpKind.UPLOAD
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
-                src_fileobj=src_stream,
+                src_fileobj=src_storage.open(storage.key, "rb"),
                 dst_bucket=storage.bucket,
                 dst_key=storage.key,
                 src_display="-",
                 dst_display=f"s3://{storage.bucket}/{storage.key}",
             )
         else:
-            storage = self._resolve_s3_target(src, operation="cp")  # type: ignore[arg-type]
+            storage = self._resolve_s3_target(src_storage, operation="cp")
             kind = OpKind.DOWNLOAD
             item = TransferItem(
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                dst_fileobj=dst_stream,
+                dst_fileobj=dst_storage.open(storage.key, "wb"),
                 src_display=f"s3://{storage.bucket}/{storage.key}",
                 dst_display="-",
             )

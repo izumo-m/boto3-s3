@@ -13,15 +13,18 @@ HTTP backend) by subclassing ``Storage`` and implementing ``scan`` / ``open`` /
 transfers included - ``scan`` / ``delete`` driving ``ls`` / ``rm``, and ``open``
 the generic stream a transfer engine reads/writes for any non-built-in side.
 
-Current state (NOT the above yet - kept accurate because this docstring is the
-design record): only the built-in ``S3Storage`` <-> ``LocalStorage`` pairs
-transfer. The ``Transferrer`` drives ``s3transfer`` for those pairs directly off
-``S3Storage``'s client/bucket and ``LocalStorage``'s path (``transfer.py``), and
-``S3._run_transfer`` (``s3.py``) hard-asserts those two concrete types. No
-``open``-based transfer path is wired, and ``S3Storage.open`` is not implemented
-(``s3storage.py``); so a custom backend can ``scan`` / ``delete`` but cannot yet
-transfer, and direct S3 stream access via ``open`` is unavailable. This gap does
-not affect CLI / ``aws s3`` parity (the CLI only ever pairs the two built-ins).
+Current state (kept accurate because this docstring is the design record): the
+built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
+directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
+(``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A **stream**
+side is an ``IOStorage`` / ``StdioStorage`` (``iostorage.py``): ``cp`` hands
+``s3transfer`` the fileobj its ``open`` returns, so the ``open``-based transfer
+path is wired for stream Storages. Still pending: ``S3Storage.open`` is not
+implemented (``s3storage.py``), and ``_run_transfer`` still hard-asserts the two
+built-in container types, so a full custom backend (e.g. an HTTP one) can
+``scan`` / ``delete`` but cannot yet transfer through enumeration. None of this
+affects CLI / ``aws s3`` parity (the CLI only ever pairs a built-in with a stdio
+stream).
 """
 
 from __future__ import annotations

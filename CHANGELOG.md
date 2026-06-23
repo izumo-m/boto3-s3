@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add streaming `cp`: wrap a stream in `IOStorage` / `StdioStorage` and pass it
+  as a `cp` side (e.g. `cp("s3://b/k", IOStorage(buf))`); `cp` accepts any
+  `Storage`, transferring a stream through its `open()`.
 - Add `S3.aws_config()`: read `~/.aws/config` with typed getters.
 - Add `sync(compare=...)`: a single copy-decision axis - the size+mtime default
   is `AwsCliComparison()` (tuned via `AwsCliComparison(size_only=...)` /

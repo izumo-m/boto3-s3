@@ -29,6 +29,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -375,7 +376,7 @@ class TestStreamRoutes:
         client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(
-            io.BytesIO(b"foo\n"),
+            IOStorage(io.BytesIO(b"foo\n")),
             S3Storage("s3://bucket/streaming.txt", client=client),
             transfer_config=_SYNC,
             on_result=results.append,
@@ -393,15 +394,32 @@ class TestStreamRoutes:
                 {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
             ]
         )
-        S3().cp(S3Storage("s3://bucket/streaming.txt", client=client), sink, transfer_config=_SYNC)
+        S3().cp(
+            S3Storage("s3://bucket/streaming.txt", client=client),
+            IOStorage(sink),
+            transfer_config=_SYNC,
+        )
         assert [call.operation for call in calls] == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"foo\n"
+
+    def test_stream_download_to_a_text_storage_decodes(self) -> None:
+        sink = io.StringIO()
+        client, _ = make_recording_client(
+            [
+                {"ContentLength": 6, "ETag": '"x"'},
+                {"Body": io.BytesIO("héllo".encode()), "ContentLength": 6, "ETag": '"x"'},
+            ]
+        )
+        S3().cp(
+            S3Storage("s3://bucket/t.txt", client=client), IOStorage(sink), transfer_config=_SYNC
+        )
+        assert sink.getvalue() == "héllo"
 
     def test_stream_dryrun_makes_no_calls(self) -> None:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
         S3().cp(
-            io.BytesIO(b"x"),
+            IOStorage(io.BytesIO(b"x")),
             S3Storage("s3://bucket/k", client=client),
             dryrun=True,
             on_result=results.append,
@@ -412,12 +430,16 @@ class TestStreamRoutes:
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().cp(io.BytesIO(b"x"), S3Storage("s3://bucket/k", client=client), recursive=True)
+            S3().cp(
+                IOStorage(io.BytesIO(b"x")),
+                S3Storage("s3://bucket/k", client=client),
+                recursive=True,
+            )
         assert "only compatible with non-recursive cp commands" in str(excinfo.value)
 
     def test_stream_to_stream_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            S3().cp(io.BytesIO(b"x"), io.BytesIO())
+            S3().cp(IOStorage(io.BytesIO(b"x")), IOStorage(io.BytesIO()))
 
     def test_stream_download_with_no_overwrite_is_rejected(self) -> None:
         # A streaming download has no existing destination to guard, so
@@ -427,7 +449,7 @@ class TestStreamRoutes:
         with pytest.raises(ValidationError) as excinfo:
             S3().cp(
                 S3Storage("s3://bucket/k", client=client),
-                io.BytesIO(),
+                IOStorage(io.BytesIO()),
                 no_overwrite=True,
             )
         assert "no_overwrite is not supported for streaming downloads" in str(excinfo.value)

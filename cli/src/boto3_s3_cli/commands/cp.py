@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 
-# Pure-Python names only (exceptions / naming modules) - safe on the
+# Pure-Python names only (exceptions / naming / StdioStorage) - safe on the
 # parse path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, ValidationError
+from boto3_s3 import Boto3S3Error, StdioStorage, ValidationError
 from boto3_s3.naming import classify, item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -97,17 +96,17 @@ class CpCommand(Command):
         src_location: object
         dst_location: object
         if src == "-":
-            # Resolved inside the pipeline boundary below (a missing stdin is
-            # aws's in-flight fatal, rc 1); the destination key reproduces
-            # aws's quirk of appending the source's basename - literally "-"
-            # - when the destination takes the source's name.
-            src_location = None
+            # The destination key reproduces aws's quirk of appending the
+            # source's basename - literally "-" - when the dest takes the source
+            # name. A missing stdin stays aws's in-flight fatal (rc 1): the check
+            # lives in StdioStorage.open, reached inside the transfer below.
+            src_location = StdioStorage()
             plan = plan_transfer(src, dst, recursive=False)
             dest, _compare_key = item_paths(plan, plan.src_root)
             dst_location = S3Storage(f"s3://{dest}", client=client)
         elif dst == "-":
             src_location = S3Storage(src, client=client)
-            dst_location = _stdout_writer()
+            dst_location = StdioStorage()
         else:
             src_location, dst_location = transferargs.resolve_locations(
                 args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
@@ -137,11 +136,8 @@ class CpCommand(Command):
             expected_size = None
             if src == "-" and args.expected_size is not None:
                 expected_size = int(args.expected_size)
-            source: object = src_location
-            if src == "-":
-                source = _binary_stdin()
             S3().cp(
-                source,  # type: ignore[arg-type]
+                src_location,  # type: ignore[arg-type]
                 dst_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
                 filter=item_filter,
@@ -156,39 +152,6 @@ class CpCommand(Command):
             )
 
         return transferargs.finish_transfer(printer, quiet=args.quiet, run=run_cp)
-
-
-class _NonSeekableStream:
-    """Read-only view of a file-like object (aws-cli's ``NonSeekableStream``).
-
-    Some streams that are not truly seekable still *look* seekable (Windows
-    stdin), which would mislead s3transfer's input manager; exposing only
-    ``read`` forces the buffered non-seekable upload path, like aws.
-    """
-
-    def __init__(self, fileobj: object) -> None:
-        self._fileobj = fileobj
-
-    def read(self, amt: int | None = None) -> bytes:
-        reader: object = self._fileobj
-        if amt is None:
-            return reader.read()  # type: ignore[attr-defined]
-        return reader.read(amt)  # type: ignore[attr-defined]
-
-
-def _binary_stdin() -> _NonSeekableStream:
-    """The process's binary stdin, or aws's in-pipeline error when absent."""
-    stdin = sys.stdin
-    if stdin is None:
-        raise Boto3S3Error(
-            "stdin is required for this operation, but is not available.", operation="cp"
-        )
-    return _NonSeekableStream(getattr(stdin, "buffer", stdin))
-
-
-def _stdout_writer() -> object:
-    """The process's binary stdout for streaming downloads."""
-    return getattr(sys.stdout, "buffer", sys.stdout)
 
 
 __all__ = ["CpCommand"]
