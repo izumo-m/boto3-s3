@@ -614,6 +614,10 @@ class S3:
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         if isinstance(target, S3Storage):
             return target
+        if isinstance(target, os.PathLike):
+            # Honor the Location os.PathLike[str] contract, like resolve() does;
+            # a non-S3 Storage (no __fspath__) still falls through to the raise.
+            target = os.fspath(target)
         if not isinstance(target, str):
             raise ValidationError(
                 f"{operation} accepts an 's3://...' URI string or an S3Storage",
@@ -1014,7 +1018,11 @@ class S3:
             else:
                 transferrer.warn(_glacier_warning(src_display, OpKind.DOWNLOAD), key=compare_key)
             return None
-        if os.path.normpath(compare_key).startswith(".." + os.sep):
+        # Anchor with "./" before normpath (aws-cli's _warn_parent_reference): a
+        # compare_key that relativizes to a leading slash (e.g. "/../secret" from
+        # an S3 key "data//../secret") must still be caught - bare
+        # normpath("/../secret") == "/secret" would slip the "..".
+        if os.path.normpath("." + os.sep + compare_key).startswith(".." + os.sep):
             transferrer.warn(
                 f"Skipping file {compare_key}. File references a parent directory.",
                 key=compare_key,

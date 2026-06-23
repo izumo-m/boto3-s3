@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from typing import Any
 
 import boto3
@@ -117,6 +118,26 @@ class TestResolveSeam:
         s3 = _SchemeS3()
         assert isinstance(s3.resolve("mem://x"), LocalStorage)  # custom scheme
         assert isinstance(s3.resolve("s3://b/k"), S3Storage)  # deferred to super()
+
+    def test_s3_only_ops_accept_pathlike_targets(self) -> None:
+        # ls/rm/mb/rb/presign/website type their target as Location (which
+        # includes os.PathLike); _resolve_s3_target must fspath a PathLike,
+        # mirroring resolve(). A non-S3 Storage (no __fspath__) still raises.
+        sentinel = _FakeS3Client([])
+
+        class _SentinelS3(S3):
+            def client(self) -> Any:
+                return sentinel
+
+        class _P(os.PathLike):  # type: ignore[type-arg]
+            def __fspath__(self) -> str:
+                return "s3://my-bucket/key"
+
+        storage = _SentinelS3()._resolve_s3_target(_P(), operation="ls")
+        assert isinstance(storage, S3Storage)
+        assert (storage.bucket, storage.key) == ("my-bucket", "key")
+        with pytest.raises(ValidationError):
+            _SentinelS3()._resolve_s3_target(LocalStorage("/tmp/x"), operation="ls")
 
 
 class _StopTransferError(Exception):

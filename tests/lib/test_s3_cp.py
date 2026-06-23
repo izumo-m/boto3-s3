@@ -264,6 +264,31 @@ class TestDownloadRoute:
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
         assert str(warned.error) == ("Skipping file ../evil. File references a parent directory.")
 
+    def test_recursive_download_skips_a_leading_slash_parent_escape(self, tmp_path: Path) -> None:
+        # An S3 key with a double slash after the prefix relativizes to a
+        # leading-slash compare_key ("/../secret"); the parent-ref gate must
+        # still skip it (aws-cli anchors with "./" before normpath - a bare
+        # normpath("/../secret") == "/secret" would slip the ".." and write
+        # outside the target directory).
+        listing = {
+            "Contents": [
+                {"Key": "pre//../secret", "Size": 1, "LastModified": _MTIME, "ETag": '"e"'},
+            ]
+        }
+        client, calls = make_recording_client([listing])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            str(tmp_path / "out"),
+            recursive=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]  # skipped, never fetched
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert "references a parent directory" in str(results[0].error)
+        assert not (tmp_path / "secret").exists()
+
     def test_recursive_download_to_existing_file_dest_empty_source(self, tmp_path: Path) -> None:
         # aws skips the dest makedirs when the path already exists, so a
         # recursive download to an existing FILE with an empty source listing
