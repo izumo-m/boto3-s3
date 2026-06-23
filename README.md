@@ -18,8 +18,8 @@ Two packages:
 
 - **`boto3-s3`** — the library. Run `aws s3`-equivalent operations from Python
   with your own boto3 clients and credentials.
-- **`boto3-s3-cli`** — the `boto3-s3` command, a drop-in for `aws s3`
-  ([details](https://github.com/izumo-m/boto3-s3/blob/main/cli/README.md)).
+- **[`boto3-s3-cli`](https://pypi.org/project/boto3-s3-cli/)** — the `boto3-s3`
+  command, a drop-in for `aws s3`.
 
 ## Why
 
@@ -120,6 +120,12 @@ It supports the flags you know from the command:
   `ParallelCompare(...)` to decide on a thread pool).
 - **`filter=`** — include/exclude matching; **`dryrun=True`** to
   preview every transfer and deletion first.
+
+The content strategies are opt-in submodule imports —
+`from boto3_s3.etagcompare import EtagComparison` /
+`from boto3_s3.checksumcompare import ChecksumComparison` (and
+`from boto3_s3.awsclicompare import AwsCliComparison` to tune the default).
+`ParallelCompare` imports from `boto3_s3` itself.
 
 Because it runs in-process, sync hands back **structured results that `aws s3`
 can't**: `on_result` fires once per item as the run proceeds, so you know exactly
