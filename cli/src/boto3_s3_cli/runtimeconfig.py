@@ -299,9 +299,21 @@ def resolve_transfer_client(
                 "unavailable. Install the optional CRT dependency with the "
                 "'crt' extra (e.g. pip install 'boto3-s3-cli[crt]')."
             )
+        if not crtsupport.has_crt_s3transfer():
+            # The floor s3transfer (< 0.8.0) lacks the CRT lock/credentials
+            # surface; fail clean (like awscrt-missing) instead of an ImportError.
+            raise ConfigurationError(
+                "preferred_transfer_client is set to crt but the installed "
+                "s3transfer is too old for it (needs s3transfer >= 0.8.0). "
+                "Upgrade s3transfer (e.g. via a newer boto3)."
+            )
         crtsupport.acquire_process_lock()  # aws-cli claims the slot, proceeds regardless
         return "crt"
-    if preferred == "auto" and crtsupport.is_optimized_for_system():
+    if (
+        preferred == "auto"
+        and crtsupport.has_crt_s3transfer()
+        and crtsupport.is_optimized_for_system()
+    ):
         if crtsupport.acquire_process_lock():
             return "crt"
     return "classic"
