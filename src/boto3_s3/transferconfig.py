@@ -70,15 +70,26 @@ class TransferConfig(Boto3TransferConfig):
         disk_throughput: int | None = None,
         direct_io: bool | None = None,
     ) -> None:
+        # Forward each base parameter only when set, letting the base ctor supply
+        # its own default. On the floor boto3 (1.28 - ~1.40) the base signature
+        # carries concrete defaults; forwarding None would overwrite them and
+        # reach s3transfer as None - a TypeError on the first size comparison, and
+        # use_threads=None silently disables threading. On a modern boto3 an
+        # omitted arg resolves to the same UNSET_DEFAULT sentinel a forwarded None
+        # would, so behavior is identical there.
         base_kwargs: dict[str, object] = {
-            "multipart_threshold": multipart_threshold,
-            "max_concurrency": max_concurrency,
-            "multipart_chunksize": multipart_chunksize,
-            "num_download_attempts": num_download_attempts,
-            "max_io_queue": max_io_queue,
-            "io_chunksize": io_chunksize,
-            "use_threads": use_threads,
-            "max_bandwidth": max_bandwidth,
+            name: value
+            for name, value in (
+                ("multipart_threshold", multipart_threshold),
+                ("max_concurrency", max_concurrency),
+                ("multipart_chunksize", multipart_chunksize),
+                ("num_download_attempts", num_download_attempts),
+                ("max_io_queue", max_io_queue),
+                ("io_chunksize", io_chunksize),
+                ("use_threads", use_threads),
+                ("max_bandwidth", max_bandwidth),
+            )
+            if value is not None
         }
         if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
             base_kwargs["preferred_transfer_client"] = preferred_transfer_client

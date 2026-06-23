@@ -9,10 +9,43 @@ stays accepted by readers that fall back via ``getattr``.
 
 from __future__ import annotations
 
+import pytest
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 import boto3_s3
 from boto3_s3.transferconfig import TransferConfig
+
+
+class TestSdkFloorCompat:
+    def test_unset_base_params_are_omitted_not_forwarded_as_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression: forwarding None for an omitted base param overwrites the
+        # base ctor's concrete default on the SDK floor (boto3 < ~1.43), so None
+        # reaches s3transfer (a TypeError on the first size comparison, and
+        # use_threads=None silently disables threading). Unset base params must
+        # be omitted so the base ctor supplies its own default.
+        captured: dict[str, object] = {}
+        real_init = Boto3TransferConfig.__init__
+
+        def spy(this: object, *args: object, **kwargs: object) -> None:
+            captured.clear()
+            captured.update(kwargs)
+            real_init(this, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Boto3TransferConfig, "__init__", spy)
+        TransferConfig(max_concurrency=5)
+        assert captured.get("max_concurrency") == 5
+        for omitted in (
+            "multipart_threshold",
+            "multipart_chunksize",
+            "num_download_attempts",
+            "max_io_queue",
+            "io_chunksize",
+            "use_threads",
+            "max_bandwidth",
+        ):
+            assert omitted not in captured, f"{omitted} must be omitted, not forwarded as None"
 
 
 class TestReExport:
