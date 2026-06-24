@@ -258,7 +258,7 @@ aws-cli's behavior):
 | `--dryrun` | Calls no delete API, emitting only `(dryrun) delete:` lines (the recursive ListObjectsV2 still runs = a listing failure is fatal even under dryrun) |
 | `--quiet` | **Suppresses all output** (not just success lines but also `delete failed:` / `fatal error:` lines. aws does not create the printer at all. The rc is unchanged) |
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
-| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). The root is recursive = the normalized prefix / single = the parent of the key / bucket root = "" (`rm_filter_root`). `cli/filters.py` translates it into globsieve and passes it to `S3.rm(filter=)` |
+| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). The root is recursive = the normalized prefix / single = the parent of the key / bucket root = "" (`rm_filter_root`). `cli/src/boto3_s3_cli/filters.py` translates it into globsieve and passes it to `S3.rm(filter=)` |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
 | `--page-size N` | No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
@@ -359,9 +359,11 @@ reproduces the same shape (`storage.key` or the `/` left after stripping) with a
 entirely as `Bucket` (aws's `block_unsupported_resources` rejects only Object
 Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
 
-rc forms: **0 / 252 / 253 / 254** (because, unlike mb / rb, there is no local
-catch, a server rejection - `NoSuchBucket`, an endpoint that does not accept the
-configuration - is **254** derived from `ClientError`. 1 cannot occur). Because
+rc forms: **0 / 252 / 253 / 254 / 255** (because, unlike mb / rb, there is no
+local catch: a server rejection - `NoSuchBucket`, an endpoint that does not
+accept the configuration - is **254** derived from `ClientError`, while a
+client-construction failure such as `ProfileNotFound` / `PartialCredentialsError`
+is **255**. 1 cannot occur). Because
 MinIO always rejects PutBucketWebsite with MalformedXML
 ([`testing.md`](./testing.md) section 7), the success-path verification is handled by
 moto.

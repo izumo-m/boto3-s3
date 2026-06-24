@@ -282,12 +282,9 @@ operation. The common form is an `aws s3`-style include/exclude matcher (last
 match wins, default-include):
 
 ```python
-from boto3_s3 import globsieve
+from boto3_s3 import GlobFilter
 
-keep = globsieve.compile([
-    globsieve.GlobPattern.exclude("*"),
-    globsieve.GlobPattern.include("*.tar.gz"),
-])
+keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
 s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
 ```
 

@@ -268,8 +268,6 @@ dest-existence check for download. We ported the same three faces:
 
 ## 10. Known wire divergences (invisible in the result; recorded only)
 
-- We do not send `ChecksumMode: ENABLED` to HeadObject (aws v2 sends it by
-  default). `--checksum-mode` rides only on GetObject (section 9).
 - When `--checksum-algorithm` is unspecified, the default integrity checksum is
   `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
   injects `CRC64NVME`. Both are valid integrity checks and do not affect the

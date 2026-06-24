@@ -161,8 +161,8 @@ def _has_drive(p: str) -> bool:
 class Matcher(Protocol):
     """Final include/exclude decision for a key.
 
-    ``runtime_checkable`` so ``S3.rm`` can tell a compiled matcher apart
-    from a plain ``Callable[[FileInfo], bool]`` filter at runtime.
+    A single-method protocol (``included(key) -> bool``); the matchers
+    :func:`compile` returns all satisfy it.
     """
 
     def included(self, key: str) -> bool: ...

@@ -163,8 +163,8 @@ non-contractual).
 
 `cli.main` resolves the mode from raw argv + env + profile config **before**
 argparse (to slip past the subcommand-required argparse and fire even on a bare
-`boto3-s3 --cli-auto-prompt`; equivalent to aws's `resolve_mode` + config chain =
-aws-cli `autoprompt/core.py` + `clidriver.py`
+`boto3-s3 --cli-auto-prompt`; equivalent to aws's `resolve_auto_prompt_mode` + config
+chain = aws-cli `clidriver.py`'s `resolve_auto_prompt_mode` +
 `_construct_cli_auto_prompt_chain`).
 
 First, `main` rejects `--cli-auto-prompt` and `--no-cli-auto-prompt` together

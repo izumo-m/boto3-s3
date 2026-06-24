@@ -19,6 +19,6 @@ class AutoPrompter(ABC):
     def prompt_for_args(self, argv: list[str]) -> list[str]:
         """Prompt the user (seeded with *argv*) and return the edited argv.
 
-        *argv* is the post-parse token list with the auto-prompt flags removed.
+        *argv* is the raw token list with the auto-prompt flags removed.
         The returned list is re-dispatched by :func:`boto3_s3_cli.cli.main`.
         """

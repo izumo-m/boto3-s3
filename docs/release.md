@@ -32,7 +32,8 @@ both and tagging the same commit twice):
    - `uv.lock` (run `uv lock` to refresh)
    - `CHANGELOG.md`: rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, then update
      the links at the bottom — add `[X.Y.Z]: .../compare/...vX.Y.Z` and repoint
-     `[Unreleased]` to `.../compare/X.Y.Z...HEAD`.
+     `[Unreleased]` to `.../compare/boto3-s3-vX.Y.Z...HEAD` (the CLI changelog
+     uses the `boto3-s3-cli-vX.Y.Z` tag).
 2. Merge into `main`, keeping the merge commit as a clear release boundary:
    ```bash
    git switch main && git merge --no-ff develop

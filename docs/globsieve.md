@@ -95,7 +95,7 @@ relativization, so it is not part of the root.
   sees the same root-relative key aws-cli's `--exclude` / `--include` match,
   with the section 2 fast paths intact. The CLI relativizes its patterns in
   their order of appearance via `translate_pattern_for_root`, `compile`s them,
-  and wraps the result as a `FileFilter` (`cli/filters.py`).
+  and wraps the result as a `FileFilter` (`cli/src/boto3_s3_cli/filters.py`).
 - **a custom predicate** can instead decide on size / mtime / storage_class
   (e.g. `filter=lambda info: info.size == 0`), or read `info.compare_key` for a
   relative-path rule of its own. On the non-recursive blind single-key path
@@ -141,14 +141,14 @@ root stripped (`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
 Matching therefore happens in `/`-space, so **a pattern must be `/`-form to
 match**:
 
-- **CLI**: patterns are written `/`-form. `cli/filters.py` runs each through
+- **CLI**: patterns are written `/`-form. `cli/src/boto3_s3_cli/filters.py` runs each through
   `translate_pattern_for_root`, which folds the host separator to `/`
   (`pattern.replace(os.sep, "/")`), so a Windows user may also write `\` and it
   is normalized. This collapses aws-cli `filters._match_pattern`'s per-side
   rewrite (local `/` -> `os.sep`, s3 `os.sep` -> `/`) into a single `/`-space
   match: on POSIX (`os.sep == "/"`) it is a no-op, so a literal `\` in an S3 key
   survives instead of being rewritten. On Windows aws-cli additionally
-  `normcase`s both sides, making the match **case-insensitive**; `cli/filters.py`
+  `normcase`s both sides, making the match **case-insensitive**; `cli/src/boto3_s3_cli/filters.py`
   reproduces this by lower-casing patterns at compile and keys at match
   (`os.name == "nt"`), and stays byte-exact on POSIX.
 - **library**: a `GlobFilter` matches the `/`-form `compare_key`, so its patterns

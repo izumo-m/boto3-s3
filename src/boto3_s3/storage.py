@@ -11,9 +11,14 @@ job, the customization seam for adding URL schemes.
 
 Design intent (the extension goal): an application adds a data source (e.g. an
 HTTP backend) by subclassing ``Storage`` and implementing ``scan`` / ``open`` /
-``delete``, and that alone would let it participate in every subcommand,
-transfers included - ``scan`` / ``delete`` driving ``ls`` / ``rm``, and ``open``
-the generic stream a transfer engine reads/writes for any non-built-in side.
+``delete``, so it can act as one side of a ``cp`` / ``mv`` / ``sync`` transfer -
+the other side always S3 - with ``open`` the generic stream the transfer engine
+reads/writes for a non-built-in side, ``scan`` enumerating it as a source, and
+``delete`` removing entries for ``mv`` / ``sync --delete``. The S3-only
+operations (``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` / ``website``) are
+**not** part of this seam: each needs an S3 bucket and accepts only an
+``S3Storage`` (a subclass customizing S3 behavior included), never an arbitrary
+``Storage``.
 
 Current state (kept accurate because this docstring is the design record): the
 built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
@@ -23,10 +28,9 @@ side is an ``IOStorage`` / ``StdioStorage`` (``iostorage.py``): ``cp`` hands
 ``s3transfer`` the fileobj its ``open`` returns, so the ``open``-based transfer
 path is wired for stream Storages. Still pending: ``S3Storage.open`` is not
 implemented (``s3storage.py``), and ``_run_transfer`` still hard-asserts the two
-built-in container types, so a full custom backend (e.g. an HTTP one) can
-``scan`` / ``delete`` but cannot yet transfer through enumeration. None of this
-affects CLI / ``aws s3`` parity (the CLI only ever pairs a built-in with a stdio
-stream).
+built-in container types, so a ``Storage``-direct custom backend (e.g. an HTTP
+one) cannot transfer yet. None of this affects CLI / ``aws s3`` parity (the CLI
+only ever pairs a built-in with a stdio stream).
 """
 
 from __future__ import annotations

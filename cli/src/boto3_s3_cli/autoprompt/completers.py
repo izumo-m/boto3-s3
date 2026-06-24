@@ -20,7 +20,7 @@ Reachability is widened the same way by the parser tuning (``parser.py``): optio
 values complete before any positional, and options keep completing after a
 command's second positional path.
 
-Pure Python - botocore is imported lazily, only when a region/profile value is
+Pure Python - boto3 is imported lazily, only when a region/profile value is
 actually being completed (the interactive path), never on a parse path.
 """
 
