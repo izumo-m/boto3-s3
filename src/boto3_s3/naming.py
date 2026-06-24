@@ -282,19 +282,6 @@ def _local_filter_root(path: str, *, dir_op: bool) -> str:
     return os.path.abspath(os.path.dirname(path))
 
 
-def filter_root(path: str, *, dir_op: bool) -> str:
-    """The filter root for one raw path, either scheme (aws-cli's ``create_filter``).
-
-    What ``--exclude`` / ``--include`` patterns resolve against on that
-    side: ``TransferPlan.filter_root`` covers the source, and sync - which
-    filters *both* sides, each against its own root - derives the
-    destination's root through this same rule.
-    """
-    if classify(path) == "s3":
-        return _s3_filter_root(_strip_scheme_normalized(path), dir_op=dir_op)
-    return _local_filter_root(path, dir_op=dir_op)
-
-
 def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     """Derive one item's ``(dest_path, compare_key)`` from its source path.
 
@@ -322,7 +309,6 @@ __all__ = [
     "PathsType",
     "TransferPlan",
     "classify",
-    "filter_root",
     "item_paths",
     "local_format",
     "normalize_s3_uri",
