@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cp` / `mv` / `sync` reject a non-built-in `Storage` (a custom backend, or a
   stream on a non-stream route) with a clear `ValidationError` (was an
   `AssertionError`).
+- `S3Storage` construction is now permissive (parse only); the strict aws-cli
+  rejections (S3 Object Lambda / Outposts bucket ARNs, a key with no bucket) move
+  to `S3Storage.validate()`, which the operations run before use. Add the
+  `Storage.schema` discriminator (`"s3"` / `"local"` / `"stream"`).
 
 ## [0.2.0] - 2026-06-23
 

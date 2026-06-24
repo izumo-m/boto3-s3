@@ -28,7 +28,7 @@ from __future__ import annotations
 import codecs
 import io
 import sys
-from typing import IO, TYPE_CHECKING, Any, Literal, cast
+from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
@@ -120,6 +120,8 @@ class IOStorage(Storage):
     (default utf-8). The caller's stream is never closed by this class. As a single
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
     """
+
+    schema: ClassVar[Literal["s3", "local", "stream"]] = "stream"
 
     def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
         self._stream: IO[Any] | None = stream

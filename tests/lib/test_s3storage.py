@@ -387,8 +387,9 @@ class TestConstructor:
             assert storage.url == "s3://"
 
     def test_key_without_bucket_is_rejected(self) -> None:
+        # Construction is permissive (non-raising); validate() does the rejection.
         with pytest.raises(ValidationError):
-            S3Storage("s3:///key")
+            S3Storage("s3:///key").validate()
 
 
 class TestArnBuckets:
@@ -396,7 +397,8 @@ class TestArnBuckets:
 
     The whole access-point ARN - slash-separated name included - is the
     bucket; only what follows it is the key. Object Lambda and Outposts
-    *bucket* ARNs are rejected at parse time the way ``aws s3`` rejects them
+    *bucket* ARNs are rejected by :meth:`S3Storage.validate` (deferred from the
+    permissive construction) the way ``aws s3`` rejects them at parse time
     (ParamValidation -> rc 252, verified against aws-cli 2.34).
 
     The client needs no ARN-derived region: botocore resolves the endpoint
@@ -429,7 +431,7 @@ class TestArnBuckets:
     def test_object_lambda_arn_is_rejected(self) -> None:
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
         with pytest.raises(ValidationError, match="S3 Object Lambda"):
-            S3Storage(f"s3://{arn}")
+            S3Storage(f"s3://{arn}").validate()
 
     def test_outpost_bucket_arn_is_rejected(self) -> None:
         arn = (
@@ -437,7 +439,7 @@ class TestArnBuckets:
             "outpost/op-01234567890123456/bucket/my-bucket"
         )
         with pytest.raises(ValidationError, match="Outpost Bucket"):
-            S3Storage(f"s3://{arn}")
+            S3Storage(f"s3://{arn}").validate()
 
 
 class TestResolveRouting:

@@ -23,9 +23,15 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from boto3_s3.exceptions import ValidationError
+
+if TYPE_CHECKING:
+    # Annotation-only (``from __future__ import annotations`` keeps it out of the
+    # runtime import graph): the ``Storage`` ABC is SDK-free and does not import
+    # ``naming``, so this is cycle-free and the pure-function layer stays SDK-free.
+    from boto3_s3.storage import Storage
 
 PathsType = Literal["locals3", "s3local", "s3s3"]
 PathKind = Literal["s3", "local"]
@@ -201,46 +207,64 @@ class TransferPlan:
     filter_root: str
 
 
-def plan_transfer(
-    src: str,
-    dst: str,
-    *,
-    src_kind: PathKind,
-    dst_kind: PathKind,
-    recursive: bool,
-    operation: str = "cp",
-) -> TransferPlan:
-    """Format a cp/mv path pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
+def _endpoint_kind(storage: Storage, *, operation: str) -> PathKind:
+    """The transfer kind from a resolved endpoint's ``schema`` (the object layer).
 
-    ``src_kind`` / ``dst_kind`` (each ``"s3"`` / ``"local"``) are decided by the
-    caller - the library from the resolved ``Storage`` types, the CLI from
-    :func:`classify` on the raw argument - so this function only formats; it does
-    not re-interpret the ``s3://`` scheme itself. ``recursive`` is aws-cli's
-    ``dir_op``. A local->local pair raises ``ValidationError`` - ``aws s3`` has no
-    such route (its usage error; the CLI layer phrases the strict aws message
-    itself).
+    ``"s3"`` / ``"local"`` are the transferable container pair. A stream or a
+    custom backend (any other ``schema``) cannot transfer through this path and is
+    rejected here rather than misclassified - a stream side goes through ``cp``'s
+    own route, a custom backend awaits the ``open``-based seam (storage.py / #53).
     """
+    schema = getattr(storage, "schema", None)
+    if schema == "s3":
+        return "s3"
+    if schema == "local":
+        return "local"
+    raise ValidationError(
+        f"{operation}: a {type(storage).__name__} is not a built-in transfer "
+        "endpoint - only s3 and local locations transfer here (a stream or custom "
+        "backend cannot; see storage.py / #53)",
+        operation=operation,
+    )
+
+
+def plan_transfer(
+    src: Storage, dst: Storage, *, recursive: bool, operation: str = "cp"
+) -> TransferPlan:
+    """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
+
+    The route (s3 vs local per side) is read from each endpoint's ``schema``
+    discriminator - the object layer, not a re-parsed scheme string - and the path
+    shape from its ``as_text()``. A non-transfer endpoint (a stream, or a custom
+    backend whose ``schema`` is neither ``"s3"`` nor ``"local"``) is rejected, as
+    is a local->local pair (``aws s3`` has no such route; the CLI layer phrases the
+    strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
+    """
+    src_kind = _endpoint_kind(src, operation=operation)
+    dst_kind = _endpoint_kind(dst, operation=operation)
     if src_kind == "local" and dst_kind == "local":
         raise ValidationError(
             f"{operation} requires at least one s3:// path (local to local is not supported)",
             operation=operation,
         )
 
+    src_text = src.as_text()
+    dst_text = dst.as_text()
     if src_kind == "s3":
-        src_rest = _strip_scheme_normalized(src)
+        src_rest = _strip_scheme_normalized(src_text)
         src_root = s3_format(src_rest, dir_op=recursive)[0]
         src_sep = "/"
         filter_root = _s3_filter_root(src_rest, dir_op=recursive)
     else:
-        src_root = local_format(src, dir_op=recursive)[0]
+        src_root = local_format(src_text, dir_op=recursive)[0]
         src_sep = os.sep
-        filter_root = _local_filter_root(src, dir_op=recursive)
+        filter_root = _local_filter_root(src_text, dir_op=recursive)
 
     if dst_kind == "s3":
-        dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst), dir_op=recursive)
+        dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst_text), dir_op=recursive)
         dst_sep = "/"
     else:
-        dst_root, use_src_name = local_format(dst, dir_op=recursive)
+        dst_root, use_src_name = local_format(dst_text, dir_op=recursive)
         dst_sep = os.sep
 
     paths_type: PathsType

@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import stat as stat_module
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from typing_extensions import override
 
@@ -220,6 +220,8 @@ def _translate_os_error(exc: OSError, *, operation: str, key: str | None) -> Bot
 
 class LocalStorage(Storage):
     """A local filesystem path as one side of a transfer."""
+
+    schema: ClassVar[Literal["s3", "local", "stream"]] = "local"
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)

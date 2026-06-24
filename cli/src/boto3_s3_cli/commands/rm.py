@@ -112,8 +112,9 @@ class RmCommand(Command):
             # aws sends Bucket="" to the API and botocore's client-side
             # validation fails the task -> rc 1: shaped like a
             # per-key failure on the blind single path, a fatal error on the
-            # enumerating paths. S3Storage would reject "s3:///k" as a parse
-            # error (252-shaped), so handle the form before construction.
+            # enumerating paths. S3Storage.validate() would reject "s3:///k" as a
+            # ValidationError (252-shaped), so handle the form before construction
+            # to keep this path at rc 1.
             # botocore's ParamValidationError str uses a colon + newline.
             message = 'Parameter validation failed:\nInvalid bucket name ""'
             if not args.quiet:
@@ -123,10 +124,11 @@ class RmCommand(Command):
                     sys.stderr.write(f"fatal error: {message}\n")
             return 1
 
-        # Outside the fatal-catch below: rejected ARN forms (S3 Object
-        # Lambda / Outposts bucket) raise ValidationError through main ->
-        # rc 252, matching aws's parse-time rejection.
+        # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
+        # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
+        # from the now non-raising construction) through main -> rc 252, matching aws.
         storage = S3Storage(target, client=ctx.client_factory(args))
+        storage.validate()
 
         item_filter = filters.build_filter(args.filters, key=storage.key, recursive=args.recursive)
         printer = _DeletePrinter(

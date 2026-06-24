@@ -108,7 +108,11 @@ class SyncCommand(Command):
             args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
         )
 
-        plan = plan_transfer(src, dst, src_kind=src_type, dst_kind=dst_type, recursive=True)
+        plan = plan_transfer(
+            transferargs.path_storage(src, src_type),
+            transferargs.path_storage(dst, dst_type),
+            recursive=True,
+        )
         # One symmetric filter, compiled against the source root and applied to
         # both sides by S3.sync (sync.md section 1; relative patterns are
         # root-independent, so one compilation suffices).

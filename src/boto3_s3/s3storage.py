@@ -16,7 +16,7 @@ import os
 import re
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from botocore.exceptions import (
     BotoCoreError,
@@ -103,34 +103,18 @@ _S3_OUTPOST_BUCKET_ARN_RE = re.compile(
 
 
 def _parse_s3_url(url: str) -> tuple[str, str]:
-    """Split an ``s3://bucket/key`` URL into ``(bucket, key)``.
+    """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
 
-    ``key`` may be empty (``"s3://bucket"`` or ``"s3://bucket/"``). ``bucket``
-    may also be empty - a bare ``"s3://"`` is the service root (bucket listing)
-    - but a key without a bucket (``"s3:///k"``) is rejected.
-
-    Access-point ARNs (plain and Outposts) are valid bucket parts: the whole
-    ARN - whose name may itself contain ``/`` - becomes ``bucket`` and only
-    what follows it becomes ``key`` (aws-cli's ``find_bucket_key``, ported as
-    ``naming.split_bucket_key``). S3 Object Lambda and Outposts *bucket* ARNs
-    are rejected the way ``aws s3`` rejects them - they are s3api / s3control
-    territory.
+    Either part may be empty: a bare ``"s3://"`` is the service root (bucket
+    listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
+    (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
+    contain ``/`` (aws-cli's ``find_bucket_key``, ported as
+    ``naming.split_bucket_key``). The strict aws-cli checks - the unsupported S3
+    Object Lambda / Outposts *bucket* ARN forms, and a key with no bucket - are
+    deferred to :meth:`S3Storage.validate`, so construction itself never raises.
     """
-    scheme, sep, rest = url.partition("://")
-    if not sep or scheme != "s3":
-        raise ValidationError(f"not an s3:// URL: {url!r}")
-    if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
-        raise ValidationError(
-            "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
-        )
-    if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
-        raise ValidationError(
-            "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
-        )
-    bucket, key = split_bucket_key(rest)
-    if not bucket and key:
-        raise ValidationError(f"s3:// URL has a key but no bucket: {url!r}")
-    return bucket, key
+    rest = url.partition("://")[2]
+    return split_bucket_key(rest)
 
 
 def _translate_client_error(
@@ -260,10 +244,11 @@ class S3Storage(Storage):
     (intentional library leniency; :meth:`S3.resolve` stays strict and routes a
     bare ``"bucket/key"`` to local instead). An empty bucket part (bare ``"s3://"``) is the
     *service root*: :meth:`scan` then lists the account's buckets instead of
-    objects; a key without a bucket (``"s3:///k"``) is rejected. The bucket
-    part may be an access-point ARN (plain or Outposts), which is passed whole
-    as the ``Bucket`` parameter; S3 Object Lambda and Outposts bucket ARNs are
-    rejected like ``aws s3`` rejects them (see :func:`_parse_s3_url`). When
+    objects; a key without a bucket (``"s3:///k"``) is rejected by
+    :meth:`validate`. The bucket part may be an access-point ARN (plain or
+    Outposts), which is passed whole as the ``Bucket`` parameter; S3 Object Lambda
+    and Outposts bucket ARNs are rejected like ``aws s3`` rejects them (by
+    :meth:`validate`, deferred from construction). When
     ``client`` is omitted, a default ``boto3.client("s3")``
     is built lazily on first use and owned by this instance (released by
     :meth:`close`). The region is not derived from the URL; for a specific
@@ -275,6 +260,8 @@ class S3Storage(Storage):
     elsewhere). For concurrent use, build the client at a safe time on the caller
     side and pass it in rather than relying on the lazy default.
     """
+
+    schema: ClassVar[Literal["s3", "local", "stream"]] = "s3"
 
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
         text = os.fspath(url)
@@ -315,6 +302,28 @@ class S3Storage(Storage):
         if self._key:
             return f"s3://{self._bucket}/{self._key}"
         return f"s3://{self._bucket}"
+
+    @override
+    def validate(self) -> None:
+        """Reject the resource forms ``aws s3`` rejects at parse time (rc 252).
+
+        Deferred from construction (:meth:`Storage.validate`): S3 Object Lambda
+        and Outposts *bucket* ARNs (s3api / s3control territory), and a key with
+        no bucket (``"s3:///k"``). The library calls this before an operation and
+        the CLI at its parity-correct point, so a malformed location fails loud
+        instead of reaching the API as a cryptic botocore error. Idempotent.
+        """
+        rest = self._url.partition("://")[2]
+        if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
+            raise ValidationError(
+                "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
+            )
+        if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
+            raise ValidationError(
+                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
+            )
+        if not self._bucket and self._key:
+            raise ValidationError(f"s3:// URL has a key but no bucket: {self._url!r}")
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.

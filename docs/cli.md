@@ -196,8 +196,9 @@ sources.
 The bucket part of an S3 URI may also be an access point ARN (regular /
 Outposts), and just like aws-cli's `find_bucket_key`, the entire ARN (including
 the `/`-separated name) is passed as `Bucket`. S3 Object Lambda / Outposts
-**bucket** ARNs are rejected at parse time, as in aws (rc 252). Both are
-implemented in the library layer (`S3Storage`'s URL parsing).
+**bucket** ARNs are rejected by `S3Storage.validate()` (deferred from the
+permissive construction), matching aws's rc 252. Both are implemented in the
+library layer.
 
 ### 5.1 `ls`
 

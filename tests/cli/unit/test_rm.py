@@ -141,8 +141,8 @@ class TestExitCodeShape:
         assert "NoSuchBucket" in result.stderr
 
     def test_object_lambda_arn_stays_usage_error(self) -> None:
-        # Parse-time ARN rejections must reach main's 252 mapping, not be
-        # swallowed into rm's rc-1 fatal path.
+        # S3Storage.validate() ARN rejections must reach main's 252 mapping, not
+        # be swallowed into rm's rc-1 fatal path.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
         result = run_cli_in_process(["rm", f"s3://{arn}"], ctx=_ctx(object()))
         assert result.rc == 252

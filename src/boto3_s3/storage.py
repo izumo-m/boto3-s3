@@ -62,12 +62,19 @@ def _sieve_pages(
 class Storage(abc.ABC):
     """One side of a data location (local filesystem, an S3 bucket/prefix, ...).
 
-    Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`, and
-    :meth:`as_text` to add a data source; :meth:`scan` (prefetch + flatten) is
-    provided concretely on top of ``scan_pages``, and :meth:`__str__` delegates
-    to :meth:`as_text`. Built-in implementations are ``LocalStorage`` and
-    ``S3Storage``.
+    Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`, :meth:`as_text`,
+    and set the :attr:`schema` discriminator to add a data source; :meth:`scan`
+    (prefetch + flatten) is provided concretely on top of ``scan_pages``,
+    :meth:`__str__` delegates to :meth:`as_text`, and :meth:`validate` is a no-op
+    by default (override to reject a malformed location before an operation uses
+    it). Built-in implementations are ``LocalStorage`` and ``S3Storage``.
     """
+
+    #: Which built-in family this Storage belongs to - the object-layer
+    #: discriminator ``naming.plan_transfer`` reads instead of re-parsing the
+    #: scheme from a string. ``"s3"`` / ``"local"`` are the transferable container
+    #: pair; ``"stream"`` is a stdio endpoint. Each concrete Storage sets it.
+    schema: ClassVar[Literal["s3", "local", "stream"]]
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
@@ -152,6 +159,16 @@ class Storage(abc.ABC):
     def __str__(self) -> str:
         """Delegate to :meth:`as_text` so ``str(storage)`` is its path-shape token."""
         return self.as_text()
+
+    def validate(self) -> None:  # noqa: B027 - deliberate concrete no-op; S3Storage overrides
+        """Run any deferred strict validation on this location (no-op by default).
+
+        Construction is permissive (a building block); an operation - or the CLI
+        at its parity point - calls this to reject a malformed location loudly
+        before use. ``S3Storage`` overrides it with the aws-cli-parity checks
+        (unsupported ARN forms, a key with no bucket); built-ins that need none
+        keep this no-op. Idempotent.
+        """
 
 
 # A path argument accepted by the operation APIs: a string (``"s3://b/k"`` or a

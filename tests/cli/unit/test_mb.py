@@ -116,7 +116,7 @@ class TestUsageErrors:
         assert rc == 255  # the construction error, not the scheme 252
 
     def test_object_lambda_arn_is_252_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The S3Storage parse rejection must stay outside mb's rc-1 catch.
+        # The S3Storage.validate() rejection must stay outside mb's rc-1 catch.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-ap"
         rc = cli.main(["mb", f"s3://{arn}"], ctx=_ctx(None))
         assert rc == 252

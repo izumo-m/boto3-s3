@@ -30,6 +30,7 @@ from boto3_s3_cli import filters, shorthand
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from boto3_s3 import LocalStorage, S3Storage
     from boto3_s3_cli.commands.base import Context
     from boto3_s3_cli.progress import TransferPrinter
 
@@ -444,17 +445,38 @@ def resolve_locations(
     # stay SDK-free (import contract, docs/imports.md).
     from boto3_s3 import S3Storage
 
+    def _s3(arg: str, client_for: Any) -> S3Storage:
+        # Construction is permissive (non-raising); validate the strict aws-cli
+        # forms here - the same point construction used to reject them, so a usage
+        # error (rc 252) still precedes the transfer pipeline.
+        storage = S3Storage(arg, client=client_for)
+        storage.validate()
+        return storage
+
     if src_type == "local":
-        return src, S3Storage(dst, client=client)
+        return src, _s3(dst, client)
     if dst_type == "local":
-        return S3Storage(src, client=client), dst
+        return _s3(src, client), dst
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))
         source_args.region = args.source_region
         source_args.endpoint_url = None
         source_client = ctx.client_factory(source_args)
-    return S3Storage(src, client=source_client), S3Storage(dst, client=client)
+    return _s3(src, source_client), _s3(dst, client)
+
+
+def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
+    """The schema-bearing Storage ``naming.plan_transfer`` reads for cp/mv/sync.
+
+    ``plan_transfer`` needs only ``.schema`` / ``.as_text()``, so the S3 side
+    carries no client here - this is the throwaway used purely to derive the path
+    shapes (``filter_root``, the stdin dest key). The real transfer storages (with
+    a client) are built in :func:`resolve_locations`.
+    """
+    from boto3_s3 import LocalStorage, S3Storage
+
+    return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
 
 
 def resolve_transfer_config(args: argparse.Namespace, ctx: Context, *, paths_type: str) -> Any:
