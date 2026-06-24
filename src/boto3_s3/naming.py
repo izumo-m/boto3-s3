@@ -186,9 +186,12 @@ def same_key(src: str, dest: str) -> bool:
 class TransferPlan:
     """The resolved shape of one cp/mv/sync path pair.
 
-    ``src_root`` / ``dst_root`` are the *formatted* sides (aws-cli's
-    ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as a
-    native absolute path; directory semantics are expressed by a trailing
+    ``src`` / ``dst`` are the resolved endpoint ``Storage`` objects this plan was
+    built from, retained so the transfer can drive each side's own ``scan`` (and
+    honor a ``Storage`` subclass override) instead of re-deriving the walk from
+    the formatted root. ``src_root`` / ``dst_root`` are the *formatted* sides
+    (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
+    a native absolute path; directory semantics are expressed by a trailing
     separator. ``filter_root`` is what ``--exclude`` / ``--include`` patterns
     resolve against (aws-cli's ``filters._get_*_root``): for an S3 source the
     *key*-derived root (the bucket cancels out of the relative match, exactly
@@ -200,6 +203,8 @@ class TransferPlan:
     paths_type: PathsType
     dir_op: bool
     use_src_name: bool
+    src: Storage
+    dst: Storage
     src_root: str
     dst_root: str
     src_sep: str
@@ -278,6 +283,8 @@ def plan_transfer(
         paths_type=paths_type,
         dir_op=recursive,
         use_src_name=use_src_name,
+        src=src,
+        dst=dst,
         src_root=src_root,
         dst_root=dst_root,
         src_sep=src_sep,
