@@ -45,7 +45,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from boto3_s3.types import FileInfo
@@ -157,7 +157,6 @@ def _has_drive(p: str) -> bool:
 # ----- runtime protocols ---------------------------------------------------
 
 
-@runtime_checkable
 class Matcher(Protocol):
     """Final include/exclude decision for a key.
 
