@@ -19,6 +19,7 @@ from boto3_s3.exceptions import ValidationError
 from boto3_s3.globsieve import translate_pattern_for_root
 from boto3_s3.naming import (
     classify,
+    dest_for,
     item_paths,
     local_format,
     normalize_s3_uri,
@@ -210,6 +211,33 @@ class TestItemPaths:
         dest, compare_key = item_paths(plan, "b/pre/sub/f.txt")
         assert dest == str(tmp_path / "out" / "sub" / "f.txt")
         assert compare_key == "sub/f.txt"
+
+
+class TestDestFor:
+    """``dest_for`` is the dest half of ``item_paths``, fed a producer-stamped
+    ``compare_key`` directly (what the transfer item builders use)."""
+
+    def test_appends_compare_key_when_dest_takes_source_name(self, tmp_path: Path) -> None:
+        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
+        assert plan.use_src_name is True
+        assert dest_for(plan, "sub/f.txt") == "b/tree/sub/f.txt"
+
+    def test_root_verbatim_when_dest_keeps_its_name(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        plan = plan_transfer(str(src), "s3://b/up/key.bin", recursive=False)
+        assert plan.use_src_name is False
+        assert dest_for(plan, "a.txt") == "b/up/key.bin"
+
+    def test_translates_to_the_destination_separator(self, tmp_path: Path) -> None:
+        plan = plan_transfer("s3://b/pre/", str(tmp_path / "out"), recursive=True)
+        assert dest_for(plan, "sub/f.txt") == str(tmp_path / "out" / "sub" / "f.txt")
+
+    def test_matches_item_paths(self, tmp_path: Path) -> None:
+        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
+        src_path = plan.src_root + os.path.join("sub", "f.txt")
+        dest, compare_key = item_paths(plan, src_path)
+        assert dest_for(plan, compare_key) == dest
 
 
 class TestFilterRoot:

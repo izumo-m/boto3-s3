@@ -313,6 +313,20 @@ def _local_filter_root(path: str, *, dir_op: bool) -> str:
     return os.path.abspath(os.path.dirname(path))
 
 
+def dest_for(plan: TransferPlan, compare_key: str) -> str:
+    """The destination path for an item from its root-relative ``compare_key``.
+
+    The destination half of aws-cli's ``find_dest_path_comp_key``: the
+    ``/``-separated ``compare_key`` is appended (separator-translated) to the
+    destination root only when the destination adopts the source's name;
+    otherwise the root stands alone. A producer-stamped ``FileInfo.compare_key``
+    feeds this directly, so a transfer needs no re-derivation from the full key.
+    """
+    if plan.use_src_name:
+        return plan.dst_root + compare_key.replace("/", plan.dst_sep)
+    return plan.dst_root
+
+
 def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     """Derive one item's ``(dest_path, compare_key)`` from its source path.
 
@@ -321,18 +335,16 @@ def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     component. ``compare_key`` is that relative part ``/``-separated - the
     name under which the item is filtered, reported, and (for sync) compared.
     The destination appends it (separator-translated) only when the
-    destination takes the source's name.
+    destination takes the source's name. Used where no listing ``FileInfo`` is
+    at hand (a stream's dest); the listing paths read ``FileInfo.compare_key``
+    and call :func:`dest_for` directly.
     """
     if plan.dir_op:
         rel_path = src_path[len(plan.src_root) :]
     else:
         rel_path = src_path.split(plan.src_sep)[-1]
     compare_key = rel_path.replace(plan.src_sep, "/")
-    if plan.use_src_name:
-        dest_path = plan.dst_root + rel_path.replace(plan.src_sep, plan.dst_sep)
-    else:
-        dest_path = plan.dst_root
-    return dest_path, compare_key
+    return dest_for(plan, compare_key), compare_key
 
 
 __all__ = [
@@ -340,6 +352,7 @@ __all__ = [
     "PathsType",
     "TransferPlan",
     "classify",
+    "dest_for",
     "item_paths",
     "local_format",
     "normalize_s3_uri",

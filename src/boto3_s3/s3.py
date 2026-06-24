@@ -78,9 +78,6 @@ _MAX_UPLOAD_SIZE_TEXT = "48.8 TiB"
 
 _GLACIER_STORAGE_CLASSES = ("GLACIER", "DEEP_ARCHIVE")
 
-# Internal predicate shape for cp's filter: (info, compare_key) -> keep?
-_CpKeep = Callable[[FileInfo, str], bool]
-
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
     """The prefix root an ``rm`` of ``key`` operates under (aws-cli parity).
@@ -117,24 +114,16 @@ def _is_folder_marker(info: FileInfo) -> bool:
     return info.size == 0 and info.key.endswith("/")
 
 
-def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
-    """Adapt a ``FileFilter`` to the internal ``(info, compare_key)`` test.
+def _ckey(info: FileInfo) -> str:
+    """The producer-stamped ``compare_key``, narrowed to ``str``.
 
-    The scan computes each entry's compare key (its key relative to the
-    operation root - the space ``TransferPlan.filter_root``-translated patterns
-    live in); this stamps it onto ``info.compare_key`` before consulting the
-    predicate, so a glob filter matches the root-relative key while a richer
-    predicate still sees the full ``FileInfo``.
+    Every ``Storage.scan`` / ``walk_local`` entry carries it (the single-item
+    HEAD path stamps it too), so a transfer reads it instead of re-deriving the
+    root-relative key. ``None`` would mean a producer skipped the stamp - a bug.
     """
-    if item_filter is None:
-        return None
-    predicate = item_filter
-
-    def keep(info: FileInfo, compare_key: str) -> bool:
-        info.compare_key = compare_key
-        return predicate(info)
-
-    return keep
+    key = info.compare_key
+    assert key is not None, "compare_key must be stamped before transfer"
+    return key
 
 
 def _copy_all(_pair: SyncPair) -> bool:
@@ -794,7 +783,6 @@ class S3:
             src_s3 = src_storage
             dst_bucket = dst_storage.bucket
 
-        keep = _cp_keep(item_filter)
         case_gate = self._cp_case_gate(plan, kind=kind, recursive=recursive, options=options)
         transferrer = Transferrer(
             kind,
@@ -814,7 +802,7 @@ class S3:
                     dst_bucket=dst_bucket,
                     transferrer=transferrer,
                     follow_symlinks=follow_symlinks,
-                    keep=keep,
+                    item_filter=item_filter,
                 )
             else:
                 items = self._cp_s3_source_items(
@@ -824,7 +812,7 @@ class S3:
                     dst_bucket=dst_bucket,
                     transferrer=transferrer,
                     page_size=page_size,
-                    keep=keep,
+                    item_filter=item_filter,
                     options=options,
                     case_gate=case_gate,
                     operation=operation,
@@ -854,12 +842,13 @@ class S3:
         dst_bucket: str,
         transferrer: Transferrer,
         follow_symlinks: bool,
-        keep: _CpKeep | None,
+        item_filter: FileFilter | None,
     ) -> Iterator[TransferItem]:
         """Materialize upload items from the local walk (warnings -> rollup).
 
         No directory check on the single path, like aws: a directory source
-        becomes an item whose open fails in flight ([Errno 21], rc 1).
+        becomes an item whose open fails in flight ([Errno 21], rc 1). The walk
+        stamps each entry's ``compare_key``, so ``item_filter`` reads it directly.
         """
         infos = walk_local(
             plan.src_root,
@@ -868,10 +857,8 @@ class S3:
             on_warning=transferrer.warn,
         )
         for info in infos:
-            if keep is not None:
-                _dest, compare_key = naming.item_paths(plan, to_native_path(info.key))
-                if not keep(info, compare_key):
-                    continue
+            if item_filter is not None and not item_filter(info):
+                continue
             yield self._upload_item_from_info(
                 plan, info, dst_bucket=dst_bucket, transferrer=transferrer
             )
@@ -886,7 +873,8 @@ class S3:
     ) -> TransferItem:
         """One upload item from a walk entry (the oversize warning included)."""
         native = to_native_path(info.key)
-        dest, compare_key = naming.item_paths(plan, native)
+        compare_key = _ckey(info)
+        dest = naming.dest_for(plan, compare_key)
         if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
             # aws-cli's _warn_if_too_large: warn (rendered relative) but
             # still attempt, so S3's own EntityTooLarge stays visible.
@@ -915,7 +903,7 @@ class S3:
         dst_bucket: str,
         transferrer: Transferrer,
         page_size: int,
-        keep: _CpKeep | None,
+        item_filter: FileFilter | None,
         options: TransferOptions,
         case_gate: _CaseConflictGate | None = None,
         operation: str = "cp",
@@ -927,7 +915,7 @@ class S3:
                 src_storage,
                 key_prefix=plan.src_root[len(bucket) + 1 :],
                 page_size=page_size,
-                keep=keep,
+                item_filter=item_filter,
                 options=options,
             )
         elif not src_storage.key:
@@ -975,7 +963,8 @@ class S3:
         """One download item from a listing entry, or ``None`` once a gate
         consumed it (the gate emits its own warn/skip/notice record)."""
         src_path = f"{bucket}/{info.key}"
-        dest, compare_key = naming.item_paths(plan, src_path)
+        compare_key = _ckey(info)
+        dest = naming.dest_for(plan, compare_key)
         src_display = f"s3://{src_path}"
         is_s3_info = isinstance(info, S3FileInfo)
         item = TransferItem(
@@ -1030,7 +1019,8 @@ class S3:
         """One S3-to-S3 copy item from a listing entry, or ``None`` when the
         glacier gate consumed it."""
         src_path = f"{bucket}/{info.key}"
-        dest, compare_key = naming.item_paths(plan, src_path)
+        compare_key = _ckey(info)
+        dest = naming.dest_for(plan, compare_key)
         src_display = f"s3://{src_path}"
         is_s3_info = isinstance(info, S3FileInfo)
         if _glacier_blocked(info, kind=OpKind.COPY, options=options):
@@ -1059,15 +1049,15 @@ class S3:
         *,
         key_prefix: str,
         page_size: int,
-        keep: _CpKeep | None,
+        item_filter: FileFilter | None,
         options: TransferOptions,
     ) -> Iterator[FileInfo]:
         """A recursive object listing anchored at the '/'-normalized ``key_prefix``.
 
         The shared transfer-side enumeration: cp/mv scan their source here,
         and sync scans whichever of its sides is S3 (the destination too).
-        Folder markers never surface, and ``keep`` sees the prefix-relative
-        key (the compare key).
+        Folder markers never surface; the scan stamps each entry's prefix-relative
+        ``compare_key``, which ``item_filter`` matches against.
         """
         bucket = storage.bucket
         list_storage = storage
@@ -1079,9 +1069,9 @@ class S3:
             # (aws-cli filegenerator); the user filter prunes what remains.
             if info.size == 0 and info.key.endswith("/"):
                 return False
-            if keep is None:
+            if item_filter is None:
                 return True
-            return keep(info, info.key[len(key_prefix) :])
+            return item_filter(info)
 
         scan_options = ScanOptions(
             recursive=True,
@@ -1123,6 +1113,8 @@ class S3:
                 key=key,
             ) from exc
         etag = head.get("ETag")
+        # A single (non-dir_op) source: the compare key is the key's basename,
+        # matching naming.item_paths' single-item branch.
         yield S3FileInfo(
             key=key,
             size=head.get("ContentLength"),
@@ -1130,6 +1122,7 @@ class S3:
             etag=etag.strip('"') if etag else None,
             storage_class=head.get("StorageClass"),
             head=head,
+            compare_key=key.rsplit("/", 1)[-1],
         )
 
     def _cp_stream(
@@ -1460,10 +1453,10 @@ class S3:
             decide = _copy_none
         else:
             decide = compare
-        keep = _cp_keep(filter)
         # delete is False/True (no per-orphan filter) or a FileFilter that
-        # narrows which destination-only orphans are deleted (matched like rm).
-        delete_keep = _cp_keep(delete) if not isinstance(delete, bool) else None
+        # narrows which destination-only orphans are deleted (matched like rm);
+        # the producer-stamped compare_key lets it read the entry directly.
+        delete_keep = delete if not isinstance(delete, bool) else None
         case_gate = self._sync_case_gate(kind, options=options)
 
         transferrer = Transferrer(
@@ -1488,7 +1481,7 @@ class S3:
             src_entries = self._sync_entries(
                 src_storage,
                 root=plan.src_root,
-                keep=keep,
+                item_filter=filter,
                 transferrer=transferrer,
                 follow_symlinks=follow_symlinks,
                 page_size=page_size,
@@ -1497,7 +1490,7 @@ class S3:
             dst_entries = self._sync_entries(
                 dst_storage,
                 root=plan.dst_root,
-                keep=keep,
+                item_filter=filter,
                 transferrer=transferrer,
                 follow_symlinks=follow_symlinks,
                 page_size=page_size,
@@ -1526,7 +1519,7 @@ class S3:
             def submit_delete(pair: SyncPair) -> None:
                 if delete_keep is not None:
                     assert pair.dst is not None
-                    if not delete_keep(pair.dst, pair.key):
+                    if not delete_keep(pair.dst):
                         return
                 deletes.submit(pair, plan)
 
@@ -1575,7 +1568,7 @@ class S3:
         storage: Storage,
         *,
         root: str,
-        keep: _CpKeep | None,
+        item_filter: FileFilter | None,
         transferrer: Transferrer,
         follow_symlinks: bool,
         page_size: int,
@@ -1587,23 +1580,26 @@ class S3:
         the transfer rollup (both sides warn, aws parity); an S3 side is the
         shared anchored listing (folder markers dropped, ``request_payer`` /
         ``page_size`` forwarded - aws-cli maps them onto the destination
-        listing too).
+        listing too). Both sides' producers stamp ``compare_key`` (the merge-join
+        axis), so ``item_filter`` reads it and the pair key is taken from it.
         """
         if isinstance(storage, S3Storage):
             key_prefix = root[len(storage.bucket) + 1 :]
             for info in self._cp_scan(
-                storage, key_prefix=key_prefix, page_size=page_size, keep=keep, options=options
+                storage,
+                key_prefix=key_prefix,
+                page_size=page_size,
+                item_filter=item_filter,
+                options=options,
             ):
-                yield info.key[len(key_prefix) :], info
+                yield _ckey(info), info
             return
-        prefix = root.replace(os.sep, "/")
         for info in walk_local(
             root, dir_op=True, follow_symlinks=follow_symlinks, on_warning=transferrer.warn
         ):
-            compare_key = info.key[len(prefix) :]
-            if keep is not None and not keep(info, compare_key):
+            if item_filter is not None and not item_filter(info):
                 continue
-            yield compare_key, info
+            yield _ckey(info), info
 
     def _sync_transfer_item(
         self,
@@ -1705,12 +1701,12 @@ class S3:
             # service-root branch list buckets.
             raise ValidationError('Invalid bucket name "": rm requires a bucket', operation="rm")
         root = rm_filter_root(storage.key, recursive=recursive)
-        decide = self._rm_decider(filter, strip=len(root))
 
         if not recursive and storage.key:
             self._rm_single(
                 storage,
-                decide,
+                filter,
+                root=root,
                 dryrun=dryrun,
                 request_payer=request_payer,
                 on_result=on_result,
@@ -1728,7 +1724,7 @@ class S3:
             recursive=True,
             page_size=page_size,
             request_payer=request_payer,
-            filter=self._rm_scan_filter(decide, sweep=not recursive),
+            filter=self._rm_scan_filter(filter, sweep=not recursive),
         )
 
         if dryrun:
@@ -1752,57 +1748,43 @@ class S3:
             ) from deleter.first_error
 
     @staticmethod
-    def _rm_decider(
-        item_filter: FileFilter | None, *, strip: int
-    ) -> Callable[[FileInfo], bool] | None:
-        """Wrap a ``FileFilter`` to stamp the compare key before each test.
-
-        ``None`` means "keep everything" - kept as ``None`` (not a tautology
-        lambda) so the unfiltered paths pay no per-object predicate call. Every
-        candidate key starts with the root (the recursive listing uses it as
-        Prefix; a single key starts with its own parent), so a plain slice
-        yields the root-relative ``compare_key`` a glob filter matches against.
-        """
-        if item_filter is None:
-            return None
-        predicate = item_filter
-
-        def decide(info: FileInfo) -> bool:
-            info.compare_key = info.key[strip:]
-            return predicate(info)
-
-        return decide
-
-    @staticmethod
-    def _rm_scan_filter(
-        decide: Callable[[FileInfo], bool] | None, *, sweep: bool
-    ) -> Callable[[FileInfo], bool] | None:
+    def _rm_scan_filter(item_filter: FileFilter | None, *, sweep: bool) -> FileFilter | None:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
-        Composes the keyless-sweep marker test with ``decide``, marker first:
-        the sweep selects only folder markers, and the user filter then prunes
-        those candidates (aws-cli order). ``None`` when there is nothing to
-        test. Evaluated page by page on the scan prefetch worker.
+        The scan stamps each entry's root-relative ``compare_key`` (the listing is
+        anchored at the prefix), so a glob/user filter reads it directly. The
+        keyless sweep additionally restricts to folder markers (marker test first,
+        then the user filter - aws-cli order). ``None`` when there is nothing to
+        test, so unfiltered paths pay no per-object call. Evaluated page by page on
+        the scan prefetch worker.
         """
         if not sweep:
-            return decide
-        if decide is None:
+            return item_filter
+        if item_filter is None:
             return _is_folder_marker
-        keep = decide
-        return lambda info: _is_folder_marker(info) and keep(info)
+        predicate = item_filter
+        return lambda info: _is_folder_marker(info) and predicate(info)
 
     @staticmethod
     def _rm_single(
         storage: S3Storage,
-        decide: Callable[[FileInfo], bool] | None,
+        item_filter: FileFilter | None,
         *,
+        root: str,
         dryrun: bool,
         request_payer: str | None,
         on_result: ResultCallback | None,
     ) -> None:
-        """The blind single-key path (no listing; aws ``_list_single_object``)."""
+        """The blind single-key path (no listing; aws ``_list_single_object``).
+
+        No scan runs here, so the entry's ``compare_key`` (its key relative to
+        ``root`` = :func:`rm_filter_root`, what a glob filter matches) is stamped
+        on the hand-built ``FileInfo``.
+        """
         key = storage.key
-        if decide is not None and not decide(S3FileInfo(key=key)):
+        if item_filter is not None and not item_filter(
+            S3FileInfo(key=key, compare_key=key[len(root) :])
+        ):
             return
         if dryrun:
             _emit_result(on_result, key=key, outcome=OpOutcome.DRYRUN)
