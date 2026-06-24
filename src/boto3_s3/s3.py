@@ -117,28 +117,6 @@ def _is_folder_marker(info: FileInfo) -> bool:
     return info.size == 0 and info.key.endswith("/")
 
 
-def _cp_text(storage: Storage, *, operation: str = "cp") -> str:
-    """The textual form ``naming.plan_transfer`` resolves (aws-cli path shapes).
-
-    An ``S3Storage`` reconstructs its ``s3://bucket/key`` (the keyless form
-    stays slashless so the bucket-root normalization applies, exactly like a
-    raw ``s3://bucket`` argument); a ``LocalStorage`` contributes its path as
-    given - the trailing-separator rule reads the raw form. Other ``Storage``
-    subclasses are not transferable yet.
-    """
-    if isinstance(storage, S3Storage):
-        if storage.key:
-            return f"s3://{storage.bucket}/{storage.key}"
-        return f"s3://{storage.bucket}"
-    if isinstance(storage, LocalStorage):
-        return storage.path
-    raise ValidationError(
-        f"{operation} supports s3:// URIs, local paths, S3Storage, and LocalStorage "
-        f"(got {type(storage).__name__})",
-        operation=operation,
-    )
-
-
 def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
     """Adapt a ``FileFilter`` to the internal ``(info, compare_key)`` test.
 
@@ -763,8 +741,8 @@ class S3:
         no such restriction.
         """
         plan = naming.plan_transfer(
-            _cp_text(src_storage, operation=operation),
-            _cp_text(dst_storage, operation=operation),
+            src_storage.as_text(),
+            dst_storage.as_text(),
             recursive=recursive,
             operation=operation,
         )
@@ -1309,8 +1287,8 @@ class S3:
         src_storage = self.resolve(src)
         dst_storage = self.resolve(dst)
         if isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage):
-            src_text = naming.normalize_s3_uri(_cp_text(src_storage, operation="mv"))
-            dst_text = naming.normalize_s3_uri(_cp_text(dst_storage, operation="mv"))
+            src_text = naming.normalize_s3_uri(src_storage.as_text())
+            dst_text = naming.normalize_s3_uri(dst_storage.as_text())
             if naming.same_path(src_text, dst_text):
                 raise ValidationError(
                     f"Cannot mv a file onto itself: {src_text} - {dst_text}",
@@ -1418,8 +1396,8 @@ class S3:
         src_storage = self.resolve(src)
         dst_storage = self.resolve(dst)
         plan = naming.plan_transfer(
-            _cp_text(src_storage, operation="sync"),
-            _cp_text(dst_storage, operation="sync"),
+            src_storage.as_text(),
+            dst_storage.as_text(),
             recursive=True,
             operation="sync",
         )

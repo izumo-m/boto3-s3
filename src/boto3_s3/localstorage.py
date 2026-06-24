@@ -229,6 +229,15 @@ class LocalStorage(Storage):
         return self._path
 
     @override
+    def as_text(self) -> str:
+        """Return the path as given (:meth:`Storage.as_text`).
+
+        The raw constructor form, verbatim - the trailing-separator rule that
+        ``naming`` applies reads this unmodified token.
+        """
+        return self._path
+
+    @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path` one stat batch at a time.
 

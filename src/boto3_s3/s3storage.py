@@ -303,6 +303,19 @@ class S3Storage(Storage):
         """The key or prefix part of the URL (may be empty)."""
         return self._key
 
+    @override
+    def as_text(self) -> str:
+        """Reconstruct the ``s3://bucket/key`` token (:meth:`Storage.as_text`).
+
+        Rebuilt from :attr:`bucket` / :attr:`key`, not from the raw constructor
+        input, so a keyless location normalizes to a slashless ``s3://bucket``
+        (and the bare service root to ``s3://``) - exactly the token a raw
+        ``s3://bucket`` argument carries into ``naming``.
+        """
+        if self._key:
+            return f"s3://{self._bucket}/{self._key}"
+        return f"s3://{self._bucket}"
+
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.
 

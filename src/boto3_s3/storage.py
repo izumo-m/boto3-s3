@@ -2,7 +2,9 @@
 
 ``Storage`` is the abstract extension surface for one side of a data location.
 It has three operations - :meth:`scan` (enumerate), :meth:`open` (read/write a
-single object as a binary stream), :meth:`delete` - plus the ``Location`` type.
+single object as a binary stream), :meth:`delete` - plus :meth:`as_text` (its
+canonical aws-cli path-shape token, the inverse of :meth:`S3.resolve`) and the
+``Location`` type.
 Built-in implementations are ``S3Storage`` and ``LocalStorage``; turning a
 ``Location`` (string / path) into a concrete ``Storage`` is :meth:`S3.resolve`'s
 job, the customization seam for adding URL schemes.
@@ -56,9 +58,11 @@ def _sieve_pages(
 class Storage(abc.ABC):
     """One side of a data location (local filesystem, an S3 bucket/prefix, ...).
 
-    Implement :meth:`scan_pages`, :meth:`open`, and :meth:`delete` to add a data
-    source; :meth:`scan` (prefetch + flatten) is provided concretely on top of
-    ``scan_pages``. Built-in implementations are ``LocalStorage`` and ``S3Storage``.
+    Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`, and
+    :meth:`as_text` to add a data source; :meth:`scan` (prefetch + flatten) is
+    provided concretely on top of ``scan_pages``, and :meth:`__str__` delegates
+    to :meth:`as_text`. Built-in implementations are ``LocalStorage`` and
+    ``S3Storage``.
     """
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
@@ -128,6 +132,22 @@ class Storage(abc.ABC):
     @abc.abstractmethod
     def delete(self, key: str) -> None:
         """Delete the object at ``key`` (for ``rm`` / ``mv`` source / ``sync --delete``)."""
+
+    @abc.abstractmethod
+    def as_text(self) -> str:
+        """Return this location's canonical aws-cli path-shape token.
+
+        The inverse of :meth:`S3.resolve`: an ``S3Storage`` yields
+        ``s3://bucket/key`` (a keyless location stays slashless, ``s3://bucket``),
+        a ``LocalStorage`` its path as given, so ``S3.resolve(s.as_text())``
+        round-trips a locatable Storage. This is the form ``naming.plan_transfer``
+        consumes and ``aws s3`` displays. A stream endpoint has no location, so
+        its token (``"-"``) is display-only - not round-trippable.
+        """
+
+    def __str__(self) -> str:
+        """Delegate to :meth:`as_text` so ``str(storage)`` is its path-shape token."""
+        return self.as_text()
 
 
 # A path argument accepted by the operation APIs: a string (``"s3://b/k"`` or a

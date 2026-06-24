@@ -124,7 +124,7 @@ sync orchestrator rather than in this deleter module - `_SyncDeletes` drives an
 `S3Deleter` for an S3 dest and a synchronous `os.remove` for a local dest; see
 [`sync.md`](./sync.md) section 2 / 5), a `Deleter` ABC / `Storage.deleter()`
 factory (considered, but not adopted: sync uses `S3Deleter` directly, and the
-`Storage` ABC stays at scan_pages / open / delete), dryrun (the responsibility
+`Storage` ABC keeps deletion as the plain per-key `delete`), dryrun (the responsibility
 of the orchestrator layer - `S3.rm` handles it before reaching the deleter),
 the cancel token, and deletion by `VersionId`.
 

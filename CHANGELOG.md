@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `Storage.as_text()` (and `str(Storage)`): a Storage's canonical `aws s3`
+  path-shape token (the inverse of `S3.resolve`).
+
 ## [0.2.0] - 2026-06-23
 
 - Add streaming `cp`: wrap a stream in `IOStorage` / `StdioStorage` and pass it
