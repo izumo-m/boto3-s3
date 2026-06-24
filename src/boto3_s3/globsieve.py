@@ -518,10 +518,10 @@ class GlobFilter:
         key = info.compare_key
         if key is None:
             raise ValueError(
-                "GlobFilter matches FileInfo.compare_key, which an operation "
-                "stamps before consulting the filter; it is unset here. Apply "
-                "the filter through S3.cp / mv / rm / sync rather than calling "
-                "it directly."
+                "GlobFilter matches FileInfo.compare_key, which Storage.scan "
+                "stamps on each entry; it is unset here (a hand-built FileInfo). "
+                "Filter through Storage.scan / S3.cp / mv / rm / sync rather than "
+                "calling it directly."
             )
         compiled = self._compiled
         if compiled is None:

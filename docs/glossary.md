@@ -80,9 +80,10 @@ group (`aws s3`).
   key / prefix / bucket name, or a local path with the host `os.sep` translated
   to `/`). It is `/`-form on **every OS**, never the host separator, so the two
   sides of a sync share one merge/sort key space. (`FileInfo.key`.)
-- **compare key** - the **key** relative to the operation's scan root (the full
-  key with the root prefix stripped), `/`-separated. It is what sync's merge-join
-  pairs on and what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`)
-  is matched against; it is carried on `FileInfo.compare_key`, stamped just
-  before a filter runs. Pattern form and OS handling are in
+- **compare key** - the **key** relative to its scan root (the full key with the
+  root prefix stripped), `/`-separated. It is what sync's merge-join pairs on and
+  what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`) is matched
+  against; it is carried on `FileInfo.compare_key`, stamped by `Storage.scan` on
+  every entry it yields, so a custom filter can read it directly. The name mirrors
+  aws-cli's `FileInfo.compare_key`. Pattern form and OS handling are in
   [`globsieve.md`](./globsieve.md) section 4.

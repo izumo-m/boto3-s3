@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `Storage.scan` now stamps `FileInfo.compare_key` (the scan-root-relative key)
+  on every entry, so a custom `ScanOptions.filter` predicate can match it directly
+  instead of stripping `key`.
 - Add `Storage.as_text()` (and `str(Storage)`): a Storage's canonical `aws s3`
   path-shape token (the inverse of `S3.resolve`).
 - `cp` / `mv` / `sync` reject a non-built-in `Storage` (a custom backend, or a

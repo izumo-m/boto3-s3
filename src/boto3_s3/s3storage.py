@@ -184,20 +184,31 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
-def _page_to_infos(page: ListObjectsV2OutputTypeDef, *, recursive: bool) -> list[FileInfo]:
+def _page_to_infos(
+    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str
+) -> list[FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
     Runs on the prefetch worker thread. Non-recursive listings emit one
     ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
     objects); every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
+    ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
+    ``Prefix``, so every object key and common-prefix starts with it, and the
+    slice is the root-relative key operations and custom filters match against.
     """
     infos: list[FileInfo] = []
     if not recursive:
         for common in page.get("CommonPrefixes", []):
-            prefix = common.get("Prefix")
-            if prefix is not None:
-                infos.append(S3FileInfo(key=prefix, kind=FileKind.DIRECTORY))
+            dir_prefix = common.get("Prefix")
+            if dir_prefix is not None:
+                infos.append(
+                    S3FileInfo(
+                        key=dir_prefix,
+                        kind=FileKind.DIRECTORY,
+                        compare_key=dir_prefix[len(prefix) :],
+                    )
+                )
     for obj in page.get("Contents", []):
         key = obj.get("Key")
         size = obj.get("Size")
@@ -214,6 +225,7 @@ def _page_to_infos(page: ListObjectsV2OutputTypeDef, *, recursive: bool) -> list
                 etag=etag.strip('"') if etag else None,
                 storage_class=obj.get("StorageClass"),
                 owner=owner.get("ID") if owner else None,
+                compare_key=key[len(prefix) :],
             )
         )
     return infos
@@ -224,14 +236,19 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
 
     Runs on the prefetch worker thread. Each bucket becomes an ``S3FileInfo``
     whose ``key`` is the bucket name and whose ``mtime`` is the bucket's
-    ``CreationDate`` (what ``aws s3 ls`` prints next to the name).
+    ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
+    root has no prefix, so ``compare_key`` is the bucket name itself.
     """
     infos: list[FileInfo] = []
     for bucket in page.get("Buckets", []):
         name = bucket.get("Name")
         if name is None:
             continue  # ListBuckets always populates Name; stay defensive
-        infos.append(S3FileInfo(key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate")))
+        infos.append(
+            S3FileInfo(
+                key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate"), compare_key=name
+            )
+        )
     return infos
 
 
@@ -390,7 +407,7 @@ class S3Storage(Storage):
             paging["FetchOwner"] = True
         with s3_errors(operation="ls", bucket=self._bucket):
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive)
+                yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
 
     def _scan_bucket_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListBuckets`` page (service root).

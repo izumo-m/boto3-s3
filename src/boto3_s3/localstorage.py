@@ -164,10 +164,29 @@ def walk_local(
     Warnings carry the aws-cli message bodies and go to ``on_warning`` (dropped
     when ``None``); each warned entry is skipped. ``follow_symlinks=False``
     skips symlinks silently. ``FileInfo.key`` is the absolute path with
-    ``os.sep`` normalized to ``/`` (:func:`to_native_path` inverts it).
+    ``os.sep`` normalized to ``/`` (:func:`to_native_path` inverts it). Each
+    entry's ``compare_key`` is stamped here - its key relative to ``path`` for
+    ``dir_op=True``, the basename for ``dir_op=False`` - matching the two
+    branches of :func:`naming.item_paths`.
     """
     notify: Callable[[str], None] = on_warning if on_warning is not None else (lambda body: None)
-    return _walk(path, dir_op=dir_op, follow_symlinks=follow_symlinks, notify=notify)
+    walk = _walk(path, dir_op=dir_op, follow_symlinks=follow_symlinks, notify=notify)
+    if not dir_op:
+        # A single named path (no walk): the basename is its root-relative key.
+        for info in walk:
+            info.compare_key = info.key.rsplit("/", 1)[-1]
+            yield info
+        return
+    # Every entry sits under ``path``; the tail after the root is its compare
+    # key. Normalize the root to a trailing "/" so the slice never leaves a
+    # leading separator (``path`` itself may or may not carry one).
+    root = path.replace(os.sep, "/")
+    if not root.endswith("/"):
+        root += "/"
+    strip = len(root)
+    for info in walk:
+        info.compare_key = info.key[strip:]
+        yield info
 
 
 def _walk(
@@ -272,11 +291,19 @@ class LocalStorage(Storage):
         names.sort(key=lambda item: item.replace(os.sep, "/"))
         for name in names:
             entry_path = os.path.join(self._path, name)
+            # One level down: the entry name itself is the root-relative key
+            # (directory names already carry a trailing separator).
+            compare_key = name.replace(os.sep, "/")
             if os.path.isdir(entry_path):
-                yield LocalFileInfo(key=entry_path.replace(os.sep, "/"), kind=FileKind.DIRECTORY)
+                yield LocalFileInfo(
+                    key=entry_path.replace(os.sep, "/"),
+                    kind=FileKind.DIRECTORY,
+                    compare_key=compare_key,
+                )
             else:
                 info = _stat_info(entry_path, lambda body: None)
                 if info is not None:
+                    info.compare_key = compare_key
                     yield info
 
     @override

@@ -29,7 +29,10 @@ def _keys(tmp_path: Path, *, dir_op: bool = True, **kwargs: object) -> list[str]
     out: list[str] = []
     for info in walk_local(root, dir_op=dir_op, **kwargs):  # type: ignore[arg-type]
         assert info.key.startswith(prefix)
-        out.append(info.key[len(prefix) :])
+        rel = info.key[len(prefix) :]
+        # walk_local stamps compare_key with this same root-relative key.
+        assert info.compare_key == rel
+        out.append(rel)
     return out
 
 
@@ -57,6 +60,8 @@ class TestWalkOrder:
         target.write_bytes(b"12345")
         infos = list(walk_local(str(target), dir_op=False))
         assert [info.key for info in infos] == [str(target).replace(os.sep, "/")]
+        # dir_op=False: the single entry's compare_key is its basename.
+        assert infos[0].compare_key == "a.txt"
         assert infos[0].size == 5
         assert infos[0].mtime is not None and infos[0].mtime.tzinfo is not None
 
@@ -152,17 +157,19 @@ class TestSymlinks:
 class TestLocalStorageScan:
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
-        keys = [info.key for info in LocalStorage(tmp_path).scan(ScanOptions(recursive=True))]
+        infos = list(LocalStorage(tmp_path).scan(ScanOptions(recursive=True)))
         prefix = str(tmp_path).replace(os.sep, "/")
-        assert keys == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
+        assert [info.key for info in infos] == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
+        # scan stamps the root-relative compare_key on every entry.
+        assert [info.compare_key for info in infos] == ["a.txt", "a/inner.txt"]
 
     def test_non_recursive_lists_one_level_with_directories(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
         infos = list(LocalStorage(tmp_path).scan())
         prefix = str(tmp_path).replace(os.sep, "/")
-        assert [(info.key, info.kind) for info in infos] == [
-            (f"{prefix}/a.txt", FileKind.FILE),
-            (f"{prefix}/a/", FileKind.DIRECTORY),
+        assert [(info.key, info.kind, info.compare_key) for info in infos] == [
+            (f"{prefix}/a.txt", FileKind.FILE, "a.txt"),
+            (f"{prefix}/a/", FileKind.DIRECTORY, "a/"),
         ]
 
     def test_scan_filter_applies(self, tmp_path: Path) -> None:

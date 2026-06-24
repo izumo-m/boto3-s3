@@ -49,14 +49,16 @@ class FileInfo:
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.
 
-    ``compare_key`` is the entry's key *relative to the current operation's
-    root* (the ``--exclude`` / ``--include`` matching space). It is ``None`` on a
-    bare listing entry and is stamped just before a :data:`FileFilter` is
-    consulted (``cp`` / ``mv`` / ``rm`` / ``sync``), so a filter - notably
-    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key while
-    ``key`` stays the full identifier the transfer / delete actually uses. Two
-    ``scan`` sides relativized to their roots share one ``compare_key`` space
-    (the basis of ``sync``'s merge-join); ``key`` differs per side.
+    ``compare_key`` is the entry's key *relative to its scan root* - the
+    ``--exclude`` / ``--include`` matching space, and the axis ``sync`` merge-joins
+    on (two ``scan`` sides relativized to their roots share one ``compare_key``
+    space, while ``key`` stays the full identifier the transfer / delete uses and
+    differs per side). ``Storage.scan`` stamps it on every entry it yields, so a
+    custom ``ScanOptions.filter`` predicate - notably
+    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key
+    directly, without re-deriving it from ``key``. The name mirrors aws-cli's
+    ``FileInfo.compare_key``. It is ``None`` only on a ``FileInfo`` built by hand
+    rather than produced by ``scan``.
     """
 
     key: str
