@@ -28,6 +28,7 @@ from typing import Literal
 from boto3_s3.exceptions import ValidationError
 
 PathsType = Literal["locals3", "s3local", "s3s3"]
+PathKind = Literal["s3", "local"]
 
 _S3_SCHEME = "s3://"
 
@@ -46,7 +47,7 @@ _S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
 )
 
 
-def classify(path: str) -> Literal["s3", "local"]:
+def classify(path: str) -> PathKind:
     """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows."""
     return "s3" if path.startswith(_S3_SCHEME) else "local"
 
@@ -200,22 +201,32 @@ class TransferPlan:
     filter_root: str
 
 
-def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp") -> TransferPlan:
-    """Resolve a raw cp/mv path pair into a :class:`TransferPlan`.
+def plan_transfer(
+    src: str,
+    dst: str,
+    *,
+    src_kind: PathKind,
+    dst_kind: PathKind,
+    recursive: bool,
+    operation: str = "cp",
+) -> TransferPlan:
+    """Format a cp/mv path pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
 
-    ``recursive`` is aws-cli's ``dir_op``. A local->local pair raises
-    ``ValidationError`` - ``aws s3`` has no such route (its usage error; the
-    CLI layer phrases the strict aws message itself).
+    ``src_kind`` / ``dst_kind`` (each ``"s3"`` / ``"local"``) are decided by the
+    caller - the library from the resolved ``Storage`` types, the CLI from
+    :func:`classify` on the raw argument - so this function only formats; it does
+    not re-interpret the ``s3://`` scheme itself. ``recursive`` is aws-cli's
+    ``dir_op``. A local->local pair raises ``ValidationError`` - ``aws s3`` has no
+    such route (its usage error; the CLI layer phrases the strict aws message
+    itself).
     """
-    src_type = classify(src)
-    dst_type = classify(dst)
-    if src_type == "local" and dst_type == "local":
+    if src_kind == "local" and dst_kind == "local":
         raise ValidationError(
             f"{operation} requires at least one s3:// path (local to local is not supported)",
             operation=operation,
         )
 
-    if src_type == "s3":
+    if src_kind == "s3":
         src_rest = _strip_scheme_normalized(src)
         src_root = s3_format(src_rest, dir_op=recursive)[0]
         src_sep = "/"
@@ -225,7 +236,7 @@ def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp")
         src_sep = os.sep
         filter_root = _local_filter_root(src, dir_op=recursive)
 
-    if dst_type == "s3":
+    if dst_kind == "s3":
         dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst), dir_op=recursive)
         dst_sep = "/"
     else:
@@ -233,9 +244,9 @@ def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp")
         dst_sep = os.sep
 
     paths_type: PathsType
-    if src_type == "local":
+    if src_kind == "local":
         paths_type = "locals3"
-    elif dst_type == "local":
+    elif dst_kind == "local":
         paths_type = "s3local"
     else:
         paths_type = "s3s3"
@@ -307,6 +318,7 @@ def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
 
 
 __all__ = [
+    "PathKind",
     "PathsType",
     "TransferPlan",
     "classify",

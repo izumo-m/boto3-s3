@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from boto3_s3 import naming
 from boto3_s3.exceptions import ValidationError
 from boto3_s3.globsieve import translate_pattern_for_root
 from boto3_s3.naming import (
@@ -21,7 +22,6 @@ from boto3_s3.naming import (
     item_paths,
     local_format,
     normalize_s3_uri,
-    plan_transfer,
     s3_format,
     same_key,
     same_path,
@@ -30,6 +30,20 @@ from boto3_s3.naming import (
 
 _ACCESSPOINT_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myap"
 _OUTPOST_ARN = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567/accesspoint/my-ap"
+
+
+def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp"):
+    """Test wrapper: supply ``src_kind`` / ``dst_kind`` the way the CLI does
+    (``classify`` on the raw arg) so the formatter call sites stay path-focused.
+    """
+    return naming.plan_transfer(
+        src,
+        dst,
+        src_kind=classify(src),
+        dst_kind=classify(dst),
+        recursive=recursive,
+        operation=operation,
+    )
 
 
 class TestClassify:

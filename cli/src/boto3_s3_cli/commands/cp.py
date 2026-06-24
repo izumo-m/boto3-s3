@@ -101,7 +101,7 @@ class CpCommand(Command):
             # name. A missing stdin stays aws's in-flight fatal (rc 1): the check
             # lives in StdioStorage.open, reached inside the transfer below.
             src_location = StdioStorage()
-            plan = plan_transfer(src, dst, recursive=False)
+            plan = plan_transfer(src, dst, src_kind=src_type, dst_kind=dst_type, recursive=False)
             dest, _compare_key = item_paths(plan, plan.src_root)
             dst_location = S3Storage(f"s3://{dest}", client=client)
         elif dst == "-":
@@ -114,7 +114,9 @@ class CpCommand(Command):
 
         item_filter = None
         if not is_stream:
-            plan = plan_transfer(src, dst, recursive=args.recursive)
+            plan = plan_transfer(
+                src, dst, src_kind=src_type, dst_kind=dst_type, recursive=args.recursive
+            )
             item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(

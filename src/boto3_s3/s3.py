@@ -117,6 +117,50 @@ def _is_folder_marker(info: FileInfo) -> bool:
     return info.size == 0 and info.key.endswith("/")
 
 
+def _transfer_kind(storage: Storage, *, operation: str) -> naming.PathKind:
+    """Classify a resolved transfer endpoint by type (the object-layer rule).
+
+    The built-in container pair the engine drives through ``s3transfer``:
+    ``S3Storage`` -> ``"s3"``, ``LocalStorage`` -> ``"local"``. Anything else - a
+    stream (``IOStorage`` / ``StdioStorage``) reaching a non-stream route, or a
+    ``Storage``-direct custom backend - cannot transfer here yet and is rejected
+    up front with a usage error (a plain ``raise`` so it also holds under
+    ``python -O``, unlike the per-route ``assert``). Wiring a custom backend
+    through ``Storage.open`` is the remaining gap (storage.py / #53).
+    """
+    if isinstance(storage, S3Storage):
+        return "s3"
+    if isinstance(storage, LocalStorage):
+        return "local"
+    raise ValidationError(
+        f"{operation}: a {type(storage).__name__} is not a built-in transfer "
+        "endpoint - only S3Storage / LocalStorage transfer today (custom-backend "
+        "transfer through Storage.open() is not wired yet; see storage.py / #53)",
+        operation=operation,
+    )
+
+
+def _transfer_plan(
+    src_storage: Storage, dst_storage: Storage, *, recursive: bool, operation: str
+) -> naming.TransferPlan:
+    """Build a :class:`~boto3_s3.naming.TransferPlan` from the resolved storages.
+
+    The route (s3/local per side) is decided here by type via
+    :func:`_transfer_kind` - the object layer - and handed to
+    ``naming.plan_transfer``, which only formats the path shapes. Each side's
+    canonical path-shape token (``Storage.as_text``) is the formatter's input;
+    the ``s3://`` scheme is never re-interpreted to guess the route.
+    """
+    return naming.plan_transfer(
+        src_storage.as_text(),
+        dst_storage.as_text(),
+        src_kind=_transfer_kind(src_storage, operation=operation),
+        dst_kind=_transfer_kind(dst_storage, operation=operation),
+        recursive=recursive,
+        operation=operation,
+    )
+
+
 def _cp_keep(item_filter: FileFilter | None) -> _CpKeep | None:
     """Adapt a ``FileFilter`` to the internal ``(info, compare_key)`` test.
 
@@ -740,12 +784,7 @@ class S3:
         docstring is not wired. Enumeration / deletion (``ls`` / ``rm``) carry
         no such restriction.
         """
-        plan = naming.plan_transfer(
-            src_storage.as_text(),
-            dst_storage.as_text(),
-            recursive=recursive,
-            operation=operation,
-        )
+        plan = _transfer_plan(src_storage, dst_storage, recursive=recursive, operation=operation)
 
         source_client = None
         src_s3: S3Storage | None = None
@@ -1395,12 +1434,7 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dst_storage = self.resolve(dst)
-        plan = naming.plan_transfer(
-            src_storage.as_text(),
-            dst_storage.as_text(),
-            recursive=True,
-            operation="sync",
-        )
+        plan = _transfer_plan(src_storage, dst_storage, recursive=True, operation="sync")
 
         source_client = None
         dst_bucket = ""

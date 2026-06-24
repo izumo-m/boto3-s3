@@ -105,7 +105,9 @@ class MvCommand(Command):
             args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
         )
 
-        plan = plan_transfer(src, dst, recursive=args.recursive)
+        plan = plan_transfer(
+            src, dst, src_kind=src_type, dst_kind=dst_type, recursive=args.recursive
+        )
         item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(

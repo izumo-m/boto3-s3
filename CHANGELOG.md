@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `Storage.as_text()` (and `str(Storage)`): a Storage's canonical `aws s3`
   path-shape token (the inverse of `S3.resolve`).
+- `cp` / `mv` / `sync` reject a non-built-in `Storage` (a custom backend, or a
+  stream on a non-stream route) with a clear `ValidationError` (was an
+  `AssertionError`).
 
 ## [0.2.0] - 2026-06-23
 
