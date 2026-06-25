@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -468,6 +468,40 @@ class S3Storage(Storage):
             kwargs["RequestPayer"] = request_payer
         with s3_errors(operation="delete", bucket=self._bucket, key=key):
             self.get_client().delete_object(**kwargs)
+
+    @override
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> S3FileInfo | None:
+        """HeadObject a single key (:meth:`Storage.get_fileinfo`).
+
+        ``key`` is relative to this storage's location: ``""`` heads
+        :attr:`key`, a non-empty ``key`` an entry beneath it. A ``404`` returns
+        ``None`` (definitively absent); any other error (``403``, transport, 5xx)
+        is raised - existence could not be determined. ``follow_symlinks`` /
+        ``on_warning`` do not apply to S3 and are ignored. This is the generic
+        HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
+        """
+        target_key = self._key + key
+        try:
+            with s3_errors(operation="head", bucket=self._bucket, key=target_key):
+                head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
+        except NotFoundError:
+            return None
+        etag = head.get("ETag")
+        return S3FileInfo(
+            key=target_key,
+            size=head.get("ContentLength"),
+            mtime=head.get("LastModified"),
+            etag=etag.strip('"') if etag else None,
+            storage_class=head.get("StorageClass"),
+            head=head,
+            compare_key=target_key.rsplit("/", 1)[-1],
+        )
 
 
 __all__ = ["S3Storage", "s3_errors", "translate_boto_error"]

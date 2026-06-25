@@ -38,7 +38,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
-from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
+from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer
@@ -117,9 +117,10 @@ def _is_folder_marker(info: FileInfo) -> bool:
 def _ckey(info: FileInfo) -> str:
     """The producer-stamped ``compare_key``, narrowed to ``str``.
 
-    Every ``Storage.scan`` / ``walk_local`` entry carries it (the single-item
-    HEAD path stamps it too), so a transfer reads it instead of re-deriving the
-    root-relative key. ``None`` would mean a producer skipped the stamp - a bug.
+    Every ``Storage.scan`` (listing) and ``Storage.get_fileinfo`` (single) entry
+    carries it (the single-object HEAD path stamps it too), so a transfer reads it
+    instead of re-deriving the root-relative key. ``None`` would mean a producer
+    skipped the stamp - a bug.
     """
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
@@ -863,12 +864,12 @@ class S3:
                 )
             )
         else:
-            infos = walk_local(
-                plan.src_root,
-                dir_op=False,
-                follow_symlinks=follow_symlinks,
-                on_warning=transferrer.warn,
+            # Single source object: the get_fileinfo point op (the scan
+            # counterpart). None = warned-away (special/unreadable) or absent.
+            single = plan.src.get_fileinfo(
+                follow_symlinks=follow_symlinks, on_warning=transferrer.warn
             )
+            infos = iter([single] if single is not None else [])
         for info in infos:
             if item_filter is not None and not item_filter(info):
                 continue

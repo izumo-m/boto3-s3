@@ -146,46 +146,71 @@ def _stat_info(path: str, notify: Callable[[str], None]) -> LocalFileInfo | None
     return LocalFileInfo(key=path.replace(os.sep, "/"), size=size, mtime=mtime)
 
 
+def _stat_one(
+    path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
+) -> LocalFileInfo | None:
+    """One path's ``LocalFileInfo``, or ``None`` when there is no transferable entry.
+
+    The local side of :meth:`Storage.get_fileinfo`'s contract: a
+    ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` -
+    including a broken symlink when following), is a silent ``None``; a special /
+    unreadable file warns via ``notify`` and returns ``None`` (aws-cli's
+    warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
+    type check, so a directory is returned and fails later at open). A stat error
+    other than absence (e.g. a permission error reaching the path) is raised -
+    existence could not be determined. ``compare_key`` is the caller's to stamp.
+    """
+    if not follow_symlinks and os.path.islink(path):
+        return None
+    try:
+        size, mtime = _file_stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _translate_os_error(exc, operation="get_fileinfo", key=None) from exc
+    if _is_special_file(path):
+        notify(
+            f"Skipping file {path}. File is character special device, "
+            "block special device, FIFO, or socket."
+        )
+        return None
+    if not _is_readable(path):
+        notify(f"Skipping file {path}. File/Directory is not readable.")
+        return None
+    if mtime is None:
+        notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+        mtime = _EPOCH
+    return LocalFileInfo(key=path.replace(os.sep, "/"), size=size, mtime=mtime)
+
+
 def walk_local(
     path: str,
     *,
-    dir_op: bool,
     follow_symlinks: bool = True,
     on_warning: Callable[[str], None] | None = None,
 ) -> Iterator[LocalFileInfo]:
-    """Yield local files under ``path`` in aws-cli's byte order.
+    """Yield every file under ``path`` (recursively) in aws-cli's byte order.
 
-    ``dir_op=False`` yields the single entry at ``path`` itself - including a
-    directory: like aws, no type check happens here, so a directory source
-    simply fails later at open time (``[Errno 21]``, the rc 1 shape).
-    ``dir_op=True`` walks depth-first; each directory's entries are vetted
-    (warned entries never reach the sort), directory names gain ``os.sep``,
-    and the page sorts by ``name.replace(os.sep, '/')`` - S3 byte order.
-
-    Warnings carry the aws-cli message bodies and go to ``on_warning`` (dropped
-    when ``None``); each warned entry is skipped. ``follow_symlinks=False``
-    skips symlinks silently. ``FileInfo.key`` is the absolute path with
-    ``os.sep`` normalized to ``/`` (:func:`to_native_path` inverts it). Each
-    entry's ``compare_key`` is stamped here - its key relative to ``path`` for
-    ``dir_op=True``, the basename for ``dir_op=False`` - matching the two
-    branches of :func:`naming.item_paths`.
+    Depth-first; each directory's entries are vetted (warned entries never reach
+    the sort), directory names gain ``os.sep``, and the page sorts by
+    ``name.replace(os.sep, '/')`` - S3's UTF-8 byte order (``foo.txt`` before
+    ``foo/bar``), which sync's merge-join relies on. Warnings carry the aws-cli
+    message bodies and go to ``on_warning`` (dropped when ``None``); each warned
+    entry is skipped. ``follow_symlinks=False`` skips symlinks silently.
+    ``FileInfo.key`` is the absolute path with ``os.sep`` normalized to ``/``
+    (:func:`to_native_path` inverts it); each entry's ``compare_key`` is stamped
+    here as its key relative to ``path``. A single source object goes through
+    :meth:`LocalStorage.get_fileinfo` instead, not this walk.
     """
     notify: Callable[[str], None] = on_warning if on_warning is not None else (lambda body: None)
-    walk = _walk(path, dir_op=dir_op, follow_symlinks=follow_symlinks, notify=notify)
-    if not dir_op:
-        # A single named path (no walk): the basename is its root-relative key.
-        for info in walk:
-            info.compare_key = info.key.rsplit("/", 1)[-1]
-            yield info
-        return
-    # Every entry sits under ``path``; the tail after the root is its compare
-    # key. Normalize the root to a trailing "/" so the slice never leaves a
-    # leading separator (``path`` itself may or may not carry one).
+    # Every entry sits under ``path``; the tail after the root is its compare key.
+    # Normalize the root to a trailing "/" so the slice never leaves a leading
+    # separator (``path`` itself may or may not carry one).
     root = path.replace(os.sep, "/")
     if not root.endswith("/"):
         root += "/"
     strip = len(root)
-    for info in walk:
+    for info in _walk(path, follow_symlinks=follow_symlinks, notify=notify):
         info.compare_key = info.key[strip:]
         yield info
 
@@ -193,16 +218,10 @@ def walk_local(
 def _walk(
     path: str,
     *,
-    dir_op: bool,
     follow_symlinks: bool,
     notify: Callable[[str], None],
 ) -> Iterator[LocalFileInfo]:
     if _should_ignore(path, follow_symlinks=follow_symlinks, notify=notify):
-        return
-    if not dir_op:
-        info = _stat_info(path, notify)
-        if info is not None:
-            yield info
         return
     names: list[str] = []
     for name in os.listdir(path):
@@ -220,9 +239,7 @@ def _walk(
     for name in names:
         entry_path = os.path.join(path, name)
         if os.path.isdir(entry_path):
-            yield from _walk(
-                entry_path, dir_op=True, follow_symlinks=follow_symlinks, notify=notify
-            )
+            yield from _walk(entry_path, follow_symlinks=follow_symlinks, notify=notify)
         else:
             info = _stat_info(entry_path, notify)
             if info is not None:
@@ -282,7 +299,6 @@ class LocalStorage(Storage):
             yield from _paged(
                 walk_local(
                     abs_path + os.sep,
-                    dir_op=True,
                     follow_symlinks=options.follow_symlinks,
                     on_warning=options.on_warning,
                 )
@@ -301,9 +317,9 @@ class LocalStorage(Storage):
             on_warning if on_warning is not None else (lambda body: None)
         )
         if not os.path.isdir(root):
-            yield from walk_local(
-                root, dir_op=False, follow_symlinks=follow_symlinks, on_warning=on_warning
-            )
+            info = self.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=on_warning)
+            if info is not None:
+                yield info
             return
         names: list[str] = []
         for name in os.listdir(root):
@@ -357,6 +373,30 @@ class LocalStorage(Storage):
             os.remove(target)
         except OSError as exc:
             raise _translate_os_error(exc, operation="delete", key=key) from exc
+
+    @override
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> LocalFileInfo | None:
+        """Stat a single path (:meth:`Storage.get_fileinfo`).
+
+        Anchored at ``os.path.abspath(self._path)`` (joined with ``key`` for a
+        child), so ``FileInfo.key`` is absolute; ``compare_key`` is its basename.
+        """
+        notify: Callable[[str], None] = (
+            on_warning if on_warning is not None else (lambda body: None)
+        )
+        target = os.path.abspath(self._path)
+        if key:
+            target = os.path.join(target, to_native_path(key))
+        info = _stat_one(target, follow_symlinks=follow_symlinks, notify=notify)
+        if info is not None:
+            info.compare_key = info.key.rsplit("/", 1)[-1]
+        return info
 
 
 def _paged(infos: Iterator[FileInfo]) -> Iterator[list[FileInfo]]:

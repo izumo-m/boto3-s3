@@ -67,6 +67,10 @@ class TestUnsupportedContainerOps:
         with pytest.raises(NotImplementedError):
             IOStorage(io.BytesIO()).delete("k")
 
+    def test_get_fileinfo_raises(self) -> None:
+        with pytest.raises(NotImplementedError):
+            IOStorage(io.BytesIO()).get_fileinfo()
+
 
 class _Stdio:
     """A minimal stdin/stdout stand-in exposing a binary ``.buffer``."""

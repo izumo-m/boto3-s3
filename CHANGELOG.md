@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `Storage.get_fileinfo(key="")`: the single-entry counterpart to `scan`
+  (returns a `FileInfo`, or `None` if absent). `cp` / `mv` resolve a single
+  source through it; a `Storage` subclass must now implement it.
 - `Storage.scan` now stamps `FileInfo.compare_key` (the scan-root-relative key)
   on every entry, so a custom `ScanOptions.filter` predicate can match it directly
   instead of stripping `key`.

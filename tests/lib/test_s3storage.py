@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 from boto3_s3 import (
     S3,
+    AccessDeniedError,
     FileInfo,
     FileKind,
     LocalStorage,
@@ -47,12 +48,19 @@ class _FakePaginator:
 
 class _FakeS3Client:
     def __init__(
-        self, pages: list[dict[str, Any]] | None = None, error: Exception | None = None
+        self,
+        pages: list[dict[str, Any]] | None = None,
+        error: Exception | None = None,
+        head_response: dict[str, Any] | None = None,
+        head_error: Exception | None = None,
     ) -> None:
         self._pages = pages or []
         self._error = error
+        self._head_response = head_response
+        self._head_error = head_error
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
+        self.head_calls: list[dict[str, Any]] = []
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -61,14 +69,24 @@ class _FakeS3Client:
         self.paginator_names.append(name)
         return _FakePaginator(self._pages, self._error, self.calls)
 
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.head_calls.append(kwargs)
+        if self._head_error is not None:
+            raise self._head_error
+        return self._head_response or {}
+
 
 def _storage(
     pages: list[dict[str, Any]] | None = None,
     *,
     error: Exception | None = None,
+    head_response: dict[str, Any] | None = None,
+    head_error: Exception | None = None,
     url: str = "s3://bucket/prefix/",
 ) -> tuple[S3Storage, _FakeS3Client]:
-    client = _FakeS3Client(pages=pages, error=error)
+    client = _FakeS3Client(
+        pages=pages, error=error, head_response=head_response, head_error=head_error
+    )
     return S3Storage(url, client=client), client
 
 
@@ -255,6 +273,52 @@ class TestScanFilter:
         storage, _ = _storage(pages)
         with pytest.raises(RuntimeError, match="predicate failed"):
             list(storage.scan(ScanOptions(recursive=True, filter=boom)))
+
+
+def _client_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "HeadObject",
+    )
+
+
+class TestGetFileinfo:
+    """``S3Storage.get_fileinfo`` - a generic HeadObject: present / 404->None / raise."""
+
+    def test_present_returns_fileinfo(self) -> None:
+        head = {
+            "ContentLength": 7,
+            "LastModified": _MTIME,
+            "ETag": '"abc"',
+            "StorageClass": "STANDARD",
+        }
+        storage, client = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert isinstance(info, S3FileInfo)
+        assert info.key == "prefix/obj.txt"
+        assert info.compare_key == "obj.txt"  # basename
+        assert info.size == 7
+        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.head is head  # the HeadObject payload is cached
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
+
+    def test_404_returns_none(self) -> None:
+        storage, _ = _storage(url="s3://bucket/missing", head_error=_client_error("404", 404))
+        assert storage.get_fileinfo() is None
+
+    def test_other_error_raises(self) -> None:
+        storage, _ = _storage(url="s3://bucket/denied", head_error=_client_error("403", 403))
+        with pytest.raises(AccessDeniedError):
+            storage.get_fileinfo()
+
+    def test_child_key_joins_under_the_prefix(self) -> None:
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket/prefix/", head_response=head)
+        info = storage.get_fileinfo("sub/f.txt")
+        assert info is not None
+        assert info.key == "prefix/sub/f.txt"
+        assert info.compare_key == "f.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
 
 
 def _bucket_entry(name: str) -> dict[str, Any]:

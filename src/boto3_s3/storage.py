@@ -145,6 +145,39 @@ class Storage(abc.ABC):
         """Delete the object at ``key`` (for ``rm`` / ``mv`` source / ``sync --delete``)."""
 
     @abc.abstractmethod
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> FileInfo | None:
+        """Return the ``FileInfo`` for a single entry, or ``None`` if it is absent.
+
+        The single-entry counterpart to :meth:`scan` (which enumerates): ``cp`` /
+        ``mv`` use it for a single source object, and an existence check (e.g.
+        ``--no-overwrite``) reads it for ``None``. ``key`` is relative to this
+        storage's location: ``key=""`` (the default) is the location itself (the
+        single source/dest the storage points at), a non-empty ``key`` an entry
+        beneath it. The outcomes are uniform across backends:
+
+        - present and transferable -> a ``FileInfo`` whose ``compare_key`` is the
+          entry's basename;
+        - **definitively absent** (an S3 ``404``, a local ``ENOENT``) -> ``None``,
+          no warning;
+        - present but not a transferable regular file (a local special device /
+          FIFO / socket, or one that fails the readability probe) -> a message to
+          ``on_warning`` and ``None`` (aws-cli's warn-and-skip, exit code 2);
+        - **existence cannot be determined** (a permission error reaching it, a
+          transport / 5xx error) -> the error is raised.
+
+        So ``None`` means "no transferable entry here"; the caller decides what
+        that means (a single source raises its own "does not exist"; an existence
+        check proceeds). ``follow_symlinks=False`` skips a symlink; ``on_warning``
+        is the local-walk warning channel (ignored by S3).
+        """
+
+    @abc.abstractmethod
     def as_text(self) -> str:
         """Return this location's canonical aws-cli path-shape token.
 
