@@ -70,11 +70,13 @@ class Storage(abc.ABC):
     it). Built-in implementations are ``LocalStorage`` and ``S3Storage``.
     """
 
-    #: Which built-in family this Storage belongs to - the object-layer
-    #: discriminator ``naming.plan_transfer`` reads instead of re-parsing the
-    #: scheme from a string. ``"s3"`` / ``"local"`` are the transferable container
-    #: pair; ``"stream"`` is a stdio endpoint. Each concrete Storage sets it.
-    schema: ClassVar[Literal["s3", "local", "stream"]]
+    #: Which storage family this is - the object-layer discriminator
+    #: ``naming.plan_transfer`` reads instead of re-parsing a scheme string
+    #: (importing the concrete classes here would be circular). ``"s3"`` and
+    #: ``"local"`` are the built-in transferable pair; any other value is a
+    #: non-built-in backend (a custom one, or a stdio stream). Each concrete
+    #: Storage sets its own token.
+    schema: ClassVar[str]
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
@@ -134,10 +136,13 @@ class Storage(abc.ABC):
         for writes (lets S3 choose single-part vs multipart up front). This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path intended for
-        custom backends and for direct stream access. Current state: only
-        ``LocalStorage`` implements it; ``S3Storage.open`` is not implemented
-        yet and no transfer path calls ``open``, so that intended use is not
-        wired (see this module's docstring and ``s3storage.py``).
+        custom backends and for direct stream access. Current state:
+        ``LocalStorage`` and the stream Storages (``IOStorage`` /
+        ``StdioStorage``) implement it, and ``cp``'s stream path is the one
+        transfer path that calls it, handing the returned fileobj to
+        ``s3transfer``. ``S3Storage.open`` is not implemented yet, and no route
+        calls ``open`` for a non-stream custom backend, so that use is not wired
+        (see this module's docstring and ``s3storage.py``).
         """
 
     @abc.abstractmethod

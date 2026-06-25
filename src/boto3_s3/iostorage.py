@@ -121,7 +121,7 @@ class IOStorage(Storage):
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
     """
 
-    schema: ClassVar[Literal["s3", "local", "stream"]] = "stream"
+    schema: ClassVar[str] = "stdio"
 
     def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
         self._stream: IO[Any] | None = stream

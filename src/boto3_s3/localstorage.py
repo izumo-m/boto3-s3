@@ -258,7 +258,7 @@ def _translate_os_error(exc: OSError, *, operation: str, key: str | None) -> Bot
 class LocalStorage(Storage):
     """A local filesystem path as one side of a transfer."""
 
-    schema: ClassVar[Literal["s3", "local", "stream"]] = "local"
+    schema: ClassVar[str] = "local"
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)

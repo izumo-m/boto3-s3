@@ -278,7 +278,7 @@ class S3Storage(Storage):
     side and pass it in rather than relying on the lazy default.
     """
 
-    schema: ClassVar[Literal["s3", "local", "stream"]] = "s3"
+    schema: ClassVar[str] = "s3"
 
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
         text = os.fspath(url)
