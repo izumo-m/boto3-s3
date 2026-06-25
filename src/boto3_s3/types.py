@@ -117,7 +117,12 @@ class ScanOptions:
     (aws-cli parity). Values are not validated here: like aws-cli, they pass
     through to the service, which decides (``page_size=0`` lists nothing,
     negative values fail the call with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both).
+    charter requires reproducing both). ``follow_symlinks`` / ``on_warning`` are
+    local-walk knobs (ignored by S3, like the listing knobs above):
+    ``follow_symlinks=False`` skips symlinks; ``on_warning`` receives the
+    aws-cli-worded skip messages (a broken symlink, an unreadable or special
+    file) that the transfer rolls up - without it those entries are dropped
+    silently.
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     ``scan`` itself - page by page on the prefetch worker, before pages cross
@@ -138,6 +143,8 @@ class ScanOptions:
     bucket_name_prefix: str | None = None
     bucket_region: str | None = None
     filter: Callable[[FileInfo], bool] | None = None
+    follow_symlinks: bool = True
+    on_warning: Callable[[str], None] | None = None
 
 
 class OpKind(enum.Enum):

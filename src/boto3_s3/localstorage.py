@@ -7,9 +7,10 @@ directory names and compares with separators normalized to ``/`` - so the
 stream comes out in S3's UTF-8 byte order (``foo.txt`` before ``foo/bar``),
 which sync's merge-join later relies on - and the same skip-with-warning rules
 (nonexistent / special / unreadable files, broken symlinks, the
-invalid-timestamp epoch fallback). ``cp`` drives it directly to receive the
-warnings; :meth:`LocalStorage.scan_pages` wraps it for the generic
-``Storage.scan`` seam. aws-cli's Python-2 byte-filename decoding warning has
+invalid-timestamp epoch fallback). :meth:`LocalStorage.scan_pages` wraps it for
+the ``Storage.scan`` seam that cp / mv / sync enumerate through (so a
+``LocalStorage`` subclass override is honored); only cp's single-file point-op
+drives it directly. aws-cli's Python-2 byte-filename decoding warning has
 no Python-3 equivalent (``os.listdir`` of a ``str`` path always yields ``str``)
 and is not ported.
 """
@@ -262,35 +263,59 @@ class LocalStorage(Storage):
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path` one stat batch at a time.
 
-        ``options.recursive`` streams :func:`walk_local` (aws-cli byte order;
-        warned entries are skipped, their messages dropped - a generic scan
-        has no warning channel, ``cp`` drives ``walk_local`` directly for
-        that). Non-recursive yields one level like the S3 backend: the
-        immediate entries in the same sort order, sub-directories as
-        ``DIRECTORY``-kind infos whose key ends with ``/``. The S3 listing
-        knobs on ``options`` (``page_size`` / ``request_payer`` / ...) are
-        ignored here (docs on ``ScanOptions``).
+        The walk is anchored at the absolutized path so ``FileInfo.key`` is
+        absolute (its documented form), and ``options.follow_symlinks`` /
+        ``options.on_warning`` are threaded into the walk - a symlink skip and the
+        aws-cli-worded warning channel a transfer needs. ``options.recursive``
+        streams :func:`walk_local` in aws-cli byte order over
+        ``os.path.abspath(self._path) + os.sep`` - the trailing separator is
+        aws-cli's ``local_format(dir_op=True)`` form, so a non-directory root (a
+        file, or a missing path) degrades to a "does not exist" warning instead of
+        an ``os.listdir`` error. Non-recursive yields one level like the S3 backend
+        (immediate entries in the same sort order, sub-directories as
+        ``DIRECTORY``-kind infos whose key ends with ``/``). The S3 listing knobs
+        on ``options`` (``page_size`` / ``request_payer`` / ...) are ignored here
+        (docs on ``ScanOptions``).
         """
+        abs_path = os.path.abspath(self._path)
         if options.recursive:
-            yield from _paged(walk_local(self._path, dir_op=True))
+            yield from _paged(
+                walk_local(
+                    abs_path + os.sep,
+                    dir_op=True,
+                    follow_symlinks=options.follow_symlinks,
+                    on_warning=options.on_warning,
+                )
+            )
             return
-        yield from _paged(self._scan_one_level())
+        yield from _paged(
+            self._scan_one_level(
+                abs_path, follow_symlinks=options.follow_symlinks, on_warning=options.on_warning
+            )
+        )
 
-    def _scan_one_level(self) -> Iterator[FileInfo]:
-        if not os.path.isdir(self._path):
-            yield from walk_local(self._path, dir_op=False)
+    def _scan_one_level(
+        self, root: str, *, follow_symlinks: bool, on_warning: Callable[[str], None] | None
+    ) -> Iterator[FileInfo]:
+        notify: Callable[[str], None] = (
+            on_warning if on_warning is not None else (lambda body: None)
+        )
+        if not os.path.isdir(root):
+            yield from walk_local(
+                root, dir_op=False, follow_symlinks=follow_symlinks, on_warning=on_warning
+            )
             return
         names: list[str] = []
-        for name in os.listdir(self._path):
-            entry_path = os.path.join(self._path, name)
-            if _triggers_warning(entry_path, lambda body: None):
+        for name in os.listdir(root):
+            entry_path = os.path.join(root, name)
+            if _should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
                 continue
             if os.path.isdir(entry_path):
                 name += os.sep
             names.append(name)
         names.sort(key=lambda item: item.replace(os.sep, "/"))
         for name in names:
-            entry_path = os.path.join(self._path, name)
+            entry_path = os.path.join(root, name)
             # One level down: the entry name itself is the root-relative key
             # (directory names already carry a trailing separator).
             compare_key = name.replace(os.sep, "/")
@@ -301,7 +326,7 @@ class LocalStorage(Storage):
                     compare_key=compare_key,
                 )
             else:
-                info = _stat_info(entry_path, lambda body: None)
+                info = _stat_info(entry_path, notify)
                 if info is not None:
                     info.compare_key = compare_key
                     yield info

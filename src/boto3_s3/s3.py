@@ -844,18 +844,31 @@ class S3:
         follow_symlinks: bool,
         item_filter: FileFilter | None,
     ) -> Iterator[TransferItem]:
-        """Materialize upload items from the local walk (warnings -> rollup).
+        """Materialize upload items from the local source (warnings -> rollup).
 
-        No directory check on the single path, like aws: a directory source
-        becomes an item whose open fails in flight ([Errno 21], rc 1). The walk
-        stamps each entry's ``compare_key``, so ``item_filter`` reads it directly.
+        A recursive source enumerates through ``plan.src.scan`` so a ``LocalStorage``
+        subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
+        a point op walked directly (the local analog of ``_cp_head_single`` - no
+        directory check, so a directory source becomes an item whose open fails in
+        flight, [Errno 21], rc 1). Either way the producer stamps each entry's
+        ``compare_key``, so ``item_filter`` reads it directly.
         """
-        infos = walk_local(
-            plan.src_root,
-            dir_op=plan.dir_op,
-            follow_symlinks=follow_symlinks,
-            on_warning=transferrer.warn,
-        )
+        infos: Iterator[FileInfo]
+        if plan.dir_op:
+            infos = plan.src.scan(
+                ScanOptions(
+                    recursive=True,
+                    follow_symlinks=follow_symlinks,
+                    on_warning=transferrer.warn,
+                )
+            )
+        else:
+            infos = walk_local(
+                plan.src_root,
+                dir_op=False,
+                follow_symlinks=follow_symlinks,
+                on_warning=transferrer.warn,
+            )
         for info in infos:
             if item_filter is not None and not item_filter(info):
                 continue
@@ -1227,15 +1240,15 @@ class S3:
         """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
         recursive S3->local with a mode other than ``ignore``).
 
-        The destination tree is enumerated up front into the exact-case
-        membership set the gate's AlwaysSync arm consults - the observable
-        equivalent of aws's reverse file generator + comparator.
+        The destination tree is enumerated up front (through ``plan.dst.scan``)
+        into the exact-case membership set the gate's AlwaysSync arm consults -
+        the observable equivalent of aws's reverse file generator + comparator.
+        Each entry's stamped ``compare_key`` is the root-relative membership key.
         """
         mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
         if kind is not OpKind.DOWNLOAD or not recursive or mode is CaseConflictMode.IGNORE:
             return None
-        prefix = plan.dst_root.replace(os.sep, "/")
-        dest_keys = {info.key[len(prefix) :] for info in walk_local(plan.dst_root, dir_op=True)}
+        dest_keys = {_ckey(info) for info in plan.dst.scan(ScanOptions(recursive=True))}
         return _CaseConflictGate(mode, dest_keys)
 
     def mv(
@@ -1594,8 +1607,10 @@ class S3:
             ):
                 yield _ckey(info), info
             return
-        for info in walk_local(
-            root, dir_op=True, follow_symlinks=follow_symlinks, on_warning=transferrer.warn
+        for info in storage.scan(
+            ScanOptions(
+                recursive=True, follow_symlinks=follow_symlinks, on_warning=transferrer.warn
+            )
         ):
             if item_filter is not None and not item_filter(info):
                 continue
