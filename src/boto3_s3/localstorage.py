@@ -30,7 +30,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     TransportError,
 )
-from boto3_s3.storage import Storage
+from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, ScanOptions
 
 if TYPE_CHECKING:
@@ -259,6 +259,16 @@ class LocalStorage(Storage):
     """A local filesystem path as one side of a transfer."""
 
     schema: ClassVar[str] = "local"
+    #: The local filesystem supports every transfer operation: byte I/O both
+    #: ways, single-entry stat, a sorted walk (so ``SORTED_SCAN``), and delete.
+    capabilities: ClassVar[StorageCapability] = (
+        StorageCapability.OPEN_READ
+        | StorageCapability.OPEN_WRITE
+        | StorageCapability.GET_FILEINFO
+        | StorageCapability.SCAN
+        | StorageCapability.SORTED_SCAN
+        | StorageCapability.DELETE
+    )
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)

@@ -38,6 +38,7 @@ from __future__ import annotations
 import abc
 import os
 from collections.abc import Callable, Iterator, Sequence
+from enum import Flag, auto
 from typing import BinaryIO, ClassVar, Literal
 
 from boto3_s3.concurrency import prefetch
@@ -59,15 +60,68 @@ def _sieve_pages(
             yield kept
 
 
+class StorageCapability(Flag):
+    """Which transfer operations a :class:`Storage` *kind* actually implements.
+
+    A declarative, class-level mirror of the contract methods, checked **before**
+    a transfer so an unsupported pairing fails with a clear error instead of a
+    deep ``NotImplementedError`` mid-flight. This is *capability* - whether the
+    Storage kind implements the operation at all - **not** *permission* (whether a
+    particular target is writable / reachable right now); a denied write or a
+    missing object stays an execution-time error (an S3 ``403``, a local
+    ``EACCES`` / ``ENOENT``), reported per item like aws-cli, never pre-screened.
+
+    The members mirror the methods one-to-one, because support genuinely differs
+    per kind (``S3Storage`` resolves one object via ``get_fileinfo`` yet does not
+    implement ``open``; a single-URL backend reads one object but cannot
+    enumerate):
+
+    - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
+    - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
+    - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
+    - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order (``sync``'s
+      merge-join needs it on both sides)
+    - ``DELETE`` - ``delete(key)`` (``rm`` / ``mv`` source / ``sync --delete``)
+
+    The reading members form a lattice (expanded by :func:`_implied`):
+    ``SORTED_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration
+    implies enumeration implies single-entry resolution), so a backend need only
+    declare its strongest one.
+    """
+
+    OPEN_READ = auto()
+    OPEN_WRITE = auto()
+    GET_FILEINFO = auto()
+    SCAN = auto()
+    SORTED_SCAN = auto()
+    DELETE = auto()
+
+
+def _implied(caps: StorageCapability) -> StorageCapability:
+    """Expand :class:`StorageCapability`'s reading lattice for a containment test.
+
+    ``SORTED_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``, so a backend that declares
+    only its strongest reading capability still satisfies a check for a weaker
+    one. Applied wherever capabilities are tested, never to the stored value.
+    """
+    if caps & StorageCapability.SORTED_SCAN:
+        caps |= StorageCapability.SCAN
+    if caps & StorageCapability.SCAN:
+        caps |= StorageCapability.GET_FILEINFO
+    return caps
+
+
 class Storage(abc.ABC):
     """One side of a data location (local filesystem, an S3 bucket/prefix, ...).
 
-    Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`, :meth:`as_text`,
-    and set the :attr:`schema` discriminator to add a data source; :meth:`scan`
-    (prefetch + flatten) is provided concretely on top of ``scan_pages``,
-    :meth:`__str__` delegates to :meth:`as_text`, and :meth:`validate` is a no-op
-    by default (override to reject a malformed location before an operation uses
-    it). Built-in implementations are ``LocalStorage`` and ``S3Storage``.
+    Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`,
+    :meth:`get_fileinfo`, :meth:`as_text`, set the :attr:`schema` discriminator,
+    and declare :attr:`capabilities` (which of those operations actually work) to
+    add a data source; :meth:`scan` (prefetch + flatten) is provided concretely
+    on top of ``scan_pages``, :meth:`__str__` delegates to :meth:`as_text`, and
+    :meth:`validate` is a no-op by default (override to reject a malformed
+    location before an operation uses it). Built-in implementations are
+    ``LocalStorage`` and ``S3Storage``.
     """
 
     #: Which storage family this is - the object-layer discriminator
@@ -77,6 +131,14 @@ class Storage(abc.ABC):
     #: non-built-in backend (a custom one, or a stdio stream). Each concrete
     #: Storage sets its own token.
     schema: ClassVar[str]
+
+    #: Which transfer operations this Storage *kind* implements
+    #: (:class:`StorageCapability`): the structural, class-level contract a
+    #: transfer pre-checks for a custom side - distinct from runtime *permission*
+    #: (a denied write / missing target is an execution-time error, not modeled
+    #: here). The default declares nothing (fail-closed); each concrete Storage
+    #: overrides it, and a subclass may narrow or widen it.
+    capabilities: ClassVar[StorageCapability] = StorageCapability(0)
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
@@ -208,6 +270,25 @@ class Storage(abc.ABC):
         keep this no-op. Idempotent.
         """
 
+    def supports(self, needed: StorageCapability) -> bool:
+        """Whether this storage implements every capability in ``needed``.
+
+        The capability lattice is applied first (see :class:`StorageCapability`),
+        so e.g. a backend declaring ``SORTED_SCAN`` ``supports(SCAN)``. This is
+        the structural pre-check a transfer runs on a custom (``open``-routed)
+        side; a built-in S3 / local side rides ``s3transfer`` and is not gated.
+        """
+        have = _implied(self.capabilities)
+        return (needed & have) == needed
+
+    def missing_capabilities(self, needed: StorageCapability) -> StorageCapability:
+        """The subset of ``needed`` this storage does not implement (empty if none).
+
+        The companion to :meth:`supports` that names what is absent, for a clear
+        rejection message; lattice-expanded the same way.
+        """
+        return needed & ~_implied(self.capabilities)
+
 
 # A path argument accepted by the operation APIs: a string (``"s3://b/k"`` or a
 # local path), any ``os.PathLike``, or a ``Storage`` instance (extension point).
@@ -217,4 +298,5 @@ Location = str | os.PathLike[str] | Storage
 __all__ = [
     "Location",
     "Storage",
+    "StorageCapability",
 ]

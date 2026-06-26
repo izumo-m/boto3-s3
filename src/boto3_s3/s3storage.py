@@ -41,7 +41,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.naming import split_bucket_key
-from boto3_s3.storage import Storage
+from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
 
 if TYPE_CHECKING:
@@ -279,6 +279,15 @@ class S3Storage(Storage):
     """
 
     schema: ClassVar[str] = "s3"
+    #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
+    #: (``ListObjectsV2``), and deletes; ``open`` is not implemented yet, so no
+    #: ``OPEN_*`` (see :meth:`open`).
+    capabilities: ClassVar[StorageCapability] = (
+        StorageCapability.GET_FILEINFO
+        | StorageCapability.SCAN
+        | StorageCapability.SORTED_SCAN
+        | StorageCapability.DELETE
+    )
 
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
         text = os.fspath(url)

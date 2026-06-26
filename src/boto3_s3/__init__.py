@@ -54,7 +54,7 @@ if TYPE_CHECKING:
         website,
     )
     from boto3_s3.s3storage import S3Storage
-    from boto3_s3.storage import Location, Storage
+    from boto3_s3.storage import Location, Storage, StorageCapability
     from boto3_s3.transferconfig import TransferConfig
     from boto3_s3.types import (
         CancelToken,
@@ -112,6 +112,7 @@ __all__ = [
     "ScanOptions",
     "StdioStorage",
     "Storage",
+    "StorageCapability",
     "SyncPair",
     "TransferConfig",
     "TransferOptions",
@@ -182,6 +183,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "S3Storage": "boto3_s3.s3storage",
     "Location": "boto3_s3.storage",
     "Storage": "boto3_s3.storage",
+    "StorageCapability": "boto3_s3.storage",
     "CancelToken": "boto3_s3.types",
     "CaseConflictMode": "boto3_s3.types",
     "CopyPropsMode": "boto3_s3.types",

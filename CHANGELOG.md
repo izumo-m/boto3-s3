@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `S3Storage.validate()`, which the operations run before use. Add the
   `Storage.schema` discriminator (`"s3"` / `"local"`, or a non-built-in backend's
   own token); its type is an open `str` so a custom backend can declare its own.
+- Add `Storage.capabilities` (a `StorageCapability` flag set: `OPEN_READ` /
+  `OPEN_WRITE` / `GET_FILEINFO` / `SCAN` / `SORTED_SCAN` / `DELETE`) declaring
+  which transfer operations a backend implements, so a transfer can pre-check a
+  custom side instead of failing deep. `StorageCapability` is exported from
+  `boto3_s3`.
 
 ## [0.2.0] - 2026-06-23
 

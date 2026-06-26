@@ -33,7 +33,7 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 from typing_extensions import override
 
 from boto3_s3.exceptions import Boto3S3Error
-from boto3_s3.storage import Storage
+from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -122,6 +122,11 @@ class IOStorage(Storage):
     """
 
     schema: ClassVar[str] = "stdio"
+    #: A single stream supports only byte I/O (both directions, chosen per
+    #: ``open`` call); it has no listing or deletion, so just the ``OPEN_*`` pair.
+    capabilities: ClassVar[StorageCapability] = (
+        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
+    )
 
     def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
         self._stream: IO[Any] | None = stream
