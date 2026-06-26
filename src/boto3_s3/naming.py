@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     # ``naming``, so this is cycle-free and the pure-function layer stays SDK-free.
     from boto3_s3.storage import Storage
 
-PathsType = Literal["locals3", "s3local", "s3s3"]
-PathKind = Literal["s3", "local"]
+PathsType = Literal["locals3", "s3local", "s3s3", "opens3", "s3open"]
+PathKind = Literal["s3", "local", "open"]
 
 _S3_SCHEME = "s3://"
 
@@ -120,6 +120,20 @@ def s3_format(path: str, *, dir_op: bool) -> tuple[str, bool]:
     return path, path.endswith("/")
 
 
+def _open_format(text: str, *, dir_op: bool) -> tuple[str, bool]:
+    """Format a custom-backend (``open``-routed) side; return ``(root, use_src_name)``.
+
+    A custom ``Storage`` encapsulates its own location and addresses entries by
+    their scan-root-relative ``compare_key`` - exactly what its ``open`` /
+    ``get_fileinfo`` / ``delete`` take - so the root is always empty: the relative
+    key passes straight through (:func:`dest_for` returns ``compare_key``
+    unchanged, or ``""`` to mean the location itself). ``use_src_name`` mirrors
+    :func:`s3_format`: a ``dir_op`` or an explicit trailing ``/`` means the
+    destination adopts the source's name.
+    """
+    return "", (dir_op or text.endswith("/"))
+
+
 def _strip_scheme_normalized(path: str) -> str:
     """Scheme-less form with the keyless-bucket normalization applied.
 
@@ -191,8 +205,10 @@ class TransferPlan:
     honor a ``Storage`` subclass override) instead of re-deriving the walk from
     the formatted root. ``src_root`` / ``dst_root`` are the *formatted* sides
     (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
-    a native absolute path; directory semantics are expressed by a trailing
-    separator. ``filter_root`` is what ``--exclude`` / ``--include`` patterns
+    a native absolute path, and a custom ``open`` side as ``""`` (it addresses
+    entries by the relative ``compare_key`` its own ``open`` takes); directory
+    semantics are expressed by a trailing separator. ``filter_root`` is what
+    ``--exclude`` / ``--include`` patterns
     resolve against (aws-cli's ``filters._get_*_root``): for an S3 source the
     *key*-derived root (the bucket cancels out of the relative match, exactly
     like ``rm_filter_root``), for a local source an absolute directory; feed
@@ -212,25 +228,23 @@ class TransferPlan:
     filter_root: str
 
 
-def _endpoint_kind(storage: Storage, *, operation: str) -> PathKind:
+def _endpoint_kind(storage: Storage) -> PathKind:
     """The transfer kind from a resolved endpoint's ``schema`` (the object layer).
 
-    ``"s3"`` / ``"local"`` are the transferable container pair. A stream or a
-    custom backend (any other ``schema``) cannot transfer through this path and is
-    rejected here rather than misclassified - a stream side goes through ``cp``'s
-    own route, a custom backend awaits the ``open``-based seam (storage.py / #53).
+    ``"s3"`` / ``"local"`` are the built-in container pair, driven through
+    ``s3transfer`` / the local path directly. Any other ``schema`` is a custom
+    backend, routed as ``"open"`` - its bytes move through ``Storage.open`` while
+    the paired side (always s3) rides ``s3transfer``. A stdio stream never reaches
+    here (``cp`` diverts it to the stream path up front), so its schema folds into
+    ``"open"`` harmlessly; an unsupported pairing is rejected by
+    :func:`plan_transfer`, not here.
     """
     schema = getattr(storage, "schema", None)
     if schema == "s3":
         return "s3"
     if schema == "local":
         return "local"
-    raise ValidationError(
-        f"{operation}: a {type(storage).__name__} is not a built-in transfer "
-        "endpoint - only s3 and local locations transfer here (a stream or custom "
-        "backend cannot; see storage.py / #53)",
-        operation=operation,
-    )
+    return "open"
 
 
 def plan_transfer(
@@ -238,15 +252,25 @@ def plan_transfer(
 ) -> TransferPlan:
     """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
 
-    The route (s3 vs local per side) is read from each endpoint's ``schema``
-    discriminator - the object layer, not a re-parsed scheme string - and the path
-    shape from its ``as_text()``. A non-transfer endpoint (a stream, or a custom
-    backend whose ``schema`` is neither ``"s3"`` nor ``"local"``) is rejected, as
-    is a local->local pair (``aws s3`` has no such route; the CLI layer phrases the
-    strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
+    The route per side is read from each endpoint's ``schema`` discriminator - the
+    object layer, not a re-parsed scheme string - and the path shape from its
+    ``as_text()``. ``"s3"`` / ``"local"`` are the built-in pair; any other schema
+    is a custom backend routed through ``Storage.open`` (``opens3`` / ``s3open``),
+    which must pair with s3 - ``open`` to ``local``, ``open`` to ``open`` and
+    ``local`` to ``local`` have no ``aws s3`` route and are rejected (the CLI layer
+    phrases the strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
     """
-    src_kind = _endpoint_kind(src, operation=operation)
-    dst_kind = _endpoint_kind(dst, operation=operation)
+    src_kind = _endpoint_kind(src)
+    dst_kind = _endpoint_kind(dst)
+    # A custom ``open`` side moves its bytes through ``Storage.open`` while the
+    # other side rides ``s3transfer``, so it can only pair with s3 - never local,
+    # another custom backend, or a stream.
+    if "open" in (src_kind, dst_kind) and {src_kind, dst_kind} != {"open", "s3"}:
+        raise ValidationError(
+            f"{operation}: a custom-backend path transfers only with an s3:// path "
+            "(not local, another custom backend, or a stream)",
+            operation=operation,
+        )
     if src_kind == "local" and dst_kind == "local":
         raise ValidationError(
             f"{operation} requires at least one s3:// path (local to local is not supported)",
@@ -260,6 +284,10 @@ def plan_transfer(
         src_root = s3_format(src_rest, dir_op=recursive)[0]
         src_sep = "/"
         filter_root = _s3_filter_root(src_rest, dir_op=recursive)
+    elif src_kind == "open":
+        src_root = _open_format(src_text, dir_op=recursive)[0]
+        src_sep = "/"
+        filter_root = ""
     else:
         src_root = local_format(src_text, dir_op=recursive)[0]
         src_sep = os.sep
@@ -268,12 +296,19 @@ def plan_transfer(
     if dst_kind == "s3":
         dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst_text), dir_op=recursive)
         dst_sep = "/"
+    elif dst_kind == "open":
+        dst_root, use_src_name = _open_format(dst_text, dir_op=recursive)
+        dst_sep = "/"
     else:
         dst_root, use_src_name = local_format(dst_text, dir_op=recursive)
         dst_sep = os.sep
 
     paths_type: PathsType
-    if src_kind == "local":
+    if src_kind == "open":
+        paths_type = "opens3"
+    elif dst_kind == "open":
+        paths_type = "s3open"
+    elif src_kind == "local":
         paths_type = "locals3"
     elif dst_kind == "local":
         paths_type = "s3local"

@@ -776,13 +776,18 @@ class S3:
             kind = OpKind.DOWNLOAD
             client = src_storage.get_client()
             src_s3 = src_storage
-        else:
+        elif plan.paths_type == "s3s3":
             assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage)
             kind = OpKind.COPY
             client = dst_storage.get_client()
             source_client = src_storage.get_client()
             src_s3 = src_storage
             dst_bucket = dst_storage.bucket
+        else:  # opens3 / s3open: custom-backend transfer, wired in #53c
+            raise ValidationError(
+                f"{operation}: custom-backend transfer is not implemented yet",
+                operation=operation,
+            )
 
         case_gate = self._cp_case_gate(plan, kind=kind, recursive=recursive, options=options)
         transferrer = Transferrer(
@@ -1437,12 +1442,17 @@ class S3:
                     raise Boto3S3Error(str(exc), operation="sync") from exc
             kind = OpKind.DOWNLOAD
             client = src_storage.get_client()
-        else:
+        elif plan.paths_type == "s3s3":
             assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage)
             kind = OpKind.COPY
             client = dst_storage.get_client()
             source_client = src_storage.get_client()
             dst_bucket = dst_storage.bucket
+        else:  # opens3 / s3open: custom-backend sync, wired in #53e
+            raise ValidationError(
+                "sync: custom-backend transfer is not implemented yet",
+                operation="sync",
+            )
 
         # no_overwrite is an orthogonal write-guard (an option, so callers can
         # write ``sync(no_overwrite=True)``): strip it from the engine options
