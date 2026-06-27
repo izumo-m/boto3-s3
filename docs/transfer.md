@@ -13,7 +13,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 |---|---|
 | `naming.py` | Pure-function port of the path-shape rules (aws-cli `FileFormat` / `find_bucket_key` / keyless normalization / `find_dest_path_comp_key` / filter root). SDK-independent, so the CLI and the library derive paths, key naming, and the filter root from the **same code** |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
-| `localstorage.py` | `walk_local`: a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules). `LocalStorage` fully implements the `Storage` ABC |
+| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path). Its recursive walk `LocalStorage.walk_local` is a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules), split into overridable protected methods (`_walk` / `_should_ignore` / `_stat_info` / ...) so a subclass can extend the traversal; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
@@ -215,6 +215,15 @@ dest-existence check for download. We ported the same three faces:
   attempts the transfer** (to show S3's EntityTooLarge).
 - walk warnings (unreadable / special file / broken symlink / invalid mtime) go
   from `walk_local`'s `on_warning` to `Transferrer.warn` (aws-cli's wording).
+- **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
+  off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
+  off, a symlink cycle recurses until `RecursionError`, exactly like aws-cli; on
+  (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
+  `(st_dev, st_ino)` and skips a directory that resolves to one of its own
+  ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
+  a global visited set) still follows a legitimate diamond of links to the same
+  external directory, like GNU `find -L`; it fails open (no `stat` identity →
+  keep descending). Off costs no extra `stat` (a no-op detector).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore` = the application condition of aws-cli's
   `_modify_instructions_for_case_conflicts`): aws builds this with the sync
@@ -268,8 +277,6 @@ dest-existence check for download. We ported the same three faces:
 
 ## 10. Known wire divergences (invisible in the result; recorded only)
 
-- We do not send `ChecksumMode: ENABLED` to HeadObject (aws v2 sends it by
-  default). `--checksum-mode` rides only on GetObject (section 9).
 - When `--checksum-algorithm` is unspecified, the default integrity checksum is
   `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
   injects `CRC64NVME`. Both are valid integrity checks and do not affect the
@@ -294,9 +301,10 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   relabeling, every record of result / progress / warning / dryrun calls itself
   `move`.
 - **The `_DeleteSource` subscriber** (the position in section 3): performs the deletion
-  only when the future succeeded. upload is a plain `os.remove(src_path)`
-  (emitting the failure wording in OS form as-is - aws's `move failed: ...
-  [Errno 13] Permission denied: '<abs>'` form); download is
+  only when the future succeeded. an upload removes the source through its
+  `Storage.delete(info)` (keyed by `TransferItem.src_info`); `LocalStorage.delete`
+  maps the OS error to the library taxonomy, preserving the wording aws's
+  `move failed: ... [Errno 13] Permission denied: '<abs>'` form shows; download is
   a per-object DeleteObject against the manager's client, and copy against the
   **source-side client** (RequestPayer is passed through via
   `map_delete_object_params`). **A deletion failure flips the already-settled
@@ -328,3 +336,83 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   and the rc / output / file contents agree. If an exact match becomes necessary,
   there is room to promote the stamp into an independent subscriber from section 3 and
   place it before the deletion.
+
+## 12. open route (custom backends: `opens3` / `s3open`)
+
+A custom `Storage` (any `scheme` other than `"s3"` / `"local"`) transfers as one
+side of `cp` / `mv` / `sync`, the other side always S3. `naming.plan_transfer`
+classifies the pair from the two `scheme`s into `opens3` (custom source -> S3, an
+UPLOAD) or `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer`
+(cp / mv) and `S3.sync` route both. The S3 side rides `s3transfer` as usual; the
+custom side's bytes move through its `Storage.open(key, mode)` - the same
+primitive the stream path uses (section 6), generalized to a keyed, listable
+backend. The CLI never pairs a custom backend, so the open route is library-only
+and outside aws parity.
+
+- **bytes via `open`, the S3 side via s3transfer**: `opens3` hands `s3transfer`
+  the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
+  fileobj from `plan.dst.open(key, "wb")` to download into. The transfer
+  **closes every fileobj `open` returns** (`transfer._CloseFileobj`): for a
+  writer that `close` is the commit (`Storage.open`'s contract), and a commit
+  failure flips the settled future via `set_exception` (a failed transfer).
+  `s3transfer` itself never closes a caller fileobj (`CompleteDownloadNOOPTask`),
+  so this is the sole close. An `IOStorage` hands back a close-suppressing view,
+  so the caller's own stream is never closed (section 6).
+- **the open key**: `""` is the location itself (a single source / destination),
+  a non-empty key an entry beneath it - the same key regime as `delete`. A
+  recursive item's key is its `compare_key`; a single item's is `""`. The
+  destination key derives from `naming.dest_for` exactly as for the built-in
+  routes (a `/`-terminated or `dir_op` custom destination adopts the source
+  name).
+- **enumeration / single source**: `opens3` enumerates a recursive source
+  through `Storage.scan` and resolves a single source through
+  `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
+  path <as_text> does not exist.` (the base category, rc 255, like a missing
+  local source); an empty recursive `scan` transfers nothing (rc 0, like an empty
+  S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
+  download (recursive `ListObjectsV2` / single `HeadObject`, folder markers
+  dropped).
+- **capability gate** (`S3._require_open_capabilities`, before any bytes move):
+  the custom side is pre-checked against `Storage.capabilities` and a missing
+  contract method is a clear `ValidationError` naming the gap (not a deep
+  failure). `opens3` needs `OPEN_READ` + (`SCAN` if recursive else
+  `GET_FILEINFO`) + `DELETE` for `mv`; `s3open` needs `OPEN_WRITE`. This is
+  structural capability, not runtime permission (a denied write / missing object
+  stays a per-item execution error).
+- **gates that do not apply**: a custom destination owns its own key space, so
+  the local-filesystem destination gates do **not** run for `s3open` - no
+  case-conflict scan (that gate stays scoped to `s3local`), no parent-reference
+  check, no `no_overwrite` `os.path.exists`. Only the **source-side** glacier
+  gate runs (the S3 source of an `s3open` download, section 8).
+- **`no_overwrite`** (section 7): `opens3` keeps it - it rides `IfNoneMatch` on
+  the S3 PutObject. For `cp`, `s3open` + `no_overwrite` is a **silent no-op**:
+  the only download-side guard is the local-destination `os.path.exists` check,
+  which a custom backend (owning its key space, with no existence probe wired)
+  does not run. In `sync` it *does* work - sync lists the destination, so a
+  destination-present pair is skipped without any probe.
+- **dryrun**: enumerates and reports `DRYRUN` but does **not** call `open` on the
+  custom side - opening a `"wb"` writer is itself a side effect, so a dry run
+  leaves the backend untouched.
+- **mv** (section 11): every upload deletes its source through that source's own
+  `Storage.delete(info)` after each successful upload - the source listing entry
+  rides on `TransferItem.src_info` (its `info.key` locates the object), and
+  `Transferrer.source_storage` carries the source `Storage` (local or custom
+  backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
+  download `mv`. Data-safe in both: `_CloseFileobj` is
+  ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
+  failed writer commit - leaves the source in place.
+- **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
+  custom side must declare `SORTED_SCAN` - an unsorted listing would manufacture
+  phantom new/delete pairs and, with `--delete`, corrupt the destination. A
+  dedicated gate (`S3._require_open_sync_capabilities`) requires `SORTED_SCAN` +
+  `OPEN_READ` (an `opens3` source) / `OPEN_WRITE` (an `s3open` destination), plus
+  `DELETE` when `--delete` removes orphans from an `s3open` custom destination
+  (`opens3` orphans are S3, deleted without the custom side). `sync` passes
+  `ScanOptions(sort=True)` to the custom side; the built-ins always sort and
+  ignore the flag. Orphans are removed through `_SyncDeletes`: `DeleteObjects` for
+  an S3 destination, the backend's `Storage.delete` for a custom one. The
+  case-conflict gate is scoped to a `LocalStorage` destination (a custom one owns
+  its key space). The transfer of each surviving pair reuses the `opens3` /
+  `s3open` builders above (the dry-run-skips-`open` behavior included).
+- **display**: the custom side renders through its `Storage.as_text()` (with the
+  entry's relative key appended for a child); the S3 side as `s3://bucket/key`.

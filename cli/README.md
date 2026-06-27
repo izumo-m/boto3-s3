@@ -96,8 +96,8 @@ uploads stdin, and `boto3-s3 cp s3://b/key -` writes the object to stdout.
 Credentials and connection settings come from the standard AWS sources, selected
 with the same global flags as `aws s3` — `--profile`, `--region`,
 `--endpoint-url` (e.g. for MinIO), `--no-sign-request`, `--no-verify-ssl`,
-`--ca-bundle`, and the timeout flags. A global flag may appear **before or
-after** the subcommand:
+`--ca-bundle`, `--cli-read-timeout`, and `--cli-connect-timeout`. A global flag
+may appear **before or after** the subcommand:
 
 ```bash
 boto3-s3 --profile prod --region eu-west-1 ls s3://my-bucket
@@ -113,20 +113,6 @@ exactly as `aws s3` reads it.
 ids, session tokens) masked by default.
 
 Run `boto3-s3 <command> --help` for a subcommand's full option list.
-
-## Exit codes
-
-For scripting, `boto3-s3` returns the same codes as `aws s3`:
-
-| Code | Meaning |
-| --- | --- |
-| `0` | Success. |
-| `1` | A transfer or delete failed, or a lookup matched nothing (e.g. `ls` of a key/prefix that doesn't exist). |
-| `2` | Completed with warnings only (e.g. a skipped Glacier object). |
-| `252` | Usage / argument error. |
-| `253` | Configuration error (credentials, region). |
-| `254` | Server-side error. |
-| `255` | Other general error (e.g. a non-integer value for a numeric option). |
 
 ## License
 

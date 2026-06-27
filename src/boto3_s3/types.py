@@ -49,14 +49,16 @@ class FileInfo:
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.
 
-    ``compare_key`` is the entry's key *relative to the current operation's
-    root* (the ``--exclude`` / ``--include`` matching space). It is ``None`` on a
-    bare listing entry and is stamped just before a :data:`FileFilter` is
-    consulted (``cp`` / ``mv`` / ``rm`` / ``sync``), so a filter - notably
-    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key while
-    ``key`` stays the full identifier the transfer / delete actually uses. Two
-    ``scan`` sides relativized to their roots share one ``compare_key`` space
-    (the basis of ``sync``'s merge-join); ``key`` differs per side.
+    ``compare_key`` is the entry's key *relative to its scan root* - the
+    ``--exclude`` / ``--include`` matching space, and the axis ``sync`` merge-joins
+    on (two ``scan`` sides relativized to their roots share one ``compare_key``
+    space, while ``key`` stays the full identifier the transfer / delete uses and
+    differs per side). ``Storage.scan`` stamps it on every entry it yields, so a
+    custom ``ScanOptions.filter`` predicate - notably
+    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key
+    directly, without re-deriving it from ``key``. The name mirrors aws-cli's
+    ``FileInfo.compare_key``. It is ``None`` only on a ``FileInfo`` built by hand
+    rather than produced by ``scan``.
     """
 
     key: str
@@ -115,7 +117,17 @@ class ScanOptions:
     (aws-cli parity). Values are not validated here: like aws-cli, they pass
     through to the service, which decides (``page_size=0`` lists nothing,
     negative values fail the call with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both).
+    charter requires reproducing both). ``follow_symlinks`` /
+    ``detect_symlink_loops`` / ``on_warning`` are local-walk knobs (ignored by
+    S3, like the listing knobs above): ``follow_symlinks=False`` skips symlinks;
+    ``on_warning`` receives the aws-cli-worded skip messages (a broken symlink,
+    an unreadable or special file) that the transfer rolls up - without it those
+    entries are dropped silently. ``detect_symlink_loops`` (default ``False``, a
+    library extension - ``aws s3`` has none, so off keeps parity) guards the
+    recursive walk against symlink cycles: with it (and ``follow_symlinks``) a
+    directory that resolves to one of its own ancestors is skipped with a
+    ``Symbolic link loop detected`` warning instead of recursing until
+    ``RecursionError``. Off is zero extra cost (no per-directory ``stat``).
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     ``scan`` itself - page by page on the prefetch worker, before pages cross
@@ -127,15 +139,29 @@ class ScanOptions:
     streams - which is exactly why filtered-out destination entries are
     protected from ``--delete``. The predicate runs on the worker thread:
     keep it thread-safe and fast.
+
+    ``sort`` requests entries in UTF-8 byte order of their ``compare_key``:
+    ``sync`` sets it (its merge-join needs both sides ascending), while ``cp`` /
+    ``mv`` / ``ls`` / ``rm`` leave it ``False`` (order is immaterial - each entry
+    transfers / lists / deletes independently). A backend declaring
+    :attr:`~boto3_s3.storage.StorageCapability.SORTED_SCAN` MUST honor
+    ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
+    byte-ordered, the local walk sorts for aws parity), so it costs nothing for
+    them. A custom backend whose sort is expensive may stream natural order when
+    ``sort=False`` and pay the sort only for ``sync``.
     """
 
     recursive: bool = False
+    sort: bool = False
     page_size: int = 1000
     request_payer: str | None = None
     fetch_owner: bool = False
     bucket_name_prefix: str | None = None
     bucket_region: str | None = None
     filter: Callable[[FileInfo], bool] | None = None
+    follow_symlinks: bool = True
+    detect_symlink_loops: bool = False
+    on_warning: Callable[[str], None] | None = None
 
 
 class OpKind(enum.Enum):

@@ -81,8 +81,9 @@ first use).
 entry's `FileInfo` - returning True = include (a deletion target), False = skip
 (silently; as with aws, no OpResult is emitted either).
 
-Before consulting the filter the operation stamps **`info.compare_key`**: the
-entry's key relative to the root determined by `rm_filter_root(key,
+`Storage.scan` stamps **`info.compare_key`** on each listing entry (the
+single-key path stamps it inline): the entry's key relative to the root
+determined by `rm_filter_root(key,
 recursive=...)`. The root is, for recursive = the prefix normalized to a
 `/`-terminated form, for a single key = its parent "directory", for the bucket
 root = `""` (equivalent to the composition of aws's `filters._get_s3_root` plus
@@ -95,7 +96,7 @@ relativization, so it is not part of the root.
   sees the same root-relative key aws-cli's `--exclude` / `--include` match,
   with the section 2 fast paths intact. The CLI relativizes its patterns in
   their order of appearance via `translate_pattern_for_root`, `compile`s them,
-  and wraps the result as a `FileFilter` (`cli/filters.py`).
+  and wraps the result as a `FileFilter` (`cli/src/boto3_s3_cli/filters.py`).
 - **a custom predicate** can instead decide on size / mtime / storage_class
   (e.g. `filter=lambda info: info.size == 0`), or read `info.compare_key` for a
   relative-path rule of its own. On the non-recursive blind single-key path
@@ -104,9 +105,10 @@ relativization, so it is not part of the root.
 
 ### Application mechanism (`ScanOptions.filter`)
 
-`S3.rm` wraps the filter so each entry's `compare_key` is stamped
-(`info.key[len(root):]`) just before the predicate runs, and passes the wrapper
-as `ScanOptions.filter` to the enumeration. The evaluation is done **per page** by
+`S3.rm` wraps the filter (for the folder-marker sweep) and passes it as
+`ScanOptions.filter` to the enumeration; `Storage.scan` stamps each entry's
+root-relative `compare_key` (`info.key[len(root):]`) before the predicate runs.
+The evaluation is done **per page** by
 `Storage.scan` (the concrete base-class method) on the listing's prefetch
 worker thread - an excluded
 entry is not handed to the consumer, and a page that is wiped out entirely never
@@ -141,14 +143,14 @@ root stripped (`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
 Matching therefore happens in `/`-space, so **a pattern must be `/`-form to
 match**:
 
-- **CLI**: patterns are written `/`-form. `cli/filters.py` runs each through
+- **CLI**: patterns are written `/`-form. `cli/src/boto3_s3_cli/filters.py` runs each through
   `translate_pattern_for_root`, which folds the host separator to `/`
   (`pattern.replace(os.sep, "/")`), so a Windows user may also write `\` and it
   is normalized. This collapses aws-cli `filters._match_pattern`'s per-side
   rewrite (local `/` -> `os.sep`, s3 `os.sep` -> `/`) into a single `/`-space
   match: on POSIX (`os.sep == "/"`) it is a no-op, so a literal `\` in an S3 key
   survives instead of being rewritten. On Windows aws-cli additionally
-  `normcase`s both sides, making the match **case-insensitive**; `cli/filters.py`
+  `normcase`s both sides, making the match **case-insensitive**; `cli/src/boto3_s3_cli/filters.py`
   reproduces this by lower-casing patterns at compile and keys at match
   (`os.name == "nt"`), and stays byte-exact on POSIX.
 - **library**: a `GlobFilter` matches the `/`-form `compare_key`, so its patterns

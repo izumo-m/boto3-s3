@@ -48,7 +48,7 @@ dst listing -- filter (visibility) --+        |
 |---|---|
 | `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as a `SyncPair`; makes no decision), the `SyncPair` / `PairFilter` types, `compare_size_time` (the internal aws-compatible default, a function reading `pair.kind`), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
-| `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local dest uses a synchronous `os.remove` on the calling thread (same shape as aws-cli `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
+| `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
 Structural correspondence with aws-cli: aws-cli's `Comparator` calls three
 strategies inside its merge loop (`file_at_src_and_dest` / `file_not_at_dest` /
@@ -63,7 +63,7 @@ at_both + not_at_dest; it can branch on whether a dst exists) and `delete`
 S3().sync(src, dst, *,
     delete: bool | FileFilter = False,             # False / True / predicate: lane + scope
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
-    compare: bool | PairFilter | None = None,      # None=AwsCliComparison() / True=all / False=none / callable=custom
+    compare: bool | PairFilter | ParallelCompare | None = None,  # None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelCompare=pooled
     follow_symlinks=True, dryrun=False, page_size=1000,
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
@@ -153,7 +153,7 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
   not a conflict).
 - delete: an S3 dest uses `S3Deleter` (the `DeleteObjects` batch; the known
   wire divergence from aws-cli's per-key `DeleteObject` - same as rm,
-  deleter.md section 4). A local dest uses a synchronous `os.remove`. The output is
+  deleter.md section 4). A local dest uses a synchronous `Storage.delete` (`LocalStorage.delete`, an `os.remove`). The output is
   `delete: <endpoint>` (no `to` clause; the library emits the `s3://bucket/key`
   endpoint for an S3 dest and the full native path for a local dest - matching
   section 2 - which the CLI then renders cwd-relative) / `(dryrun) delete: ...`.
@@ -178,6 +178,16 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
   straight through, then each item fails with `[Errno 20]` and gives rc 1.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
+- opens3 / s3open (a custom backend on one side, the other always S3 - the open
+  route, transfer.md section 12): the custom side must declare `SORTED_SCAN`
+  (the merge-join needs both listings byte-ordered) plus the route's I/O
+  (`OPEN_READ` source / `OPEN_WRITE` dest) and `DELETE` for an `s3open` `--delete`
+  destination; a dedicated gate rejects a backend short of that *before* any
+  listing. `sync` requests `ScanOptions(sort=True)` from the custom side (the
+  built-ins always sort and ignore it). Orphan deletes go through the backend's
+  own `Storage.delete` for an `s3open` destination (an `opens3` destination is
+  S3); the case-conflict gate stays scoped to a local destination. Library-only -
+  the CLI never pairs a custom backend.
 
 ## 7. Known divergences (recorded only)
 

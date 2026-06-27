@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 from boto3_s3 import (
     S3,
+    AccessDeniedError,
     FileInfo,
     FileKind,
     LocalStorage,
@@ -47,12 +48,19 @@ class _FakePaginator:
 
 class _FakeS3Client:
     def __init__(
-        self, pages: list[dict[str, Any]] | None = None, error: Exception | None = None
+        self,
+        pages: list[dict[str, Any]] | None = None,
+        error: Exception | None = None,
+        head_response: dict[str, Any] | None = None,
+        head_error: Exception | None = None,
     ) -> None:
         self._pages = pages or []
         self._error = error
+        self._head_response = head_response
+        self._head_error = head_error
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
+        self.head_calls: list[dict[str, Any]] = []
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -61,14 +69,24 @@ class _FakeS3Client:
         self.paginator_names.append(name)
         return _FakePaginator(self._pages, self._error, self.calls)
 
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.head_calls.append(kwargs)
+        if self._head_error is not None:
+            raise self._head_error
+        return self._head_response or {}
+
 
 def _storage(
     pages: list[dict[str, Any]] | None = None,
     *,
     error: Exception | None = None,
+    head_response: dict[str, Any] | None = None,
+    head_error: Exception | None = None,
     url: str = "s3://bucket/prefix/",
 ) -> tuple[S3Storage, _FakeS3Client]:
-    client = _FakeS3Client(pages=pages, error=error)
+    client = _FakeS3Client(
+        pages=pages, error=error, head_response=head_response, head_error=head_error
+    )
     return S3Storage(url, client=client), client
 
 
@@ -107,11 +125,15 @@ class TestScanNonRecursive:
         assert client.calls[0]["Delimiter"] == "/"
         assert client.calls[0]["Bucket"] == "bucket"
         assert client.calls[0]["Prefix"] == "prefix/"
-        assert results[0] == S3FileInfo(key="prefix/sub/", kind=FileKind.DIRECTORY)
+        # compare_key is the prefix-relative key, stamped by scan.
+        assert results[0] == S3FileInfo(
+            key="prefix/sub/", kind=FileKind.DIRECTORY, compare_key="sub/"
+        )
         info = results[1]
         assert isinstance(info, S3FileInfo)
         assert info.kind is FileKind.FILE
         assert info.key == "prefix/a.txt"
+        assert info.compare_key == "a.txt"
         assert info.size == 10
         assert info.mtime == _MTIME
         assert info.etag == "abc"  # surrounding quotes stripped
@@ -131,6 +153,21 @@ class TestScanRecursive:
         assert "Delimiter" not in client.calls[0]
         assert all(isinstance(r, S3FileInfo) for r in results)
         assert [r.key for r in results] == ["prefix/a.txt", "prefix/sub/b.txt", "prefix/c.txt"]
+        # scan stamps the prefix-relative compare_key on every entry.
+        assert [r.compare_key for r in results] == ["a.txt", "sub/b.txt", "c.txt"]
+
+    def test_filter_matches_scan_stamped_compare_key(self) -> None:
+        # A custom ScanOptions.filter can match the prefix-relative compare_key
+        # directly: scan stamps it, so the predicate neither strips the prefix
+        # nor trips over a None compare_key.
+        pages = [{"Contents": [_obj("prefix/keep/a.txt"), _obj("prefix/drop/b.txt")]}]
+        storage, _ = _storage(pages)
+        options = ScanOptions(
+            recursive=True, filter=lambda info: info.compare_key.startswith("keep/")
+        )
+        results = list(storage.scan(options))
+        assert [r.key for r in results] == ["prefix/keep/a.txt"]
+        assert results[0].compare_key == "keep/a.txt"
 
 
 class TestScanOptionForwarding:
@@ -238,6 +275,52 @@ class TestScanFilter:
             list(storage.scan(ScanOptions(recursive=True, filter=boom)))
 
 
+def _client_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "HeadObject",
+    )
+
+
+class TestGetFileinfo:
+    """``S3Storage.get_fileinfo`` - a generic HeadObject: present / 404->None / raise."""
+
+    def test_present_returns_fileinfo(self) -> None:
+        head = {
+            "ContentLength": 7,
+            "LastModified": _MTIME,
+            "ETag": '"abc"',
+            "StorageClass": "STANDARD",
+        }
+        storage, client = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert isinstance(info, S3FileInfo)
+        assert info.key == "prefix/obj.txt"
+        assert info.compare_key == "obj.txt"  # basename
+        assert info.size == 7
+        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.head is head  # the HeadObject payload is cached
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
+
+    def test_404_returns_none(self) -> None:
+        storage, _ = _storage(url="s3://bucket/missing", head_error=_client_error("404", 404))
+        assert storage.get_fileinfo() is None
+
+    def test_other_error_raises(self) -> None:
+        storage, _ = _storage(url="s3://bucket/denied", head_error=_client_error("403", 403))
+        with pytest.raises(AccessDeniedError):
+            storage.get_fileinfo()
+
+    def test_child_key_joins_under_the_prefix(self) -> None:
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket/prefix/", head_response=head)
+        info = storage.get_fileinfo("sub/f.txt")
+        assert info is not None
+        assert info.key == "prefix/sub/f.txt"
+        assert info.compare_key == "f.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
+
+
 def _bucket_entry(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": _MTIME}
 
@@ -343,12 +426,14 @@ class _DeleteRecordingClient:
 class TestDelete:
     def test_blind_delete_object_call(self) -> None:
         client = _DeleteRecordingClient()
-        S3Storage("s3://bucket/any", client=client).delete("data/a.txt")
+        S3Storage("s3://bucket/any", client=client).delete(S3FileInfo(key="data/a.txt"))
         assert client.calls == [{"Bucket": "bucket", "Key": "data/a.txt"}]
 
     def test_request_payer_forwarded(self) -> None:
         client = _DeleteRecordingClient()
-        S3Storage("s3://bucket", client=client).delete("k", request_payer="requester")
+        S3Storage("s3://bucket", client=client).delete(
+            S3FileInfo(key="k"), request_payer="requester"
+        )
         assert client.calls == [{"Bucket": "bucket", "Key": "k", "RequestPayer": "requester"}]
 
     def test_client_error_translates_with_key_context(self) -> None:
@@ -361,7 +446,7 @@ class TestDelete:
         )
         client = _DeleteRecordingClient(error=error)
         with pytest.raises(NotFoundError) as exc_info:
-            S3Storage("s3://bucket", client=client).delete("k")
+            S3Storage("s3://bucket", client=client).delete(S3FileInfo(key="k"))
         assert exc_info.value.bucket == "bucket"
         assert exc_info.value.key == "k"
         assert isinstance(exc_info.value.__cause__, ClientError)
@@ -387,8 +472,9 @@ class TestConstructor:
             assert storage.url == "s3://"
 
     def test_key_without_bucket_is_rejected(self) -> None:
+        # Construction is permissive (non-raising); validate() does the rejection.
         with pytest.raises(ValidationError):
-            S3Storage("s3:///key")
+            S3Storage("s3:///key").validate()
 
 
 class TestArnBuckets:
@@ -396,7 +482,8 @@ class TestArnBuckets:
 
     The whole access-point ARN - slash-separated name included - is the
     bucket; only what follows it is the key. Object Lambda and Outposts
-    *bucket* ARNs are rejected at parse time the way ``aws s3`` rejects them
+    *bucket* ARNs are rejected by :meth:`S3Storage.validate` (deferred from the
+    permissive construction) the way ``aws s3`` rejects them at parse time
     (ParamValidation -> rc 252, verified against aws-cli 2.34).
 
     The client needs no ARN-derived region: botocore resolves the endpoint
@@ -429,7 +516,7 @@ class TestArnBuckets:
     def test_object_lambda_arn_is_rejected(self) -> None:
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
         with pytest.raises(ValidationError, match="S3 Object Lambda"):
-            S3Storage(f"s3://{arn}")
+            S3Storage(f"s3://{arn}").validate()
 
     def test_outpost_bucket_arn_is_rejected(self) -> None:
         arn = (
@@ -437,7 +524,7 @@ class TestArnBuckets:
             "outpost/op-01234567890123456/bucket/my-bucket"
         )
         with pytest.raises(ValidationError, match="Outpost Bucket"):
-            S3Storage(f"s3://{arn}")
+            S3Storage(f"s3://{arn}").validate()
 
 
 class TestResolveRouting:

@@ -5,10 +5,11 @@ aws-cli evaluates the two options as ONE ordered rule list (its
 last-match-wins semantics, so the interleaved command-line order is
 significant: ``--exclude '*' --include '*.txt'`` keeps only ``.txt`` while
 the reverse keeps nothing. :class:`AppendFilterAction` preserves that order;
-:func:`build_filter` resolves the patterns against the operation's root the
-way aws-cli's ``filters.py`` joins them, compiles a
-:class:`boto3_s3.globsieve` matcher, and wraps it as the ``FileFilter``
-``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume (matching ``info.compare_key``).
+:func:`compile_for_root` resolves the patterns against the operation's root
+the way aws-cli's ``filters.py`` joins them, compiles a
+:mod:`boto3_s3.globsieve` matcher, and wraps it as the ``FileFilter``
+``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume (matching ``info.compare_key``);
+``rm`` reaches it through the :func:`build_filter` convenience.
 """
 
 from __future__ import annotations
@@ -65,10 +66,10 @@ class AppendFilterAction(argparse.Action):
 def _as_file_filter(matcher: Matcher) -> FileFilter:
     """Wrap a compiled matcher as the ``FileFilter`` the operations consume.
 
-    The operation stamps ``info.compare_key`` (the root-relative key) before
-    consulting the filter, so the wrapper matches that key. It is always set in
-    a filter context; ``None`` would mean the filter was misapplied, so fail
-    loudly rather than silently matching the full key.
+    ``Storage.scan`` stamps ``info.compare_key`` (the root-relative key) on each
+    entry, so the wrapper matches that key. It is always set in a filter context;
+    ``None`` would mean the filter was misapplied, so fail loudly rather than
+    silently matching the full key.
     """
 
     def keep(info: FileInfo) -> bool:

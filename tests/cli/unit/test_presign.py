@@ -106,7 +106,7 @@ class TestPresignExitCodeShape:
         assert "Unknown options: extra-arg" in capsys.readouterr().err
 
     def test_object_lambda_arn_stays_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # Parse-time ARN rejections must reach main's 252 mapping.
+        # S3Storage.validate() ARN rejections must reach main's 252 mapping.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
         rc = cli.main(["presign", f"s3://{arn}"], ctx=_ctx(object()))
         assert rc == 252

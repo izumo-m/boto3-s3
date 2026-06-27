@@ -23,11 +23,18 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from boto3_s3.exceptions import ValidationError
 
-PathsType = Literal["locals3", "s3local", "s3s3"]
+if TYPE_CHECKING:
+    # Annotation-only (``from __future__ import annotations`` keeps it out of the
+    # runtime import graph): the ``Storage`` ABC is SDK-free and does not import
+    # ``naming``, so this is cycle-free and the pure-function layer stays SDK-free.
+    from boto3_s3.storage import Storage
+
+PathsType = Literal["locals3", "s3local", "s3s3", "opens3", "s3open"]
+PathKind = Literal["s3", "local", "open"]
 
 _S3_SCHEME = "s3://"
 
@@ -46,7 +53,7 @@ _S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
 )
 
 
-def classify(path: str) -> Literal["s3", "local"]:
+def classify(path: str) -> PathKind:
     """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows."""
     return "s3" if path.startswith(_S3_SCHEME) else "local"
 
@@ -111,6 +118,21 @@ def s3_format(path: str, *, dir_op: bool) -> tuple[str, bool]:
             path += "/"
         return path, True
     return path, path.endswith("/")
+
+
+def _open_format(text: str, *, dir_op: bool) -> tuple[str, bool]:
+    """Format a custom-backend (``open``-routed) side; return ``(root, use_src_name)``.
+
+    A custom ``Storage`` encapsulates its own location and addresses entries by
+    their scan-root-relative ``compare_key``: its ``open`` / ``get_fileinfo``
+    take that relative key, and ``delete`` takes the entry's ``FileInfo`` (whose
+    ``key`` is that same relative key). So the root is always empty: the relative
+    key passes straight through (:func:`dest_for` returns ``compare_key``
+    unchanged, or ``""`` to mean the location itself). ``use_src_name`` mirrors
+    :func:`s3_format`: a ``dir_op`` or an explicit trailing ``/`` means the
+    destination adopts the source's name.
+    """
+    return "", (dir_op or text.endswith("/"))
 
 
 def _strip_scheme_normalized(path: str) -> str:
@@ -179,10 +201,15 @@ def same_key(src: str, dest: str) -> bool:
 class TransferPlan:
     """The resolved shape of one cp/mv/sync path pair.
 
-    ``src_root`` / ``dst_root`` are the *formatted* sides (aws-cli's
-    ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as a
-    native absolute path; directory semantics are expressed by a trailing
-    separator. ``filter_root`` is what ``--exclude`` / ``--include`` patterns
+    ``src`` / ``dst`` are the resolved endpoint ``Storage`` objects this plan was
+    built from, retained so the transfer can drive each side's own ``scan`` (and
+    honor a ``Storage`` subclass override) instead of re-deriving the walk from
+    the formatted root. ``src_root`` / ``dst_root`` are the *formatted* sides
+    (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
+    a native absolute path, and a custom ``open`` side as ``""`` (it addresses
+    entries by the relative ``compare_key`` its own ``open`` takes); directory
+    semantics are expressed by a trailing separator. ``filter_root`` is what
+    ``--exclude`` / ``--include`` patterns
     resolve against (aws-cli's ``filters._get_*_root``): for an S3 source the
     *key*-derived root (the bucket cancels out of the relative match, exactly
     like ``rm_filter_root``), for a local source an absolute directory; feed
@@ -193,6 +220,8 @@ class TransferPlan:
     paths_type: PathsType
     dir_op: bool
     use_src_name: bool
+    src: Storage
+    dst: Storage
     src_root: str
     dst_root: str
     src_sep: str
@@ -200,42 +229,89 @@ class TransferPlan:
     filter_root: str
 
 
-def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp") -> TransferPlan:
-    """Resolve a raw cp/mv path pair into a :class:`TransferPlan`.
+def _endpoint_kind(storage: Storage) -> PathKind:
+    """The transfer kind from a resolved endpoint's ``scheme`` (the object layer).
 
-    ``recursive`` is aws-cli's ``dir_op``. A local->local pair raises
-    ``ValidationError`` - ``aws s3`` has no such route (its usage error; the
-    CLI layer phrases the strict aws message itself).
+    ``"s3"`` / ``"local"`` are the built-in container pair, driven through
+    ``s3transfer`` / the local path directly. Any other ``scheme`` is a custom
+    backend, routed as ``"open"`` - its bytes move through ``Storage.open`` while
+    the paired side (always s3) rides ``s3transfer``. A stdio stream never reaches
+    here (``cp`` diverts it to the stream path up front), so its scheme folds into
+    ``"open"`` harmlessly; an unsupported pairing is rejected by
+    :func:`plan_transfer`, not here.
     """
-    src_type = classify(src)
-    dst_type = classify(dst)
-    if src_type == "local" and dst_type == "local":
+    scheme = getattr(storage, "scheme", None)
+    if scheme == "s3":
+        return "s3"
+    if scheme == "local":
+        return "local"
+    return "open"
+
+
+def plan_transfer(
+    src: Storage, dst: Storage, *, recursive: bool, operation: str = "cp"
+) -> TransferPlan:
+    """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
+
+    The route per side is read from each endpoint's ``scheme`` discriminator - the
+    object layer, not a re-parsed scheme string - and the path shape from its
+    ``as_text()``. ``"s3"`` / ``"local"`` are the built-in pair; any other scheme
+    is a custom backend routed through ``Storage.open`` (``opens3`` / ``s3open``),
+    which must pair with s3 - ``open`` to ``local``, ``open`` to ``open`` and
+    ``local`` to ``local`` have no ``aws s3`` route and are rejected (the CLI layer
+    phrases the strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
+    """
+    src_kind = _endpoint_kind(src)
+    dst_kind = _endpoint_kind(dst)
+    # A custom ``open`` side moves its bytes through ``Storage.open`` while the
+    # other side rides ``s3transfer``, so it can only pair with s3 - never local,
+    # another custom backend, or a stream.
+    if "open" in (src_kind, dst_kind) and {src_kind, dst_kind} != {"open", "s3"}:
+        raise ValidationError(
+            f"{operation}: a custom-backend path transfers only with an s3:// path "
+            "(not local, another custom backend, or a stream)",
+            operation=operation,
+        )
+    if src_kind == "local" and dst_kind == "local":
         raise ValidationError(
             f"{operation} requires at least one s3:// path (local to local is not supported)",
             operation=operation,
         )
 
-    if src_type == "s3":
-        src_rest = _strip_scheme_normalized(src)
+    src_text = src.as_text()
+    dst_text = dst.as_text()
+    if src_kind == "s3":
+        src_rest = _strip_scheme_normalized(src_text)
         src_root = s3_format(src_rest, dir_op=recursive)[0]
         src_sep = "/"
         filter_root = _s3_filter_root(src_rest, dir_op=recursive)
+    elif src_kind == "open":
+        src_root = _open_format(src_text, dir_op=recursive)[0]
+        src_sep = "/"
+        filter_root = ""
     else:
-        src_root = local_format(src, dir_op=recursive)[0]
+        src_root = local_format(src_text, dir_op=recursive)[0]
         src_sep = os.sep
-        filter_root = _local_filter_root(src, dir_op=recursive)
+        filter_root = _local_filter_root(src_text, dir_op=recursive)
 
-    if dst_type == "s3":
-        dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst), dir_op=recursive)
+    if dst_kind == "s3":
+        dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst_text), dir_op=recursive)
+        dst_sep = "/"
+    elif dst_kind == "open":
+        dst_root, use_src_name = _open_format(dst_text, dir_op=recursive)
         dst_sep = "/"
     else:
-        dst_root, use_src_name = local_format(dst, dir_op=recursive)
+        dst_root, use_src_name = local_format(dst_text, dir_op=recursive)
         dst_sep = os.sep
 
     paths_type: PathsType
-    if src_type == "local":
+    if src_kind == "open":
+        paths_type = "opens3"
+    elif dst_kind == "open":
+        paths_type = "s3open"
+    elif src_kind == "local":
         paths_type = "locals3"
-    elif dst_type == "local":
+    elif dst_kind == "local":
         paths_type = "s3local"
     else:
         paths_type = "s3s3"
@@ -243,6 +319,8 @@ def plan_transfer(src: str, dst: str, *, recursive: bool, operation: str = "cp")
         paths_type=paths_type,
         dir_op=recursive,
         use_src_name=use_src_name,
+        src=src,
+        dst=dst,
         src_root=src_root,
         dst_root=dst_root,
         src_sep=src_sep,
@@ -271,17 +349,18 @@ def _local_filter_root(path: str, *, dir_op: bool) -> str:
     return os.path.abspath(os.path.dirname(path))
 
 
-def filter_root(path: str, *, dir_op: bool) -> str:
-    """The filter root for one raw path, either scheme (aws-cli's ``create_filter``).
+def dest_for(plan: TransferPlan, compare_key: str) -> str:
+    """The destination path for an item from its root-relative ``compare_key``.
 
-    What ``--exclude`` / ``--include`` patterns resolve against on that
-    side: ``TransferPlan.filter_root`` covers the source, and sync - which
-    filters *both* sides, each against its own root - derives the
-    destination's root through this same rule.
+    The destination half of aws-cli's ``find_dest_path_comp_key``: the
+    ``/``-separated ``compare_key`` is appended (separator-translated) to the
+    destination root only when the destination adopts the source's name;
+    otherwise the root stands alone. A producer-stamped ``FileInfo.compare_key``
+    feeds this directly, so a transfer needs no re-derivation from the full key.
     """
-    if classify(path) == "s3":
-        return _s3_filter_root(_strip_scheme_normalized(path), dir_op=dir_op)
-    return _local_filter_root(path, dir_op=dir_op)
+    if plan.use_src_name:
+        return plan.dst_root + compare_key.replace("/", plan.dst_sep)
+    return plan.dst_root
 
 
 def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
@@ -292,25 +371,24 @@ def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     component. ``compare_key`` is that relative part ``/``-separated - the
     name under which the item is filtered, reported, and (for sync) compared.
     The destination appends it (separator-translated) only when the
-    destination takes the source's name.
+    destination takes the source's name. Used where no listing ``FileInfo`` is
+    at hand (a stream's dest); the listing paths read ``FileInfo.compare_key``
+    and call :func:`dest_for` directly.
     """
     if plan.dir_op:
         rel_path = src_path[len(plan.src_root) :]
     else:
         rel_path = src_path.split(plan.src_sep)[-1]
     compare_key = rel_path.replace(plan.src_sep, "/")
-    if plan.use_src_name:
-        dest_path = plan.dst_root + rel_path.replace(plan.src_sep, plan.dst_sep)
-    else:
-        dest_path = plan.dst_root
-    return dest_path, compare_key
+    return dest_for(plan, compare_key), compare_key
 
 
 __all__ = [
+    "PathKind",
     "PathsType",
     "TransferPlan",
     "classify",
-    "filter_root",
+    "dest_for",
     "item_paths",
     "local_format",
     "normalize_s3_uri",

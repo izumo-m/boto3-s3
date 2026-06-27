@@ -196,8 +196,9 @@ sources.
 The bucket part of an S3 URI may also be an access point ARN (regular /
 Outposts), and just like aws-cli's `find_bucket_key`, the entire ARN (including
 the `/`-separated name) is passed as `Bucket`. S3 Object Lambda / Outposts
-**bucket** ARNs are rejected at parse time, as in aws (rc 252). Both are
-implemented in the library layer (`S3Storage`'s URL parsing).
+**bucket** ARNs are rejected by `S3Storage.validate()` (deferred from the
+permissive construction), matching aws's rc 252. Both are implemented in the
+library layer.
 
 ### 5.1 `ls`
 
@@ -258,7 +259,7 @@ aws-cli's behavior):
 | `--dryrun` | Calls no delete API, emitting only `(dryrun) delete:` lines (the recursive ListObjectsV2 still runs = a listing failure is fatal even under dryrun) |
 | `--quiet` | **Suppresses all output** (not just success lines but also `delete failed:` / `fatal error:` lines. aws does not create the printer at all. The rc is unchanged) |
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
-| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). The root is recursive = the normalized prefix / single = the parent of the key / bucket root = "" (`rm_filter_root`). `cli/filters.py` translates it into globsieve and passes it to `S3.rm(filter=)` |
+| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). The root is recursive = the normalized prefix / single = the parent of the key / bucket root = "" (`rm_filter_root`). `cli/src/boto3_s3_cli/filters.py` translates it into globsieve and passes it to `S3.rm(filter=)` |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
 | `--page-size N` | No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
@@ -359,9 +360,11 @@ reproduces the same shape (`storage.key` or the `/` left after stripping) with a
 entirely as `Bucket` (aws's `block_unsupported_resources` rejects only Object
 Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
 
-rc forms: **0 / 252 / 253 / 254** (because, unlike mb / rb, there is no local
-catch, a server rejection - `NoSuchBucket`, an endpoint that does not accept the
-configuration - is **254** derived from `ClientError`. 1 cannot occur). Because
+rc forms: **0 / 252 / 253 / 254 / 255** (because, unlike mb / rb, there is no
+local catch: a server rejection - `NoSuchBucket`, an endpoint that does not
+accept the configuration - is **254** derived from `ClientError`, while a
+client-construction failure such as `ProfileNotFound` / `PartialCredentialsError`
+is **255**. 1 cannot occur). Because
 MinIO always rejects PutBucketWebsite with MalformedXML
 ([`testing.md`](./testing.md) section 7), the success-path verification is handled by
 moto.
@@ -536,8 +539,10 @@ probe revealed that it was unimplemented on the cp side, and it was added at the
 same time).
 
 **The source deletion** is the engine's job, not the CLI's (transfer.md section 11): for
-each successful item, an upload does `os.remove`, while a download / copy does a
-DeleteObject against the source-side client (RequestPayer passed through). On a
+each successful item, an upload deletes the source through its `Storage.delete`
+(`LocalStorage.delete`, an `os.remove`, since the CLI's upload source is always
+local), while a download / copy does a DeleteObject against the source-side
+client (RequestPayer passed through). On a
 dryrun / a filter exclusion / a skip (no-overwrite, glacier) / a transfer
 failure, the source remains, and **a failure of the deletion itself makes that
 item a `move failed:` (rc 1)** (the bytes have already arrived). An emptied local

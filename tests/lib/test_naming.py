@@ -10,26 +10,85 @@ resolves to roots and ``use_src_name``, how each item's destination and
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import BinaryIO, Literal
 
 import pytest
+from typing_extensions import override
 
+from boto3_s3 import LocalStorage, S3Storage, Storage, naming
 from boto3_s3.exceptions import ValidationError
 from boto3_s3.globsieve import translate_pattern_for_root
 from boto3_s3.naming import (
     classify,
+    dest_for,
     item_paths,
     local_format,
     normalize_s3_uri,
-    plan_transfer,
     s3_format,
     same_key,
     same_path,
     split_bucket_key,
 )
+from boto3_s3.types import FileInfo, ScanOptions
 
 _ACCESSPOINT_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myap"
 _OUTPOST_ARN = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567/accesspoint/my-ap"
+
+
+def _storage(arg: str) -> S3Storage | LocalStorage:
+    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by
+    ``classify`` on the raw path - exactly how the CLI builds its endpoints."""
+    return S3Storage(arg) if classify(arg) == "s3" else LocalStorage(arg)
+
+
+def plan_transfer(
+    src: str, dst: str, *, recursive: bool, operation: str = "cp"
+) -> naming.TransferPlan:
+    """Test wrapper: build each endpoint Storage from its raw path (classify-chosen)
+    and call the real formatter, so the call sites below stay path-focused.
+    """
+    return naming.plan_transfer(
+        _storage(src), _storage(dst), recursive=recursive, operation=operation
+    )
+
+
+class _FakeOpen(Storage):
+    """A custom (open-routed) Storage for plan_transfer tests: its scheme is
+    neither s3 nor local, so it routes through the open seam. Only ``scheme`` and
+    ``as_text`` matter to the formatter; the I/O methods stay inert."""
+
+    scheme = "mem"
+
+    def __init__(self, token: str = "mem://x") -> None:
+        self._token = token
+
+    @override
+    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+        raise NotImplementedError
+
+    @override
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        raise NotImplementedError
+
+    @override
+    def delete(self, info: FileInfo) -> None:
+        raise NotImplementedError
+
+    @override
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> FileInfo | None:
+        return None
+
+    @override
+    def as_text(self) -> str:
+        return self._token
 
 
 class TestClassify:
@@ -154,6 +213,57 @@ class TestPlanTransfer:
         assert (plan.dst_root, plan.use_src_name) == (f"{_ACCESSPOINT_ARN}/", True)
 
 
+class TestPlanTransferOpenRoute:
+    """The custom-backend 'open' route: opens3 / s3open, rooted at "" so the
+    relative compare_key is handed straight to the custom side's open()."""
+
+    def test_custom_source_to_s3_is_opens3(self) -> None:
+        plan = naming.plan_transfer(_FakeOpen(), S3Storage("s3://b/dst/"), recursive=True)
+        assert plan.paths_type == "opens3"
+        # the custom side roots at "" and is addressed by relative compare_key
+        assert (plan.src_root, plan.src_sep, plan.filter_root) == ("", "/", "")
+        # use_src_name comes from the s3 dst (dir_op -> adopts the source name)
+        assert plan.use_src_name is True
+        assert dest_for(plan, "sub/f.txt") == "b/dst/sub/f.txt"
+
+    def test_s3_to_custom_dest_is_s3open(self) -> None:
+        plan = naming.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
+        assert plan.paths_type == "s3open"
+        # the custom dst roots at "" so dest_for hands the relative key to open()
+        assert (plan.dst_root, plan.dst_sep) == ("", "/")
+        assert plan.use_src_name is True
+        assert dest_for(plan, "sub/f.txt") == "sub/f.txt"
+
+    def test_custom_dest_single_rename_targets_the_location_itself(self) -> None:
+        # non-dir_op, no trailing "/" -> use_src_name False -> dest_for returns ""
+        # ("" is the custom Storage's own location, per the Storage.open key rule)
+        plan = naming.plan_transfer(
+            S3Storage("s3://b/key"), _FakeOpen("mem://one"), recursive=False
+        )
+        assert (plan.paths_type, plan.use_src_name) == ("s3open", False)
+        assert dest_for(plan, "key") == ""
+
+    def test_custom_dest_trailing_slash_adopts_src_name(self) -> None:
+        # a trailing "/" in the custom token means directory semantics (s3_format parity)
+        plan = naming.plan_transfer(
+            S3Storage("s3://b/key"), _FakeOpen("mem://dir/"), recursive=False
+        )
+        assert plan.use_src_name is True
+        assert dest_for(plan, "key") == "key"
+
+    def test_custom_to_local_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            naming.plan_transfer(_FakeOpen(), LocalStorage(str(tmp_path)), recursive=False)
+
+    def test_local_to_custom_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            naming.plan_transfer(LocalStorage(str(tmp_path)), _FakeOpen(), recursive=False)
+
+    def test_custom_to_custom_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            naming.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
+
+
 class TestItemPaths:
     def test_recursive_upload_slices_the_source_root(self, tmp_path: Path) -> None:
         plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
@@ -193,6 +303,33 @@ class TestItemPaths:
         dest, compare_key = item_paths(plan, "b/pre/sub/f.txt")
         assert dest == str(tmp_path / "out" / "sub" / "f.txt")
         assert compare_key == "sub/f.txt"
+
+
+class TestDestFor:
+    """``dest_for`` is the dest half of ``item_paths``, fed a producer-stamped
+    ``compare_key`` directly (what the transfer item builders use)."""
+
+    def test_appends_compare_key_when_dest_takes_source_name(self, tmp_path: Path) -> None:
+        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
+        assert plan.use_src_name is True
+        assert dest_for(plan, "sub/f.txt") == "b/tree/sub/f.txt"
+
+    def test_root_verbatim_when_dest_keeps_its_name(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        plan = plan_transfer(str(src), "s3://b/up/key.bin", recursive=False)
+        assert plan.use_src_name is False
+        assert dest_for(plan, "a.txt") == "b/up/key.bin"
+
+    def test_translates_to_the_destination_separator(self, tmp_path: Path) -> None:
+        plan = plan_transfer("s3://b/pre/", str(tmp_path / "out"), recursive=True)
+        assert dest_for(plan, "sub/f.txt") == str(tmp_path / "out" / "sub" / "f.txt")
+
+    def test_matches_item_paths(self, tmp_path: Path) -> None:
+        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
+        src_path = plan.src_root + os.path.join("sub", "f.txt")
+        dest, compare_key = item_paths(plan, src_path)
+        assert dest_for(plan, compare_key) == dest
 
 
 class TestFilterRoot:

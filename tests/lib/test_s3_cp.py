@@ -11,6 +11,7 @@ item failures aggregate into ``BatchError``.
 
 from __future__ import annotations
 
+import gzip
 import io
 import os
 from datetime import datetime, timezone
@@ -101,6 +102,27 @@ class TestUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/a/inner.txt"]
 
+    def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
+        # The opt-in cycle guard (default off = aws parity) flows from cp's
+        # detect_symlink_loops flag through to the local recursive walk.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
+        client, calls = make_recording_client([{}])  # one PutObject for a.txt
+        results: list[OpResult] = []
+        S3().cp(
+            str(tmp_path),
+            S3Storage("s3://b/t", client=client),
+            recursive=True,
+            detect_symlink_loops=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert [call.params["Key"] for call in calls] == ["t/a.txt"]  # loop skipped, no crash
+        assert any(
+            r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
+            for r in results
+        )
+
     def test_missing_source_raises_the_base_category_up_front(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope.txt")
         client, calls = make_recording_client([])
@@ -132,6 +154,28 @@ class TestUploadRoute:
         assert calls == []
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}. File/Directory is not readable." == str(results[0].error)
+
+    def test_directory_single_source_fails_is_a_directory(self, tmp_path: Path) -> None:
+        # A non-recursive cp of a directory fails like aws-cli with [Errno 21]
+        # Is a directory, before any PutObject - the engine detects the directory
+        # rather than letting botocore's default checksum wrapper mask the read
+        # failure as an opaque rewind error.
+        src = tmp_path / "adir"
+        src.mkdir()
+        (src / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "Is a directory" in str(results[0].error)
+        assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
 
     def test_local_to_local_is_rejected(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
@@ -439,6 +483,27 @@ class TestStreamRoutes:
             S3Storage("s3://bucket/t.txt", client=client), IOStorage(sink), transfer_config=_SYNC
         )
         assert sink.getvalue() == "héllo"
+
+    def test_stream_download_into_a_gzip_writer(self, tmp_path: Path) -> None:
+        # A non-seekable binary write stream (gzip's compressor) is a valid
+        # download sink: IOStorage writes the object's bytes through it and never
+        # closes it, so the ``with`` block finalizes the .gz file on disk.
+        out = tmp_path / "out.gz"
+        client, calls = make_recording_client(
+            [
+                {"ContentLength": 4, "ETag": '"foo"'},
+                {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
+            ]
+        )
+        with gzip.open(out, "wb") as f:
+            S3().cp(
+                S3Storage("s3://bucket/streaming.txt", client=client),
+                IOStorage(f),
+                transfer_config=_SYNC,
+            )
+        assert [call.operation for call in calls] == ["HeadObject", "GetObject"]
+        with gzip.open(out, "rb") as g:
+            assert g.read() == b"foo\n"
 
     def test_stream_dryrun_makes_no_calls(self) -> None:
         client, calls = make_recording_client([])

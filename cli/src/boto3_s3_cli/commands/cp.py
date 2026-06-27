@@ -101,11 +101,19 @@ class CpCommand(Command):
             # name. A missing stdin stays aws's in-flight fatal (rc 1): the check
             # lives in StdioStorage.open, reached inside the transfer below.
             src_location = StdioStorage()
-            plan = plan_transfer(src, dst, recursive=False)
+            plan = plan_transfer(
+                transferargs.path_storage(src, src_type),
+                transferargs.path_storage(dst, dst_type),
+                recursive=False,
+            )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            dst_location = S3Storage(f"s3://{dest}", client=client)
+            dst_s3 = S3Storage(f"s3://{dest}", client=client)
+            dst_s3.validate()  # permissive construction; reject bad forms pre-pipeline
+            dst_location = dst_s3
         elif dst == "-":
-            src_location = S3Storage(src, client=client)
+            src_s3 = S3Storage(src, client=client)
+            src_s3.validate()  # permissive construction; reject bad forms pre-pipeline
+            src_location = src_s3
             dst_location = StdioStorage()
         else:
             src_location, dst_location = transferargs.resolve_locations(
@@ -114,7 +122,11 @@ class CpCommand(Command):
 
         item_filter = None
         if not is_stream:
-            plan = plan_transfer(src, dst, recursive=args.recursive)
+            plan = plan_transfer(
+                transferargs.path_storage(src, src_type),
+                transferargs.path_storage(dst, dst_type),
+                recursive=args.recursive,
+            )
             item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(

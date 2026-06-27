@@ -45,6 +45,7 @@ class WebsiteCommand(Command):
             path = path[:-1]
 
         storage = S3Storage(f"s3://{path}", client=ctx.client_factory(args))
+        storage.validate()
         if path.endswith("/") or storage.key:
             # S3Storage splits "b/k" where aws would send the whole string as
             # the Bucket and let botocore's name regex reject it; reproduce

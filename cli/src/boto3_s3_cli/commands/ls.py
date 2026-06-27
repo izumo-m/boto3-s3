@@ -54,6 +54,7 @@ class LsCommand(Command):
             target = "s3://"
 
         storage = S3Storage(target, client=ctx.client_factory(args))
+        storage.validate()
         key_specified = bool(storage.key)
 
         matched = False

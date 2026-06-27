@@ -38,13 +38,13 @@ _CLIENT_ERROR_RC = 254
 _GENERAL_ERROR_RC = 255
 
 # --cli-auto-prompt is resolved from the raw argv before argparse runs (like
-# aws-cli's resolve_mode), so it can fire even without a subcommand
+# aws-cli's resolve_auto_prompt_mode), so it can fire even without a subcommand
 # (`boto3-s3 --cli-auto-prompt`, which argparse would otherwise reject as a
 # missing command). These flags take no value, so a membership test is exact.
 _AUTO_PROMPT_FLAG = "--cli-auto-prompt"
 _NO_AUTO_PROMPT_FLAG = "--no-cli-auto-prompt"
 # Presence of any of these means "show help/version, don't prompt" (aws-cli's
-# NO_PROMPT_ARGS analog; ours is --help/-h/--version since we have no `help`
+# _NO_AUTO_PROMPT_ARGS analog; ours is --help/-h/--version since we have no `help`
 # subcommand).
 _NO_PROMPT_ARGS = ("--help", "-h", "--version")
 # The env var and profile config key aws-cli resolves cli_auto_prompt from
@@ -132,10 +132,10 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     Mirrors aws-cli's error-handler chain for exceptions that reach the entry
     point (errorhandler.py): a botocore credential / region resolution failure
     is 253, a ``ClientError`` is 254, everything else is the general 255
-    (``GeneralExceptionHandler``). boto3-s3 already translates the common paths
-    into ``Boto3S3Error`` (``s3_errors``, ``build_client``); this is the
-    catch-all so no path can crash the CLI with a traceback (rc 1), which the
-    exit-code charter forbids (docs/overview.md section 3).
+    (``GeneralExceptionHandler``). The common paths are already translated into
+    ``Boto3S3Error`` (the library's ``s3_errors`` and the CLI's ``build_client``);
+    this is the catch-all so no path can crash the CLI with a traceback (rc 1),
+    which the exit-code charter forbids (docs/overview.md section 3).
     """
     # Deferred: botocore is already loaded once a command has run far enough to
     # raise one of these (import contract, docs/imports.md).
@@ -179,9 +179,10 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return _run_auto_prompt(raw, ctx, explicit=_AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
         # Run the command as-is; only a usage error (rc 252, which aws-cli and we
-        # both raise before any S3 call) falls back to prompting (aws-cli
-        # clidriver.py:228). The usage message is silenced on this trial so the
-        # prompt isn't buried under it (aws's SilenceParamValidationMsgErrorHandler).
+        # both raise before any S3 call) falls back to prompting (aws-cli's
+        # on-partial branch, clidriver.py:277). The usage message is silenced on
+        # this trial so the prompt isn't buried under it (aws's
+        # SilenceParamValidationMsgErrorHandler).
         rc = _dispatch(raw, ctx, suppress_usage_errors=True)
         if rc != _PARAM_VALIDATION_ERROR_RC:
             return rc
@@ -192,7 +193,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
 def _resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
     """Resolve the auto-prompt mode (``on`` / ``on-partial`` / ``off``).
 
-    Mirrors aws-cli's ``resolve_mode`` (aws-cli's ``autoprompt/core.py``) plus the
+    Mirrors aws-cli's ``resolve_auto_prompt_mode`` (aws-cli's ``clidriver.py``) plus the
     config chain (``clidriver.py`` ``_construct_cli_auto_prompt_chain``):
     help/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
     ``--cli-auto-prompt`` -> on; else ``AWS_CLI_AUTO_PROMPT`` env -> profile
@@ -306,7 +307,8 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
     ``on-partial`` trial run so the fall-back prompt isn't preceded by the error
     the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
-    clidriver.py:229). argparse writes its own message inside ``parse_*``, so the
+    errorhandler.py:250, injected on the on-partial path at clidriver.py:281).
+    argparse writes its own message inside ``parse_*``, so the
     parse (and only the parse - it is instant, no live output to lose) is wrapped
     to discard it; the command itself still runs with stderr live.
     """
@@ -322,10 +324,10 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
         # errors such as an invalid choice exit 2 -> remap per the charter).
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     if extras:
-        # aws-cli wording (awscli/argparser.py UnknownArgumentError "Unknown
-        # options: %s"), prefixed like aws's error handler (errorformat.py
-        # "<prog>: [ERROR]: <msg>"). Exercised by the ported
-        # test_errors_out_with_extra_arguments.
+        # aws-cli wording (UnknownArgumentError, defined in awscli/arguments.py and
+        # raised with "Unknown options: %s" in awscli/clidriver.py), prefixed like
+        # aws's error handler (errorformat.py "<prog>: [ERROR]: <msg>"). Exercised
+        # by the ported test_errors_out_with_extra_arguments.
         if not suppress_usage_errors:
             sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {', '.join(extras)}\n")
         return _PARAM_VALIDATION_ERROR_RC

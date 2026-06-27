@@ -56,6 +56,7 @@ from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.s3storage import translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
+    FileInfo,
     OpKind,
     OpOutcome,
     OpResult,
@@ -71,6 +72,8 @@ if TYPE_CHECKING:
 
     from boto3.s3.transfer import TransferConfig
     from mypy_boto3_s3 import S3Client
+
+    from boto3_s3.storage import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +119,10 @@ class TransferItem:
     src_bucket: str | None = None
     src_key: str | None = None
     src_path: str | None = None
+    # The source listing entry on an upload: mv unlinks the source through its
+    # logical ``/``-key, distinct from ``src_path`` (the path s3transfer reads).
+    # None on non-upload / stream routes.
+    src_info: FileInfo | None = None
     dst_bucket: str | None = None
     dst_key: str | None = None
     dst_path: str | None = None
@@ -258,13 +265,17 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe.
+    s3transfer's own size probe. ``source_storage`` is the upload source's own
+    ``Storage`` (a local file or a custom backend), supplied so ``mv`` deletes
+    the source through its ``Storage.delete``; it is ``None`` for download / copy
+    (an S3 source, removed with a DeleteObject) and for a stream upload.
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
-    transfer deletes its source - ``os.remove`` for uploads, a per-object
-    DeleteObject on the owning side's client otherwise.
+    transfer deletes its source - ``Storage.delete`` for an upload (local or
+    custom backend), a per-object DeleteObject on the owning side's client
+    otherwise.
     """
 
     def __init__(
@@ -273,6 +284,7 @@ class Transferrer:
         client: S3Client,
         *,
         source_client: S3Client | None = None,
+        source_storage: Storage | None = None,
         transfer_config: TransferConfig | None = None,
         options: TransferOptions | None = None,
         operation: str = "cp",
@@ -287,6 +299,10 @@ class Transferrer:
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
+        # The upload source's own Storage (local or custom backend), supplied so
+        # mv deletes the source through its Storage.delete. None for download /
+        # copy (S3 source -> DeleteObject) and for a stream upload.
+        self._source_storage = source_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
@@ -410,12 +426,24 @@ class Transferrer:
             self._submit_copy(item)
 
     def _submit_upload(self, item: TransferItem) -> None:
+        # A directory source is handed through to fail like aws-cli ([Errno 21]
+        # Is a directory, rc 1); botocore's default checksum wrapper would
+        # otherwise open it and mask the read failure as an opaque rewind error,
+        # so detect it and surface the OS error directly. A stream (src_fileobj)
+        # is never a directory.
+        if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
+            self._record_failure(
+                item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
+            )
+            return
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             guessed = _guess_content_type(item.src_path or "")
             if guessed is not None:
                 extra_args["ContentType"] = guessed
         subscribers = self._common_subscribers(item)
+        if item.src_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.src_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
@@ -432,6 +460,8 @@ class Transferrer:
         subscribers = self._common_subscribers(item)
         if item.dst_path is not None:
             subscribers.append(_DirectoryCreator())
+        if item.dst_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.dst_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
@@ -489,15 +519,19 @@ class Transferrer:
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
         """The per-item source deletion for ``mv`` (aws-cli DeleteSource* trio).
 
-        Uploads remove the local file with a bare ``os.remove`` so a failure
-        carries the OS's own wording (aws's ``move failed: ... [Errno 13]
-        ...``); S3 sources get a single DeleteObject - on the manager's
-        client for downloads, the source-side client for copies - with
+        An upload source - a local file or a custom (open-route) backend object -
+        is removed through its own ``Storage.delete(info)``, keyed by the source
+        listing entry (``src_info``); the delete maps the OS / backend error into
+        the library taxonomy, preserving the message aws prints (``move failed:
+        ... [Errno 13] ...``). S3 sources get a single DeleteObject - on the
+        manager's client for downloads, the source-side client for copies - with
         ``RequestPayer`` forwarded like every other request.
         """
         if self._kind is OpKind.UPLOAD:
-            src_path = item.src_path or ""
-            return _DeleteSource(lambda: os.remove(src_path))
+            source_storage = self._source_storage
+            info = item.src_info
+            assert source_storage is not None and info is not None
+            return _DeleteSource(lambda: source_storage.delete(info))
         client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
         bucket = item.src_bucket
         key = item.src_key
@@ -760,6 +794,39 @@ class _DeleteSource:
             return
         try:
             self._delete()
+        except Exception as exc:
+            future.set_exception(exc)
+
+
+class _CloseFileobj:
+    """Close the custom-backend fileobj an ``open``-routed item carries.
+
+    The transfer owns every fileobj a ``Storage.open`` hands it (the file
+    protocol the open route relies on): a real backend's ``close`` releases a
+    reader or *commits* a writer (``Storage.open``'s contract), while a
+    caller-supplied stream (``IOStorage``) hands back a close-suppressing view,
+    so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    ``_Completion`` so a writer's commit failure flips the settled future to a
+    failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
+    then sees the failure and skips its delete). A transfer that already failed
+    still closes - to release the resource - but never lets a close error
+    overwrite the original failure.
+    """
+
+    def __init__(self, fileobj: Any) -> None:
+        self._fileobj = fileobj
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            try:
+                self._fileobj.close()
+            except Exception:
+                pass
+            return
+        try:
+            self._fileobj.close()
         except Exception as exc:
             future.set_exception(exc)
 

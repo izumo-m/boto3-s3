@@ -182,8 +182,8 @@ class TestGlobalOptionPosition:
     def test_global_before_is_not_clobbered_by_subcommand_default(self) -> None:
         # The regression: a value parsed before the subcommand must survive the
         # subparser's (suppressed) default.
-        args = cli.build_parser().parse_args(["--profile", "izumo-aws", "ls", "bucket"])
-        assert args.profile == "izumo-aws"
+        args = cli.build_parser().parse_args(["--profile", "my-profile", "ls", "bucket"])
+        assert args.profile == "my-profile"
         assert args.paths == "bucket"
 
 

@@ -1,11 +1,12 @@
-"""``boto3_s3.localstorage``: the aws-cli-order walk and the Storage ABC surface.
+"""``boto3_s3.localstorage``: the aws-cli-order walk and the Storage surface.
 
-Pins aws-cli ``FileGenerator.list_files`` parity: the byte-order sort
-(``foo.txt`` before ``foo/bar`` - the appended-separator trick), depth-first
-interleaving, the warn-and-skip battery with aws-cli wording, the silent
-symlink skip, the invalid-timestamp epoch fallback, and the deliberate
-absence of a directory check on the single-file path (aws fails later at
-open time - rc 1 ``[Errno 21]``).
+Pins aws-cli ``FileGenerator.list_files`` parity for ``LocalStorage.walk_local``:
+the byte-order sort (``foo.txt`` before ``foo/bar`` - the appended-separator
+trick), depth-first interleaving, the warn-and-skip battery with aws-cli wording,
+the silent symlink skip, and the invalid-timestamp epoch fallback. The single-path
+point op (``LocalStorage.get_fileinfo``) is covered separately, including the
+deliberate absence of a directory check (aws fails later at open - rc 1
+``[Errno 21]``) and the existence-check contract (absent -> ``None``, no warning).
 """
 
 from __future__ import annotations
@@ -17,19 +18,22 @@ from pathlib import Path
 import pytest
 
 from boto3_s3.exceptions import NotFoundError
-from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
+from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path
 from boto3_s3.types import FileKind, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def _keys(tmp_path: Path, *, dir_op: bool = True, **kwargs: object) -> list[str]:
+def _keys(tmp_path: Path, **kwargs: object) -> list[str]:
     root = str(tmp_path)
     prefix = root.replace(os.sep, "/") + "/"
     out: list[str] = []
-    for info in walk_local(root, dir_op=dir_op, **kwargs):  # type: ignore[arg-type]
+    for info in LocalStorage(root).walk_local(**kwargs):  # type: ignore[arg-type]
         assert info.key.startswith(prefix)
-        out.append(info.key[len(prefix) :])
+        rel = info.key[len(prefix) :]
+        # walk_local stamps compare_key with this same root-relative key.
+        assert info.compare_key == rel
+        out.append(rel)
     return out
 
 
@@ -52,28 +56,8 @@ class TestWalkOrder:
         _make_tree(tmp_path, "z.txt", "sub/n.txt", "sub/deep/m.txt", "sub2/o.txt")
         assert _keys(tmp_path) == ["sub/deep/m.txt", "sub/n.txt", "sub2/o.txt", "z.txt"]
 
-    def test_single_file(self, tmp_path: Path) -> None:
-        target = tmp_path / "a.txt"
-        target.write_bytes(b"12345")
-        infos = list(walk_local(str(target), dir_op=False))
-        assert [info.key for info in infos] == [str(target).replace(os.sep, "/")]
-        assert infos[0].size == 5
-        assert infos[0].mtime is not None and infos[0].mtime.tzinfo is not None
-
-    def test_single_path_on_a_directory_yields_the_directory(self, tmp_path: Path) -> None:
-        # No type check on the single path (aws parity): the directory itself
-        # is yielded and the transfer later fails at open ([Errno 21], rc 1).
-        infos = list(walk_local(str(tmp_path) + os.sep, dir_op=False))
-        assert [info.key for info in infos] == [str(tmp_path).replace(os.sep, "/") + "/"]
-
 
 class TestWalkWarnings:
-    def test_nonexistent_root_warns_and_yields_nothing(self, tmp_path: Path) -> None:
-        warnings: list[str] = []
-        missing = str(tmp_path / "nope")
-        assert not list(walk_local(missing, dir_op=False, on_warning=warnings.append))
-        assert warnings == [f"Skipping file {missing}. File does not exist."]
-
     @pytest.mark.skipif(_IS_ROOT, reason="root reads anything")
     def test_unreadable_file_warns_and_is_skipped(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt", "secret.txt")
@@ -121,7 +105,7 @@ class TestWalkWarnings:
 
         monkeypatch.setattr("boto3_s3.localstorage.datetime", _BoomDatetime)
         warnings: list[str] = []
-        infos = list(walk_local(str(tmp_path), dir_op=True, on_warning=warnings.append))
+        infos = list(LocalStorage(str(tmp_path)).walk_local(on_warning=warnings.append))
         assert [info.mtime for info in infos] == [datetime(1970, 1, 1, tzinfo=timezone.utc)]
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
@@ -149,20 +133,178 @@ class TestSymlinks:
         assert warnings == [f"Skipping file {tmp_path / 'broken'}. File does not exist."]
 
 
+class TestSymlinkLoopDetection:
+    """``detect_loops`` (library extension, default off): an ancestor-stack guard."""
+
+    def test_loop_skipped_with_a_warning_when_enabled(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt")
+        (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle: loop -> the root
+        warnings: list[str] = []
+        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["a.txt"]  # the cycle subtree is skipped, no RecursionError
+        assert warnings == [f"Skipping file {tmp_path / 'loop'}. Symbolic link loop detected."]
+
+    def test_diamond_links_are_both_followed(self, tmp_path: Path) -> None:
+        # An ancestor stack, not a global visited set: two links to the same
+        # *non-ancestor* directory are both followed (like GNU `find -L`).
+        _make_tree(tmp_path, "target/t.txt")
+        (tmp_path / "link1").symlink_to(tmp_path / "target")
+        (tmp_path / "link2").symlink_to(tmp_path / "target")
+        warnings: list[str] = []
+        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["link1/t.txt", "link2/t.txt", "target/t.txt"]
+        assert warnings == []
+
+    def test_enabled_is_a_noop_on_a_loopless_tree(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a/b.txt", "c.txt")
+        warnings: list[str] = []
+        assert _keys(tmp_path, detect_loops=True, on_warning=warnings.append) == _keys(tmp_path)
+        assert warnings == []
+
+    def test_no_follow_symlinks_disables_detection(self, tmp_path: Path) -> None:
+        # follow_symlinks=False cannot reach a cycle (symlinks are skipped), so
+        # the detector stays inactive - the loop link is skipped silently.
+        _make_tree(tmp_path, "a.txt")
+        (tmp_path / "loop").symlink_to(tmp_path)
+        warnings: list[str] = []
+        keys = _keys(tmp_path, follow_symlinks=False, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["a.txt"]
+        assert warnings == []
+
+    def test_loop_detector_is_a_usable_public_guard(self, tmp_path: Path) -> None:
+        # LoopDetector is public for a custom walk: is_cycle registers a fresh
+        # directory (returns False) and flags re-entry of an ancestor (True).
+        (tmp_path / "child").mkdir()
+        detector = LoopDetector(str(tmp_path))
+        assert detector.is_cycle(str(tmp_path / "child")) is False  # fresh -> registered
+        detector.leave()
+        assert detector.is_cycle(str(tmp_path)) is True  # the seeded root is an ancestor
+
+
+class TestWalkIsOverridable:
+    """The walk is a pipeline of protected methods a subclass can replace.
+
+    The extension point behind, e.g., resolving Cygwin ``!<symlink>`` files on a
+    native-Python Windows build - the engine dispatches through ``self``.
+    """
+
+    def test_should_ignore_override_is_honored_through_scan(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "keep.txt", "skip.tmp")
+
+        class _NoTmp(LocalStorage):
+            def _should_ignore(self, path: str, *, follow_symlinks: bool, notify: object) -> bool:
+                if path.endswith(".tmp"):
+                    return True
+                return super()._should_ignore(
+                    path,
+                    follow_symlinks=follow_symlinks,
+                    notify=notify,  # type: ignore[arg-type]
+                )
+
+        storage = _NoTmp(str(tmp_path))
+        keys = [info.compare_key for info in storage.scan(ScanOptions(recursive=True))]
+        assert keys == ["keep.txt"]  # the override pruned skip.tmp
+
+    def test_stat_info_override_can_rewrite_entries(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt")
+
+        class _Tagged(LocalStorage):
+            def _stat_info(self, path: str, notify: object) -> object:
+                info = super()._stat_info(path, notify)  # type: ignore[arg-type]
+                if info is not None:
+                    info.size = 999
+                return info
+
+        infos = list(_Tagged(str(tmp_path)).walk_local())
+        assert [(info.compare_key, info.size) for info in infos] == [("a.txt", 999)]
+
+
+class TestGetFileinfo:
+    """``LocalStorage.get_fileinfo`` - the single-path point op (no walk)."""
+
+    def test_single_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"12345")
+        info = LocalStorage(str(target)).get_fileinfo()
+        assert info is not None
+        assert info.key == str(target).replace(os.sep, "/")  # absolutized
+        assert info.compare_key == "a.txt"  # basename
+        assert info.size == 5
+        assert info.mtime is not None and info.mtime.tzinfo is not None
+
+    def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
+        # aws parity: no type check, so a directory source yields a FileInfo and
+        # fails later at open ([Errno 21], rc 1).
+        info = LocalStorage(str(tmp_path)).get_fileinfo()
+        assert info is not None
+        assert info.key == str(tmp_path).replace(os.sep, "/")
+
+    def test_missing_returns_none_silently(self, tmp_path: Path) -> None:
+        # Definitively absent -> None, no warning (the existence-check contract).
+        warnings: list[str] = []
+        info = LocalStorage(str(tmp_path / "nope")).get_fileinfo(on_warning=warnings.append)
+        assert info is None
+        assert warnings == []
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+    def test_special_file_warns_and_skips(self, tmp_path: Path) -> None:
+        pipe = tmp_path / "pipe"
+        os.mkfifo(pipe)  # pyright: ignore[reportAttributeAccessIssue]
+        warnings: list[str] = []
+        assert LocalStorage(str(pipe)).get_fileinfo(on_warning=warnings.append) is None
+        assert warnings == [
+            f"Skipping file {pipe}. File is character special device, "
+            "block special device, FIFO, or socket."
+        ]
+
+    @pytest.mark.skipif(_IS_ROOT, reason="root reads anything")
+    def test_unreadable_file_warns_and_skips(self, tmp_path: Path) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"x")
+        secret.chmod(0)
+        warnings: list[str] = []
+        try:
+            assert LocalStorage(str(secret)).get_fileinfo(on_warning=warnings.append) is None
+        finally:
+            secret.chmod(0o644)
+        assert warnings == [f"Skipping file {secret}. File/Directory is not readable."]
+
+    def test_no_follow_symlink_skips_silently(self, tmp_path: Path) -> None:
+        target = tmp_path / "real.txt"
+        target.write_bytes(b"x")
+        link = tmp_path / "link.txt"
+        link.symlink_to(target)
+        warnings: list[str] = []
+        info = LocalStorage(str(link)).get_fileinfo(
+            follow_symlinks=False, on_warning=warnings.append
+        )
+        assert info is None
+        assert warnings == []
+
+    def test_child_key_joins_under_the_location(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "sub/f.txt")
+        info = LocalStorage(str(tmp_path)).get_fileinfo("sub/f.txt")
+        assert info is not None
+        assert info.key == str(tmp_path / "sub" / "f.txt").replace(os.sep, "/")
+        assert info.compare_key == "f.txt"
+
+
 class TestLocalStorageScan:
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
-        keys = [info.key for info in LocalStorage(tmp_path).scan(ScanOptions(recursive=True))]
+        infos = list(LocalStorage(tmp_path).scan(ScanOptions(recursive=True)))
         prefix = str(tmp_path).replace(os.sep, "/")
-        assert keys == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
+        assert [info.key for info in infos] == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
+        # scan stamps the root-relative compare_key on every entry.
+        assert [info.compare_key for info in infos] == ["a.txt", "a/inner.txt"]
 
     def test_non_recursive_lists_one_level_with_directories(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
         infos = list(LocalStorage(tmp_path).scan())
         prefix = str(tmp_path).replace(os.sep, "/")
-        assert [(info.key, info.kind) for info in infos] == [
-            (f"{prefix}/a.txt", FileKind.FILE),
-            (f"{prefix}/a/", FileKind.DIRECTORY),
+        assert [(info.key, info.kind, info.compare_key) for info in infos] == [
+            (f"{prefix}/a.txt", FileKind.FILE, "a.txt"),
+            (f"{prefix}/a/", FileKind.DIRECTORY, "a/"),
         ]
 
     def test_scan_filter_applies(self, tmp_path: Path) -> None:
@@ -187,10 +329,12 @@ class TestLocalStorageIO:
     def test_delete(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(tmp_path)
-        storage.delete("a.txt")
+        info = storage.get_fileinfo("a.txt")
+        assert info is not None
+        storage.delete(info)
         assert not (tmp_path / "a.txt").exists()
         with pytest.raises(NotFoundError):
-            storage.delete("a.txt")
+            storage.delete(info)
 
 
 def test_to_native_path_round_trips() -> None:

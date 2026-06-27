@@ -5,6 +5,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-27
+
+- `Storage.delete` now takes the `FileInfo` to remove (was a `str` key): a
+  backend deletes exactly the entry `scan` / `get_fileinfo` produced, by
+  `info.key` in its own address space, and `cp` / `mv` / `sync` / `rm` route
+  every delete through it (local ones included - no more bare `os.remove`). A
+  custom backend's `delete` signature changes to match.
+- `walk_local` is now a `LocalStorage` method (was a module-level function). The
+  recursive local walk is split into protected, overridable methods (`_walk` /
+  `_should_ignore` / `_triggers_warning` / `_stat_info` / `_stat_one`), so a
+  subclass can extend the traversal - e.g. to follow Cygwin `!<symlink>` files on
+  a native-Python Windows build - without re-implementing it.
+- Add `detect_symlink_loops` to `cp` / `mv` / `sync` (and `ScanOptions`), default
+  `False`: a recursive local walk skips a directory that resolves to one of its
+  own ancestors with a `Symbolic link loop detected` warning, instead of
+  recursing until `RecursionError`. A library extension - `aws s3` has none, so
+  off keeps parity and costs no extra `stat`. The ancestor-stack guard is exposed
+  as the reusable `boto3_s3.localstorage.LoopDetector` for custom walks.
+- `cp` / `mv` / `sync` now transfer a custom `Storage` backend as one side (the
+  other side S3), moving its bytes through `Storage.open()`: a custom source
+  uploads to S3, an S3 source downloads into the backend, `mv` deletes a custom
+  source via `Storage.delete()`, and `sync` works when the custom side declares
+  `SORTED_SCAN` (its merge-join needs byte-ordered listings). The custom side is
+  capability-checked up front.
+- Add `ScanOptions.sort`: request byte-ordered enumeration (set by `sync`, whose
+  merge-join needs it; `cp` / `mv` / `ls` / `rm` leave it off). A `SORTED_SCAN`
+  backend honors it; the built-ins always sort and ignore it.
+- Add `Storage.get_fileinfo(key="")`: the single-entry counterpart to `scan`
+  (returns a `FileInfo`, or `None` if absent). `cp` / `mv` resolve a single
+  source through it; a `Storage` subclass must now implement it.
+- `Storage.scan` now stamps `FileInfo.compare_key` (the scan-root-relative key)
+  on every entry, so a custom `ScanOptions.filter` predicate can match it directly
+  instead of stripping `key`.
+- Add `Storage.as_text()` (and `str(Storage)`): a Storage's canonical `aws s3`
+  path-shape token (the inverse of `S3.resolve`).
+- `cp` / `mv` / `sync` reject a non-built-in `Storage` (a custom backend, or a
+  stream on a non-stream route) with a clear `ValidationError` (was an
+  `AssertionError`).
+- `S3Storage` construction is now permissive (parse only); the strict aws-cli
+  rejections (S3 Object Lambda / Outposts bucket ARNs, a key with no bucket) move
+  to `S3Storage.validate()`, which the operations run before use. Add the
+  `Storage.scheme` discriminator (`"s3"` / `"local"`, or a non-built-in backend's
+  own token); its type is an open `str` so a custom backend can declare its own.
+- Add `Storage.capabilities` (a `StorageCapability` flag set: `OPEN_READ` /
+  `OPEN_WRITE` / `GET_FILEINFO` / `SCAN` / `SORTED_SCAN` / `DELETE`) declaring
+  which transfer operations a backend implements, so a transfer can pre-check a
+  custom side instead of failing deep. `StorageCapability` is exported from
+  `boto3_s3`.
+
 ## [0.2.0] - 2026-06-23
 
 - Add streaming `cp`: wrap a stream in `IOStorage` / `StdioStorage` and pass it
@@ -32,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.2.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...HEAD
+[0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.2.0...boto3-s3-v0.3.0
 [0.2.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.1.0...boto3-s3-v0.2.0
 [0.1.0]: https://github.com/izumo-m/boto3-s3/releases/tag/boto3-s3-v0.1.0

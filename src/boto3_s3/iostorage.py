@@ -8,11 +8,13 @@ endpoint, not a container: only :meth:`~IOStorage.open` is meaningful;
 client/bucket; this side hands ``s3transfer`` the fileobj that ``open`` returns.
 
 The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
-``IOStorage(binary_stream)`` passes the stream through, while
-``IOStorage(text_stream)`` wraps it with an incremental codec
+``IOStorage(binary_stream)`` presents the stream through a close-suppressing
+view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
-(download). Either way the caller's stream is **never closed** by ``IOStorage``
-(it owns only the thin codec adapter, if any).
+(download). The transfer ``close``s every fileobj ``open`` returns (the open
+route commits a real backend's writer that way), so each view here absorbs that
+``close`` into a flush: the caller's stream is **never closed** by ``IOStorage``
+(it owns only the thin view / codec adapter).
 
 ``StdioStorage`` is the convenience for the process's stdio: as a source it reads
 ``sys.stdin`` (forced non-seekable, so s3transfer takes its buffered upload path -
@@ -28,25 +30,49 @@ from __future__ import annotations
 import codecs
 import io
 import sys
-from typing import IO, TYPE_CHECKING, Any, Literal, cast
+from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
 from boto3_s3.exceptions import Boto3S3Error
-from boto3_s3.storage import Storage
+from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
     from boto3_s3.types import FileInfo, ScanOptions
 
 _NOT_A_CONTAINER = (
-    "IOStorage wraps a single stream and supports open() only, not scan / delete "
-    "(pass a path or an s3:// URI for ls / rm / recursive transfers)."
+    "IOStorage wraps a single stream and supports open() only, not scan / delete / "
+    "get_fileinfo (pass a path or an s3:// URI for ls / rm / recursive transfers)."
 )
 
 _READ_CHUNK = 64 * 1024
+
+
+class _Uncloseable:
+    """A pass-through binary view whose ``close`` never closes the wrapped stream.
+
+    The open route lets the transfer ``close`` every fileobj ``open`` returns -
+    that ``close`` is how a real backend commits a write. IOStorage never owns
+    the caller's stream, so it hands back this view instead of the raw stream:
+    ``close`` flushes any buffered bytes (so a stdout download is visible) but
+    leaves the underlying stream open for the caller. Every other attribute
+    (``read`` / ``write`` / ``seek`` / ``seekable`` ...) delegates unchanged, so
+    s3transfer drives it exactly like the wrapped stream.
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+    def close(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush is not None:
+            flush()
 
 
 class _NonSeekable:
@@ -62,6 +88,11 @@ class _NonSeekable:
 
     def read(self, amt: int | None = None) -> bytes:
         return self._fileobj.read() if amt is None else self._fileobj.read(amt)
+
+    def close(self) -> None:
+        # The transfer closes its source fileobj when done; this view reads the
+        # caller's stream, which IOStorage never closes (nothing to release).
+        pass
 
 
 class _EncodingReader:
@@ -84,6 +115,11 @@ class _EncodingReader:
             self._buf += chunk.encode(self._encoding)
         out, self._buf = self._buf[:amt], self._buf[amt:]
         return out
+
+    def close(self) -> None:
+        # A reader over the caller's text stream: nothing to release, and the
+        # caller's stream is never closed by IOStorage.
+        pass
 
 
 class _DecodingWriter:
@@ -121,6 +157,13 @@ class IOStorage(Storage):
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
     """
 
+    scheme: ClassVar[str] = "stdio"
+    #: A single stream supports only byte I/O (both directions, chosen per
+    #: ``open`` call); it has no listing or deletion, so just the ``OPEN_*`` pair.
+    capabilities: ClassVar[StorageCapability] = (
+        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
+    )
+
     def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
         self._stream: IO[Any] | None = stream
         self._encoding = encoding
@@ -141,15 +184,35 @@ class IOStorage(Storage):
                 else _DecodingWriter(stream, self._encoding)
             )
             return cast("BinaryIO", adapter)
-        return cast("BinaryIO", stream)
+        return cast("BinaryIO", _Uncloseable(stream))
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         raise NotImplementedError(_NOT_A_CONTAINER)
 
     @override
-    def delete(self, key: str) -> None:
+    def delete(self, info: FileInfo) -> None:
         raise NotImplementedError(_NOT_A_CONTAINER)
+
+    @override
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> FileInfo | None:
+        raise NotImplementedError(_NOT_A_CONTAINER)
+
+    @override
+    def as_text(self) -> str:
+        """Return the stdio token ``"-"`` (:meth:`Storage.as_text`, display-only).
+
+        A stream has no location, so this token is for display / error messages
+        only - never round-tripped. A stream side never reaches ``naming``: ``cp``
+        routes it to the stream path up front, before any transfer plan is built.
+        """
+        return "-"
 
 
 class StdioStorage(IOStorage):
@@ -175,7 +238,7 @@ class StdioStorage(IOStorage):
                     operation="cp",
                 )
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
-        return cast("BinaryIO", getattr(sys.stdout, "buffer", sys.stdout))
+        return cast("BinaryIO", _Uncloseable(getattr(sys.stdout, "buffer", sys.stdout)))
 
 
 __all__ = ["IOStorage", "StdioStorage"]

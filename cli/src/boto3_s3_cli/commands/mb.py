@@ -59,9 +59,9 @@ class MbCommand(Command):
         bucket_part, _, _key_part = target[len("s3://") :].partition("/")
         if not bucket_part:
             # aws sends Bucket="" to the API and botocore's client-side
-            # validation fails inside mb's local catch -> rc 1. S3Storage
-            # would reject "s3:///k" as a parse error (252-shaped), so handle
-            # the form before construction (same shape as rm).
+            # validation fails inside mb's local catch -> rc 1. S3Storage.validate()
+            # would reject "s3:///k" as a ValidationError (252-shaped), so handle
+            # the form before construction to keep this path at rc 1 (same as rm).
             # botocore's ParamValidationError str is "Parameter validation
             # failed:\n<report>" (colon + newline), matching aws's wording.
             message = 'Parameter validation failed:\nInvalid bucket name ""'
@@ -72,8 +72,10 @@ class MbCommand(Command):
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
 
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
-        # ValidationError from S3Storage parse -> rc 252, matching aws.
+        # ValidationError from S3Storage.validate -> rc 252, matching aws (the
+        # check is deferred from the now non-raising construction).
         storage = S3Storage(target, client=client)
+        storage.validate()
         tags = [(key, value) for key, value in args.tags] if args.tags else None
         try:
             S3().mb(storage, tags=tags)

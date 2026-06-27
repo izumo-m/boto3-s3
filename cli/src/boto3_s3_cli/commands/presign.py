@@ -46,6 +46,7 @@ class PresignCommand(Command):
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; S3Storage takes both forms too.
         storage = S3Storage(args.path, client=ctx.client_factory(args))
+        storage.validate()
         url = S3().presign(storage, expires_in=expires_in)
         sys.stdout.write(url + "\n")
         return 0

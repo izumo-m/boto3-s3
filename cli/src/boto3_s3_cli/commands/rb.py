@@ -60,9 +60,11 @@ class RbCommand(Command):
                 "usage: boto3-s3 rb <S3Uri>\nError: Invalid argument type", operation="rb"
             )
 
-        # Rejected ARN forms -> 252 from S3Storage parse; for "s3:///k" the parse
-        # error lands on 252 just like aws's key check.
+        # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
+        # non-raising construction); for "s3:///k" validate lands on 252 too, just
+        # like aws's key check.
         storage = S3Storage(target, client=client)
+        storage.validate()
         if storage.key:
             raise ValidationError(
                 f"Please specify a valid bucket name only. E.g. s3://{storage.bucket}",

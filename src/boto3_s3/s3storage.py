@@ -5,8 +5,10 @@ service root) over an overridable ``scan_pages`` seam - subclasses customize
 per-page entry handling there while keeping scan's prefetch - and exposes
 ``get_client`` / ``bucket`` / ``key`` so the ``Transferrer`` can drive
 ``s3transfer`` directly for built-in S3 pairs. ``delete`` is implemented (a
-blind ``DeleteObject``); ``open`` is intentionally not implemented yet - the
-remaining gap for direct S3 stream access and custom-backend transfers (see
+blind ``DeleteObject``); ``open`` is intentionally unimplemented - S3 always
+transfers through ``s3transfer`` (built-in pairs and the S3 side of an open-route
+custom-backend transfer alike), so no route calls it. The only thing it would
+add is direct programmatic S3 stream access, which nothing needs today (see
 :meth:`S3Storage.open`).
 """
 
@@ -14,9 +16,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from botocore.exceptions import (
     BotoCoreError,
@@ -41,7 +43,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.naming import split_bucket_key
-from boto3_s3.storage import Storage
+from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
 
 if TYPE_CHECKING:
@@ -50,17 +52,19 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
 
-# S3Storage.open is the one unfinished part of the Storage contract (scan/delete
-# are done). Built-in transfers never reach it - the Transferrer drives
-# s3transfer straight off get_client/bucket/key, and streaming hands a fileobj
-# to s3transfer (s3.py _cp_stream) - so it has no caller inside boto3-s3 today.
+# S3Storage.open is intentionally unimplemented - every S3 transfer rides
+# s3transfer instead. The Transferrer drives it straight off get_client/bucket/
+# key for built-in pairs and the S3 side of an open-route custom transfer, and
+# streaming hands a fileobj to s3transfer (s3.py _cp_stream) - so nothing inside
+# boto3-s3 calls it (the custom side of an open-route transfer uses its own open,
+# never this).
 _OPEN_NOT_IMPLEMENTED = (
-    "S3Storage.open() is not implemented yet. Built-in S3<->local / S3<->S3 "
-    "transfers go through s3transfer (driven from get_client/bucket/key), so "
-    "this generic per-object stream primitive currently has no caller. "
-    "Implementing it (GetObject->readable, multipart PutObject->writable "
-    "committed on close) would enable direct S3 stream access and "
-    "custom-backend <-> S3 transfers via Storage.open (see storage.py)."
+    "S3Storage.open() is not implemented. S3 transfers go through s3transfer "
+    "(driven from get_client/bucket/key) - including the S3 side of an open-route "
+    "custom-backend transfer, whose custom side uses its own Storage.open - so "
+    "this generic per-object stream primitive has no caller. Implementing it "
+    "(GetObject->readable, multipart PutObject->writable committed on close) would "
+    "only add direct programmatic S3 stream access (see storage.py)."
 )
 
 _CONFIG_ERRORS: tuple[type[BaseException], ...] = (
@@ -103,34 +107,18 @@ _S3_OUTPOST_BUCKET_ARN_RE = re.compile(
 
 
 def _parse_s3_url(url: str) -> tuple[str, str]:
-    """Split an ``s3://bucket/key`` URL into ``(bucket, key)``.
+    """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
 
-    ``key`` may be empty (``"s3://bucket"`` or ``"s3://bucket/"``). ``bucket``
-    may also be empty - a bare ``"s3://"`` is the service root (bucket listing)
-    - but a key without a bucket (``"s3:///k"``) is rejected.
-
-    Access-point ARNs (plain and Outposts) are valid bucket parts: the whole
-    ARN - whose name may itself contain ``/`` - becomes ``bucket`` and only
-    what follows it becomes ``key`` (aws-cli's ``find_bucket_key``, ported as
-    ``naming.split_bucket_key``). S3 Object Lambda and Outposts *bucket* ARNs
-    are rejected the way ``aws s3`` rejects them - they are s3api / s3control
-    territory.
+    Either part may be empty: a bare ``"s3://"`` is the service root (bucket
+    listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
+    (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
+    contain ``/`` (aws-cli's ``find_bucket_key``, ported as
+    ``naming.split_bucket_key``). The strict aws-cli checks - the unsupported S3
+    Object Lambda / Outposts *bucket* ARN forms, and a key with no bucket - are
+    deferred to :meth:`S3Storage.validate`, so construction itself never raises.
     """
-    scheme, sep, rest = url.partition("://")
-    if not sep or scheme != "s3":
-        raise ValidationError(f"not an s3:// URL: {url!r}")
-    if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
-        raise ValidationError(
-            "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
-        )
-    if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
-        raise ValidationError(
-            "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
-        )
-    bucket, key = split_bucket_key(rest)
-    if not bucket and key:
-        raise ValidationError(f"s3:// URL has a key but no bucket: {url!r}")
-    return bucket, key
+    rest = url.partition("://")[2]
+    return split_bucket_key(rest)
 
 
 def _translate_client_error(
@@ -200,20 +188,31 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
-def _page_to_infos(page: ListObjectsV2OutputTypeDef, *, recursive: bool) -> list[FileInfo]:
+def _page_to_infos(
+    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str
+) -> list[FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
     Runs on the prefetch worker thread. Non-recursive listings emit one
     ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
     objects); every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
+    ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
+    ``Prefix``, so every object key and common-prefix starts with it, and the
+    slice is the root-relative key operations and custom filters match against.
     """
     infos: list[FileInfo] = []
     if not recursive:
         for common in page.get("CommonPrefixes", []):
-            prefix = common.get("Prefix")
-            if prefix is not None:
-                infos.append(S3FileInfo(key=prefix, kind=FileKind.DIRECTORY))
+            dir_prefix = common.get("Prefix")
+            if dir_prefix is not None:
+                infos.append(
+                    S3FileInfo(
+                        key=dir_prefix,
+                        kind=FileKind.DIRECTORY,
+                        compare_key=dir_prefix[len(prefix) :],
+                    )
+                )
     for obj in page.get("Contents", []):
         key = obj.get("Key")
         size = obj.get("Size")
@@ -230,6 +229,7 @@ def _page_to_infos(page: ListObjectsV2OutputTypeDef, *, recursive: bool) -> list
                 etag=etag.strip('"') if etag else None,
                 storage_class=obj.get("StorageClass"),
                 owner=owner.get("ID") if owner else None,
+                compare_key=key[len(prefix) :],
             )
         )
     return infos
@@ -240,14 +240,19 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
 
     Runs on the prefetch worker thread. Each bucket becomes an ``S3FileInfo``
     whose ``key`` is the bucket name and whose ``mtime`` is the bucket's
-    ``CreationDate`` (what ``aws s3 ls`` prints next to the name).
+    ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
+    root has no prefix, so ``compare_key`` is the bucket name itself.
     """
     infos: list[FileInfo] = []
     for bucket in page.get("Buckets", []):
         name = bucket.get("Name")
         if name is None:
             continue  # ListBuckets always populates Name; stay defensive
-        infos.append(S3FileInfo(key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate")))
+        infos.append(
+            S3FileInfo(
+                key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate"), compare_key=name
+            )
+        )
     return infos
 
 
@@ -260,10 +265,11 @@ class S3Storage(Storage):
     (intentional library leniency; :meth:`S3.resolve` stays strict and routes a
     bare ``"bucket/key"`` to local instead). An empty bucket part (bare ``"s3://"``) is the
     *service root*: :meth:`scan` then lists the account's buckets instead of
-    objects; a key without a bucket (``"s3:///k"``) is rejected. The bucket
-    part may be an access-point ARN (plain or Outposts), which is passed whole
-    as the ``Bucket`` parameter; S3 Object Lambda and Outposts bucket ARNs are
-    rejected like ``aws s3`` rejects them (see :func:`_parse_s3_url`). When
+    objects; a key without a bucket (``"s3:///k"``) is rejected by
+    :meth:`validate`. The bucket part may be an access-point ARN (plain or
+    Outposts), which is passed whole as the ``Bucket`` parameter; S3 Object Lambda
+    and Outposts bucket ARNs are rejected like ``aws s3`` rejects them (by
+    :meth:`validate`, deferred from construction). When
     ``client`` is omitted, a default ``boto3.client("s3")``
     is built lazily on first use and owned by this instance (released by
     :meth:`close`). The region is not derived from the URL; for a specific
@@ -275,6 +281,17 @@ class S3Storage(Storage):
     elsewhere). For concurrent use, build the client at a safe time on the caller
     side and pass it in rather than relying on the lazy default.
     """
+
+    scheme: ClassVar[str] = "s3"
+    #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
+    #: (``ListObjectsV2``), and deletes; ``open`` is intentionally unimplemented
+    #: (S3 rides ``s3transfer``), so no ``OPEN_*`` (see :meth:`open`).
+    capabilities: ClassVar[StorageCapability] = (
+        StorageCapability.GET_FILEINFO
+        | StorageCapability.SCAN
+        | StorageCapability.SORTED_SCAN
+        | StorageCapability.DELETE
+    )
 
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
         text = os.fspath(url)
@@ -302,6 +319,41 @@ class S3Storage(Storage):
     def key(self) -> str:
         """The key or prefix part of the URL (may be empty)."""
         return self._key
+
+    @override
+    def as_text(self) -> str:
+        """Reconstruct the ``s3://bucket/key`` token (:meth:`Storage.as_text`).
+
+        Rebuilt from :attr:`bucket` / :attr:`key`, not from the raw constructor
+        input, so a keyless location normalizes to a slashless ``s3://bucket``
+        (and the bare service root to ``s3://``) - exactly the token a raw
+        ``s3://bucket`` argument carries into ``naming``.
+        """
+        if self._key:
+            return f"s3://{self._bucket}/{self._key}"
+        return f"s3://{self._bucket}"
+
+    @override
+    def validate(self) -> None:
+        """Reject the resource forms ``aws s3`` rejects at parse time (rc 252).
+
+        Deferred from construction (:meth:`Storage.validate`): S3 Object Lambda
+        and Outposts *bucket* ARNs (s3api / s3control territory), and a key with
+        no bucket (``"s3:///k"``). The library calls this before an operation and
+        the CLI at its parity-correct point, so a malformed location fails loud
+        instead of reaching the API as a cryptic botocore error. Idempotent.
+        """
+        rest = self._url.partition("://")[2]
+        if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
+            raise ValidationError(
+                "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
+            )
+        if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
+            raise ValidationError(
+                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
+            )
+        if not self._bucket and self._key:
+            raise ValidationError(f"s3:// URL has a key but no bucket: {self._url!r}")
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.
@@ -368,7 +420,7 @@ class S3Storage(Storage):
             paging["FetchOwner"] = True
         with s3_errors(operation="ls", bucket=self._bucket):
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive)
+                yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
 
     def _scan_bucket_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListBuckets`` page (service root).
@@ -401,34 +453,69 @@ class S3Storage(Storage):
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Not implemented yet - the sole unfinished part of the Storage contract.
+        """Intentionally unimplemented - every S3 transfer rides ``s3transfer``.
 
-        No built-in path reaches this: S3<->local / S3<->S3 transfers are driven
-        through ``s3transfer`` off ``get_client`` / ``bucket`` / ``key``
-        (``transfer.py``), and a stdin/stdout stream is handed to ``s3transfer``
-        as a fileobj (``s3.py`` ``_cp_stream``). Implementing it (GetObject ->
-        readable stream; multipart PutObject -> writable stream committed on
-        ``close()``, honoring the ``size`` hint) is what would wire the two
-        capabilities ``storage.py`` advertises: direct programmatic S3 stream
-        access, and a custom ``Storage`` backend transferring against S3 through
-        the generic ``open`` path. It raises rather than silently misbehaving.
+        No route reaches this: S3<->local / S3<->S3 transfers are driven through
+        ``s3transfer`` off ``get_client`` / ``bucket`` / ``key`` (``transfer.py``),
+        a stdin/stdout stream is handed to ``s3transfer`` as a fileobj (``s3.py``
+        ``_cp_stream``), and the S3 side of an open-route custom-backend transfer
+        likewise rides ``s3transfer`` (the *custom* side uses its own ``open``,
+        never this). Implementing it (GetObject -> readable stream; multipart
+        PutObject -> writable stream committed on ``close()``, honoring the
+        ``size`` hint) would only add direct programmatic S3 stream access, which
+        nothing needs today. It raises rather than silently misbehaving.
         """
         raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
 
     @override
-    def delete(self, key: str, *, request_payer: str | None = None) -> None:
+    def delete(self, info: FileInfo, *, request_payer: str | None = None) -> None:
         """Delete one object with a single blind ``DeleteObject`` call.
 
         Blind like ``aws s3 rm``'s single-key path: no listing and no
         HeadObject - deleting a key that does not exist succeeds (S3 returns
-        204). ``request_payer`` is an S3-specific knob added on top of the
-        cross-backend ``Storage.delete(key)`` signature.
+        204). The object is ``info.key`` (a full bucket key). ``request_payer``
+        is an S3-specific knob added on top of the cross-backend
+        ``Storage.delete`` signature.
         """
-        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
+        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
-        with s3_errors(operation="delete", bucket=self._bucket, key=key):
+        with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
             self.get_client().delete_object(**kwargs)
+
+    @override
+    def get_fileinfo(
+        self,
+        key: str = "",
+        *,
+        follow_symlinks: bool = True,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> S3FileInfo | None:
+        """HeadObject a single key (:meth:`Storage.get_fileinfo`).
+
+        ``key`` is relative to this storage's location: ``""`` heads
+        :attr:`key`, a non-empty ``key`` an entry beneath it. A ``404`` returns
+        ``None`` (definitively absent); any other error (``403``, transport, 5xx)
+        is raised - existence could not be determined. ``follow_symlinks`` /
+        ``on_warning`` do not apply to S3 and are ignored. This is the generic
+        HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
+        """
+        target_key = self._key + key
+        try:
+            with s3_errors(operation="head", bucket=self._bucket, key=target_key):
+                head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
+        except NotFoundError:
+            return None
+        etag = head.get("ETag")
+        return S3FileInfo(
+            key=target_key,
+            size=head.get("ContentLength"),
+            mtime=head.get("LastModified"),
+            etag=etag.strip('"') if etag else None,
+            storage_class=head.get("StorageClass"),
+            head=head,
+            compare_key=target_key.rsplit("/", 1)[-1],
+        )
 
 
 __all__ = ["S3Storage", "s3_errors", "translate_boto_error"]
