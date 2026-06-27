@@ -330,14 +330,14 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
 A custom `Storage` (any `scheme` other than `"s3"` / `"local"`) transfers as one
-side of `cp` / `mv`, the other side always S3. `naming.plan_transfer` classifies
-the pair from the two `scheme`s into `opens3` (custom source -> S3, an UPLOAD) or
-`s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer` routes
-both. The S3 side rides `s3transfer` as usual; the custom side's bytes move
-through its `Storage.open(key, mode)` - the same primitive the stream path uses
-(section 6), generalized to a keyed, listable backend. `sync` over a custom
-backend is **not** wired yet; the CLI never pairs a custom backend, so the open
-route is library-only and outside aws parity.
+side of `cp` / `mv` / `sync`, the other side always S3. `naming.plan_transfer`
+classifies the pair from the two `scheme`s into `opens3` (custom source -> S3, an
+UPLOAD) or `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer`
+(cp / mv) and `S3.sync` route both. The S3 side rides `s3transfer` as usual; the
+custom side's bytes move through its `Storage.open(key, mode)` - the same
+primitive the stream path uses (section 6), generalized to a keyed, listable
+backend. The CLI never pairs a custom backend, so the open route is library-only
+and outside aws parity.
 
 - **bytes via `open`, the S3 side via s3transfer**: `opens3` hands `s3transfer`
   the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
@@ -375,10 +375,11 @@ route is library-only and outside aws parity.
   check, no `no_overwrite` `os.path.exists`. Only the **source-side** glacier
   gate runs (the S3 source of an `s3open` download, section 8).
 - **`no_overwrite`** (section 7): `opens3` keeps it - it rides `IfNoneMatch` on
-  the S3 PutObject. `s3open` + `no_overwrite` is currently a **silent no-op**:
+  the S3 PutObject. For `cp`, `s3open` + `no_overwrite` is a **silent no-op**:
   the only download-side guard is the local-destination `os.path.exists` check,
   which a custom backend (owning its key space, with no existence probe wired)
-  does not run.
+  does not run. In `sync` it *does* work - sync lists the destination, so a
+  destination-present pair is skipped without any probe.
 - **dryrun**: enumerates and reports `DRYRUN` but does **not** call `open` on the
   custom side - opening a `"wb"` writer is itself a side effect, so a dry run
   leaves the backend untouched.
@@ -389,5 +390,18 @@ route is library-only and outside aws parity.
   `DeleteObject` like any download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
   failed writer commit - leaves the source in place.
+- **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
+  custom side must declare `SORTED_SCAN` - an unsorted listing would manufacture
+  phantom new/delete pairs and, with `--delete`, corrupt the destination. A
+  dedicated gate (`S3._require_open_sync_capabilities`) requires `SORTED_SCAN` +
+  `OPEN_READ` (an `opens3` source) / `OPEN_WRITE` (an `s3open` destination), plus
+  `DELETE` when `--delete` removes orphans from an `s3open` custom destination
+  (`opens3` orphans are S3, deleted without the custom side). `sync` passes
+  `ScanOptions(sort=True)` to the custom side; the built-ins always sort and
+  ignore the flag. Orphans are removed through `_SyncDeletes`: `DeleteObjects` for
+  an S3 destination, the backend's `Storage.delete` for a custom one. The
+  case-conflict gate is scoped to a `LocalStorage` destination (a custom one owns
+  its key space). The transfer of each surviving pair reuses the `opens3` /
+  `s3open` builders above (the dry-run-skips-`open` behavior included).
 - **display**: the custom side renders through its `Storage.as_text()` (with the
   entry's relative key appended for a child); the S3 side as `s3://bucket/key`.

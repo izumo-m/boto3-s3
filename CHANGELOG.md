@@ -5,11 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- `cp` / `mv` now transfer a custom `Storage` backend as one side (the other
-  side S3), moving its bytes through `Storage.open()`: a custom source uploads to
-  S3, an S3 source downloads into the backend, and `mv` deletes a custom source
-  via `Storage.delete()`. The custom side is capability-checked up front. (`sync`
-  for a custom backend is not yet supported.)
+- `cp` / `mv` / `sync` now transfer a custom `Storage` backend as one side (the
+  other side S3), moving its bytes through `Storage.open()`: a custom source
+  uploads to S3, an S3 source downloads into the backend, `mv` deletes a custom
+  source via `Storage.delete()`, and `sync` works when the custom side declares
+  `SORTED_SCAN` (its merge-join needs byte-ordered listings). The custom side is
+  capability-checked up front.
+- Add `ScanOptions.sort`: request byte-ordered enumeration (set by `sync`, whose
+  merge-join needs it; `cp` / `mv` / `ls` / `rm` leave it off). A `SORTED_SCAN`
+  backend honors it; the built-ins always sort and ignore it.
 - Add `Storage.get_fileinfo(key="")`: the single-entry counterpart to `scan`
   (returns a `FileInfo`, or `None` if absent). `cp` / `mv` resolve a single
   source through it; a `Storage` subclass must now implement it.

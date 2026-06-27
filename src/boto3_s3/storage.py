@@ -26,13 +26,14 @@ directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 (``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A custom
 backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
-``mv`` move the non-built-in side's bytes through its ``Storage.open``
+``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
 object into an ``open("wb")`` whose ``close`` commits it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
-(``Storage.capabilities``), and an ``mv`` removes a custom source through its own
-``delete`` (transfer.md section 12). ``sync`` over a custom backend is not wired
-yet. ``S3Storage.open`` stays unimplemented by design - the S3 side always rides
+(``Storage.capabilities``), an ``mv`` removes a custom source through its own
+``delete``, and ``sync`` works when the custom side declares ``SORTED_SCAN`` (its
+merge-join needs both listings byte-ordered) (transfer.md section 12).
+``S3Storage.open`` stays unimplemented by design - the S3 side always rides
 ``s3transfer``, never ``open``. None of this affects CLI / ``aws s3`` parity (the
 CLI only ever pairs a built-in with a stdio stream).
 """

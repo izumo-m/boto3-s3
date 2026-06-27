@@ -178,6 +178,16 @@ mtime rule (full float precision; `delta = dst.mtime - src.mtime`):
   straight through, then each item fails with `[Errno 20]` and gives rc 1.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
+- opens3 / s3open (a custom backend on one side, the other always S3 - the open
+  route, transfer.md section 12): the custom side must declare `SORTED_SCAN`
+  (the merge-join needs both listings byte-ordered) plus the route's I/O
+  (`OPEN_READ` source / `OPEN_WRITE` dest) and `DELETE` for an `s3open` `--delete`
+  destination; a dedicated gate rejects a backend short of that *before* any
+  listing. `sync` requests `ScanOptions(sort=True)` from the custom side (the
+  built-ins always sort and ignore it). Orphan deletes go through the backend's
+  own `Storage.delete` for an `s3open` destination (an `opens3` destination is
+  S3); the case-conflict gate stays scoped to a local destination. Library-only -
+  the CLI never pairs a custom backend.
 
 ## 7. Known divergences (recorded only)
 
