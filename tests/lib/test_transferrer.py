@@ -49,6 +49,21 @@ def _ops(calls: list[ApiCall]) -> list[str]:
     return [call.operation for call in calls]
 
 
+class _OpenSink(io.BytesIO):
+    """A download sink whose ``close`` is suppressed.
+
+    The open route has the transfer ``close`` every dst fileobj it is handed
+    (``transfer._CloseFileobj`` - a custom backend's writer commits that way); a
+    real ``IOStorage`` hands it a close-suppressing view, never the caller's raw
+    stream. These lower-level tests build the ``TransferItem`` directly, so this
+    stand-in mirrors that view: ``getvalue()`` stays readable after the transfer
+    closes it.
+    """
+
+    def close(self) -> None:
+        pass
+
+
 def _run(
     kind: OpKind,
     items: list[TransferItem],
@@ -276,7 +291,7 @@ class TestDownload:
     def test_streaming_download_reports_resolved_bytes(self) -> None:
         # No size/etag (a streaming download): s3transfer probes the object via
         # HeadObject, so SUCCEEDED must report the resolved byte count, not 0.
-        sink = io.BytesIO()
+        sink = _OpenSink()
         item = TransferItem(
             compare_key="a.bin",
             src_bucket="bucket",
@@ -827,7 +842,7 @@ class TestStreams:
         assert transferrer.succeeded == 1
 
     def test_stream_download_probes_then_writes(self) -> None:
-        sink = io.BytesIO()
+        sink = _OpenSink()
         item = TransferItem(
             compare_key="streaming.txt",
             src_bucket="bucket",

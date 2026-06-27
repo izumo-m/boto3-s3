@@ -17,17 +17,30 @@ from boto3_s3.types import ScanOptions
 
 
 class TestBinaryPassthrough:
-    def test_open_returns_the_stream_unwrapped(self) -> None:
-        # A binary stream is handed to s3transfer as-is, preserving its own
-        # seekability (BytesIO is seekable -> multipart / retry stay available).
+    def test_open_presents_a_close_suppressing_view(self) -> None:
+        # A binary stream reaches s3transfer through a view that delegates I/O
+        # and seekability (BytesIO is seekable -> multipart / retry stay
+        # available) but whose close() never closes the caller's stream - the
+        # transfer closes every fileobj open() returns (transfer._CloseFileobj).
         buf = io.BytesIO(b"data")
-        store = IOStorage(buf)
-        assert store.open("k", "rb") is buf
-        assert store.open("k", "wb") is buf
+        reader = IOStorage(buf).open("k", "rb")
+        assert reader is not buf
+        assert reader.read() == b"data"
+        assert reader.seekable()
+        reader.close()
+        assert not buf.closed
+
+    def test_write_view_does_not_close_the_caller_stream(self) -> None:
+        buf = io.BytesIO()
+        writer = IOStorage(buf).open("k", "wb")
+        writer.write(b"ab")
+        writer.close()
+        assert not buf.closed
+        assert buf.getvalue() == b"ab"
 
     def test_key_and_size_are_ignored(self) -> None:
         buf = io.BytesIO(b"x")
-        assert IOStorage(buf).open("anything", "rb", size=999) is buf
+        assert IOStorage(buf).open("anything", "rb", size=999).read() == b"x"
 
 
 class TestTextAdapter:
@@ -84,7 +97,12 @@ class TestStdioStorage:
         stdout = _Stdio()
         monkeypatch.setattr("sys.stdout", stdout)
         writer = StdioStorage().open("k", "wb")
-        assert writer is stdout.buffer
+        # A close-suppressing view over stdout.buffer: writes reach it, but the
+        # transfer's close() must not close the process's stdout.
+        writer.write(b"hi")
+        writer.close()
+        assert stdout.buffer.getvalue() == b"hi"
+        assert not stdout.buffer.closed
 
     def test_read_picks_stdin_buffer_forced_non_seekable(
         self, monkeypatch: pytest.MonkeyPatch

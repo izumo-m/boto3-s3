@@ -416,6 +416,8 @@ class Transferrer:
             if guessed is not None:
                 extra_args["ContentType"] = guessed
         subscribers = self._common_subscribers(item)
+        if item.src_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.src_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
@@ -432,6 +434,8 @@ class Transferrer:
         subscribers = self._common_subscribers(item)
         if item.dst_path is not None:
             subscribers.append(_DirectoryCreator())
+        if item.dst_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.dst_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
@@ -760,6 +764,39 @@ class _DeleteSource:
             return
         try:
             self._delete()
+        except Exception as exc:
+            future.set_exception(exc)
+
+
+class _CloseFileobj:
+    """Close the custom-backend fileobj an ``open``-routed item carries.
+
+    The transfer owns every fileobj a ``Storage.open`` hands it (the file
+    protocol the open route relies on): a real backend's ``close`` releases a
+    reader or *commits* a writer (``Storage.open``'s contract), while a
+    caller-supplied stream (``IOStorage``) hands back a close-suppressing view,
+    so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    ``_Completion`` so a writer's commit failure flips the settled future to a
+    failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
+    then sees the failure and skips its delete). A transfer that already failed
+    still closes - to release the resource - but never lets a close error
+    overwrite the original failure.
+    """
+
+    def __init__(self, fileobj: Any) -> None:
+        self._fileobj = fileobj
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            try:
+                self._fileobj.close()
+            except Exception:
+                pass
+            return
+        try:
+            self._fileobj.close()
         except Exception as exc:
             future.set_exception(exc)
 

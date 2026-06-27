@@ -40,7 +40,7 @@ from boto3_s3.exceptions import (
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
-from boto3_s3.storage import Location, Storage
+from boto3_s3.storage import Location, Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
     CancelToken,
@@ -125,6 +125,17 @@ def _ckey(info: FileInfo) -> str:
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
     return key
+
+
+def _open_side_display(storage: Storage, key: str) -> str:
+    """A display string for the custom (``open``-routed) side of a transfer.
+
+    The analog of the local path / ``s3://`` URI the built-in routes render:
+    the backend's own ``as_text()`` location token, with the entry's relative
+    ``key`` appended when it addresses a child (``""`` is the location itself).
+    """
+    text = storage.as_text()
+    return f"{text.rstrip('/')}/{key}" if key else text
 
 
 def _copy_all(_pair: SyncPair) -> bool:
@@ -727,27 +738,38 @@ class S3:
         only by what it validated beforehand and by ``is_move`` (the engine's
         delete-source + MOVE reporting).
 
-        Built-in backends only: each route below asserts the concrete
-        ``LocalStorage`` / ``S3Storage`` pair, because the engine reaches into
-        ``S3Storage``'s client/bucket and ``LocalStorage``'s path directly
-        (s3transfer). A custom ``Storage`` subclass cannot transfer yet - the
-        generic ``open``-based path described in ``storage.py``'s module
-        docstring is not wired. Enumeration / deletion (``ls`` / ``rm``) carry
-        no such restriction.
+        The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
+        pair, because the engine reaches into ``S3Storage``'s client/bucket and
+        ``LocalStorage``'s path directly (s3transfer). A custom ``Storage`` (any
+        other ``schema``) pairs with S3 through the ``open`` route (``opens3`` /
+        ``s3open``): its bytes move via ``Storage.open`` while the S3 side rides
+        s3transfer. The custom side is capability-checked up front - it must
+        implement the contract methods the route uses - so a missing method
+        surfaces as a clear ``ValidationError`` instead of failing deep in the
+        engine.
         """
         src_storage.validate()
         dst_storage.validate()
         plan = naming.plan_transfer(
             src_storage, dst_storage, recursive=recursive, operation=operation
         )
+        if is_move and plan.paths_type in ("opens3", "s3open"):
+            # cp over a custom backend is wired (the open route below); mv is not
+            # (deleting a custom source through Storage.delete is #53d). Reject it
+            # up front - mirroring sync's custom-backend guard - rather than fail
+            # the source delete after the bytes have already moved.
+            raise ValidationError(
+                f"{operation}: custom-backend transfer is not implemented yet",
+                operation=operation,
+            )
 
         source_client = None
         src_s3: S3Storage | None = None
         dst_bucket = ""
-        # Built-in backends only (see this method's docstring): the asserts pin
-        # the concrete types the engine reaches into. Custom Storage transfer is
-        # unimplemented - do not relax these without wiring an open()-based path
-        # (storage.py) and implementing S3Storage.open.
+        # The built-in routes pin the concrete types the engine reaches into
+        # (S3Storage's client/bucket, LocalStorage's path); the open routes pair
+        # a capability-checked custom backend with S3 and move its bytes through
+        # Storage.open (see this method's docstring).
         if plan.paths_type == "locals3":
             assert isinstance(src_storage, LocalStorage) and isinstance(dst_storage, S3Storage)
             # aws-cli's _validate_path_args: the raw user path, checked up front
@@ -783,13 +805,20 @@ class S3:
             source_client = src_storage.get_client()
             src_s3 = src_storage
             dst_bucket = dst_storage.bucket
-        else:  # opens3 / s3open: custom-backend transfer, wired in #53c
-            raise ValidationError(
-                f"{operation}: custom-backend transfer is not implemented yet",
-                operation=operation,
-            )
+        elif plan.paths_type == "opens3":
+            # Custom source -> S3: upload each entry from its Storage.open("rb").
+            assert isinstance(dst_storage, S3Storage)
+            kind = OpKind.UPLOAD
+            client = dst_storage.get_client()
+            dst_bucket = dst_storage.bucket
+        else:  # s3open: S3 -> custom destination, download into its open("wb").
+            assert isinstance(src_storage, S3Storage)
+            kind = OpKind.DOWNLOAD
+            client = src_storage.get_client()
+            src_s3 = src_storage
 
-        case_gate = self._cp_case_gate(plan, kind=kind, recursive=recursive, options=options)
+        self._require_open_capabilities(plan, recursive=recursive, operation=operation)
+        case_gate = self._cp_case_gate(plan, recursive=recursive, options=options)
         transferrer = Transferrer(
             kind,
             client,
@@ -802,7 +831,29 @@ class S3:
             on_result=on_result,
         )
         with transferrer:
-            if src_s3 is None:
+            if plan.paths_type == "opens3":
+                items = self._cp_open_upload_items(
+                    plan,
+                    dst_bucket=dst_bucket,
+                    transferrer=transferrer,
+                    follow_symlinks=follow_symlinks,
+                    item_filter=item_filter,
+                    operation=operation,
+                    dryrun=dryrun,
+                )
+            elif plan.paths_type == "s3open":
+                assert src_s3 is not None
+                items = self._cp_open_download_items(
+                    plan,
+                    src_s3,
+                    transferrer=transferrer,
+                    page_size=page_size,
+                    item_filter=item_filter,
+                    options=options,
+                    operation=operation,
+                    dryrun=dryrun,
+                )
+            elif src_s3 is None:
                 items = self._cp_upload_items(
                     plan,
                     dst_bucket=dst_bucket,
@@ -1144,6 +1195,197 @@ class S3:
             compare_key=key.rsplit("/", 1)[-1],
         )
 
+    def _require_open_capabilities(
+        self, plan: naming.TransferPlan, *, recursive: bool, operation: str
+    ) -> None:
+        """Reject an open-route custom side that lacks a contract method.
+
+        The capability set is structural (class-level): ``opens3`` reads its
+        custom source - a single object via ``get_fileinfo``, a recursive tree
+        via ``scan`` - and opens each entry ``"rb"``; ``s3open`` opens its custom
+        destination ``"wb"``. A backend that declares less than the route asks of
+        it is rejected here, before any bytes move, with the gap named (so a
+        forgotten method is a clear ``ValidationError``, not a deep failure).
+        """
+        if plan.paths_type == "opens3":
+            custom: Storage = plan.src
+            needed = StorageCapability.OPEN_READ
+            needed |= StorageCapability.SCAN if recursive else StorageCapability.GET_FILEINFO
+        elif plan.paths_type == "s3open":
+            custom = plan.dst
+            needed = StorageCapability.OPEN_WRITE
+        else:
+            return
+        missing = custom.missing_capabilities(needed)
+        if missing:
+            names = ", ".join(c.name for c in StorageCapability if c in missing and c.name)
+            raise ValidationError(
+                f"{operation}: the custom backend {custom.as_text()!r} cannot satisfy this "
+                f"transfer (missing capability: {names})",
+                operation=operation,
+            )
+
+    def _cp_open_upload_items(
+        self,
+        plan: naming.TransferPlan,
+        *,
+        dst_bucket: str,
+        transferrer: Transferrer,
+        follow_symlinks: bool,
+        item_filter: FileFilter | None,
+        operation: str,
+        dryrun: bool,
+    ) -> Iterator[TransferItem]:
+        """Upload items from a custom source: each entry's bytes via ``open("rb")``.
+
+        The open-route mirror of ``_cp_upload_items`` - a recursive source
+        enumerates through ``plan.src.scan``, a single source resolves through
+        ``plan.src.get_fileinfo`` - but the source has no local path: the engine
+        reads its ``Storage.open(key, "rb")``. The open key is the entry's
+        ``compare_key`` for a recursive item, ``""`` (the location itself) for a
+        single one; the producer stamps each ``compare_key``, from which the
+        filter and the S3 destination key derive. A ``dryrun`` enumerates but
+        does not ``open`` the source (no side effect on the backend).
+
+        A single source the backend cannot resolve (``get_fileinfo`` -> ``None``)
+        raises like a missing local source - the base category, aws's wording
+        (rc 255) - rather than transferring nothing. A recursive source is an
+        enumeration: an empty ``scan`` yields zero items (rc 0), matching an empty
+        S3 prefix listing.
+        """
+        if plan.dir_op:
+            infos: Iterator[FileInfo] = plan.src.scan(
+                ScanOptions(
+                    recursive=True,
+                    follow_symlinks=follow_symlinks,
+                    on_warning=transferrer.warn,
+                )
+            )
+        else:
+            single = plan.src.get_fileinfo(
+                follow_symlinks=follow_symlinks, on_warning=transferrer.warn
+            )
+            if single is None:
+                raise Boto3S3Error(
+                    f"The user-provided path {plan.src.as_text()} does not exist.",
+                    operation=operation,
+                )
+            infos = iter([single])
+        for info in infos:
+            if item_filter is not None and not item_filter(info):
+                continue
+            yield self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
+
+    def _open_upload_item(
+        self, plan: naming.TransferPlan, info: FileInfo, *, dst_bucket: str, dryrun: bool
+    ) -> TransferItem:
+        """One upload item reading the custom source through ``Storage.open``.
+
+        ``dryrun`` skips the ``open`` (the item is only reported, never
+        submitted), so a dry run never reads from the backend.
+        """
+        compare_key = _ckey(info)
+        open_key = compare_key if plan.dir_op else ""
+        dest = naming.dest_for(plan, compare_key)
+        return TransferItem(
+            compare_key=compare_key,
+            size=info.size,
+            mtime=info.mtime,
+            src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
+            dst_bucket=dst_bucket,
+            dst_key=dest[len(dst_bucket) + 1 :],
+            src_display=_open_side_display(plan.src, open_key),
+            dst_display=f"s3://{dest}",
+        )
+
+    def _cp_open_download_items(
+        self,
+        plan: naming.TransferPlan,
+        src_storage: S3Storage,
+        *,
+        transferrer: Transferrer,
+        page_size: int,
+        item_filter: FileFilter | None,
+        options: TransferOptions,
+        operation: str,
+        dryrun: bool,
+    ) -> Iterator[TransferItem]:
+        """Download items from an S3 source into a custom destination's ``open("wb")``.
+
+        The open-route mirror of the S3-source half of ``_cp_s3_source_items``:
+        the source is enumerated identically (``_cp_scan`` for a recursive
+        prefix, ``_cp_head_single`` for one object), but each entry is written
+        through ``plan.dst.open(key, "wb")`` instead of to a local path. The
+        destination's local-filesystem gates (case-conflict, parent-reference,
+        ``no_overwrite``'s ``os.path.exists``) do not apply - the backend owns its
+        own key space - so only the source-side glacier gate runs. A ``dryrun``
+        enumerates but does not ``open`` the destination (no side effect on the
+        backend).
+        """
+        bucket = src_storage.bucket
+        if plan.dir_op:
+            infos: Iterator[FileInfo] = self._cp_scan(
+                src_storage,
+                key_prefix=plan.src_root[len(bucket) + 1 :],
+                page_size=page_size,
+                item_filter=item_filter,
+                options=options,
+            )
+        elif not src_storage.key:
+            # Keyless non-recursive source (`cp s3://bucket custom`): aws lists
+            # the bucket and exact-matches nothing -> zero items (the built-in
+            # download path's behavior, without issuing the listing).
+            return
+        else:
+            infos = self._cp_head_single(
+                src_storage, kind=OpKind.DOWNLOAD, options=options, operation=operation
+            )
+        for info in infos:
+            item = self._open_download_item(
+                plan, info, bucket=bucket, transferrer=transferrer, options=options, dryrun=dryrun
+            )
+            if item is not None:
+                yield item
+
+    def _open_download_item(
+        self,
+        plan: naming.TransferPlan,
+        info: FileInfo,
+        *,
+        bucket: str,
+        transferrer: Transferrer,
+        options: TransferOptions,
+        dryrun: bool,
+    ) -> TransferItem | None:
+        """One download item writing the custom destination through ``Storage.open``,
+        or ``None`` once the glacier gate consumed it.
+
+        ``dryrun`` skips the destination ``open`` (the item is only reported,
+        never submitted), so a dry run never opens the backend for writing.
+        """
+        compare_key = _ckey(info)
+        open_key = naming.dest_for(plan, compare_key)
+        src_display = f"s3://{bucket}/{info.key}"
+        is_s3_info = isinstance(info, S3FileInfo)
+        if _glacier_blocked(info, kind=OpKind.DOWNLOAD, options=options):
+            if options.get("ignore_glacier_warnings"):
+                transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
+            else:
+                transferrer.warn(_glacier_warning(src_display, OpKind.DOWNLOAD), key=compare_key)
+            return None
+        return TransferItem(
+            compare_key=compare_key,
+            size=info.size,
+            etag=info.etag if is_s3_info else None,
+            mtime=info.mtime,
+            head=info.head if is_s3_info else None,
+            src_bucket=bucket,
+            src_key=info.key,
+            dst_fileobj=None if dryrun else plan.dst.open(open_key, "wb", size=info.size),
+            src_display=src_display,
+            dst_display=_open_side_display(plan.dst, open_key),
+        )
+
     def _cp_stream(
         self,
         src_storage: Storage,
@@ -1239,7 +1481,6 @@ class S3:
         self,
         plan: naming.TransferPlan,
         *,
-        kind: OpKind,
         recursive: bool,
         options: TransferOptions,
     ) -> _CaseConflictGate | None:
@@ -1250,9 +1491,12 @@ class S3:
         into the exact-case membership set the gate's AlwaysSync arm consults -
         the observable equivalent of aws's reverse file generator + comparator.
         Each entry's stamped ``compare_key`` is the root-relative membership key.
+        Scoped to ``s3local`` (a case-insensitive *filesystem* destination); a
+        custom ``s3open`` destination owns its own key space, so it never scans
+        the custom side here.
         """
         mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
-        if kind is not OpKind.DOWNLOAD or not recursive or mode is CaseConflictMode.IGNORE:
+        if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
             return None
         dest_keys = {_ckey(info) for info in plan.dst.scan(ScanOptions(recursive=True))}
         return _CaseConflictGate(mode, dest_keys)
