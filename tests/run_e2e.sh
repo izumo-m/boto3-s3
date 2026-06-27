@@ -21,12 +21,15 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." # repo root
 
-export AWS_PROFILE="$BOTO3_S3_E2E_PROFILE"
 export AWS_REGION="$BOTO3_S3_E2E_REGION"
 export AWS_DEFAULT_REGION="$AWS_REGION"
-# Talk to real AWS via the profile only: drop any MinIO endpoint / static creds
-# a normal shell might carry.
-unset AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+# Resolve the profile's credentials into env vars and drop AWS_PROFILE: a test
+# that supplies its own AWS_CONFIG_FILE (the CRT lane writes a [default] config
+# selecting the CRT engine) must not be shadowed by a named profile's config.
+creds="$(aws configure export-credentials --profile "$BOTO3_S3_E2E_PROFILE" --format env)" \
+    || { echo "could not resolve credentials for profile $BOTO3_S3_E2E_PROFILE" >&2; exit 1; }
+unset AWS_PROFILE AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL
+eval "$creds"
 
 suffix="$(openssl rand -hex 5 2>/dev/null \
     || python3 -c 'import secrets; print(secrets.token_hex(5))' 2>/dev/null \
