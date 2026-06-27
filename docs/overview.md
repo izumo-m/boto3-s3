@@ -115,6 +115,8 @@ written here.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`s3.md`](./s3.md) - the design of the `S3` entry point (the `client` /
   `resolve` customization seams, resolution rules, module-level functions).
+- [`storage.md`](./storage.md) - the `Storage` abstraction and custom backends
+  (the subclassing contract, `StorageCapability`, the open route).
 - [`deleter.md`](./deleter.md) - the design of `S3Deleter` (asynchronous batch
   deletion).
 - [`globsieve.md`](./globsieve.md) - the glob filter engine and the filter
@@ -144,6 +146,7 @@ written here.
 - [`release.md`](./release.md) - how the two packages are published to PyPI
   (tag-driven GitHub Actions, Trusted Publishing, independent versioning).
 
-The `S3` entry point itself is documented in [`s3.md`](./s3.md); each operation's
+The `S3` entry point itself is documented in [`s3.md`](./s3.md), the `Storage`
+abstraction and custom backends in [`storage.md`](./storage.md); each operation's
 per-method semantics live with its engine (`transfer.md` / `sync.md` /
 `deleter.md` / `globsieve.md`).

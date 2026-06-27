@@ -309,67 +309,14 @@ Batch operations stream their per-item outcomes instead of returning a list:
 
 ## Custom backends
 
-`cp` / `mv` / `sync` aren't limited to local paths and S3. A **custom `Storage`**
-— an HTTP service, an archive, an in-memory store — can be **one side of a
-transfer, the other side always S3**: the custom side moves its bytes through
-`open()` while the S3 side keeps riding `s3transfer` (the built-in
-`IOStorage` / `StdioStorage` stream wrappers are this same seam). Subclass
-`Storage`, declare a `scheme` (anything but `"s3"` / `"local"`) and the
-`capabilities` the backend actually has, and implement the contract:
+`cp` / `mv` / `sync` aren't limited to local paths and S3: a custom `Storage`
+subclass — an HTTP service, an archive, an in-memory store — can be **one side of
+a transfer, the other side always S3** (the built-in `IOStorage` /
+`StdioStorage` stream wrappers are this same seam). A backend declares its
+`capabilities`, which a transfer pre-checks, failing fast if it needs more.
 
-```python
-import io
-from typing import BinaryIO, ClassVar
-
-from boto3_s3 import S3, FileInfo, ScanOptions, Storage, StorageCapability
-
-class _Committing(io.BytesIO):           # a "wb" handle whose close() commits the write
-    def __init__(self, store, key):
-        super().__init__()
-        self._store, self._key = store, key
-    def close(self):
-        self._store[self._key] = self.getvalue()
-        super().close()
-
-class DictStorage(Storage):
-    """A minimal in-memory backend: a dict of key -> bytes."""
-
-    scheme: ClassVar[str] = "dict"
-    capabilities: ClassVar[StorageCapability] = (
-        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
-        | StorageCapability.SORTED_SCAN | StorageCapability.DELETE
-    )
-
-    def __init__(self, store: dict[str, bytes], *, root: str = "dict://store"):
-        self._store, self._root = store, root
-
-    def as_text(self) -> str:            # how this side renders in results
-        return self._root
-
-    def open(self, key: str, mode: str, *, size: int | None = None) -> BinaryIO:
-        return io.BytesIO(self._store[key]) if mode == "rb" else _Committing(self._store, key)
-
-    def scan_pages(self, options: ScanOptions):
-        yield [FileInfo(key=k, size=len(v), compare_key=k)      # compare_key = root-relative
-               for k, v in sorted(self._store.items())]         # sorted -> byte order (sync)
-
-    def get_fileinfo(self, key: str = "", *, follow_symlinks=True, on_warning=None):
-        data = self._store.get(key)
-        return None if data is None else FileInfo(key=key, size=len(data), compare_key=key)
-
-    def delete(self, info: FileInfo) -> None:
-        del self._store[info.key]
-
-store = {"a.txt": b"hello", "b.txt": b"world"}
-S3().sync(DictStorage(store), "s3://my-bucket/data/")   # custom -> S3 (upload)
-S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download)
-```
-
-A transfer **pre-checks the custom side against `capabilities`** and fails fast
-with a clear error if it needs more than the backend declares: `sync`, whose
-merge-join needs both listings in byte order, requires `SORTED_SCAN`; an `mv`
-source needs `DELETE`. The S3-only operations (`ls` / `rm` / `mb` / `rb` /
-`presign` / `website`) need an actual S3 bucket and are **not** part of this seam.
+See **[`docs/storage.md`](docs/storage.md)** for the `Storage` contract,
+capabilities, and a worked example.
 
 ## Errors
 
