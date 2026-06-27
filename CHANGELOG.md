@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `walk_local` is now a `LocalStorage` method (was a module-level function). The
+  recursive local walk is split into protected, overridable methods (`_walk` /
+  `_should_ignore` / `_triggers_warning` / `_stat_info` / `_stat_one`), so a
+  subclass can extend the traversal - e.g. to follow Cygwin `!<symlink>` files on
+  a native-Python Windows build - without re-implementing it.
 - Add `detect_symlink_loops` to `cp` / `mv` / `sync` (and `ScanOptions`), default
   `False`: a recursive local walk skips a directory that resolves to one of its
   own ancestors with a `Symbolic link loop detected` warning, instead of

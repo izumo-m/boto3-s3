@@ -13,7 +13,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 |---|---|
 | `naming.py` | Pure-function port of the path-shape rules (aws-cli `FileFormat` / `find_bucket_key` / keyless normalization / `find_dest_path_comp_key` / filter root). SDK-independent, so the CLI and the library derive paths, key naming, and the filter root from the **same code** |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
-| `localstorage.py` | `walk_local`: a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules). `LocalStorage` fully implements the `Storage` ABC |
+| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path). Its recursive walk `LocalStorage.walk_local` is a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules), split into overridable protected methods (`_walk` / `_should_ignore` / `_stat_info` / ...) so a subclass can extend the traversal; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |

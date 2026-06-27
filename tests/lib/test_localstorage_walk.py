@@ -1,6 +1,6 @@
 """``boto3_s3.localstorage``: the aws-cli-order walk and the Storage surface.
 
-Pins aws-cli ``FileGenerator.list_files`` parity for the recursive ``walk_local``:
+Pins aws-cli ``FileGenerator.list_files`` parity for ``LocalStorage.walk_local``:
 the byte-order sort (``foo.txt`` before ``foo/bar`` - the appended-separator
 trick), depth-first interleaving, the warn-and-skip battery with aws-cli wording,
 the silent symlink skip, and the invalid-timestamp epoch fallback. The single-path
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from boto3_s3.exceptions import NotFoundError
-from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path, walk_local
+from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path
 from boto3_s3.types import FileKind, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -28,7 +28,7 @@ def _keys(tmp_path: Path, **kwargs: object) -> list[str]:
     root = str(tmp_path)
     prefix = root.replace(os.sep, "/") + "/"
     out: list[str] = []
-    for info in walk_local(root, **kwargs):  # type: ignore[arg-type]
+    for info in LocalStorage(root).walk_local(**kwargs):  # type: ignore[arg-type]
         assert info.key.startswith(prefix)
         rel = info.key[len(prefix) :]
         # walk_local stamps compare_key with this same root-relative key.
@@ -105,7 +105,7 @@ class TestWalkWarnings:
 
         monkeypatch.setattr("boto3_s3.localstorage.datetime", _BoomDatetime)
         warnings: list[str] = []
-        infos = list(walk_local(str(tmp_path), on_warning=warnings.append))
+        infos = list(LocalStorage(str(tmp_path)).walk_local(on_warning=warnings.append))
         assert [info.mtime for info in infos] == [datetime(1970, 1, 1, tzinfo=timezone.utc)]
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
@@ -179,6 +179,46 @@ class TestSymlinkLoopDetection:
         assert detector.is_cycle(str(tmp_path / "child")) is False  # fresh -> registered
         detector.leave()
         assert detector.is_cycle(str(tmp_path)) is True  # the seeded root is an ancestor
+
+
+class TestWalkIsOverridable:
+    """The walk is a pipeline of protected methods a subclass can replace.
+
+    The extension point behind, e.g., resolving Cygwin ``!<symlink>`` files on a
+    native-Python Windows build - the engine dispatches through ``self``.
+    """
+
+    def test_should_ignore_override_is_honored_through_scan(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "keep.txt", "skip.tmp")
+
+        class _NoTmp(LocalStorage):
+            def _should_ignore(
+                self, path: str, *, follow_symlinks: bool, notify: object
+            ) -> bool:
+                if path.endswith(".tmp"):
+                    return True
+                return super()._should_ignore(
+                    path,
+                    follow_symlinks=follow_symlinks,
+                    notify=notify,  # type: ignore[arg-type]
+                )
+
+        storage = _NoTmp(str(tmp_path))
+        keys = [info.compare_key for info in storage.scan(ScanOptions(recursive=True))]
+        assert keys == ["keep.txt"]  # the override pruned skip.tmp
+
+    def test_stat_info_override_can_rewrite_entries(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt")
+
+        class _Tagged(LocalStorage):
+            def _stat_info(self, path: str, notify: object) -> object:
+                info = super()._stat_info(path, notify)  # type: ignore[arg-type]
+                if info is not None:
+                    info.size = 999
+                return info
+
+        infos = list(_Tagged(str(tmp_path)).walk_local())
+        assert [(info.compare_key, info.size) for info in infos] == [("a.txt", 999)]
 
 
 class TestGetFileinfo:
