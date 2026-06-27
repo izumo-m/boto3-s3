@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3-cli"
-version = "0.1.1"
+version = "0.2.0"
 description = "An `aws s3` compatible CLI built on the boto3-s3 library."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     # Released in lockstep; floor pins the library version this CLI is built against.
-    "boto3-s3>=0.2.0,<0.3.0",
+    "boto3-s3>=0.3.0,<0.4.0",
     # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's boto3 pin.
     "botocore>=1.31",
 ]
