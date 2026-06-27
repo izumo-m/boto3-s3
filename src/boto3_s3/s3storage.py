@@ -282,7 +282,7 @@ class S3Storage(Storage):
     side and pass it in rather than relying on the lazy default.
     """
 
-    schema: ClassVar[str] = "s3"
+    scheme: ClassVar[str] = "s3"
     #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
     #: (``ListObjectsV2``), and deletes; ``open`` is intentionally unimplemented
     #: (S3 rides ``s3transfer``), so no ``OPEN_*`` (see :meth:`open`).

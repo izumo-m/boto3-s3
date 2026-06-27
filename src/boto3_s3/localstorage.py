@@ -258,7 +258,7 @@ def _translate_os_error(exc: OSError, *, operation: str, key: str | None) -> Bot
 class LocalStorage(Storage):
     """A local filesystem path as one side of a transfer."""
 
-    schema: ClassVar[str] = "local"
+    scheme: ClassVar[str] = "local"
     #: The local filesystem supports every transfer operation: byte I/O both
     #: ways, single-entry stat, a sorted walk (so ``SORTED_SCAN``), and delete.
     capabilities: ClassVar[StorageCapability] = (

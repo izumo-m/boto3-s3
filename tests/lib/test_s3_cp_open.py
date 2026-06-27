@@ -1,6 +1,6 @@
 """``S3.cp`` over the open route: a custom ``Storage`` backend paired with S3.
 
-A non-built-in backend (``schema`` other than ``"s3"`` / ``"local"``) moves its
+A non-built-in backend (``scheme`` other than ``"s3"`` / ``"local"``) moves its
 bytes through ``Storage.open`` instead of ``s3transfer``: ``opens3`` uploads each
 ``open("rb")`` to an S3 destination, ``s3open`` downloads each S3 object into an
 ``open("wb")`` whose ``close`` commits the write. An in-memory
@@ -98,14 +98,14 @@ class _MemWriter:
 class _MemStorage(Storage):
     """An in-memory ``dict[str, bytes]`` as a custom (non-built-in) ``Storage``.
 
-    ``schema = "mem"`` routes ``cp`` through the open route against an S3 side.
+    ``scheme = "mem"`` routes ``cp`` through the open route against an S3 side.
     ``store`` is keyed by ``compare_key`` (root-relative): a single source /
     destination uses the key ``""`` (the location itself), a recursive one the
     relative keys. ``capabilities`` declares the full open-route contract; the
     narrower subclasses below drive the capability gate.
     """
 
-    schema = "mem"
+    scheme = "mem"
     capabilities = (
         StorageCapability.OPEN_READ
         | StorageCapability.OPEN_WRITE

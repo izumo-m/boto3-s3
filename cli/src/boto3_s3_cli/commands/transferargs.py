@@ -467,9 +467,9 @@ def resolve_locations(
 
 
 def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
-    """The schema-bearing Storage ``naming.plan_transfer`` reads for cp/mv/sync.
+    """The scheme-bearing Storage ``naming.plan_transfer`` reads for cp/mv/sync.
 
-    ``plan_transfer`` needs only ``.schema`` / ``.as_text()``, so the S3 side
+    ``plan_transfer`` needs only ``.scheme`` / ``.as_text()``, so the S3 side
     carries no client here - this is the throwaway used purely to derive the path
     shapes (``filter_root``, the stdin dest key). The real transfer storages (with
     a client) are built in :func:`resolve_locations`.

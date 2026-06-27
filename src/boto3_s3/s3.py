@@ -741,7 +741,7 @@ class S3:
         The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
         pair, because the engine reaches into ``S3Storage``'s client/bucket and
         ``LocalStorage``'s path directly (s3transfer). A custom ``Storage`` (any
-        other ``schema``) pairs with S3 through the ``open`` route (``opens3`` /
+        other ``scheme``) pairs with S3 through the ``open`` route (``opens3`` /
         ``s3open``): its bytes move via ``Storage.open`` while the S3 side rides
         s3transfer. The custom side is capability-checked up front - it must
         implement the contract methods the route uses - so a missing method

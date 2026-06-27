@@ -24,7 +24,7 @@ Current state (kept accurate because this docstring is the design record): the
 built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
 directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 (``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A custom
-backend (any non-built-in ``schema``) - and the ``IOStorage`` / ``StdioStorage``
+backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` move the non-built-in side's bytes through its ``Storage.open``
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
@@ -119,7 +119,7 @@ class Storage(abc.ABC):
     """One side of a data location (local filesystem, an S3 bucket/prefix, ...).
 
     Implement :meth:`scan_pages`, :meth:`open`, :meth:`delete`,
-    :meth:`get_fileinfo`, :meth:`as_text`, set the :attr:`schema` discriminator,
+    :meth:`get_fileinfo`, :meth:`as_text`, set the :attr:`scheme` discriminator,
     and declare :attr:`capabilities` (which of those operations actually work) to
     add a data source; :meth:`scan` (prefetch + flatten) is provided concretely
     on top of ``scan_pages``, :meth:`__str__` delegates to :meth:`as_text`, and
@@ -134,7 +134,7 @@ class Storage(abc.ABC):
     #: ``"local"`` are the built-in transferable pair; any other value is a
     #: non-built-in backend (a custom one, or a stdio stream). Each concrete
     #: Storage sets its own token.
-    schema: ClassVar[str]
+    scheme: ClassVar[str]
 
     #: Which transfer operations this Storage *kind* implements
     #: (:class:`StorageCapability`): the structural, class-level contract a

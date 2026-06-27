@@ -329,9 +329,9 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
-A custom `Storage` (any `schema` other than `"s3"` / `"local"`) transfers as one
+A custom `Storage` (any `scheme` other than `"s3"` / `"local"`) transfers as one
 side of `cp` / `mv`, the other side always S3. `naming.plan_transfer` classifies
-the pair from the two `schema`s into `opens3` (custom source -> S3, an UPLOAD) or
+the pair from the two `scheme`s into `opens3` (custom source -> S3, an UPLOAD) or
 `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer` routes
 both. The S3 side rides `s3transfer` as usual; the custom side's bytes move
 through its `Storage.open(key, mode)` - the same primitive the stream path uses

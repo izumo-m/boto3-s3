@@ -38,7 +38,7 @@ _OUTPOST_ARN = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567/a
 
 
 def _storage(arg: str) -> S3Storage | LocalStorage:
-    """The schema-bearing endpoint the test feeds plan_transfer, chosen by
+    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by
     ``classify`` on the raw path - exactly how the CLI builds its endpoints."""
     return S3Storage(arg) if classify(arg) == "s3" else LocalStorage(arg)
 
@@ -55,11 +55,11 @@ def plan_transfer(
 
 
 class _FakeOpen(Storage):
-    """A custom (open-routed) Storage for plan_transfer tests: its schema is
-    neither s3 nor local, so it routes through the open seam. Only ``schema`` and
+    """A custom (open-routed) Storage for plan_transfer tests: its scheme is
+    neither s3 nor local, so it routes through the open seam. Only ``scheme`` and
     ``as_text`` matter to the formatter; the I/O methods stay inert."""
 
-    schema = "mem"
+    scheme = "mem"
 
     def __init__(self, token: str = "mem://x") -> None:
         self._token = token

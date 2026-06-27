@@ -157,7 +157,7 @@ class IOStorage(Storage):
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
     """
 
-    schema: ClassVar[str] = "stdio"
+    scheme: ClassVar[str] = "stdio"
     #: A single stream supports only byte I/O (both directions, chosen per
     #: ``open`` call); it has no listing or deletion, so just the ``OPEN_*`` pair.
     capabilities: ClassVar[StorageCapability] = (

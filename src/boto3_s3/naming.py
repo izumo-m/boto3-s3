@@ -229,20 +229,20 @@ class TransferPlan:
 
 
 def _endpoint_kind(storage: Storage) -> PathKind:
-    """The transfer kind from a resolved endpoint's ``schema`` (the object layer).
+    """The transfer kind from a resolved endpoint's ``scheme`` (the object layer).
 
     ``"s3"`` / ``"local"`` are the built-in container pair, driven through
-    ``s3transfer`` / the local path directly. Any other ``schema`` is a custom
+    ``s3transfer`` / the local path directly. Any other ``scheme`` is a custom
     backend, routed as ``"open"`` - its bytes move through ``Storage.open`` while
     the paired side (always s3) rides ``s3transfer``. A stdio stream never reaches
-    here (``cp`` diverts it to the stream path up front), so its schema folds into
+    here (``cp`` diverts it to the stream path up front), so its scheme folds into
     ``"open"`` harmlessly; an unsupported pairing is rejected by
     :func:`plan_transfer`, not here.
     """
-    schema = getattr(storage, "schema", None)
-    if schema == "s3":
+    scheme = getattr(storage, "scheme", None)
+    if scheme == "s3":
         return "s3"
-    if schema == "local":
+    if scheme == "local":
         return "local"
     return "open"
 
@@ -252,9 +252,9 @@ def plan_transfer(
 ) -> TransferPlan:
     """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
 
-    The route per side is read from each endpoint's ``schema`` discriminator - the
+    The route per side is read from each endpoint's ``scheme`` discriminator - the
     object layer, not a re-parsed scheme string - and the path shape from its
-    ``as_text()``. ``"s3"`` / ``"local"`` are the built-in pair; any other schema
+    ``as_text()``. ``"s3"`` / ``"local"`` are the built-in pair; any other scheme
     is a custom backend routed through ``Storage.open`` (``opens3`` / ``s3open``),
     which must pair with s3 - ``open`` to ``local``, ``open`` to ``open`` and
     ``local`` to ``local`` have no ``aws s3`` route and are rejected (the CLI layer
