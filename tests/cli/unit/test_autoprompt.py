@@ -201,6 +201,26 @@ class TestCompletionReachability:
     def test_value_completes_after_two_paths(self) -> None:
         assert _names("mv ./a s3://b --storage-class ")[0] == "STANDARD"
 
+    def test_options_complete_after_a_non_path_like_second_positional(self) -> None:
+        # #66: a bare local name as the second positional (no path character)
+        # still offers options - aws drops it on a path-likeness heuristic; we
+        # keep completing (usability first, docs/autoprompt.md section 3).
+        assert _names("cp s3://a outdir --st")[0] == "--storage-class"
+        assert _names("sync s3://a outdir --ex")[:2] == ["--exact-timestamps", "--exclude"]
+        all_opts = _names("cp s3://a outdir --")
+        assert "--recursive" in all_opts and "--storage-class" in all_opts
+
+    def test_value_completes_after_a_non_path_like_second_positional(self) -> None:
+        # #66: an option value also completes after a bare second positional.
+        assert _names("cp s3://a outdir --storage-class ")[0] == "STANDARD"
+
+    def test_unknown_option_among_positionals_still_offers(self) -> None:
+        # Never offer less than aws (docs/autoprompt.md section 1): aws treats a
+        # `--`-containing unparsed token as path-like and offers options, so an
+        # unknown --option sitting among the positionals must not suppress the
+        # menu (regression guard for #66's relaxed gate).
+        assert "--recursive" in _names("cp s3://a --bogus s3://b --")
+
     def test_bare_command_offers_options(self) -> None:
         # `cp <TAB>` (no path yet) offers the option set, matching `cp src <TAB>`
         # after the first path - the port claimed the empty boundary as the

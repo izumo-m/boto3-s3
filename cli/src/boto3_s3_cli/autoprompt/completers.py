@@ -143,24 +143,21 @@ class ModelIndexCompleter(BaseCompleter):
         self._filter = response_filter
 
     def complete(self, parsed: ParsedResult) -> list[CompletionResult] | None:
-        are_unparsed_items_paths = [
-            bool(re.search(r"[./\\:]|(--)", item)) for item in parsed.unparsed_items
-        ]
-        if parsed.unparsed_items and all(are_unparsed_items_paths) and not parsed.current_param:
-            # cp/mv/sync take two positional paths but the model has one slot, so
-            # the second path lands in unparsed_items. Offer the option set: an
-            # empty trailing fragment shows the whole set, a `--frag` narrows it.
-            # (The faithful port used the command name as the prefix here, which
-            # fuzzy-filtered the options down to a useless subset; we favor
-            # usability - the auto-prompt UI is charter-exempt, docs/autoprompt.md
-            # section 2.) When current_param is set we are typing an option *value*, so
-            # we fall through to the value completers below instead.
+        # cp/mv/sync take two positional paths but the model has one slot, so a
+        # second positional lands in unparsed_items. Offer the option set there
+        # whatever it looks like - usability first (the auto-prompt UI is
+        # charter-exempt, docs/autoprompt.md section 2/3): aws drops a bare
+        # `outdir` on a path-likeness heuristic, we keep completing, and we never
+        # offer less than aws does. We defer only while an option *value* is being
+        # typed (current_param), so its value completer fires instead.
+        if parsed.unparsed_items and not parsed.current_param:
+            # Empty trailing fragment -> the whole set; a `--frag` narrows it.
             fragment = parsed.current_fragment or ""
             prefix = "" if fragment == "--" else fragment
             return self._filter(prefix, self._complete_options(parsed))
         elif parsed.unparsed_items or parsed.current_fragment is None or parsed.current_param:
-            # Unknown tokens, nothing being typed, or we're on an option value:
-            # defer (value completers handle the last case).
+            # Nothing being typed, or an option value: defer (value completers
+            # handle the last case).
             return None
         current_fragment = parsed.current_fragment
         if current_fragment.startswith("--"):

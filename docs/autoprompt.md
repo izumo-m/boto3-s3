@@ -36,6 +36,15 @@ candidates is not a contract either**. We port aws's completion engine
 (`autocomplete/`) as the foundation, but **we prioritize usability (completions
 appearing naturally) over matching aws** (next section).
 
+**Parity with aws's auto-prompt is an explicit non-goal.** Auto-prompt is
+interactive and never driven from a script, so there is no parity value to
+preserve here - and a completion that is *more* helpful than `aws s3`'s is itself
+a reason to reach for `boto3-s3`. The guiding rule is therefore one-directional:
+**where aws completes, we complete; where aws does not, we still may** when it
+helps the user finish the command. We never complete *less* than aws. This is the
+opposite of the exit-code charter (which demands exact parity) precisely because
+the UI is charter-exempt.
+
 ## 2. Completion policy (usability first)
 
 Byte-matching aws all the way down to behavior that depends on prompt_toolkit's
@@ -98,14 +107,16 @@ section 1).
 - **Option after the second path**: cp/mv/sync take two paths, but the source
   set `current_args` to None at the second path and dropped subsequent options
   into `unparsed_items`, stopping completion -> fixed to **keep the command's
-  options alive after a path-like second positional**. So after an `s3://` URI or
-  a `./` / `/` / `file://` path (the realistic forms), option-name completion,
-  value completion, and dedup (excluding already-present options) all work: an
-  empty fragment offers all options and `--frag` narrows them. A bare second
-  positional with no path character (e.g. a plain local name `outdir`) keeps
-  aws-cli's behavior - no option-name completion (the completer's path-likeness
-  heuristic is a faithful port; prefix `./` to opt in). The source fuzzy-matched
-  against the command name and offered only a subset.
+  options alive after the second positional, whatever it looks like**. So after
+  *any* second positional - an `s3://` URI, a `./` / `/` / `file://` path, or a
+  bare local name like `outdir` - option-name completion, value completion, and
+  dedup (excluding already-present options) all work: an empty fragment offers
+  all options and `--frag` narrows them. aws drops a bare (non-path-like) second
+  positional on a path-likeness heuristic and offers nothing there; we do not -
+  the completer defers only while an option value is being typed (so its value
+  completer fires), and so never offers less than aws (section 1). The source
+  also fuzzy-matched the options against the command name, offering a useless
+  subset even for the path-like forms.
 
 These are **deliberate deviations** from aws's behavior (usability first), and
 they are guaranteed by

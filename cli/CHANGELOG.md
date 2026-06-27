@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--cli-auto-prompt`: offer option completion after a non-path-like second
+  positional too (e.g. `cp s3://b/k outdir --<TAB>`), not just after a path-like
+  one. The interactive prompt favors usability over `aws s3` parity.
+
 ## [0.1.1] - 2026-06-23
 
 - Fix the CRT transfer engine on an old s3transfer: degrade to classic (or error
