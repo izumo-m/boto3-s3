@@ -134,9 +134,20 @@ class ScanOptions:
     streams - which is exactly why filtered-out destination entries are
     protected from ``--delete``. The predicate runs on the worker thread:
     keep it thread-safe and fast.
+
+    ``sort`` requests entries in UTF-8 byte order of their ``compare_key``:
+    ``sync`` sets it (its merge-join needs both sides ascending), while ``cp`` /
+    ``mv`` / ``ls`` / ``rm`` leave it ``False`` (order is immaterial - each entry
+    transfers / lists / deletes independently). A backend declaring
+    :attr:`~boto3_s3.storage.StorageCapability.SORTED_SCAN` MUST honor
+    ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
+    byte-ordered, the local walk sorts for aws parity), so it costs nothing for
+    them. A custom backend whose sort is expensive may stream natural order when
+    ``sort=False`` and pay the sort only for ``sync``.
     """
 
     recursive: bool = False
+    sort: bool = False
     page_size: int = 1000
     request_payer: str | None = None
     fetch_owner: bool = False

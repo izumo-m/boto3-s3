@@ -83,8 +83,9 @@ class StorageCapability(Flag):
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
     - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
     - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
-    - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order (``sync``'s
-      merge-join needs it on both sides)
+    - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
+      (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,
+      and gates on this capability for a custom side
     - ``DELETE`` - ``delete(key)`` (``rm`` / ``mv`` source / ``sync --delete``)
 
     The reading members form a lattice (expanded by :func:`_implied`):
@@ -186,11 +187,15 @@ class Storage(abc.ABC):
         ``options.recursive`` walks every entry beneath the prefix (all ``FILE``
         kind, no directory grouping); non-recursive yields the immediate entries
         plus one ``DIRECTORY``-kind ``FileInfo`` per sub-"directory" (S3
-        ``Delimiter='/'``). Entries come out in the backend's natural key order -
-        for S3, UTF-8 lexicographic byte order, preserved across pages - so two
-        recursive streams can be merge-joined on ``key`` (what ``sync`` relies on)
-        after each is relativized to its scan root; ``key`` itself is the full,
-        ``/``-separated identifier, so relativizing is the caller's job.
+        ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
+        ``compare_key``): a backend declaring ``SORTED_SCAN`` MUST honor it, so
+        two recursive streams can be merge-joined (what ``sync`` relies on) after
+        each is relativized to its scan root; when ``sort`` is ``False`` (``cp`` /
+        ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper natural order.
+        The built-ins always sort - S3's listing is byte-ordered (preserved across
+        pages), the local walk sorts for aws parity - so they ignore the flag.
+        ``key`` itself is the full, ``/``-separated identifier, so relativizing to
+        the scan root is the caller's job.
         """
 
     @abc.abstractmethod

@@ -1868,7 +1868,10 @@ class S3:
             return
         for info in storage.scan(
             ScanOptions(
-                recursive=True, follow_symlinks=follow_symlinks, on_warning=transferrer.warn
+                recursive=True,
+                sort=True,  # the merge-join needs both sides byte-ordered
+                follow_symlinks=follow_symlinks,
+                on_warning=transferrer.warn,
             )
         ):
             if item_filter is not None and not item_filter(info):
