@@ -330,31 +330,34 @@ class _CaseConflictGate:
 class _SyncDeletes:
     """The deletion lane of one sync run (destination-only pairs).
 
-    Wraps the two dispatch shapes behind one ``submit``: an S3 destination
+    Wraps the dispatch shapes behind one ``submit``: an S3 destination
     batches through :class:`S3Deleter` (the ``rm`` machinery - a wire-level
     deviation from aws-cli's per-key DeleteObject with the same end state),
     a local destination removes synchronously on the calling thread (aws-cli's
-    ``LocalDeleteRequestSubmitter``). Dry runs emit DRYRUN records and touch
-    nothing. The deleter is created lazily on the first S3 submit - a run
-    with nothing to delete spawns no worker - and lands in the sync's
-    ``ExitStack`` so an exception abandons the unflushed batch (aws-cli
+    ``LocalDeleteRequestSubmitter``), and a custom (``s3open``) destination
+    removes synchronously through its own ``Storage.delete``. Dry runs emit
+    DRYRUN records and touch nothing. The deleter is created lazily on the first
+    S3 submit - a run with nothing to delete spawns no worker - and lands in the
+    sync's ``ExitStack`` so an exception abandons the unflushed batch (aws-cli
     cancel behavior) while a clean exit flushes it.
     """
 
     def __init__(
         self,
-        dst_s3: S3Storage | None,
+        dst_storage: Storage,
         *,
         request_payer: str | None,
         dryrun: bool,
         on_result: ResultCallback | None,
     ) -> None:
-        self._dst_s3 = dst_s3
+        self._dst = dst_storage
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
         self._stack: ExitStack | None = None
         self._deleter: S3Deleter | None = None
+        # Synchronous (non-batched) deletes - a local os.remove or a custom
+        # backend's delete - share one set of counters.
         self._local_succeeded = 0
         self._local_failed = 0
         self._local_first_error: BaseException | None = None
@@ -379,8 +382,9 @@ class _SyncDeletes:
         return self._local_first_error
 
     def submit(self, pair: SyncPair, plan: naming.TransferPlan) -> None:
-        if self._dst_s3 is not None:
-            key = plan.dst_root[len(self._dst_s3.bucket) + 1 :] + pair.key
+        dst = self._dst
+        if isinstance(dst, S3Storage):
+            key = plan.dst_root[len(dst.bucket) + 1 :] + pair.key
             if self._dryrun:
                 self._emit(key=key, outcome=OpOutcome.DRYRUN, src=self._display(key))
                 return
@@ -388,13 +392,33 @@ class _SyncDeletes:
                 assert self._stack is not None
                 self._deleter = self._stack.enter_context(
                     S3Deleter(
-                        self._dst_s3,
+                        dst,
                         request_payer=self._request_payer,
                         on_result=self._relay,
                         operation="sync",
                     )
                 )
             self._deleter.submit(key)
+            return
+        if not isinstance(dst, LocalStorage):
+            # A custom (s3open) destination: remove the orphan through the
+            # backend's own delete (pair.key is its root-relative key, the open
+            # key regime), synchronously like the local arm. The backend's error
+            # type is its own, so the catch is broad.
+            display = _open_side_display(dst, pair.key)
+            if self._dryrun:
+                self._emit(key=pair.key, outcome=OpOutcome.DRYRUN, src=display)
+                return
+            try:
+                dst.delete(pair.key)
+            except Exception as exc:
+                self._local_failed += 1
+                if self._local_first_error is None:
+                    self._local_first_error = exc
+                self._emit(key=pair.key, outcome=OpOutcome.FAILED, src=display, error=exc)
+                return
+            self._local_succeeded += 1
+            self._emit(key=pair.key, outcome=OpOutcome.SUCCEEDED, src=display)
             return
         info = pair.dst
         assert info is not None
@@ -414,8 +438,8 @@ class _SyncDeletes:
         self._emit(key=pair.key, outcome=OpOutcome.SUCCEEDED, src=native)
 
     def _display(self, key: str) -> str:
-        assert self._dst_s3 is not None
-        return f"s3://{self._dst_s3.bucket}/{key}"
+        assert isinstance(self._dst, S3Storage)
+        return f"s3://{self._dst.bucket}/{key}"
 
     def _relay(self, result: OpResult) -> None:
         # The deleter reports bare keys; re-emit with the rendered endpoint
@@ -1217,6 +1241,36 @@ class S3:
             needed = StorageCapability.OPEN_WRITE
         else:
             return
+        self._reject_missing_capabilities(custom, needed, operation=operation)
+
+    def _require_open_sync_capabilities(
+        self, plan: naming.TransferPlan, *, delete: bool, operation: str
+    ) -> None:
+        """Reject an open-route custom side that cannot back a ``sync``.
+
+        ``sync`` merge-joins two byte-ordered listings, so a custom side must
+        declare ``SORTED_SCAN`` (an unsorted side would manufacture phantom
+        new/delete pairs - with ``--delete``, destination corruption). On top of
+        that: an ``opens3`` source needs ``OPEN_READ``; an ``s3open`` destination
+        needs ``OPEN_WRITE`` plus ``DELETE`` when ``delete`` removes orphans (the
+        ``opens3`` orphans are S3, deleted without the custom side).
+        """
+        if plan.paths_type == "opens3":
+            custom: Storage = plan.src
+            needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_READ
+        elif plan.paths_type == "s3open":
+            custom = plan.dst
+            needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_WRITE
+            if delete:
+                needed |= StorageCapability.DELETE
+        else:
+            return
+        self._reject_missing_capabilities(custom, needed, operation=operation)
+
+    def _reject_missing_capabilities(
+        self, custom: Storage, needed: StorageCapability, *, operation: str
+    ) -> None:
+        """Raise a clear ``ValidationError`` naming the capabilities ``custom`` lacks."""
         missing = custom.missing_capabilities(needed)
         if missing:
             names = ", ".join(c.name for c in StorageCapability if c in missing and c.name)
@@ -1696,11 +1750,19 @@ class S3:
             client = dst_storage.get_client()
             source_client = src_storage.get_client()
             dst_bucket = dst_storage.bucket
-        else:  # opens3 / s3open: custom-backend sync, wired in #53e
-            raise ValidationError(
-                "sync: custom-backend transfer is not implemented yet",
-                operation="sync",
-            )
+        elif plan.paths_type == "opens3":
+            # Custom source -> S3: upload each entry from its Storage.open("rb").
+            assert isinstance(dst_storage, S3Storage)
+            kind = OpKind.UPLOAD
+            client = dst_storage.get_client()
+            dst_bucket = dst_storage.bucket
+        else:  # s3open: S3 -> custom destination, download into its open("wb").
+            assert isinstance(src_storage, S3Storage)
+            kind = OpKind.DOWNLOAD
+            client = src_storage.get_client()
+        # A custom side must support sorted enumeration (the merge-join) plus the
+        # I/O the route uses; reject up front before any listing (gate below).
+        self._require_open_sync_capabilities(plan, delete=bool(delete), operation="sync")
 
         # no_overwrite is an orthogonal write-guard (an option, so callers can
         # write ``sync(no_overwrite=True)``): strip it from the engine options
@@ -1729,7 +1791,7 @@ class S3:
         # narrows which destination-only orphans are deleted (matched like rm);
         # the producer-stamped compare_key lets it read the entry directly.
         delete_keep = delete if not isinstance(delete, bool) else None
-        case_gate = self._sync_case_gate(kind, options=options)
+        case_gate = self._sync_case_gate(kind, dst_storage, options=options)
 
         transferrer = Transferrer(
             kind,
@@ -1742,7 +1804,7 @@ class S3:
             on_result=on_result,
         )
         deletes = _SyncDeletes(
-            dst_storage if isinstance(dst_storage, S3Storage) else None,
+            dst_storage,
             request_payer=options.get("request_payer"),
             dryrun=dryrun,
             on_result=on_result,
@@ -1780,6 +1842,7 @@ class S3:
                     transferrer=transferrer,
                     options=options,
                     case_gate=case_gate,
+                    dryrun=dryrun,
                 )
                 if item is None:
                     return
@@ -1819,19 +1882,25 @@ class S3:
             ) from (transferrer.first_error or deletes.first_error)
 
     def _sync_case_gate(
-        self, kind: OpKind, *, options: TransferOptions
+        self, kind: OpKind, dst_storage: Storage, *, options: TransferOptions
     ) -> _CaseConflictGate | None:
-        """The ``--case-conflict`` gate for sync downloads.
+        """The ``--case-conflict`` gate for sync downloads to a local destination.
 
         Unlike cp's (which pre-lists the destination for its exact-case
         AlwaysSync arm), sync already pairs against the destination listing:
         the gate is consulted only for pairs *missing* there, so the
         membership set is vacuously empty and only the submitted-set /
         ``os.path.exists`` conflict check remains - aws-cli's
-        ``CaseConflictSync`` in the ``file_not_at_dest`` slot.
+        ``CaseConflictSync`` in the ``file_not_at_dest`` slot. Scoped to a
+        ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
+        ``s3open`` destination owns its key space and runs no such check.
         """
         mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
-        if kind is not OpKind.DOWNLOAD or mode is CaseConflictMode.IGNORE:
+        if (
+            kind is not OpKind.DOWNLOAD
+            or mode is CaseConflictMode.IGNORE
+            or not isinstance(dst_storage, LocalStorage)
+        ):
             return None
         return _CaseConflictGate(mode, set(), operation="sync")
 
@@ -1889,10 +1958,27 @@ class S3:
         transferrer: Transferrer,
         options: TransferOptions,
         case_gate: _CaseConflictGate | None,
+        dryrun: bool,
     ) -> TransferItem | None:
-        """Build the transfer item for a copy-judged pair, cp's gates applied."""
+        """Build the transfer item for a copy-judged pair, cp's gates applied.
+
+        A custom-backend side (``opens3`` / ``s3open``) moves through the open
+        builders (``Storage.open``); ``dryrun`` skips the ``open`` there so a
+        dry run never touches the backend.
+        """
         info = pair.src
         assert info is not None
+        if plan.paths_type == "opens3":
+            return self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
+        if plan.paths_type == "s3open":
+            return self._open_download_item(
+                plan,
+                info,
+                bucket=src_bucket,
+                transferrer=transferrer,
+                options=options,
+                dryrun=dryrun,
+            )
         if kind is OpKind.UPLOAD:
             return self._upload_item_from_info(
                 plan, info, dst_bucket=dst_bucket, transferrer=transferrer
