@@ -11,6 +11,7 @@ item failures aggregate into ``BatchError``.
 
 from __future__ import annotations
 
+import gzip
 import io
 import os
 from datetime import datetime, timezone
@@ -460,6 +461,27 @@ class TestStreamRoutes:
             S3Storage("s3://bucket/t.txt", client=client), IOStorage(sink), transfer_config=_SYNC
         )
         assert sink.getvalue() == "héllo"
+
+    def test_stream_download_into_a_gzip_writer(self, tmp_path: Path) -> None:
+        # A non-seekable binary write stream (gzip's compressor) is a valid
+        # download sink: IOStorage writes the object's bytes through it and never
+        # closes it, so the ``with`` block finalizes the .gz file on disk.
+        out = tmp_path / "out.gz"
+        client, calls = make_recording_client(
+            [
+                {"ContentLength": 4, "ETag": '"foo"'},
+                {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
+            ]
+        )
+        with gzip.open(out, "wb") as f:
+            S3().cp(
+                S3Storage("s3://bucket/streaming.txt", client=client),
+                IOStorage(f),
+                transfer_config=_SYNC,
+            )
+        assert [call.operation for call in calls] == ["HeadObject", "GetObject"]
+        with gzip.open(out, "rb") as g:
+            assert g.read() == b"foo\n"
 
     def test_stream_dryrun_makes_no_calls(self) -> None:
         client, calls = make_recording_client([])

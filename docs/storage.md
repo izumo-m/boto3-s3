@@ -145,3 +145,57 @@ store = {"a.txt": b"hello", "b.txt": b"world"}
 S3().sync(DictStorage(store), "s3://my-bucket/data/")   # custom -> S3 (upload)
 S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download)
 ```
+
+## 5. Streams: `IOStorage` and `StdioStorage`
+
+`IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
+as a single `open`-able endpoint, so a stream can be one side of a `cp` / `mv`
+(the other side always S3) without a temp file:
+
+```python
+import gzip
+import io
+
+from boto3_s3 import S3, IOStorage
+
+s3 = S3()
+
+# upload from a stream (a binary file, or any readable)
+with open("hello.txt", "rb") as f:
+    s3.cp(IOStorage(f), "s3://bucket/hello.txt")
+
+# upload from a text buffer (encoded with `encoding`, default utf-8)
+s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
+
+# download into a buffer, then read it back: IOStorage does NOT reposition the
+# stream, so rewind it yourself (or use getvalue())
+buf = io.StringIO()
+s3.cp("s3://bucket/hello.txt", IOStorage(buf))
+buf.seek(0)
+print(buf.read())            # or: print(buf.getvalue())
+
+# download straight into a gzip writer - a non-seekable binary write stream
+with gzip.open("hello.txt.gz", "wb") as f:
+    s3.cp("s3://bucket/hello.txt", IOStorage(f))
+```
+
+The contract:
+
+- **Bytes at the s3transfer boundary.** A **binary** stream (`io.BytesIO`, a file
+  opened `"rb"` / `"wb"`, a `gzip` writer, a pipe) is used as-is; a **text**
+  stream (`io.StringIO`, a file opened `"r"` / `"w"`) is wrapped with a codec
+  (`IOStorage(stream, encoding="utf-8")`) — encode on upload, decode on download.
+- **The caller owns the stream.** `IOStorage` **never closes** it and never
+  rewinds it for you: lifecycle and final position are yours. After a download
+  the stream sits at the end of the written bytes, so to read them back rewind it
+  (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well — a
+  `gzip` writer, `sys.stdout`, a pipe — there is nothing to rewind; the bytes
+  land wherever the stream sends them (the `.gz` file, the console), and the
+  caller's own `with` / `close` finalizes it.
+- **A single endpoint, not a container.** Only `open` is meaningful; `scan` /
+  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` / `mv`
+  side only — never `ls` / `rm`, and not stream↔stream.
+
+`StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
+source, `sys.stdout` as a destination (both binary, via `.buffer`) — the
+equivalent of `aws s3 cp - …` / `aws s3 cp … -`.
