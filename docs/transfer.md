@@ -326,3 +326,68 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   and the rc / output / file contents agree. If an exact match becomes necessary,
   there is room to promote the stamp into an independent subscriber from section 3 and
   place it before the deletion.
+
+## 12. open route (custom backends: `opens3` / `s3open`)
+
+A custom `Storage` (any `schema` other than `"s3"` / `"local"`) transfers as one
+side of `cp` / `mv`, the other side always S3. `naming.plan_transfer` classifies
+the pair from the two `schema`s into `opens3` (custom source -> S3, an UPLOAD) or
+`s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer` routes
+both. The S3 side rides `s3transfer` as usual; the custom side's bytes move
+through its `Storage.open(key, mode)` - the same primitive the stream path uses
+(section 6), generalized to a keyed, listable backend. `sync` over a custom
+backend is **not** wired yet; the CLI never pairs a custom backend, so the open
+route is library-only and outside aws parity.
+
+- **bytes via `open`, the S3 side via s3transfer**: `opens3` hands `s3transfer`
+  the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
+  fileobj from `plan.dst.open(key, "wb")` to download into. The transfer
+  **closes every fileobj `open` returns** (`transfer._CloseFileobj`): for a
+  writer that `close` is the commit (`Storage.open`'s contract), and a commit
+  failure flips the settled future via `set_exception` (a failed transfer).
+  `s3transfer` itself never closes a caller fileobj (`CompleteDownloadNOOPTask`),
+  so this is the sole close. An `IOStorage` hands back a close-suppressing view,
+  so the caller's own stream is never closed (section 6).
+- **the open key**: `""` is the location itself (a single source / destination),
+  a non-empty key an entry beneath it - the same key regime as `delete`. A
+  recursive item's key is its `compare_key`; a single item's is `""`. The
+  destination key derives from `naming.dest_for` exactly as for the built-in
+  routes (a `/`-terminated or `dir_op` custom destination adopts the source
+  name).
+- **enumeration / single source**: `opens3` enumerates a recursive source
+  through `Storage.scan` and resolves a single source through
+  `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
+  path <as_text> does not exist.` (the base category, rc 255, like a missing
+  local source); an empty recursive `scan` transfers nothing (rc 0, like an empty
+  S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
+  download (recursive `ListObjectsV2` / single `HeadObject`, folder markers
+  dropped).
+- **capability gate** (`S3._require_open_capabilities`, before any bytes move):
+  the custom side is pre-checked against `Storage.capabilities` and a missing
+  contract method is a clear `ValidationError` naming the gap (not a deep
+  failure). `opens3` needs `OPEN_READ` + (`SCAN` if recursive else
+  `GET_FILEINFO`) + `DELETE` for `mv`; `s3open` needs `OPEN_WRITE`. This is
+  structural capability, not runtime permission (a denied write / missing object
+  stays a per-item execution error).
+- **gates that do not apply**: a custom destination owns its own key space, so
+  the local-filesystem destination gates do **not** run for `s3open` - no
+  case-conflict scan (that gate stays scoped to `s3local`), no parent-reference
+  check, no `no_overwrite` `os.path.exists`. Only the **source-side** glacier
+  gate runs (the S3 source of an `s3open` download, section 8).
+- **`no_overwrite`** (section 7): `opens3` keeps it - it rides `IfNoneMatch` on
+  the S3 PutObject. `s3open` + `no_overwrite` is currently a **silent no-op**:
+  the only download-side guard is the local-destination `os.path.exists` check,
+  which a custom backend (owning its key space, with no existence probe wired)
+  does not run.
+- **dryrun**: enumerates and reports `DRYRUN` but does **not** call `open` on the
+  custom side - opening a `"wb"` writer is itself a side effect, so a dry run
+  leaves the backend untouched.
+- **mv** (section 11): `opens3` deletes the custom source through its own
+  `Storage.delete(key)` after each successful upload (the open key rides on
+  `TransferItem.src_key`; `Transferrer.source_storage` carries the backend),
+  while a local source keeps `os.remove`. `s3open`'s source is S3, deleted with
+  `DeleteObject` like any download `mv`. Data-safe in both: `_CloseFileobj` is
+  ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
+  failed writer commit - leaves the source in place.
+- **display**: the custom side renders through its `Storage.as_text()` (with the
+  entry's relative key appended for a child); the S3 side as `s3://bucket/key`.

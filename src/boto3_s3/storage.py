@@ -23,14 +23,18 @@ operations (``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` / ``website``) are
 Current state (kept accurate because this docstring is the design record): the
 built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
 directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
-(``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A **stream**
-side is an ``IOStorage`` / ``StdioStorage`` (``iostorage.py``): ``cp`` hands
-``s3transfer`` the fileobj its ``open`` returns, so the ``open``-based transfer
-path is wired for stream Storages. Still pending: ``S3Storage.open`` is not
-implemented (``s3storage.py``), and ``_run_transfer`` still hard-asserts the two
-built-in container types, so a ``Storage``-direct custom backend (e.g. an HTTP
-one) cannot transfer yet. None of this affects CLI / ``aws s3`` parity (the CLI
-only ever pairs a built-in with a stdio stream).
+(``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A custom
+backend (any non-built-in ``schema``) - and the ``IOStorage`` / ``StdioStorage``
+stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
+``mv`` move the non-built-in side's bytes through its ``Storage.open``
+(``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
+object into an ``open("wb")`` whose ``close`` commits it) while the S3 side rides
+``s3transfer``; the custom side is capability-checked up front
+(``Storage.capabilities``), and an ``mv`` removes a custom source through its own
+``delete`` (transfer.md section 12). ``sync`` over a custom backend is not wired
+yet. ``S3Storage.open`` stays unimplemented by design - the S3 side always rides
+``s3transfer``, never ``open``. None of this affects CLI / ``aws s3`` parity (the
+CLI only ever pairs a built-in with a stdio stream).
 """
 
 from __future__ import annotations
@@ -197,14 +201,14 @@ class Storage(abc.ABC):
         ``close()`` commits the write. ``size`` is an optional total-length hint
         for writes (lets S3 choose single-part vs multipart up front). This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
-        through ``s3transfer`` instead, so ``open`` is the path intended for
-        custom backends and for direct stream access. Current state:
-        ``LocalStorage`` and the stream Storages (``IOStorage`` /
-        ``StdioStorage``) implement it, and ``cp``'s stream path is the one
-        transfer path that calls it, handing the returned fileobj to
-        ``s3transfer``. ``S3Storage.open`` is not implemented yet, and no route
-        calls ``open`` for a non-stream custom backend, so that use is not wired
-        (see this module's docstring and ``s3storage.py``).
+        through ``s3transfer`` instead, so ``open`` is the path a custom backend
+        (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
+        non-built-in side of an open-route transfer (``opens3`` / ``s3open``,
+        transfer.md section 12), handing the returned fileobj to ``s3transfer``
+        and ``close``-ing it when done - a ``"wb"`` ``close`` is the write's
+        commit point. ``LocalStorage`` and the stream Storages (``IOStorage`` /
+        ``StdioStorage``) implement it; ``S3Storage.open`` stays unimplemented by
+        design (the S3 side always rides ``s3transfer``, never ``open``).
         """
 
     @abc.abstractmethod

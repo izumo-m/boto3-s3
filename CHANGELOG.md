@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `cp` / `mv` now transfer a custom `Storage` backend as one side (the other
+  side S3), moving its bytes through `Storage.open()`: a custom source uploads to
+  S3, an S3 source downloads into the backend, and `mv` deletes a custom source
+  via `Storage.delete()`. The custom side is capability-checked up front. (`sync`
+  for a custom backend is not yet supported.)
 - Add `Storage.get_fileinfo(key="")`: the single-entry counterpart to `scan`
   (returns a `FileInfo`, or `None` if absent). `cp` / `mv` resolve a single
   source through it; a `Storage` subclass must now implement it.

@@ -5,8 +5,10 @@ service root) over an overridable ``scan_pages`` seam - subclasses customize
 per-page entry handling there while keeping scan's prefetch - and exposes
 ``get_client`` / ``bucket`` / ``key`` so the ``Transferrer`` can drive
 ``s3transfer`` directly for built-in S3 pairs. ``delete`` is implemented (a
-blind ``DeleteObject``); ``open`` is intentionally not implemented yet - the
-remaining gap for direct S3 stream access and custom-backend transfers (see
+blind ``DeleteObject``); ``open`` is intentionally unimplemented - S3 always
+transfers through ``s3transfer`` (built-in pairs and the S3 side of an open-route
+custom-backend transfer alike), so no route calls it. The only thing it would
+add is direct programmatic S3 stream access, which nothing needs today (see
 :meth:`S3Storage.open`).
 """
 
@@ -50,17 +52,19 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
 
-# S3Storage.open is the one unfinished part of the Storage contract (scan/delete
-# are done). Built-in transfers never reach it - the Transferrer drives
-# s3transfer straight off get_client/bucket/key, and streaming hands a fileobj
-# to s3transfer (s3.py _cp_stream) - so it has no caller inside boto3-s3 today.
+# S3Storage.open is intentionally unimplemented - every S3 transfer rides
+# s3transfer instead. The Transferrer drives it straight off get_client/bucket/
+# key for built-in pairs and the S3 side of an open-route custom transfer, and
+# streaming hands a fileobj to s3transfer (s3.py _cp_stream) - so nothing inside
+# boto3-s3 calls it (the custom side of an open-route transfer uses its own open,
+# never this).
 _OPEN_NOT_IMPLEMENTED = (
-    "S3Storage.open() is not implemented yet. Built-in S3<->local / S3<->S3 "
-    "transfers go through s3transfer (driven from get_client/bucket/key), so "
-    "this generic per-object stream primitive currently has no caller. "
-    "Implementing it (GetObject->readable, multipart PutObject->writable "
-    "committed on close) would enable direct S3 stream access and "
-    "custom-backend <-> S3 transfers via Storage.open (see storage.py)."
+    "S3Storage.open() is not implemented. S3 transfers go through s3transfer "
+    "(driven from get_client/bucket/key) - including the S3 side of an open-route "
+    "custom-backend transfer, whose custom side uses its own Storage.open - so "
+    "this generic per-object stream primitive has no caller. Implementing it "
+    "(GetObject->readable, multipart PutObject->writable committed on close) would "
+    "only add direct programmatic S3 stream access (see storage.py)."
 )
 
 _CONFIG_ERRORS: tuple[type[BaseException], ...] = (
@@ -280,8 +284,8 @@ class S3Storage(Storage):
 
     schema: ClassVar[str] = "s3"
     #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
-    #: (``ListObjectsV2``), and deletes; ``open`` is not implemented yet, so no
-    #: ``OPEN_*`` (see :meth:`open`).
+    #: (``ListObjectsV2``), and deletes; ``open`` is intentionally unimplemented
+    #: (S3 rides ``s3transfer``), so no ``OPEN_*`` (see :meth:`open`).
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
@@ -449,17 +453,17 @@ class S3Storage(Storage):
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Not implemented yet - the sole unfinished part of the Storage contract.
+        """Intentionally unimplemented - every S3 transfer rides ``s3transfer``.
 
-        No built-in path reaches this: S3<->local / S3<->S3 transfers are driven
-        through ``s3transfer`` off ``get_client`` / ``bucket`` / ``key``
-        (``transfer.py``), and a stdin/stdout stream is handed to ``s3transfer``
-        as a fileobj (``s3.py`` ``_cp_stream``). Implementing it (GetObject ->
-        readable stream; multipart PutObject -> writable stream committed on
-        ``close()``, honoring the ``size`` hint) is what would wire the two
-        capabilities ``storage.py`` advertises: direct programmatic S3 stream
-        access, and a custom ``Storage`` backend transferring against S3 through
-        the generic ``open`` path. It raises rather than silently misbehaving.
+        No route reaches this: S3<->local / S3<->S3 transfers are driven through
+        ``s3transfer`` off ``get_client`` / ``bucket`` / ``key`` (``transfer.py``),
+        a stdin/stdout stream is handed to ``s3transfer`` as a fileobj (``s3.py``
+        ``_cp_stream``), and the S3 side of an open-route custom-backend transfer
+        likewise rides ``s3transfer`` (the *custom* side uses its own ``open``,
+        never this). Implementing it (GetObject -> readable stream; multipart
+        PutObject -> writable stream committed on ``close()``, honoring the
+        ``size`` hint) would only add direct programmatic S3 stream access, which
+        nothing needs today. It raises rather than silently misbehaving.
         """
         raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
 
