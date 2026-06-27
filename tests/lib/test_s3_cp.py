@@ -155,6 +155,28 @@ class TestUploadRoute:
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}. File/Directory is not readable." == str(results[0].error)
 
+    def test_directory_single_source_fails_is_a_directory(self, tmp_path: Path) -> None:
+        # A non-recursive cp of a directory fails like aws-cli with [Errno 21]
+        # Is a directory, before any PutObject - the engine detects the directory
+        # rather than letting botocore's default checksum wrapper mask the read
+        # failure as an opaque rewind error.
+        src = tmp_path / "adir"
+        src.mkdir()
+        (src / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "Is a directory" in str(results[0].error)
+        assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
+
     def test_local_to_local_is_rejected(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")

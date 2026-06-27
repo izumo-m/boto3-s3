@@ -426,6 +426,16 @@ class Transferrer:
             self._submit_copy(item)
 
     def _submit_upload(self, item: TransferItem) -> None:
+        # A directory source is handed through to fail like aws-cli ([Errno 21]
+        # Is a directory, rc 1); botocore's default checksum wrapper would
+        # otherwise open it and mask the read failure as an opaque rewind error,
+        # so detect it and surface the OS error directly. A stream (src_fileobj)
+        # is never a directory.
+        if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
+            self._record_failure(
+                item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
+            )
+            return
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             guessed = _guess_content_type(item.src_path or "")

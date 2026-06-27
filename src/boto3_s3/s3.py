@@ -938,9 +938,10 @@ class S3:
         A recursive source enumerates through ``plan.src.scan`` so a ``LocalStorage``
         subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
         a point op walked directly (the local analog of ``_cp_head_single`` - no
-        directory check, so a directory source becomes an item whose open fails in
-        flight, [Errno 21], rc 1). Either way the producer stamps each entry's
-        ``compare_key``, so ``item_filter`` reads it directly.
+        directory check, so a directory source becomes an item the engine fails
+        with [Errno 21] Is a directory, rc 1, like aws-cli). Either way the
+        producer stamps each entry's ``compare_key``, so ``item_filter`` reads it
+        directly.
         """
         infos: Iterator[FileInfo]
         if plan.dir_op:
