@@ -128,6 +128,6 @@ factory (considered, but not adopted: sync uses `S3Deleter` directly, and the
 of the orchestrator layer - `S3.rm` handles it before reaching the deleter),
 the cancel token, and deletion by `VersionId`.
 
-The wiring of `S3.rm` / CLI `rm` and the per-key `S3Storage.delete(key)` (a
+The wiring of `S3.rm` / CLI `rm` and the single-object `S3Storage.delete(info)` (a
 blind `DeleteObject` used by the single-shot path of a non-recursive rm) are
 implemented - see [`cli.md`](./cli.md) section 5.2 / [`globsieve.md`](./globsieve.md).

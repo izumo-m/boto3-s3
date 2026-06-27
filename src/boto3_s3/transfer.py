@@ -265,16 +265,17 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe. ``source_storage`` is set only for an
-    open-route (custom backend) source, so ``mv`` can delete it through its own
-    ``Storage.delete`` (a custom source has no local path / S3 key to remove).
+    s3transfer's own size probe. ``source_storage`` is the upload source's own
+    ``Storage`` (a local file or a custom backend), supplied so ``mv`` deletes
+    the source through its ``Storage.delete``; it is ``None`` for download / copy
+    (an S3 source, removed with a DeleteObject) and for a stream upload.
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
-    transfer deletes its source - ``os.remove`` for a local upload,
-    ``Storage.delete`` for a custom-backend upload, a per-object DeleteObject on
-    the owning side's client otherwise.
+    transfer deletes its source - ``Storage.delete`` for an upload (local or
+    custom backend), a per-object DeleteObject on the owning side's client
+    otherwise.
     """
 
     def __init__(
@@ -298,9 +299,9 @@ class Transferrer:
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
-        # An open-route (custom backend) source: mv deletes it through its own
-        # Storage.delete (the source has no local path / S3 key). None for the
-        # built-in routes, whose source delete stays os.remove / DeleteObject.
+        # The upload source's own Storage (local or custom backend), supplied so
+        # mv deletes the source through its Storage.delete. None for download /
+        # copy (S3 source -> DeleteObject) and for a stream upload.
         self._source_storage = source_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()

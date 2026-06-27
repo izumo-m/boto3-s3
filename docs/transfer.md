@@ -301,9 +301,10 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   relabeling, every record of result / progress / warning / dryrun calls itself
   `move`.
 - **The `_DeleteSource` subscriber** (the position in section 3): performs the deletion
-  only when the future succeeded. upload is a plain `os.remove(src_path)`
-  (emitting the failure wording in OS form as-is - aws's `move failed: ...
-  [Errno 13] Permission denied: '<abs>'` form); download is
+  only when the future succeeded. an upload removes the source through its
+  `Storage.delete(info)` (keyed by `TransferItem.src_info`); `LocalStorage.delete`
+  maps the OS error to the library taxonomy, preserving the wording aws's
+  `move failed: ... [Errno 13] Permission denied: '<abs>'` form shows; download is
   a per-object DeleteObject against the manager's client, and copy against the
   **source-side client** (RequestPayer is passed through via
   `map_delete_object_params`). **A deletion failure flips the already-settled
@@ -392,11 +393,12 @@ and outside aws parity.
 - **dryrun**: enumerates and reports `DRYRUN` but does **not** call `open` on the
   custom side - opening a `"wb"` writer is itself a side effect, so a dry run
   leaves the backend untouched.
-- **mv** (section 11): `opens3` deletes the custom source through its own
-  `Storage.delete(key)` after each successful upload (the open key rides on
-  `TransferItem.src_key`; `Transferrer.source_storage` carries the backend),
-  while a local source keeps `os.remove`. `s3open`'s source is S3, deleted with
-  `DeleteObject` like any download `mv`. Data-safe in both: `_CloseFileobj` is
+- **mv** (section 11): every upload deletes its source through that source's own
+  `Storage.delete(info)` after each successful upload - the source listing entry
+  rides on `TransferItem.src_info` (its `info.key` locates the object), and
+  `Transferrer.source_storage` carries the source `Storage` (local or custom
+  backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
+  download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
   failed writer commit - leaves the source in place.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a

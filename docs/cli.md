@@ -539,8 +539,10 @@ probe revealed that it was unimplemented on the cp side, and it was added at the
 same time).
 
 **The source deletion** is the engine's job, not the CLI's (transfer.md section 11): for
-each successful item, an upload does `os.remove`, while a download / copy does a
-DeleteObject against the source-side client (RequestPayer passed through). On a
+each successful item, an upload deletes the source through its `Storage.delete`
+(`LocalStorage.delete`, an `os.remove`, since the CLI's upload source is always
+local), while a download / copy does a DeleteObject against the source-side
+client (RequestPayer passed through). On a
 dryrun / a filter exclusion / a skip (no-overwrite, glacier) / a transfer
 failure, the source remains, and **a failure of the deletion itself makes that
 item a `move failed:` (rc 1)** (the bytes have already arrived). An emptied local

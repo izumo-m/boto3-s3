@@ -356,8 +356,8 @@ class _SyncDeletes:
         self._on_result = on_result
         self._stack: ExitStack | None = None
         self._deleter: S3Deleter | None = None
-        # Synchronous (non-batched) deletes - a local os.remove or a custom
-        # backend's delete - share one set of counters.
+        # Synchronous (non-batched) deletes - a local or custom dest's own
+        # Storage.delete(info) - share one set of counters.
         self._local_succeeded = 0
         self._local_failed = 0
         self._local_first_error: BaseException | None = None
@@ -1362,9 +1362,11 @@ class S3:
             compare_key=compare_key,
             size=info.size,
             mtime=info.mtime,
-            # src_info carries the source listing entry so an mv can delete it via
-            # the backend's Storage.delete(info) (info.key == the open key: "" =
-            # the location, a relative key under a recursive source).
+            # src_info carries the source listing entry so an mv can delete it via the
+            # backend's Storage.delete(info). info.key addresses the same object open_key
+            # opens: for a recursive item info.key is the compare_key (the open key), for a
+            # single source it is "" (the location). The backend resolves both in its own
+            # key space.
             src_info=info,
             src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
             dst_bucket=dst_bucket,
@@ -1599,8 +1601,9 @@ class S3:
         gates, warnings, the ``BatchError`` aggregation - applies unchanged;
         the differences are mv's. Every result reports ``OpKind.MOVE``, and
         each item's source is deleted right after its transfer succeeds
-        (``os.remove`` for uploads; one DeleteObject per object otherwise,
-        ``request_payer`` forwarded). A failed, skipped, or dry-run item
+        (``Storage.delete`` for uploads - a local file or a custom backend
+        object; one DeleteObject per object otherwise, ``request_payer``
+        forwarded). A failed, skipped, or dry-run item
         keeps its source; a deletion failure turns that item into the
         failure aws prints as ``move failed`` (the bytes already arrived).
         Filters prune both the transfer and the deletion. Streams are not a
@@ -1716,7 +1719,8 @@ class S3:
         applied only to pairs missing at the destination, the aws-cli slot).
         Deletions are dispatched as they stream: batched ``DeleteObjects``
         for an S3 destination (the ``rm`` machinery; ``request_payer``
-        forwarded), a synchronous ``os.remove`` for a local one. ``dryrun``
+        forwarded), a synchronous ``Storage.delete`` for a local one
+        (``LocalStorage.delete``, an ``os.remove``). ``dryrun``
         reports every would-be transfer and deletion without any API call.
         Local listing warnings (unreadable / vanished / special files,
         invalid timestamps) surface from **both** sides as WARNED records,

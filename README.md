@@ -357,8 +357,8 @@ class DictStorage(Storage):
         data = self._store.get(key)
         return None if data is None else FileInfo(key=key, size=len(data), compare_key=key)
 
-    def delete(self, key: str) -> None:
-        del self._store[key]
+    def delete(self, info: FileInfo) -> None:
+        del self._store[info.key]
 
 store = {"a.txt": b"hello", "b.txt": b"world"}
 S3().sync(DictStorage(store), "s3://my-bucket/data/")   # custom -> S3 (upload)

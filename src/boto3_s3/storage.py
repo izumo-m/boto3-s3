@@ -87,7 +87,7 @@ class StorageCapability(Flag):
     - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
       (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,
       and gates on this capability for a custom side
-    - ``DELETE`` - ``delete(key)`` (``rm`` / ``mv`` source / ``sync --delete``)
+    - ``DELETE`` - ``delete(info)`` (``rm`` / ``mv`` source / ``sync --delete``)
 
     The reading members form a lattice (expanded by :func:`_implied`):
     ``SORTED_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration

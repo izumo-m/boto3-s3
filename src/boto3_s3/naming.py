@@ -124,8 +124,9 @@ def _open_format(text: str, *, dir_op: bool) -> tuple[str, bool]:
     """Format a custom-backend (``open``-routed) side; return ``(root, use_src_name)``.
 
     A custom ``Storage`` encapsulates its own location and addresses entries by
-    their scan-root-relative ``compare_key`` - exactly what its ``open`` /
-    ``get_fileinfo`` / ``delete`` take - so the root is always empty: the relative
+    their scan-root-relative ``compare_key``: its ``open`` / ``get_fileinfo``
+    take that relative key, and ``delete`` takes the entry's ``FileInfo`` (whose
+    ``key`` is that same relative key). So the root is always empty: the relative
     key passes straight through (:func:`dest_for` returns ``compare_key``
     unchanged, or ``""`` to mean the location itself). ``use_src_name`` mirrors
     :func:`s3_format`: a ``dir_op`` or an explicit trailing ``/`` means the
