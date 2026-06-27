@@ -183,10 +183,72 @@ def _stat_one(
     return LocalFileInfo(key=path.replace(os.sep, "/"), size=size, mtime=mtime)
 
 
+def _stat_key(path: str) -> tuple[int, int] | None:
+    """A directory's ``(st_dev, st_ino)`` identity, or ``None`` to fail open.
+
+    ``None`` - an ``os.stat`` error, or the ``st_ino == 0`` some FAT / exFAT /
+    FUSE volumes report - disables loop detection for that subtree (we keep
+    descending rather than risk a false positive on a volume with no real
+    inodes).
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+class LoopDetector:
+    """Ancestor-stack guard against symbolic-link cycles in a recursive walk.
+
+    A reusable building block for a custom recursive enumerator - an application
+    walking its own backend, or driving :func:`walk_local`'s lower layer. It
+    tracks the ``(st_dev, st_ino)`` identity of every directory on the path from
+    the root down to the one being descended (an *ancestor stack*, not a global
+    visited set, so a legitimate diamond - two symlinks to the same external
+    directory - is still followed on both arms, like GNU ``find -L`` /
+    ``walkdir``). A directory whose identity matches an ancestor is a cycle.
+
+    Seed it with the walk root, then for each subdirectory::
+
+        if detector.is_cycle(subdir):
+            ...  # skip: descending would loop
+        else:
+            try:
+                ...  # recurse into subdir
+            finally:
+                detector.leave()
+
+    It fails open: a directory with no stable identity (an ``os.stat`` error, or
+    the ``st_ino == 0`` some FAT / exFAT / FUSE volumes report) never matches an
+    ancestor, so the walk keeps descending rather than risk a false positive.
+    """
+
+    def __init__(self, root: str) -> None:
+        self._ancestors: list[tuple[int, int] | None] = [_stat_key(root)]
+
+    def is_cycle(self, path: str) -> bool:
+        """Whether descending ``path`` would re-enter an ancestor (a cycle).
+
+        On ``False`` (not a cycle) ``path`` is pushed as the stack's new tip -
+        pair that call with a :meth:`leave` once its descent returns.
+        """
+        key = _stat_key(path)
+        if key is not None and key in self._ancestors:
+            return True
+        self._ancestors.append(key)  # None (fail-open) never matches an ancestor
+        return False
+
+    def leave(self) -> None:
+        """Pop the directory pushed by the matching non-cycle :meth:`is_cycle`."""
+        self._ancestors.pop()
+
+
 def walk_local(
     path: str,
     *,
     follow_symlinks: bool = True,
+    detect_loops: bool = False,
     on_warning: Callable[[str], None] | None = None,
 ) -> Iterator[LocalFileInfo]:
     """Yield every file under ``path`` (recursively) in aws-cli's byte order.
@@ -197,12 +259,19 @@ def walk_local(
     ``foo/bar``), which sync's merge-join relies on. Warnings carry the aws-cli
     message bodies and go to ``on_warning`` (dropped when ``None``); each warned
     entry is skipped. ``follow_symlinks=False`` skips symlinks silently.
+    ``detect_loops=True`` (with ``follow_symlinks``) skips a directory that
+    resolves to one of its own ancestors with a ``Symbolic link loop detected``
+    warning, instead of recursing until ``RecursionError`` (a library extension,
+    off by default = ``aws s3`` behavior; off costs no extra ``stat``).
     ``FileInfo.key`` is the absolute path with ``os.sep`` normalized to ``/``
     (:func:`to_native_path` inverts it); each entry's ``compare_key`` is stamped
     here as its key relative to ``path``. A single source object goes through
     :meth:`LocalStorage.get_fileinfo` instead, not this walk.
     """
     notify: Callable[[str], None] = on_warning if on_warning is not None else (lambda body: None)
+    # No detector unless asked and reachable (a cycle needs a followed symlink);
+    # None then costs no per-directory stat.
+    detector = LoopDetector(path) if detect_loops and follow_symlinks else None
     # Every entry sits under ``path``; the tail after the root is its compare key.
     # Normalize the root to a trailing "/" so the slice never leaves a leading
     # separator (``path`` itself may or may not carry one).
@@ -210,7 +279,7 @@ def walk_local(
     if not root.endswith("/"):
         root += "/"
     strip = len(root)
-    for info in _walk(path, follow_symlinks=follow_symlinks, notify=notify):
+    for info in _walk(path, follow_symlinks=follow_symlinks, notify=notify, detector=detector):
         info.compare_key = info.key[strip:]
         yield info
 
@@ -220,6 +289,7 @@ def _walk(
     *,
     follow_symlinks: bool,
     notify: Callable[[str], None],
+    detector: LoopDetector | None,
 ) -> Iterator[LocalFileInfo]:
     if _should_ignore(path, follow_symlinks=follow_symlinks, notify=notify):
         return
@@ -239,7 +309,18 @@ def _walk(
     for name in names:
         entry_path = os.path.join(path, name)
         if os.path.isdir(entry_path):
-            yield from _walk(entry_path, follow_symlinks=follow_symlinks, notify=notify)
+            if detector is not None and detector.is_cycle(entry_path):
+                # entry_path carries the directory's trailing os.sep (the sort
+                # suffix); drop it so the warning path reads like the others.
+                notify(f"Skipping file {entry_path.rstrip(os.sep)}. Symbolic link loop detected.")
+                continue
+            try:
+                yield from _walk(
+                    entry_path, follow_symlinks=follow_symlinks, notify=notify, detector=detector
+                )
+            finally:
+                if detector is not None:
+                    detector.leave()
         else:
             info = _stat_info(entry_path, notify)
             if info is not None:
@@ -292,8 +373,9 @@ class LocalStorage(Storage):
 
         The walk is anchored at the absolutized path so ``FileInfo.key`` is
         absolute (its documented form), and ``options.follow_symlinks`` /
-        ``options.on_warning`` are threaded into the walk - a symlink skip and the
-        aws-cli-worded warning channel a transfer needs. ``options.recursive``
+        ``options.detect_symlink_loops`` / ``options.on_warning`` are threaded
+        into the walk - a symlink skip, the cycle guard, and the aws-cli-worded
+        warning channel a transfer needs. ``options.recursive``
         streams :func:`walk_local` in aws-cli byte order over
         ``os.path.abspath(self._path) + os.sep`` - the trailing separator is
         aws-cli's ``local_format(dir_op=True)`` form, so a non-directory root (a
@@ -310,6 +392,7 @@ class LocalStorage(Storage):
                 walk_local(
                     abs_path + os.sep,
                     follow_symlinks=options.follow_symlinks,
+                    detect_loops=options.detect_symlink_loops,
                     on_warning=options.on_warning,
                 )
             )
@@ -420,4 +503,4 @@ def _paged(infos: Iterator[FileInfo]) -> Iterator[list[FileInfo]]:
         yield page
 
 
-__all__ = ["LocalStorage", "to_native_path", "walk_local"]
+__all__ = ["LocalStorage", "LoopDetector", "to_native_path", "walk_local"]

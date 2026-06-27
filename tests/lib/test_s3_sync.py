@@ -93,6 +93,27 @@ class TestSyncUpload:
             "p/stale.txt",
         ]
 
+    def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
+        # The opt-in cycle guard (default off = aws parity) flows through sync's
+        # local-side walk too, not just cp/mv's.
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"x")
+        (src / "loop").symlink_to(src)  # a directory cycle
+        client, calls = make_recording_client([_listing(), {}])  # empty dst, PutObject a.txt
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            detect_symlink_loops=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert any(
+            r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
+            for r in results
+        )
+
     def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()

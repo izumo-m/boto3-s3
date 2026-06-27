@@ -215,6 +215,15 @@ dest-existence check for download. We ported the same three faces:
   attempts the transfer** (to show S3's EntityTooLarge).
 - walk warnings (unreadable / special file / broken symlink / invalid mtime) go
   from `walk_local`'s `on_warning` to `Transferrer.warn` (aws-cli's wording).
+- **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
+  off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
+  off, a symlink cycle recurses until `RecursionError`, exactly like aws-cli; on
+  (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
+  `(st_dev, st_ino)` and skips a directory that resolves to one of its own
+  ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
+  a global visited set) still follows a legitimate diamond of links to the same
+  external directory, like GNU `find -L`; it fails open (no `stat` identity →
+  keep descending). Off costs no extra `stat` (a no-op detector).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore` = the application condition of aws-cli's
   `_modify_instructions_for_case_conflicts`): aws builds this with the sync

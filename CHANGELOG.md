@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `detect_symlink_loops` to `cp` / `mv` / `sync` (and `ScanOptions`), default
+  `False`: a recursive local walk skips a directory that resolves to one of its
+  own ancestors with a `Symbolic link loop detected` warning, instead of
+  recursing until `RecursionError`. A library extension - `aws s3` has none, so
+  off keeps parity and costs no extra `stat`. The ancestor-stack guard is exposed
+  as the reusable `boto3_s3.localstorage.LoopDetector` for custom walks.
 - `cp` / `mv` / `sync` now transfer a custom `Storage` backend as one side (the
   other side S3), moving its bytes through `Storage.open()`: a custom source
   uploads to S3, an S3 source downloads into the backend, `mv` deletes a custom

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from boto3_s3.exceptions import NotFoundError
-from boto3_s3.localstorage import LocalStorage, to_native_path, walk_local
+from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path, walk_local
 from boto3_s3.types import FileKind, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -131,6 +131,54 @@ class TestSymlinks:
         warnings: list[str] = []
         assert _keys(tmp_path, on_warning=warnings.append) == ["plain.txt"]
         assert warnings == [f"Skipping file {tmp_path / 'broken'}. File does not exist."]
+
+
+class TestSymlinkLoopDetection:
+    """``detect_loops`` (library extension, default off): an ancestor-stack guard."""
+
+    def test_loop_skipped_with_a_warning_when_enabled(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt")
+        (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle: loop -> the root
+        warnings: list[str] = []
+        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["a.txt"]  # the cycle subtree is skipped, no RecursionError
+        assert warnings == [f"Skipping file {tmp_path / 'loop'}. Symbolic link loop detected."]
+
+    def test_diamond_links_are_both_followed(self, tmp_path: Path) -> None:
+        # An ancestor stack, not a global visited set: two links to the same
+        # *non-ancestor* directory are both followed (like GNU `find -L`).
+        _make_tree(tmp_path, "target/t.txt")
+        (tmp_path / "link1").symlink_to(tmp_path / "target")
+        (tmp_path / "link2").symlink_to(tmp_path / "target")
+        warnings: list[str] = []
+        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["link1/t.txt", "link2/t.txt", "target/t.txt"]
+        assert warnings == []
+
+    def test_enabled_is_a_noop_on_a_loopless_tree(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a/b.txt", "c.txt")
+        warnings: list[str] = []
+        assert _keys(tmp_path, detect_loops=True, on_warning=warnings.append) == _keys(tmp_path)
+        assert warnings == []
+
+    def test_no_follow_symlinks_disables_detection(self, tmp_path: Path) -> None:
+        # follow_symlinks=False cannot reach a cycle (symlinks are skipped), so
+        # the detector stays inactive - the loop link is skipped silently.
+        _make_tree(tmp_path, "a.txt")
+        (tmp_path / "loop").symlink_to(tmp_path)
+        warnings: list[str] = []
+        keys = _keys(tmp_path, follow_symlinks=False, detect_loops=True, on_warning=warnings.append)
+        assert keys == ["a.txt"]
+        assert warnings == []
+
+    def test_loop_detector_is_a_usable_public_guard(self, tmp_path: Path) -> None:
+        # LoopDetector is public for a custom walk: is_cycle registers a fresh
+        # directory (returns False) and flags re-entry of an ancestor (True).
+        (tmp_path / "child").mkdir()
+        detector = LoopDetector(str(tmp_path))
+        assert detector.is_cycle(str(tmp_path / "child")) is False  # fresh -> registered
+        detector.leave()
+        assert detector.is_cycle(str(tmp_path)) is True  # the seeded root is an ancestor
 
 
 class TestGetFileinfo:

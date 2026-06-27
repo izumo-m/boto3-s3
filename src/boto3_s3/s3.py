@@ -646,6 +646,7 @@ class S3:
         recursive: bool = False,
         filter: FileFilter | None = None,
         follow_symlinks: bool = True,
+        detect_symlink_loops: bool = False,
         dryrun: bool = False,
         page_size: int = 1000,
         expected_size: int | None = None,
@@ -686,6 +687,11 @@ class S3:
         root (``TransferPlan.filter_root`` is the translation root for
         patterns) - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key
         while a richer predicate can read size / mtime / storage_class.
+        ``detect_symlink_loops`` (default ``False``; a library extension - ``aws
+        s3`` has no such option, so off keeps parity) guards a recursive local
+        walk against symlink cycles: with it (and ``follow_symlinks``) a directory
+        resolving to one of its own ancestors is skipped with a warning instead of
+        recursing until ``RecursionError`` - off costs no extra ``stat``.
         ``dryrun`` enumerates (listing and HeadObject still
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
         still apply. ``expected_size`` is the multipart sizing hint for a
@@ -728,6 +734,7 @@ class S3:
             recursive=recursive,
             item_filter=filter,
             follow_symlinks=follow_symlinks,
+            detect_symlink_loops=detect_symlink_loops,
             dryrun=dryrun,
             page_size=page_size,
             on_progress=on_progress,
@@ -747,6 +754,7 @@ class S3:
         recursive: bool,
         item_filter: FileFilter | None,
         follow_symlinks: bool,
+        detect_symlink_loops: bool,
         dryrun: bool,
         page_size: int,
         on_progress: ProgressCallback | None,
@@ -857,6 +865,7 @@ class S3:
                     dst_bucket=dst_bucket,
                     transferrer=transferrer,
                     follow_symlinks=follow_symlinks,
+                    detect_symlink_loops=detect_symlink_loops,
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
@@ -879,6 +888,7 @@ class S3:
                     dst_bucket=dst_bucket,
                     transferrer=transferrer,
                     follow_symlinks=follow_symlinks,
+                    detect_symlink_loops=detect_symlink_loops,
                     item_filter=item_filter,
                 )
             else:
@@ -919,6 +929,7 @@ class S3:
         dst_bucket: str,
         transferrer: Transferrer,
         follow_symlinks: bool,
+        detect_symlink_loops: bool,
         item_filter: FileFilter | None,
     ) -> Iterator[TransferItem]:
         """Materialize upload items from the local source (warnings -> rollup).
@@ -936,6 +947,7 @@ class S3:
                 ScanOptions(
                     recursive=True,
                     follow_symlinks=follow_symlinks,
+                    detect_symlink_loops=detect_symlink_loops,
                     on_warning=transferrer.warn,
                 )
             )
@@ -1287,6 +1299,7 @@ class S3:
         dst_bucket: str,
         transferrer: Transferrer,
         follow_symlinks: bool,
+        detect_symlink_loops: bool,
         item_filter: FileFilter | None,
         operation: str,
         dryrun: bool,
@@ -1313,6 +1326,7 @@ class S3:
                 ScanOptions(
                     recursive=True,
                     follow_symlinks=follow_symlinks,
+                    detect_symlink_loops=detect_symlink_loops,
                     on_warning=transferrer.warn,
                 )
             )
@@ -1567,6 +1581,7 @@ class S3:
         recursive: bool = False,
         filter: FileFilter | None = None,
         follow_symlinks: bool = True,
+        detect_symlink_loops: bool = False,
         dryrun: bool = False,
         page_size: int = 1000,
         on_progress: ProgressCallback | None = None,
@@ -1620,6 +1635,7 @@ class S3:
             recursive=recursive,
             item_filter=filter,
             follow_symlinks=follow_symlinks,
+            detect_symlink_loops=detect_symlink_loops,
             dryrun=dryrun,
             page_size=page_size,
             on_progress=on_progress,
@@ -1638,6 +1654,7 @@ class S3:
         filter: FileFilter | None = None,
         compare: bool | PairFilter | ParallelCompare | None = None,
         follow_symlinks: bool = True,
+        detect_symlink_loops: bool = False,
         dryrun: bool = False,
         page_size: int = 1000,
         on_progress: ProgressCallback | None = None,
@@ -1818,6 +1835,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 follow_symlinks=follow_symlinks,
+                detect_symlink_loops=detect_symlink_loops,
                 page_size=page_size,
                 options=options,
             )
@@ -1827,6 +1845,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 follow_symlinks=follow_symlinks,
+                detect_symlink_loops=detect_symlink_loops,
                 page_size=page_size,
                 options=options,
             )
@@ -1912,6 +1931,7 @@ class S3:
         item_filter: FileFilter | None,
         transferrer: Transferrer,
         follow_symlinks: bool,
+        detect_symlink_loops: bool,
         page_size: int,
         options: TransferOptions,
     ) -> Iterator[tuple[str, FileInfo]]:
@@ -1940,6 +1960,7 @@ class S3:
                 recursive=True,
                 sort=True,  # the merge-join needs both sides byte-ordered
                 follow_symlinks=follow_symlinks,
+                detect_symlink_loops=detect_symlink_loops,
                 on_warning=transferrer.warn,
             )
         ):

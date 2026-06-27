@@ -101,6 +101,27 @@ class TestUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/a/inner.txt"]
 
+    def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
+        # The opt-in cycle guard (default off = aws parity) flows from cp's
+        # detect_symlink_loops flag through to the local recursive walk.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
+        client, calls = make_recording_client([{}])  # one PutObject for a.txt
+        results: list[OpResult] = []
+        S3().cp(
+            str(tmp_path),
+            S3Storage("s3://b/t", client=client),
+            recursive=True,
+            detect_symlink_loops=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert [call.params["Key"] for call in calls] == ["t/a.txt"]  # loop skipped, no crash
+        assert any(
+            r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
+            for r in results
+        )
+
     def test_missing_source_raises_the_base_category_up_front(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope.txt")
         client, calls = make_recording_client([])
