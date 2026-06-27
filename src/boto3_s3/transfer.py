@@ -53,9 +53,11 @@ from urllib.parse import quote
 
 from boto3_s3 import requestparams
 from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
+from boto3_s3.localstorage import to_native_path
 from boto3_s3.s3storage import translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
+    FileInfo,
     OpKind,
     OpOutcome,
     OpResult,
@@ -118,6 +120,10 @@ class TransferItem:
     src_bucket: str | None = None
     src_key: str | None = None
     src_path: str | None = None
+    # The source listing entry on an upload: mv unlinks the source through its
+    # logical ``/``-key, distinct from ``src_path`` (the path s3transfer reads).
+    # None on non-upload / stream routes.
+    src_info: FileInfo | None = None
     dst_bucket: str | None = None
     dst_key: str | None = None
     dst_path: str | None = None
@@ -517,7 +523,13 @@ class Transferrer:
                 source_storage = self._source_storage
                 key = item.src_key or ""
                 return _DeleteSource(lambda: source_storage.delete(key))
-            src_path = item.src_path or ""
+            # mv unlinks the source via its listing entry's logical ``/``-key
+            # (src_info), kept distinct from src_path (the path s3transfer reads).
+            info = item.src_info
+            if info is not None:
+                src_path = to_native_path(info.key)
+            else:
+                src_path = item.src_path or ""
             return _DeleteSource(lambda: os.remove(src_path))
         client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
         bucket = item.src_bucket

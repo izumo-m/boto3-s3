@@ -990,6 +990,7 @@ class S3:
             size=info.size,
             mtime=info.mtime,
             src_path=native,
+            src_info=info,
             dst_bucket=dst_bucket,
             dst_key=dest[len(dst_bucket) + 1 :],
             src_display=native,
