@@ -9,23 +9,26 @@ setup is the local MinIO stack::
     source scripts/minio-env.sh
     uv run pytest tests/cli/e2e
 
+To run against **real AWS** instead, ``tests/run_e2e.sh`` creates a throwaway
+bucket from ``BOTO3_S3_E2E_PROFILE`` / ``BOTO3_S3_E2E_REGION`` and force-removes
+it (and its mb/rb siblings) on exit.
+
 The suite is opt-in, gated on ``BOTO3_S3_E2E_BUCKET``:
 
 - env var unset, e2e collected alongside other suites -> every e2e item is
   skipped with a clear reason;
 - env var unset, *only* e2e was requested -> the session aborts immediately
   with one message instead of N skips;
-- env var set -> the environment is probed once at collection time (``aws``
-  binary present, bucket reachable, bucket **empty**) and the session aborts
-  on any failure. The non-empty check is the safety guard against pointing
-  the variable at a real, populated bucket.
+- env var set -> the environment is probed once at collection time (the ``aws``
+  binary present; the bucket reachable and **empty**, checked via boto3) and the
+  session aborts on any failure. The non-empty check is the safety guard against
+  pointing the variable at a real, populated bucket.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -92,30 +95,27 @@ def _probe_e2e_environment_or_exit() -> None:
     """Probe the live environment once per session; abort on any failure.
 
     ``pytest.exit`` (rather than per-test fixture errors) keeps the failure to
-    a single clear message. Listing the bucket doubles as the reachability
-    check; a populated bucket aborts the run before any test can touch data.
+    a single clear message. The parity tests drive the high-level ``aws s3``
+    commands themselves, so the probe only checks that the ``aws`` binary is
+    present; the bucket's reachability and the empty-bucket safety guard go
+    through boto3 (the same client the per-test ``_assert_bucket_empty`` uses),
+    not a low-level ``aws s3api`` call.
     """
     bucket = os.environ.get(BUCKET_ENV_VAR)
     assert bucket  # checked by the caller
-    aws = shutil.which("aws")
-    if aws is None:
+    if shutil.which("aws") is None:
         pytest.exit("aws v2 binary not on PATH", returncode=2)
-    result = subprocess.run(
-        [aws, "s3api", "list-objects-v2", "--bucket", bucket, "--max-items", "1"],
-        check=False,
-        capture_output=True,
-        timeout=15.0,
+    client = boto3.session.Session().client(
+        "s3",
+        endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
+        config=_E2E_BOTO3_CONFIG,
     )
-    if result.returncode != 0:
-        pytest.exit(
-            f"aws s3api list-objects-v2 --bucket {bucket} failed (rc={result.returncode}):\n"
-            f"stderr: {result.stderr.decode(errors='replace').strip()}\n"
-            f"stdout: {result.stdout.decode(errors='replace').strip()}",
-            returncode=2,
-        )
-    # aws-cli v2 prints "" for an empty bucket and JSON containing "Contents"
-    # once any objects are present.
-    if b'"Contents"' in result.stdout:
+    try:
+        response = client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+    except Exception as exc:
+        pytest.exit(f"bucket {bucket!r} not reachable via boto3: {exc}", returncode=2)
+    # A populated bucket aborts the run before any test can touch data.
+    if response.get("Contents"):
         pytest.exit(
             f"bucket {bucket!r} is not empty. e2e tests refuse to run against a "
             f"populated bucket - set {BUCKET_ENV_VAR} to a clean, dedicated test "
