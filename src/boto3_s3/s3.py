@@ -753,15 +753,6 @@ class S3:
         plan = naming.plan_transfer(
             src_storage, dst_storage, recursive=recursive, operation=operation
         )
-        if is_move and plan.paths_type in ("opens3", "s3open"):
-            # cp over a custom backend is wired (the open route below); mv is not
-            # (deleting a custom source through Storage.delete is #53d). Reject it
-            # up front - mirroring sync's custom-backend guard - rather than fail
-            # the source delete after the bytes have already moved.
-            raise ValidationError(
-                f"{operation}: custom-backend transfer is not implemented yet",
-                operation=operation,
-            )
 
         source_client = None
         src_s3: S3Storage | None = None
@@ -817,12 +808,17 @@ class S3:
             client = src_storage.get_client()
             src_s3 = src_storage
 
-        self._require_open_capabilities(plan, recursive=recursive, operation=operation)
+        self._require_open_capabilities(
+            plan, recursive=recursive, is_move=is_move, operation=operation
+        )
         case_gate = self._cp_case_gate(plan, recursive=recursive, options=options)
         transferrer = Transferrer(
             kind,
             client,
             source_client=source_client,
+            # An opens3 mv deletes its custom source through Storage.delete; the
+            # other routes leave source_storage None (os.remove / DeleteObject).
+            source_storage=src_storage if plan.paths_type == "opens3" else None,
             transfer_config=transfer_config,
             options=options,
             operation=operation,
@@ -1196,21 +1192,26 @@ class S3:
         )
 
     def _require_open_capabilities(
-        self, plan: naming.TransferPlan, *, recursive: bool, operation: str
+        self, plan: naming.TransferPlan, *, recursive: bool, is_move: bool, operation: str
     ) -> None:
         """Reject an open-route custom side that lacks a contract method.
 
         The capability set is structural (class-level): ``opens3`` reads its
         custom source - a single object via ``get_fileinfo``, a recursive tree
-        via ``scan`` - and opens each entry ``"rb"``; ``s3open`` opens its custom
-        destination ``"wb"``. A backend that declares less than the route asks of
-        it is rejected here, before any bytes move, with the gap named (so a
-        forgotten method is a clear ``ValidationError``, not a deep failure).
+        via ``scan`` - and opens each entry ``"rb"``, plus ``delete`` when it is
+        an ``mv`` source (the source is removed after each transfer); ``s3open``
+        opens its custom destination ``"wb"`` (an ``mv`` deletes the S3 source,
+        not the custom side, so it needs nothing extra). A backend that declares
+        less than the route asks of it is rejected here, before any bytes move,
+        with the gap named (so a forgotten method is a clear ``ValidationError``,
+        not a deep failure).
         """
         if plan.paths_type == "opens3":
             custom: Storage = plan.src
             needed = StorageCapability.OPEN_READ
             needed |= StorageCapability.SCAN if recursive else StorageCapability.GET_FILEINFO
+            if is_move:
+                needed |= StorageCapability.DELETE
         elif plan.paths_type == "s3open":
             custom = plan.dst
             needed = StorageCapability.OPEN_WRITE
@@ -1291,6 +1292,9 @@ class S3:
             compare_key=compare_key,
             size=info.size,
             mtime=info.mtime,
+            # src_key carries the open key so an mv can delete the source via the
+            # backend's Storage.delete (same key open used: "" = the location).
+            src_key=open_key,
             src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
             dst_bucket=dst_bucket,
             dst_key=dest[len(dst_bucket) + 1 :],

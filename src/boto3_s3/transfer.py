@@ -72,6 +72,8 @@ if TYPE_CHECKING:
     from boto3.s3.transfer import TransferConfig
     from mypy_boto3_s3 import S3Client
 
+    from boto3_s3.storage import Storage
+
 logger = logging.getLogger(__name__)
 
 # Object properties carried by MetadataDirective=COPY semantics - what the
@@ -258,13 +260,16 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe.
+    s3transfer's own size probe. ``source_storage`` is set only for an
+    open-route (custom backend) source, so ``mv`` can delete it through its own
+    ``Storage.delete`` (a custom source has no local path / S3 key to remove).
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
-    transfer deletes its source - ``os.remove`` for uploads, a per-object
-    DeleteObject on the owning side's client otherwise.
+    transfer deletes its source - ``os.remove`` for a local upload,
+    ``Storage.delete`` for a custom-backend upload, a per-object DeleteObject on
+    the owning side's client otherwise.
     """
 
     def __init__(
@@ -273,6 +278,7 @@ class Transferrer:
         client: S3Client,
         *,
         source_client: S3Client | None = None,
+        source_storage: Storage | None = None,
         transfer_config: TransferConfig | None = None,
         options: TransferOptions | None = None,
         operation: str = "cp",
@@ -287,6 +293,10 @@ class Transferrer:
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
+        # An open-route (custom backend) source: mv deletes it through its own
+        # Storage.delete (the source has no local path / S3 key). None for the
+        # built-in routes, whose source delete stays os.remove / DeleteObject.
+        self._source_storage = source_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
@@ -493,13 +503,20 @@ class Transferrer:
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
         """The per-item source deletion for ``mv`` (aws-cli DeleteSource* trio).
 
-        Uploads remove the local file with a bare ``os.remove`` so a failure
+        Local uploads remove the file with a bare ``os.remove`` so a failure
         carries the OS's own wording (aws's ``move failed: ... [Errno 13]
-        ...``); S3 sources get a single DeleteObject - on the manager's
-        client for downloads, the source-side client for copies - with
-        ``RequestPayer`` forwarded like every other request.
+        ...``); a custom (open-route) source has no local path, so it is removed
+        through its own ``Storage.delete(key)`` (the ``key`` the item rode in on
+        ``src_key``, the same one ``open`` used). S3 sources get a single
+        DeleteObject - on the manager's client for downloads, the source-side
+        client for copies - with ``RequestPayer`` forwarded like every other
+        request.
         """
         if self._kind is OpKind.UPLOAD:
+            if self._source_storage is not None:
+                source_storage = self._source_storage
+                key = item.src_key or ""
+                return _DeleteSource(lambda: source_storage.delete(key))
             src_path = item.src_path or ""
             return _DeleteSource(lambda: os.remove(src_path))
         client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client

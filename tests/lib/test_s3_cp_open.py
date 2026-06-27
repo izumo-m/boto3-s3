@@ -22,13 +22,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
+from botocore.exceptions import ClientError
 
 from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import BatchError, Boto3S3Error, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, OpOutcome, OpResult
+from boto3_s3.types import FileInfo, FileKind, OpKind, OpOutcome, OpResult
 from tests.utils.recorder import ApiCall, make_recording_client
 
 if TYPE_CHECKING:
@@ -43,6 +44,14 @@ _MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 def _ops(calls: list[ApiCall]) -> list[str]:
     return [call.operation for call in calls]
+
+
+def _client_error(code: str, status: int, operation: str) -> ClientError:
+    response: Any = {
+        "Error": {"Code": code, "Message": "stub"},
+        "ResponseMetadata": {"HTTPStatusCode": status},
+    }
+    return ClientError(response, operation)
 
 
 def _head_response(**extra: Any) -> dict[str, Any]:
@@ -110,6 +119,9 @@ class _MemStorage(Storage):
         #: every (key, mode) passed to open() - lets a dry-run test assert the
         #: backend is never opened (no read/write side effect).
         self.opens: list[tuple[str, str]] = []
+        #: every key passed to delete() - lets an mv test assert the source was
+        #: removed through Storage.delete (not os.remove of an empty path).
+        self.deletes: list[str] = []
 
     def as_text(self) -> str:
         return self._location
@@ -144,6 +156,7 @@ class _MemStorage(Storage):
         )
 
     def delete(self, key: str) -> None:
+        self.deletes.append(key)
         del self._store[key]
 
 
@@ -152,6 +165,14 @@ class _ReadOnlyMem(_MemStorage):
     ``OPEN_WRITE`` (s3open), so it always trips the capability gate."""
 
     capabilities = StorageCapability.OPEN_READ
+
+
+class _NoDeleteMem(_MemStorage):
+    """Readable/writable but not deletable - an mv *source* trips the gate (DELETE)."""
+
+    capabilities = (
+        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE | StorageCapability.SORTED_SCAN
+    )
 
 
 class _FailingWriter(_MemWriter):
@@ -396,27 +417,79 @@ class TestOpenDownloadRoute:
         assert "commit failed" in str(results[0].error)
 
 
-class TestMoveIsDeferred:
-    """``mv`` over a custom backend is not wired yet (#53d); cp is.
+class TestMoveRoute:
+    """``mv`` over a custom backend: transfer, then delete the source.
 
-    Deleting a custom source through ``Storage.delete`` is the pending piece, so
-    ``mv`` is rejected up front for both open routes - mirroring ``sync``'s
-    custom-backend guard - rather than failing the source delete after the bytes
-    have moved (a custom-source upload has no ``src_path`` to ``os.remove``).
+    For ``opens3`` (custom source) the source is removed through its own
+    ``Storage.delete`` after each successful upload; for ``s3open`` (custom
+    destination) the source is S3, deleted with ``DeleteObject`` like any other
+    download mv. Both report ``OpKind.MOVE``. A failed transfer keeps its source
+    (``_CloseFileobj`` sits before the source delete, so a failed commit blocks
+    it too).
     """
 
-    def test_move_from_a_custom_source_is_rejected(self) -> None:
-        src = _MemStorage({"": b"x"}, location="mem://data/a.txt")
+    def test_move_from_a_custom_source_uploads_then_deletes(self) -> None:
+        src = _MemStorage({"": b"x" * 7}, location="mem://data/a.txt")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().mv(
+            src,
+            S3Storage("s3://bucket/up/", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["PutObject"]
+        assert calls[0].params["Key"] == "up/a.txt"
+        # The single source's open key is "" (the location itself); delete uses it.
+        assert src.deletes == [""]
+        assert src._store == {}
+        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+
+    def test_recursive_move_from_a_custom_source_deletes_each_key(self) -> None:
+        src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
+        client, calls = make_recording_client([{}, {}])
+        S3().mv(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
+        # Each recursive item's open key is its compare_key; all are deleted.
+        assert src.deletes == ["a.txt", "sub/b.txt"]
+        assert src._store == {}
+
+    def test_move_into_a_custom_destination_deletes_the_s3_source(self) -> None:
+        store: dict[str, bytes] = {}
+        dst = _MemStorage(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([_head_response(), _get_response(), {}])
+        results: list[OpResult] = []
+        S3().mv(
+            S3Storage("s3://b/d/a.txt", client=client),
+            dst,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        # Download into the custom dest, then DeleteObject the S3 source.
+        assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
+        assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
+        assert store == {"": b"payload"}
+        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+
+    def test_move_from_a_source_without_delete_is_rejected(self) -> None:
+        src = _NoDeleteMem({"": b"x"}, location="mem://data/a.txt")
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().mv(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
-        assert "not implemented yet" in str(excinfo.value)
+        assert "DELETE" in str(excinfo.value)
         assert calls == []
 
-    def test_move_into_a_custom_destination_is_rejected(self) -> None:
-        dst = _MemStorage({}, location="mem://data/out.bin")
-        client, calls = make_recording_client([])
-        with pytest.raises(ValidationError) as excinfo:
-            S3().mv(S3Storage("s3://b/d/a.txt", client=client), dst, transfer_config=_SYNC)
-        assert "not implemented yet" in str(excinfo.value)
-        assert calls == []
+    def test_failed_upload_keeps_the_custom_source(self) -> None:
+        # The source delete must not run when the transfer failed: the bytes
+        # never arrived, so mv keeps the only copy.
+        src = _MemStorage({"": b"x" * 7}, location="mem://data/a.txt")
+        client, _ = make_recording_client([_client_error("NoSuchBucket", 404, "PutObject")])
+        with pytest.raises(BatchError):
+            S3().mv(src, S3Storage("s3://gone/up/", client=client), transfer_config=_SYNC)
+        assert src.deletes == []
+        assert src._store == {"": b"x" * 7}
