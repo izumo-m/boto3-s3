@@ -191,7 +191,7 @@ class IOStorage(Storage):
         raise NotImplementedError(_NOT_A_CONTAINER)
 
     @override
-    def delete(self, key: str) -> None:
+    def delete(self, info: FileInfo) -> None:
         raise NotImplementedError(_NOT_A_CONTAINER)
 
     @override

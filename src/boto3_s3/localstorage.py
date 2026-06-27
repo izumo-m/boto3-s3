@@ -480,13 +480,13 @@ class LocalStorage(Storage):
             raise _translate_os_error(exc, operation="open", key=key) from exc
 
     @override
-    def delete(self, key: str) -> None:
-        """Remove the file at ``key`` (resolved against :attr:`path`)."""
-        target = os.path.join(self._path, to_native_path(key))
+    def delete(self, info: FileInfo) -> None:
+        """Remove the file at ``info.key`` (an absolute local path)."""
+        target = to_native_path(info.key)
         try:
             os.remove(target)
         except OSError as exc:
-            raise _translate_os_error(exc, operation="delete", key=key) from exc
+            raise _translate_os_error(exc, operation="delete", key=info.key) from exc
 
     @override
     def get_fileinfo(

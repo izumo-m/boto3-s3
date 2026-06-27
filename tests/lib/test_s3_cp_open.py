@@ -155,9 +155,9 @@ class _MemStorage(Storage):
             compare_key=_basename(self._location),
         )
 
-    def delete(self, key: str) -> None:
-        self.deletes.append(key)
-        del self._store[key]
+    def delete(self, info: FileInfo) -> None:
+        self.deletes.append(info.key)
+        del self._store[info.key]
 
 
 class _ReadOnlyMem(_MemStorage):

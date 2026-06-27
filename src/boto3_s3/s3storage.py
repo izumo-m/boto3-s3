@@ -468,18 +468,19 @@ class S3Storage(Storage):
         raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
 
     @override
-    def delete(self, key: str, *, request_payer: str | None = None) -> None:
+    def delete(self, info: FileInfo, *, request_payer: str | None = None) -> None:
         """Delete one object with a single blind ``DeleteObject`` call.
 
         Blind like ``aws s3 rm``'s single-key path: no listing and no
         HeadObject - deleting a key that does not exist succeeds (S3 returns
-        204). ``request_payer`` is an S3-specific knob added on top of the
-        cross-backend ``Storage.delete(key)`` signature.
+        204). The object is ``info.key`` (a full bucket key). ``request_payer``
+        is an S3-specific knob added on top of the cross-backend
+        ``Storage.delete`` signature.
         """
-        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
+        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
-        with s3_errors(operation="delete", bucket=self._bucket, key=key):
+        with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
             self.get_client().delete_object(**kwargs)
 
     @override

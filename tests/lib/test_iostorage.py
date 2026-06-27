@@ -13,7 +13,7 @@ import pytest
 
 from boto3_s3.exceptions import Boto3S3Error
 from boto3_s3.iostorage import IOStorage, StdioStorage
-from boto3_s3.types import ScanOptions
+from boto3_s3.types import FileInfo, ScanOptions
 
 
 class TestBinaryPassthrough:
@@ -78,7 +78,7 @@ class TestUnsupportedContainerOps:
 
     def test_delete_raises(self) -> None:
         with pytest.raises(NotImplementedError):
-            IOStorage(io.BytesIO()).delete("k")
+            IOStorage(io.BytesIO()).delete(FileInfo(key="k"))
 
     def test_get_fileinfo_raises(self) -> None:
         with pytest.raises(NotImplementedError):

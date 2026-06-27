@@ -218,8 +218,14 @@ class Storage(abc.ABC):
         """
 
     @abc.abstractmethod
-    def delete(self, key: str) -> None:
-        """Delete the object at ``key`` (for ``rm`` / ``mv`` source / ``sync --delete``)."""
+    def delete(self, info: FileInfo) -> None:
+        """Delete the entry ``info`` identifies (``rm`` / ``mv`` source / ``sync --delete``).
+
+        ``info`` is a listing entry (from :meth:`scan` / :meth:`get_fileinfo`) or
+        one built by hand; the backend locates the object by ``info.key`` in its
+        own address space - a local absolute path, an S3 full key, or a custom
+        backend's own key.
+        """
 
     @abc.abstractmethod
     def get_fileinfo(

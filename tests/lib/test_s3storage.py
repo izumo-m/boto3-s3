@@ -426,12 +426,14 @@ class _DeleteRecordingClient:
 class TestDelete:
     def test_blind_delete_object_call(self) -> None:
         client = _DeleteRecordingClient()
-        S3Storage("s3://bucket/any", client=client).delete("data/a.txt")
+        S3Storage("s3://bucket/any", client=client).delete(S3FileInfo(key="data/a.txt"))
         assert client.calls == [{"Bucket": "bucket", "Key": "data/a.txt"}]
 
     def test_request_payer_forwarded(self) -> None:
         client = _DeleteRecordingClient()
-        S3Storage("s3://bucket", client=client).delete("k", request_payer="requester")
+        S3Storage("s3://bucket", client=client).delete(
+            S3FileInfo(key="k"), request_payer="requester"
+        )
         assert client.calls == [{"Bucket": "bucket", "Key": "k", "RequestPayer": "requester"}]
 
     def test_client_error_translates_with_key_context(self) -> None:
@@ -444,7 +446,7 @@ class TestDelete:
         )
         client = _DeleteRecordingClient(error=error)
         with pytest.raises(NotFoundError) as exc_info:
-            S3Storage("s3://bucket", client=client).delete("k")
+            S3Storage("s3://bucket", client=client).delete(S3FileInfo(key="k"))
         assert exc_info.value.bucket == "bucket"
         assert exc_info.value.key == "k"
         assert isinstance(exc_info.value.__cause__, ClientError)

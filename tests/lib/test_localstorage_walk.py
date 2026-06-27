@@ -192,9 +192,7 @@ class TestWalkIsOverridable:
         _make_tree(tmp_path, "keep.txt", "skip.tmp")
 
         class _NoTmp(LocalStorage):
-            def _should_ignore(
-                self, path: str, *, follow_symlinks: bool, notify: object
-            ) -> bool:
+            def _should_ignore(self, path: str, *, follow_symlinks: bool, notify: object) -> bool:
                 if path.endswith(".tmp"):
                     return True
                 return super()._should_ignore(
@@ -331,10 +329,12 @@ class TestLocalStorageIO:
     def test_delete(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(tmp_path)
-        storage.delete("a.txt")
+        info = storage.get_fileinfo("a.txt")
+        assert info is not None
+        storage.delete(info)
         assert not (tmp_path / "a.txt").exists()
         with pytest.raises(NotFoundError):
-            storage.delete("a.txt")
+            storage.delete(info)
 
 
 def test_to_native_path_round_trips() -> None:

@@ -53,7 +53,6 @@ from urllib.parse import quote
 
 from boto3_s3 import requestparams
 from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
-from boto3_s3.localstorage import to_native_path
 from boto3_s3.s3storage import translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
@@ -509,28 +508,19 @@ class Transferrer:
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
         """The per-item source deletion for ``mv`` (aws-cli DeleteSource* trio).
 
-        Local uploads remove the file with a bare ``os.remove`` so a failure
-        carries the OS's own wording (aws's ``move failed: ... [Errno 13]
-        ...``); a custom (open-route) source has no local path, so it is removed
-        through its own ``Storage.delete(key)`` (the ``key`` the item rode in on
-        ``src_key``, the same one ``open`` used). S3 sources get a single
-        DeleteObject - on the manager's client for downloads, the source-side
-        client for copies - with ``RequestPayer`` forwarded like every other
-        request.
+        An upload source - a local file or a custom (open-route) backend object -
+        is removed through its own ``Storage.delete(info)``, keyed by the source
+        listing entry (``src_info``); the delete maps the OS / backend error into
+        the library taxonomy, preserving the message aws prints (``move failed:
+        ... [Errno 13] ...``). S3 sources get a single DeleteObject - on the
+        manager's client for downloads, the source-side client for copies - with
+        ``RequestPayer`` forwarded like every other request.
         """
         if self._kind is OpKind.UPLOAD:
-            if self._source_storage is not None:
-                source_storage = self._source_storage
-                key = item.src_key or ""
-                return _DeleteSource(lambda: source_storage.delete(key))
-            # mv unlinks the source via its listing entry's logical ``/``-key
-            # (src_info), kept distinct from src_path (the path s3transfer reads).
+            source_storage = self._source_storage
             info = item.src_info
-            if info is not None:
-                src_path = to_native_path(info.key)
-            else:
-                src_path = item.src_path or ""
-            return _DeleteSource(lambda: os.remove(src_path))
+            assert source_storage is not None and info is not None
+            return _DeleteSource(lambda: source_storage.delete(info))
         client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
         bucket = item.src_bucket
         key = item.src_key

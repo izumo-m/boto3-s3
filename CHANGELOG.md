@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `Storage.delete` now takes the `FileInfo` to remove (was a `str` key): a
+  backend deletes exactly the entry `scan` / `get_fileinfo` produced, by
+  `info.key` in its own address space, and `cp` / `mv` / `sync` / `rm` route
+  every delete through it (local ones included - no more bare `os.remove`). A
+  custom backend's `delete` signature changes to match.
 - `walk_local` is now a `LocalStorage` method (was a module-level function). The
   recursive local walk is split into protected, overridable methods (`_walk` /
   `_should_ignore` / `_triggers_warning` / `_stat_info` / `_stat_one`), so a

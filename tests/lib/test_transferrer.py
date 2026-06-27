@@ -21,9 +21,11 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
 from boto3_s3.types import (
     CopyPropsMode,
+    FileInfo,
     OpKind,
     OpOutcome,
     OpResult,
@@ -79,11 +81,20 @@ def _run(
     source_calls: list[ApiCall] = []
     if source_responses is not None:
         source_client, source_calls = make_recording_client(source_responses)
+    # Mirror the orchestration: an mv upload deletes its source through the
+    # source storage's Storage.delete(info), so wire both like production does.
+    source_storage: LocalStorage | None = None
+    if is_move and kind is OpKind.UPLOAD:
+        source_storage = LocalStorage(".")
+        for it in items:
+            if it.src_info is None and it.src_path is not None:
+                it.src_info = FileInfo(key=it.src_path.replace(os.sep, "/"))
     results: list[OpResult] = []
     transferrer = Transferrer(
         kind,
         client,
         source_client=source_client,
+        source_storage=source_storage,
         transfer_config=config,
         options=options,
         is_move=is_move,

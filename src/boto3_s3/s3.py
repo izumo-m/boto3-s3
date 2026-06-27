@@ -400,17 +400,19 @@ class _SyncDeletes:
                 )
             self._deleter.submit(key)
             return
+        # Local or custom (s3open) destination: remove the orphan synchronously
+        # through the backend's own Storage.delete(info), sharing the local
+        # counters. The delete maps the OS / backend error into the library
+        # taxonomy (its message is what aws prints), so the catch is broad.
+        info = pair.dst
+        assert info is not None
         if not isinstance(dst, LocalStorage):
-            # A custom (s3open) destination: remove the orphan through the
-            # backend's own delete (pair.key is its root-relative key, the open
-            # key regime), synchronously like the local arm. The backend's error
-            # type is its own, so the catch is broad.
             display = _open_side_display(dst, pair.key)
             if self._dryrun:
                 self._emit(key=pair.key, outcome=OpOutcome.DRYRUN, src=display)
                 return
             try:
-                dst.delete(pair.key)
+                dst.delete(info)
             except Exception as exc:
                 self._local_failed += 1
                 if self._local_first_error is None:
@@ -420,15 +422,13 @@ class _SyncDeletes:
             self._local_succeeded += 1
             self._emit(key=pair.key, outcome=OpOutcome.SUCCEEDED, src=display)
             return
-        info = pair.dst
-        assert info is not None
         native = to_native_path(info.key)
         if self._dryrun:
             self._emit(key=pair.key, outcome=OpOutcome.DRYRUN, src=native)
             return
         try:
-            os.remove(native)
-        except OSError as exc:
+            dst.delete(info)
+        except Exception as exc:
             self._local_failed += 1
             if self._local_first_error is None:
                 self._local_first_error = exc
@@ -848,9 +848,10 @@ class S3:
             kind,
             client,
             source_client=source_client,
-            # An opens3 mv deletes its custom source through Storage.delete; the
-            # other routes leave source_storage None (os.remove / DeleteObject).
-            source_storage=src_storage if plan.paths_type == "opens3" else None,
+            # mv deletes its upload source (local file or custom backend) through
+            # that storage's Storage.delete; download/copy sources are S3, deleted
+            # with a DeleteObject, so they need no source_storage.
+            source_storage=src_storage if kind is OpKind.UPLOAD else None,
             transfer_config=transfer_config,
             options=options,
             operation=operation,
@@ -1361,9 +1362,10 @@ class S3:
             compare_key=compare_key,
             size=info.size,
             mtime=info.mtime,
-            # src_key carries the open key so an mv can delete the source via the
-            # backend's Storage.delete (same key open used: "" = the location).
-            src_key=open_key,
+            # src_info carries the source listing entry so an mv can delete it via
+            # the backend's Storage.delete(info) (info.key == the open key: "" =
+            # the location, a relative key under a recursive source).
+            src_info=info,
             src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
             dst_bucket=dst_bucket,
             dst_key=dest[len(dst_bucket) + 1 :],
@@ -2167,15 +2169,14 @@ class S3:
         on the hand-built ``FileInfo``.
         """
         key = storage.key
-        if item_filter is not None and not item_filter(
-            S3FileInfo(key=key, compare_key=key[len(root) :])
-        ):
+        info = S3FileInfo(key=key, compare_key=key[len(root) :])
+        if item_filter is not None and not item_filter(info):
             return
         if dryrun:
             _emit_result(on_result, key=key, outcome=OpOutcome.DRYRUN)
             return
         try:
-            storage.delete(key, request_payer=request_payer)
+            storage.delete(info, request_payer=request_payer)
         except Boto3S3Error as exc:
             # The single key is still one batch item (aws counts it as a task
             # failure -> "delete failed:" + rc 1), so aggregate rather than

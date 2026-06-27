@@ -73,7 +73,7 @@ class _FakeOpen(Storage):
         raise NotImplementedError
 
     @override
-    def delete(self, key: str) -> None:
+    def delete(self, info: FileInfo) -> None:
         raise NotImplementedError
 
     @override
