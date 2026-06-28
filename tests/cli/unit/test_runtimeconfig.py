@@ -194,3 +194,22 @@ class TestLoadScopedS3Config:
         )
         scoped = runtimeconfig.load_scoped_s3_config(self._args(profile="alt"))
         assert scoped == {"preferred_transfer_client": "classic"}
+
+    def test_env_profile_precedence_matches_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no --profile, the scoped ``[s3]`` read must honor aws-cli's env
+        # precedence (AWS_PROFILE > AWS_DEFAULT_PROFILE), the same as the client
+        # this transfer uses. A bare boto3.Session(profile_name=None) would adopt
+        # stock botocore's reversed order and read the wrong profile's section
+        # (botocore #1725) - a charter-breaking exit-code divergence.
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "[profile aws_profile]\ns3 =\n  preferred_transfer_client = crt\n"
+            "[profile aws_default_profile]\ns3 =\n  preferred_transfer_client = classic\n",
+        )
+        monkeypatch.setenv("AWS_PROFILE", "aws_profile")
+        monkeypatch.setenv("AWS_DEFAULT_PROFILE", "aws_default_profile")
+        scoped = runtimeconfig.load_scoped_s3_config(self._args())
+        assert scoped == {"preferred_transfer_client": "crt"}

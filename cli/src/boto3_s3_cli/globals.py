@@ -201,7 +201,7 @@ def _pin_python_sigv4_signers() -> None:
 _PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
 
 
-def _resolve_profile(args: argparse.Namespace) -> str | None:
+def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
     ``--profile`` > the first env var of :data:`_PROFILE_ENV_VARS` that is
@@ -291,7 +291,7 @@ def build_service_client(
     # a bad --profile); translate them so they reach the exit-code mapping
     # instead of escaping as an uncaught traceback (see build_client).
     try:
-        botocore_session = botocore.session.Session(profile=_resolve_profile(args))
+        botocore_session = botocore.session.Session(profile=resolve_profile(args))
         session = boto3.Session(botocore_session=botocore_session)
         return session.client(
             service, region_name=_resolve_region(region, botocore_session), verify=verify
@@ -306,7 +306,7 @@ def build_client(args: argparse.Namespace) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
-    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - :func:`_resolve_profile`);
+    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - :func:`resolve_profile`);
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
     ``AWS_DEFAULT_REGION`` > config > IMDS - :func:`_resolve_region`);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
@@ -366,7 +366,7 @@ def build_client(args: argparse.Namespace) -> S3Client:
     # ConfigurationError [253], the rest -> 255) instead of letting a raw
     # botocore exception escape main() as an uncaught traceback (rc 1).
     try:
-        botocore_session = botocore.session.Session(profile=_resolve_profile(args))
+        botocore_session = botocore.session.Session(profile=resolve_profile(args))
         session = boto3.Session(botocore_session=botocore_session)
         return session.client(
             "s3",

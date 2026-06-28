@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix the `[s3]` transfer config to load from the same profile the client uses
+  when both `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` are set with no `--profile`
+  (aws-cli precedence `AWS_PROFILE` > `AWS_DEFAULT_PROFILE`; stock boto3/botocore
+  use the reverse, so the section could be read from the wrong profile).
+
 ## [0.2.0] - 2026-06-27
 
 - `--cli-auto-prompt`: offer option completion after a non-path-like second
