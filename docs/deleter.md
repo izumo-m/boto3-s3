@@ -2,8 +2,9 @@
 
 `S3Deleter` is a building block that batches the deletion of S3 objects. It is
 the foundation of `S3.rm` and `S3.sync(delete=True)`, and it can also be used
-directly. It accumulates full keys in a buffer and, each time the buffer fills
-(default 1000 = the `DeleteObjects` limit), hands one `DeleteObjects` request to
+directly. It accumulates listing entries (`FileInfo`) in a buffer and, each time
+the buffer fills (default 1000 = the `DeleteObjects` limit), hands one
+`DeleteObjects` request to
 a background worker, so the caller can keep iterating `S3Storage.scan()` while
 deletion proceeds in the background (a pipeline of one in-flight batch plus one
 buffer under construction).
@@ -18,7 +19,7 @@ from boto3_s3 import S3Deleter, ScanOptions
 
 with S3Deleter(storage, on_result=cb) as deleter:
     for info in storage.scan(ScanOptions(recursive=True)):
-        deleter.submit(info.key)
+        deleter.submit(info)
 ```
 
 Iterate scan in **recursive** mode (a non-recursive scan also yields DIRECTORY
@@ -28,7 +29,7 @@ that are not objects).
 | Argument / method | Description |
 |---|---|
 | `S3Deleter(storage, *, request_payer=None, on_result=None, batch_size=1000, operation="delete")` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it uses **only the client and bucket** (it ignores the key/prefix part). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `batch_size` is 1-1000 (`ValueError`). `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
-| `submit(key)` | Accumulates one **full object key** into the buffer. Auto-flushes when `batch_size` is reached. An empty key raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the key has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
+| `submit(info)` | Accumulates one listing entry (`FileInfo`) into the buffer; its `key` is the **full object key** to delete, and the rest of the entry (e.g. an `S3FileInfo.etag`) rides through to its `OpResult` untouched. Auto-flushes when `batch_size` is reached. An empty `info.key` raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the entry has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
 | `flush()` | Splits the buffer into batches of `batch_size` and hands them to the worker (a complete no-op when empty). **Each dispatch first waits for the previous batch to complete** - this is the backpressure point, and the point where an unexpected worker exception is re-raised on the caller's thread (keys not yet dispatched remain intact in the buffer). After a re-raise it re-splits even if the buffer exceeds `batch_size`, so a single call never exceeds 1000 keys. |
 | `close(*, flush=True)` | flush (with `flush=False` the remaining buffer is discarded) -> wait for in-flight -> stop the worker. Idempotent. Subsequent `submit` / `flush` raise `ValidationError`. A worker exception is re-raised here too, but it closes fully regardless. Keys left in the buffer by a re-raise or by `flush=False` are discarded **without an OpResult**. |
 | context manager | `__exit__` is `close(flush=exc_type is None)` - on a body exception it discards the unsent buffer while still waiting for in-flight (the body exception is preserved via the `__context__` chain). |

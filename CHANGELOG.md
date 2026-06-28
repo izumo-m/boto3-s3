@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3Deleter.submit` now takes the `FileInfo` to delete (was a `str` key): the
+  deleter buffers listing entries by `info.key`, so a richer subtype
+  (`S3FileInfo` with its `etag`) rides through to each `OpResult`. Callers pass
+  `info` rather than `info.key`.
+
 ## [0.3.0] - 2026-06-27
 
 - `Storage.delete` now takes the `FileInfo` to remove (was a `str` key): a

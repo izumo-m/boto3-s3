@@ -1,7 +1,7 @@
 """Async batched S3 object deletion: ``S3Deleter``.
 
-``S3Deleter`` buffers full object keys and deletes each batch with one
-``DeleteObjects`` call (up to :data:`S3_DELETE_BATCH` keys) dispatched on a
+``S3Deleter`` buffers listing entries (``FileInfo``) and deletes each batch with
+one ``DeleteObjects`` call (up to :data:`S3_DELETE_BATCH` keys) dispatched on a
 single background worker thread, so a caller iterating ``S3Storage.scan()``
 keeps scanning while the previous batch deletes. It is the building block for
 ``S3.rm`` and ``S3.sync(delete=True)``, and is usable directly.
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ErrorTypeDef, ObjectIdentifierTypeDef
 
-    from boto3_s3.types import ResultCallback
+    from boto3_s3.types import FileInfo, ResultCallback
 
 logger = logging.getLogger(__name__)
 
@@ -49,18 +49,21 @@ S3_DELETE_BATCH = 1000
 
 
 class S3Deleter:
-    """Buffer object keys and delete them in batched ``DeleteObjects`` calls.
+    """Buffer listing entries and delete them in batched ``DeleteObjects`` calls.
 
-    Keys are FULL object keys; the target bucket and client come from
-    ``storage`` - its key/prefix part is not consulted, and the client is held
-    for the deleter's whole lifetime (do not ``storage.close()`` until this
-    deleter is closed). The buffer auto-flushes at ``batch_size``; each flush
-    runs as one ``DeleteObjects`` call on the worker while the caller keeps
-    submitting. Duplicate keys within a batch are passed through as-is (dedup
-    is the caller's concern).
+    :meth:`submit` takes a :class:`~boto3_s3.types.FileInfo`; its ``key`` is the
+    FULL object key to delete, and the rest of the entry rides along untouched
+    (a richer subtype - ``S3FileInfo`` with its ``etag`` - flows straight
+    through). The target bucket and client come from ``storage`` - its key/prefix
+    part is not consulted, and the client is held for the deleter's whole
+    lifetime (do not ``storage.close()`` until this deleter is closed). The
+    buffer auto-flushes at ``batch_size``; each flush runs as one
+    ``DeleteObjects`` call on the worker while the caller keeps submitting.
+    Duplicate keys within a batch are passed through as-is (dedup is the caller's
+    concern).
 
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
-    dispatched key, in submission order within a batch (keys abandoned by
+    submitted entry, in submission order within a batch (entries abandoned by
     ``close(flush=False)`` or by an error-path close get no result); rollup
     ``succeeded`` / ``failed`` / ``first_error`` are approximate while running
     and final after :meth:`close`. The deleter never raises ``BatchError``
@@ -74,7 +77,7 @@ class S3Deleter:
 
         with S3Deleter(storage, on_result=cb) as deleter:
             for info in storage.scan(ScanOptions(recursive=True)):
-                deleter.submit(info.key)
+                deleter.submit(info)
     """
 
     def __init__(
@@ -108,7 +111,7 @@ class S3Deleter:
         self._batch_size = batch_size
         self._operation = operation
 
-        self._buffer: list[str] = []
+        self._buffer: list[FileInfo] = []
         self._pending: Future[None] | None = None  # at most one in-flight batch
         self._closed = False
 
@@ -161,7 +164,7 @@ class S3Deleter:
         Idempotent. Afterwards the rollup counters are final and ``submit`` /
         ``flush`` raise ``ValidationError``. An unexpected worker exception (or
         one raised by ``on_result``) re-raises here; the deleter still ends up
-        closed and the worker shut down either way, and any keys left in the
+        closed and the worker shut down either way, and any entries left in the
         buffer by that re-raise (or by ``flush=False``) are abandoned without
         results.
         """
@@ -178,32 +181,33 @@ class S3Deleter:
 
     # -- submission --------------------------------------------------------
 
-    def submit(self, key: str) -> None:
-        """Buffer one full object key; auto-flush when ``batch_size`` is reached.
+    def submit(self, info: FileInfo) -> None:
+        """Buffer one entry to delete; auto-flush when ``batch_size`` is reached.
 
-        An empty key is rejected up front: S3 requires keys of length >= 1,
-        and one empty key would fail its entire batch. The key stays buffered
-        even when the auto-flush re-raises a previous batch's worker error -
-        do not submit it again after catching that error.
+        ``info.key`` is the full object key. An empty key is rejected up front:
+        S3 requires keys of length >= 1, and one empty key would fail its entire
+        batch. The entry stays buffered even when the auto-flush re-raises a
+        previous batch's worker error - do not submit it again after catching
+        that error.
         """
         self._ensure_open()
-        if not key:
+        if not info.key:
             raise ValidationError(
                 "object key must not be empty", operation=self._operation, bucket=self._bucket
             )
-        self._buffer.append(key)
+        self._buffer.append(info)
         if len(self._buffer) >= self._batch_size:
             self.flush()
 
     def flush(self) -> None:
-        """Hand the buffered keys to the worker, one batch per ``batch_size``.
+        """Hand the buffered entries to the worker, one batch per ``batch_size``.
 
         No-op when the buffer is empty. Each dispatch first waits for the
         previous batch - the backpressure point, and where an unexpected
-        worker exception re-raises on the caller thread (the keys not yet
+        worker exception re-raises on the caller thread (the entries not yet
         dispatched then stay buffered; nothing is lost). The buffer only
         exceeds ``batch_size`` after such a re-raise; the loop re-chunks it so
-        a single call never carries more than ``batch_size`` keys.
+        a single call never carries more than ``batch_size`` entries.
         """
         self._ensure_open()
         while self._buffer:
@@ -227,10 +231,10 @@ class S3Deleter:
         self._pending = None  # cleared first: a failed batch is reported once
         pending.result()
 
-    def _run_batch(self, batch: list[str]) -> None:
+    def _run_batch(self, batch: list[FileInfo]) -> None:
         """Delete one batch with a single ``DeleteObjects`` call (worker thread)."""
         logger.debug("deleting %d object(s) from s3://%s", len(batch), self._bucket)
-        objects: list[ObjectIdentifierTypeDef] = [{"Key": key} for key in batch]
+        objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for info in batch]
         kwargs: dict[str, Any] = {
             "Bucket": self._bucket,
             "Delete": {"Objects": objects, "Quiet": True},
@@ -247,14 +251,14 @@ class S3Deleter:
             # s3_errors does not translate (a programming error) propagates
             # and re-raises at the caller's next non-empty flush() or close().
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, exc)
-            failures = dict.fromkeys(batch, exc)
+            failures = {info.key: exc for info in batch}
         else:
             failures = self._translate_errors(response.get("Errors", []), batch)
-        for key in batch:
-            self._record(key, failures.get(key))
+        for info in batch:
+            self._record(info, failures.get(info.key))
 
     def _translate_errors(
-        self, entries: list[ErrorTypeDef], batch: list[str]
+        self, entries: list[ErrorTypeDef], batch: list[FileInfo]
     ) -> dict[str, Boto3S3Error]:
         """Map the response ``Errors[]`` onto the submitted keys (worker thread).
 
@@ -267,7 +271,7 @@ class S3Deleter:
         """
         if not entries:
             return {}
-        submitted = set(batch)
+        submitted = {info.key for info in batch}
         failures: dict[str, Boto3S3Error] = {}
         for err in entries:
             key = err.get("Key")
@@ -299,7 +303,7 @@ class S3Deleter:
         text = f"An error occurred ({code}) when calling the DeleteObjects operation: {message}"
         return category(text, operation=self._operation, bucket=self._bucket, key=key)
 
-    def _record(self, key: str, error: Boto3S3Error | None) -> None:
+    def _record(self, info: FileInfo, error: Boto3S3Error | None) -> None:
         """Update the rollup and dispatch one ``OpResult`` (worker thread).
 
         Counters update before ``on_result`` runs: if the callback raises, its
@@ -315,7 +319,9 @@ class S3Deleter:
                 self._first_error = error
             outcome = OpOutcome.FAILED
         if self._on_result is not None:
-            self._on_result(OpResult(kind=OpKind.DELETE, key=key, outcome=outcome, error=error))
+            self._on_result(
+                OpResult(kind=OpKind.DELETE, key=info.key, outcome=outcome, error=error)
+            )
 
 
 __all__ = ["S3_DELETE_BATCH", "S3Deleter"]

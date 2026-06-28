@@ -398,7 +398,8 @@ class _SyncDeletes:
                         operation="sync",
                     )
                 )
-            self._deleter.submit(key)
+            assert pair.dst is not None
+            self._deleter.submit(pair.dst)
             return
         # Local or custom (s3open) destination: remove the orphan synchronously
         # through the backend's own Storage.delete(info), sharing the local
@@ -2128,7 +2129,7 @@ class S3:
             storage, request_payer=request_payer, on_result=on_result, operation="rm"
         ) as deleter:
             for info in list_storage.scan(options):
-                deleter.submit(info.key)
+                deleter.submit(info)
         if deleter.failed:
             raise BatchError(
                 f"{deleter.failed} of {deleter.failed + deleter.succeeded} deletes failed",
