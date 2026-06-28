@@ -224,9 +224,11 @@ class TestOutputShapes:
     def test_excluded_dest_objects_survive_delete(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The patterns compile against BOTH roots; the destination-side set
-        # is what shields excluded objects from --delete (aws-cli
-        # create_filter's dst_rootdir).
+        # The single source-root filter is applied to the destination stream
+        # too (sync.md section 1), shielding excluded objects from --delete.
+        # For this relative pattern that matches aws-cli's per-root filtering
+        # (sync.md section 7 records the absolute-pattern edge as the only
+        # divergence).
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client(
