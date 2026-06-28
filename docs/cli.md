@@ -143,9 +143,12 @@ These implement the policy in
      (`['AWS_DEFAULT_PROFILE', 'AWS_PROFILE']` - the long-standing botocore #1725),
      so a bare `boto3.Session(profile_name=None)` would pick a *different* profile
      when both env vars are set. `build_client` / `build_service_client` resolve it
-     via `_resolve_profile` to restore aws's order - the first env var that is
+     via `resolve_profile` to restore aws's order - the first env var that is
      *present* wins, an empty value included (`AWS_PROFILE=` -> the empty profile ->
-     ProfileNotFound, matching aws). This correction is the CLI layer's alone: the
+     ProfileNotFound, matching aws). The `[s3]` scoped read
+     (`load_scoped_s3_config`, section 8) goes through the same `resolve_profile`,
+     so the transfer config and the client never read a *different* profile when
+     both env vars are set. This correction is the CLI layer's alone: the
      library (`S3.client`'s `boto3.client` fallback) stays boto3/botocore-faithful
      and keeps stock order on purpose - the same library=boto3 / CLI=aws split as
      [`crt.md`](./crt.md).
@@ -734,7 +737,11 @@ the library. The overall design and the library side (boto3-faithful) are in
 [`crt.md`](./crt.md). The key points on the CLI side (aws-cli-faithful):
 
 - **Reading and validating `[s3]`**: `runtimeconfig.load_scoped_s3_config` reads
-  it with `session.get_scoped_config().get("s3", {})`, and
+  it with `session.get_scoped_config().get("s3", {})` off a session opened on the
+  same profile as the client (`resolve_profile`, aws-cli's
+  `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` precedence - section 4; a bare
+  `Session(profile_name=None)` would read a *different* profile's `[s3]` when both
+  env vars are set), and
   `RuntimeConfig.build_config` converts sizes / rates / bools exactly as aws-cli
   `transferconfig.py`, resolves the `default` -> `classic` alias, and validates
   invalid values. An invalid value is a `Boto3S3Error` (rc 255 - aws-cli's
