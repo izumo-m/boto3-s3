@@ -83,9 +83,9 @@ def _run(
         source_client, source_calls = make_recording_client(source_responses)
     # Mirror the orchestration: an mv upload deletes its source through the
     # source storage's Storage.delete(info), so wire both like production does.
-    source_storage: LocalStorage | None = None
+    src_storage: LocalStorage | None = None
     if is_move and kind is OpKind.UPLOAD:
-        source_storage = LocalStorage(".")
+        src_storage = LocalStorage(".")
         for it in items:
             if it.src_info is None and it.src_path is not None:
                 it.src_info = FileInfo(key=it.src_path.replace(os.sep, "/"))
@@ -94,7 +94,7 @@ def _run(
         kind,
         client,
         source_client=source_client,
-        source_storage=source_storage,
+        src_storage=src_storage,
         transfer_config=config,
         options=options,
         is_move=is_move,

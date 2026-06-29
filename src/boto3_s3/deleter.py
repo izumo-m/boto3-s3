@@ -104,6 +104,9 @@ class S3Deleter:
         # Eager: resolve the client and bucket now, so a bad storage fails on
         # the caller thread and the worker never triggers the lazy
         # (deliberately unlocked) client construction.
+        # Retained whole (not just client/bucket) so a completion can surface the
+        # backend handle alongside the deleted entry on its result.
+        self._storage: S3Storage = storage
         self._client: S3Client = storage.get_client()
         self._bucket: str = storage.bucket
         self._request_payer = request_payer

@@ -849,10 +849,11 @@ class S3:
             kind,
             client,
             source_client=source_client,
-            # mv deletes its upload source (local file or custom backend) through
-            # that storage's Storage.delete; download/copy sources are S3, deleted
-            # with a DeleteObject, so they need no source_storage.
-            source_storage=src_storage if kind is OpKind.UPLOAD else None,
+            # The run's two resolved sides, carried onto each result; src_storage
+            # is also mv's upload-source delete handle (consulted only on the
+            # upload route - a download/copy S3 source is removed via DeleteObject).
+            src_storage=src_storage,
+            dst_storage=dst_storage,
             transfer_config=transfer_config,
             options=options,
             operation=operation,
@@ -1081,6 +1082,7 @@ class S3:
             head=info.head if is_s3_info else None,
             src_bucket=bucket,
             src_key=info.key,
+            src_info=info,
             dst_path=dest,
             src_display=src_display,
             dst_display=dest,
@@ -1143,6 +1145,7 @@ class S3:
             head=info.head if is_s3_info else None,
             src_bucket=bucket,
             src_key=info.key,
+            src_info=info,
             dst_bucket=dst_bucket,
             dst_key=dest[len(dst_bucket) + 1 :],
             src_display=src_display,
@@ -1460,6 +1463,7 @@ class S3:
             head=info.head if is_s3_info else None,
             src_bucket=bucket,
             src_key=info.key,
+            src_info=info,
             dst_fileobj=None if dryrun else plan.dst.open(open_key, "wb", size=info.size),
             src_display=src_display,
             dst_display=_open_side_display(plan.dst, open_key),
@@ -1535,6 +1539,8 @@ class S3:
         transferrer = Transferrer(
             kind,
             storage.get_client(),
+            src_storage=src_storage,
+            dst_storage=dst_storage,
             transfer_config=transfer_config,
             options=options,
             operation="cp",
@@ -1823,6 +1829,8 @@ class S3:
             kind,
             client,
             source_client=source_client,
+            src_storage=src_storage,
+            dst_storage=dst_storage,
             transfer_config=transfer_config,
             options=options,
             operation="sync",
@@ -1999,9 +2007,9 @@ class S3:
         info = pair.src
         assert info is not None
         if plan.paths_type == "opens3":
-            return self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
-        if plan.paths_type == "s3open":
-            return self._open_download_item(
+            item = self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
+        elif plan.paths_type == "s3open":
+            item = self._open_download_item(
                 plan,
                 info,
                 bucket=src_bucket,
@@ -2009,16 +2017,16 @@ class S3:
                 options=options,
                 dryrun=dryrun,
             )
-        if kind is OpKind.UPLOAD:
-            return self._upload_item_from_info(
+        elif kind is OpKind.UPLOAD:
+            item = self._upload_item_from_info(
                 plan, info, dst_bucket=dst_bucket, transferrer=transferrer
             )
-        if kind is OpKind.DOWNLOAD:
+        elif kind is OpKind.DOWNLOAD:
             # The case-conflict gate guards only pairs missing at the
             # destination (the aws-cli strategy slot); an exact-key update
             # never conflicts.
             gate = case_gate if pair.dst is None else None
-            return self._download_item_from_info(
+            item = self._download_item_from_info(
                 plan,
                 info,
                 bucket=src_bucket,
@@ -2026,14 +2034,21 @@ class S3:
                 options=options,
                 case_gate=gate,
             )
-        return self._copy_item_from_info(
-            plan,
-            info,
-            bucket=src_bucket,
-            dst_bucket=dst_bucket,
-            transferrer=transferrer,
-            options=options,
-        )
+        else:
+            item = self._copy_item_from_info(
+                plan,
+                info,
+                bucket=src_bucket,
+                dst_bucket=dst_bucket,
+                transferrer=transferrer,
+                options=options,
+            )
+        # Stamp the comparison's destination entry (None for a new key) so a
+        # completion can report both sides of the sync pair. A gate that consumed
+        # the item returns None - nothing to stamp.
+        if item is not None:
+            item.dst_info = pair.dst
+        return item
 
     # -- deletion ---------------------------------------------------------
 

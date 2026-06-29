@@ -119,10 +119,15 @@ class TransferItem:
     src_bucket: str | None = None
     src_key: str | None = None
     src_path: str | None = None
-    # The source listing entry on an upload: mv unlinks the source through its
-    # logical ``/``-key, distinct from ``src_path`` (the path s3transfer reads).
-    # None on non-upload / stream routes.
+    # The source listing entry, set by every listing-driven route (upload,
+    # download, copy, and their open-route variants); ``mv`` unlinks an upload
+    # source through its logical ``/``-key, distinct from ``src_path`` (the path
+    # s3transfer reads). None only on the stream routes, which list nothing.
     src_info: FileInfo | None = None
+    # The destination listing entry, set only by ``sync`` (the pair's ``dst``):
+    # the pre-existing object an update overwrites, or None for a new key. cp /
+    # mv never list the destination, so it stays None there.
+    dst_info: FileInfo | None = None
     dst_bucket: str | None = None
     dst_key: str | None = None
     dst_path: str | None = None
@@ -265,10 +270,13 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe. ``source_storage`` is the upload source's own
-    ``Storage`` (a local file or a custom backend), supplied so ``mv`` deletes
-    the source through its ``Storage.delete``; it is ``None`` for download / copy
-    (an S3 source, removed with a DeleteObject) and for a stream upload.
+    s3transfer's own size probe. ``src_storage`` / ``dst_storage`` are the run's
+    two resolved side ``Storage`` objects (``plan.src`` / ``plan.dst``), retained
+    so a completion can resolve or report either endpoint alongside its listing
+    entries. ``src_storage`` doubles as ``mv``'s upload-source delete handle: an
+    upload source - a local file or a custom backend - is removed through its
+    ``Storage.delete``, while a download / copy S3 source is removed with a
+    DeleteObject instead (so the handle is consulted only on the upload route).
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
@@ -284,7 +292,8 @@ class Transferrer:
         client: S3Client,
         *,
         source_client: S3Client | None = None,
-        source_storage: Storage | None = None,
+        src_storage: Storage | None = None,
+        dst_storage: Storage | None = None,
         transfer_config: TransferConfig | None = None,
         options: TransferOptions | None = None,
         operation: str = "cp",
@@ -299,10 +308,12 @@ class Transferrer:
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
-        # The upload source's own Storage (local or custom backend), supplied so
-        # mv deletes the source through its Storage.delete. None for download /
-        # copy (S3 source -> DeleteObject) and for a stream upload.
-        self._source_storage = source_storage
+        # The run's two resolved side Storages (plan.src / plan.dst), retained so
+        # a completion can surface them with the listing entries; _src_storage is
+        # also mv's upload-source delete handle (consulted only on the upload
+        # route - a download / copy S3 source is removed with a DeleteObject).
+        self._src_storage = src_storage
+        self._dst_storage = dst_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
@@ -528,10 +539,10 @@ class Transferrer:
         ``RequestPayer`` forwarded like every other request.
         """
         if self._kind is OpKind.UPLOAD:
-            source_storage = self._source_storage
+            src_storage = self._src_storage
             info = item.src_info
-            assert source_storage is not None and info is not None
-            return _DeleteSource(lambda: source_storage.delete(info))
+            assert src_storage is not None and info is not None
+            return _DeleteSource(lambda: src_storage.delete(info))
         client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
         bucket = item.src_bucket
         key = item.src_key
