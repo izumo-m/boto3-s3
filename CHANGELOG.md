@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Rename `OpKind` to `TransferType`, and the `kind` field on `OpResult` /
+  `TransferProgress` to `transfer_type` (aws-cli's name for the record's verb).
+  Frees `.kind` to mean only a `FileInfo`'s `FileKind`.
 - `S3Deleter.submit` now takes the `FileInfo` to delete (was a `str` key): the
   deleter buffers listing entries by `info.key`, so a richer subtype
   (`S3FileInfo` with its `etag`) rides through to each `OpResult`. Callers pass

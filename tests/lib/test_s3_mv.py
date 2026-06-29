@@ -21,7 +21,7 @@ from botocore.exceptions import ClientError
 from boto3_s3.exceptions import BatchError, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.types import OpKind, OpOutcome, OpResult
+from boto3_s3.types import OpOutcome, OpResult, TransferType
 
 _SYNC = TransferConfig(use_threads=False)
 _MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
@@ -121,7 +121,7 @@ class TestUploadMove:
         assert calls[0].params["Key"] == "up/a.txt"
         assert not src.exists()
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-        assert all(result.kind is OpKind.MOVE for result in results)
+        assert all(result.transfer_type is TransferType.MOVE for result in results)
 
     def test_filtered_out_files_are_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
         from boto3_s3 import GlobFilter
@@ -159,7 +159,7 @@ class TestUploadMove:
         assert calls == []
         assert src.exists()
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
-        assert results[0].kind is OpKind.MOVE
+        assert results[0].transfer_type is TransferType.MOVE
 
 
 class TestDownloadMove:
@@ -177,7 +177,7 @@ class TestDownloadMove:
         assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
-        assert [result.kind for result in results] == [OpKind.MOVE]
+        assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_recursive_skips_markers_without_deleting_them(self, tmp_path: Path) -> None:
         # Folder markers never transfer (aws-cli filegenerator), so a move
@@ -216,7 +216,7 @@ class TestDownloadMove:
         # aws-cli uses operation_name, not "move") but reports kind MOVE.
         assert _ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
-        assert results[0].kind is OpKind.MOVE
+        assert results[0].transfer_type is TransferType.MOVE
         assert "Unable to perform download operations on GLACIER objects." in str(results[0].error)
 
     def test_no_overwrite_existing_destination_skips_without_deleting(self, tmp_path: Path) -> None:
@@ -278,7 +278,7 @@ class TestCopyMove:
         assert _ops(source_calls) == ["HeadObject", "DeleteObject"]
         assert source_calls[1].params == {"Bucket": "src-b", "Key": "d/a.txt"}
         assert _ops(dest_calls) == ["CopyObject"]
-        assert [result.kind for result in results] == [OpKind.MOVE]
+        assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_request_payer_reaches_the_delete(self) -> None:
         from tests.utils.recorder import make_recording_client

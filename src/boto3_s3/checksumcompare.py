@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING, Any
 
 from boto3_s3.comparator import SyncPair
 from boto3_s3.localstorage import to_native_path
-from boto3_s3.types import LocalFileInfo, OpKind
+from boto3_s3.types import LocalFileInfo, TransferType
 
 if TYPE_CHECKING:
     from boto3_s3.s3 import S3
@@ -128,7 +128,7 @@ class ChecksumComparison:
     # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries
     # ``.bucket`` / ``.get_client()``. Held as ``Any`` so this module needs no
     # ``S3Storage`` import (which would drag ``botocore`` at import time); the
-    # route (``pair.kind``) tells which side is the S3 one.
+    # route (``pair.transfer_type``) tells which side is the S3 one.
     _src_storage: Any
     _dst_storage: Any
     _request_payer: str | None
@@ -162,20 +162,21 @@ class ChecksumComparison:
             and src.size != dst.size
         ):
             return True
-        kind = pair.kind
-        if kind is OpKind.COPY:
+        transfer_type = pair.transfer_type
+        if transfer_type is TransferType.COPY:
             return self._copy_differs(src.key, dst.key)
-        if kind is OpKind.UPLOAD:
+        if transfer_type is TransferType.UPLOAD:
             local, remote_key, storage = src, dst.key, self._dst_storage
-        elif kind is OpKind.DOWNLOAD:
+        elif transfer_type is TransferType.DOWNLOAD:
             local, remote_key, storage = dst, src.key, self._src_storage
         else:  # MOVE / DELETE never reach a copy decision; guard defensively.
             raise ValueError(
-                f"checksum comparison cannot judge a {kind.value!r} pair: {pair.key!r}"
+                f"checksum comparison cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
             )
         if not isinstance(local, LocalFileInfo):
             raise ValueError(
-                f"checksum comparison: no local side for pair {pair.key!r} (kind={kind.value})"
+                f"checksum comparison: no local side for pair {pair.key!r} "
+                f"(transfer_type={transfer_type.value})"
             )
         remote = self._remote_checksum(storage, remote_key)
         if remote is None:

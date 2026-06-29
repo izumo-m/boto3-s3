@@ -29,7 +29,7 @@ from boto3_s3.exceptions import BatchError, Boto3S3Error, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, OpKind, OpOutcome, OpResult
+from boto3_s3.types import FileInfo, FileKind, OpOutcome, OpResult, TransferType
 from tests.utils.recorder import ApiCall, make_recording_client
 
 if TYPE_CHECKING:
@@ -423,7 +423,7 @@ class TestMoveRoute:
     For ``opens3`` (custom source) the source is removed through its own
     ``Storage.delete`` after each successful upload; for ``s3open`` (custom
     destination) the source is S3, deleted with ``DeleteObject`` like any other
-    download mv. Both report ``OpKind.MOVE``. A failed transfer keeps its source
+    download mv. Both report ``TransferType.MOVE``. A failed transfer keeps its source
     (``_CloseFileobj`` sits before the source delete, so a failed commit blocks
     it too).
     """
@@ -443,7 +443,9 @@ class TestMoveRoute:
         # The single source's open key is "" (the location itself); delete uses it.
         assert src.deletes == [""]
         assert src._store == {}
-        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.SUCCEEDED)
+        ]
 
     def test_recursive_move_from_a_custom_source_deletes_each_key(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
@@ -474,7 +476,9 @@ class TestMoveRoute:
         assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
         assert store == {"": b"payload"}
-        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.SUCCEEDED)
+        ]
 
     def test_move_from_a_source_without_delete_is_rejected(self) -> None:
         src = _NoDeleteMem({"": b"x"}, location="mem://data/a.txt")

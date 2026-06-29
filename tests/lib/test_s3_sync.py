@@ -30,10 +30,10 @@ from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
-    OpKind,
     OpOutcome,
     OpResult,
     TransferOptions,
+    TransferType,
 )
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -156,7 +156,7 @@ class TestSyncUpload:
         assert delete_params["RequestPayer"] == "requester"
         keys = [entry["Key"] for entry in delete_params["Delete"]["Objects"]]
         assert keys == ["p/extra1.txt", "p/sub/extra2.txt"]
-        deleted = [r for r in results if r.kind is OpKind.DELETE]
+        deleted = [r for r in results if r.transfer_type is TransferType.DELETE]
         assert {r.outcome for r in deleted} == {OpOutcome.SUCCEEDED}
         assert sorted(r.src for r in deleted if r.src) == [
             "s3://bucket/p/extra1.txt",
@@ -230,10 +230,10 @@ class TestSyncUpload:
             on_result=results.append,
         )
         assert _ops(calls) == ["ListObjectsV2"]
-        outcomes = {(r.kind, r.key): r.outcome for r in results}
+        outcomes = {(r.transfer_type, r.key): r.outcome for r in results}
         assert outcomes == {
-            (OpKind.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
-            (OpKind.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
+            (TransferType.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
+            (TransferType.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
     def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
@@ -428,7 +428,9 @@ class TestSyncDownload:
         )
         assert _ops(calls) == ["ListObjectsV2"]
         assert not stale.exists() and not nested.exists()
-        assert {(r.kind, r.outcome) for r in results} == {(OpKind.DELETE, OpOutcome.SUCCEEDED)}
+        assert {(r.transfer_type, r.outcome) for r in results} == {
+            (TransferType.DELETE, OpOutcome.SUCCEEDED)
+        }
         assert sorted(r.src for r in results if r.src) == [str(stale), str(nested)]
 
     def test_dryrun_delete_keeps_local_files(self, tmp_path: Path) -> None:

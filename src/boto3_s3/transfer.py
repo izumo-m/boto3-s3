@@ -1,7 +1,7 @@
 """The ``s3transfer``-backed transfer engine: ``TransferItem`` + ``Transferrer``.
 
 One ``Transferrer`` serves one ``cp`` / ``mv`` / ``sync`` run, whose items all
-share a single :class:`OpKind` (a run moves bytes in one direction). It owns
+share a single :class:`TransferType` (a run moves bytes in one direction). It owns
 the ``s3transfer.manager.TransferManager`` - built lazily on the first
 :meth:`Transferrer.submit`, so dry runs and all-skipped runs never instantiate
 it (no thread pools spun up; the ``s3transfer`` module itself is imported
@@ -57,13 +57,13 @@ from boto3_s3.s3storage import translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
     FileInfo,
-    OpKind,
     OpOutcome,
     OpResult,
     ProgressCallback,
     ResultCallback,
     TransferOptions,
     TransferProgress,
+    TransferType,
 )
 
 if TYPE_CHECKING:
@@ -279,7 +279,7 @@ class Transferrer:
     DeleteObject instead (so the handle is consulted only on the upload route).
 
     ``is_move`` turns the run into ``mv``: every record reports
-    ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
+    ``TransferType.MOVE`` while ``transfer_type`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
     transfer deletes its source - ``Storage.delete`` for an upload (local or
     custom backend), a per-object DeleteObject on the owning side's client
@@ -288,7 +288,7 @@ class Transferrer:
 
     def __init__(
         self,
-        kind: OpKind,
+        transfer_type: TransferType,
         client: S3Client,
         *,
         source_client: S3Client | None = None,
@@ -301,10 +301,12 @@ class Transferrer:
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
     ) -> None:
-        if kind not in (OpKind.UPLOAD, OpKind.DOWNLOAD, OpKind.COPY):
-            raise ValidationError(f"Transferrer does not handle {kind!r}", operation=operation)
-        self._kind = kind
-        self._result_kind = OpKind.MOVE if is_move else kind
+        if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
+            raise ValidationError(
+                f"Transferrer does not handle {transfer_type!r}", operation=operation
+            )
+        self._transfer_type = transfer_type
+        self._result_transfer_type = TransferType.MOVE if is_move else transfer_type
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
@@ -319,8 +321,13 @@ class Transferrer:
         self._operation = operation
         # Library-side --no-overwrite gate (the CLI rejects earlier with rc 252):
         # only uploads/copies carry IfNoneMatch, and an old botocore lacks it.
-        if self._options.get("no_overwrite") and kind in (OpKind.UPLOAD, OpKind.COPY):
-            reason = conditional_write_unsupported_reason(client, is_copy=kind is OpKind.COPY)
+        if self._options.get("no_overwrite") and transfer_type in (
+            TransferType.UPLOAD,
+            TransferType.COPY,
+        ):
+            reason = conditional_write_unsupported_reason(
+                client, is_copy=transfer_type is TransferType.COPY
+            )
             if reason is not None:
                 raise Boto3S3Error(reason, operation=operation)
         self._on_progress = on_progress
@@ -386,7 +393,7 @@ class Transferrer:
             self._warned += 1
         self._emit(
             OpResult(
-                kind=self._result_kind,
+                transfer_type=self._result_transfer_type,
                 key=key,
                 outcome=OpOutcome.WARNED,
                 error=Boto3S3Error(body, operation=self._operation),
@@ -409,7 +416,7 @@ class Transferrer:
         """
         self._emit(
             OpResult(
-                kind=self._result_kind,
+                transfer_type=self._result_transfer_type,
                 key=key,
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
@@ -429,9 +436,9 @@ class Transferrer:
         ``grants`` shape surfaces as an in-flight error like aws (rc 1 via
         the fatal-error path), never as an upfront usage error.
         """
-        if self._kind is OpKind.UPLOAD:
+        if self._transfer_type is TransferType.UPLOAD:
             self._submit_upload(item)
-        elif self._kind is OpKind.DOWNLOAD:
+        elif self._transfer_type is TransferType.DOWNLOAD:
             self._submit_download(item)
         else:
             self._submit_copy(item)
@@ -513,7 +520,9 @@ class Transferrer:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(
-                _Progress(self._result_kind, item.compare_key, item.size, self._on_progress)
+                _Progress(
+                    self._result_transfer_type, item.compare_key, item.size, self._on_progress
+                )
             )
         return subscribers
 
@@ -538,12 +547,14 @@ class Transferrer:
         manager's client for downloads, the source-side client for copies - with
         ``RequestPayer`` forwarded like every other request.
         """
-        if self._kind is OpKind.UPLOAD:
+        if self._transfer_type is TransferType.UPLOAD:
             src_storage = self._src_storage
             info = item.src_info
             assert src_storage is not None and info is not None
             return _DeleteSource(lambda: src_storage.delete(info))
-        client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
+        client: Any = (
+            self._client if self._transfer_type is TransferType.DOWNLOAD else self._source_client
+        )
         bucket = item.src_bucket
         key = item.src_key
         params = requestparams.map_delete_object_params(self._options)
@@ -596,7 +607,7 @@ class Transferrer:
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
         """
-        if self._kind is OpKind.COPY:
+        if self._transfer_type is TransferType.COPY:
             return None
         preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
         if str(preferred).lower() == "classic":
@@ -637,7 +648,7 @@ class Transferrer:
         error: BaseException | None = None,
     ) -> OpResult:
         return OpResult(
-            kind=self._result_kind,
+            transfer_type=self._result_transfer_type,
             key=item.compare_key,
             outcome=outcome,
             bytes_transferred=bytes_transferred,
@@ -745,9 +756,9 @@ class _Progress:
     """
 
     def __init__(
-        self, kind: OpKind, key: str, size: int | None, callback: ProgressCallback
+        self, transfer_type: TransferType, key: str, size: int | None, callback: ProgressCallback
     ) -> None:
-        self._kind = kind
+        self._transfer_type = transfer_type
         self._key = key
         self._size = size
         self._callback = callback
@@ -757,7 +768,10 @@ class _Progress:
     def _fire(self, bytes_done: int) -> None:
         self._callback(
             TransferProgress(
-                kind=self._kind, key=self._key, bytes_done=bytes_done, bytes_total=self._size
+                transfer_type=self._transfer_type,
+                key=self._key,
+                bytes_done=bytes_done,
+                bytes_total=self._size,
             )
         )
 

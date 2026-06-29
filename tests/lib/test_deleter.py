@@ -23,12 +23,12 @@ from boto3_s3 import (
     ConfigurationError,
     LocalStorage,
     NotFoundError,
-    OpKind,
     OpOutcome,
     OpResult,
     S3Deleter,
     S3FileInfo,
     S3Storage,
+    TransferType,
     TransportError,
     ValidationError,
 )
@@ -221,7 +221,7 @@ class TestResults:
             deleter.submit(_info(key))
         deleter.close()
         assert [r.key for r in results] == ["a", "b", "c"]
-        assert all(r.kind is OpKind.DELETE for r in results)
+        assert all(r.transfer_type is TransferType.DELETE for r in results)
         assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
         assert all(r.bytes_transferred == 0 for r in results)
         assert all(r.error is None for r in results)

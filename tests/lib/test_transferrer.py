@@ -26,11 +26,11 @@ from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsup
 from boto3_s3.types import (
     CopyPropsMode,
     FileInfo,
-    OpKind,
     OpOutcome,
     OpResult,
     TransferOptions,
     TransferProgress,
+    TransferType,
 )
 from tests.utils.fakemodel import model_only_client
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -67,7 +67,7 @@ class _OpenSink(io.BytesIO):
 
 
 def _run(
-    kind: OpKind,
+    kind: TransferType,
     items: list[TransferItem],
     responses: list[dict[str, Any] | Exception],
     *,
@@ -84,7 +84,7 @@ def _run(
     # Mirror the orchestration: an mv upload deletes its source through the
     # source storage's Storage.delete(info), so wire both like production does.
     src_storage: LocalStorage | None = None
-    if is_move and kind is OpKind.UPLOAD:
+    if is_move and kind is TransferType.UPLOAD:
         src_storage = LocalStorage(".")
         for it in items:
             if it.src_info is None and it.src_path is not None:
@@ -119,7 +119,7 @@ class TestUpload:
             src_display=str(src),
             dst_display="s3://bucket/up/a.bin",
         )
-        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Key"] == "up/a.bin"
@@ -136,7 +136,7 @@ class TestUpload:
             compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
         )
         calls, _, _, transferrer = _run(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             [item],
             [{"UploadId": "upload-id"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
         )
@@ -155,7 +155,7 @@ class TestUpload:
         item = TransferItem(
             compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
         )
-        calls, _, _, _ = _run(OpKind.UPLOAD, [item], [{}])
+        calls, _, _, _ = _run(TransferType.UPLOAD, [item], [{}])
         assert calls[0].params["ContentType"] == "application/json"
 
     def test_explicit_content_type_wins_over_the_guess(self, tmp_path: Path) -> None:
@@ -165,7 +165,7 @@ class TestUpload:
             compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD, [item], [{}], options=TransferOptions(content_type="text/x-probe")
+            TransferType.UPLOAD, [item], [{}], options=TransferOptions(content_type="text/x-probe")
         )
         assert calls[0].params["ContentType"] == "text/x-probe"
 
@@ -176,7 +176,7 @@ class TestUpload:
             compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD, [item], [{}], options=TransferOptions(guess_mime_type=False)
+            TransferType.UPLOAD, [item], [{}], options=TransferOptions(guess_mime_type=False)
         )
         assert "ContentType" not in calls[0].params
 
@@ -187,7 +187,7 @@ class TestUpload:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             [item],
             [{}],
             options=TransferOptions(
@@ -206,7 +206,7 @@ class TestUpload:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, results, transferrer = _run(
-            OpKind.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
+            TransferType.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
         )
         assert _ops(calls) == ["PutObject"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
@@ -224,7 +224,7 @@ class TestUpload:
         )
         client, calls = make_recording_client([{}])
         transferrer = Transferrer(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             client,
             options=TransferOptions(grants=["bogus"]),
             transfer_config=_SYNC_CONFIG,
@@ -254,7 +254,7 @@ class TestDownload:
     def test_single_download_writes_file_and_stamps_mtime(self, tmp_path: Path) -> None:
         item = self._item(tmp_path)
         calls, _, results, transferrer = _run(
-            OpKind.DOWNLOAD, [item], [self._get_object_response()]
+            TransferType.DOWNLOAD, [item], [self._get_object_response()]
         )
         # Size + etag were both provided, so no HeadObject probe happened.
         assert _ops(calls) == ["GetObject"]
@@ -267,7 +267,7 @@ class TestDownload:
 
     def test_parent_directories_are_created(self, tmp_path: Path) -> None:
         item = self._item(tmp_path, dest="deep/er/tree/a.bin")
-        _run(OpKind.DOWNLOAD, [item], [self._get_object_response()])
+        _run(TransferType.DOWNLOAD, [item], [self._get_object_response()])
         assert (tmp_path / "deep" / "er" / "tree" / "a.bin").exists()
 
     def test_utime_failure_warns_but_succeeds(
@@ -279,7 +279,9 @@ class TestDownload:
             raise OSError(1, "Operation not permitted")
 
         monkeypatch.setattr(os, "utime", _boom)
-        _, _, results, transferrer = _run(OpKind.DOWNLOAD, [item], [self._get_object_response()])
+        _, _, results, transferrer = _run(
+            TransferType.DOWNLOAD, [item], [self._get_object_response()]
+        )
         assert (transferrer.succeeded, transferrer.failed, transferrer.warned) == (1, 0, 1)
         outcomes = [result.outcome for result in results]
         assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
@@ -292,7 +294,7 @@ class TestDownload:
     def test_download_request_params(self, tmp_path: Path) -> None:
         item = self._item(tmp_path)
         calls, _, _, _ = _run(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             [item],
             [self._get_object_response()],
             options=TransferOptions(request_payer="requester"),
@@ -312,7 +314,9 @@ class TestDownload:
             dst_display="-",
         )
         head = {"ContentLength": 7, "ETag": '"abc123"'}
-        calls, _, results, _ = _run(OpKind.DOWNLOAD, [item], [head, self._get_object_response()])
+        calls, _, results, _ = _run(
+            TransferType.DOWNLOAD, [item], [head, self._get_object_response()]
+        )
         assert _ops(calls) == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"payload"
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
@@ -340,7 +344,7 @@ class TestCopy:
         # Below the threshold S3's CopyObject carries metadata and tags by
         # itself: no directives are sent and no extra reads happen.
         calls, source_calls, _, transferrer = _run(
-            OpKind.COPY, [self._item()], [{}], source_responses=[]
+            TransferType.COPY, [self._item()], [{}], source_responses=[]
         )
         assert _ops(calls) == ["CopyObject"]
         assert calls[0].params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.bin"}
@@ -351,7 +355,7 @@ class TestCopy:
 
     def test_copy_props_none_replaces_both_directives(self) -> None:
         calls, _, _, _ = _run(
-            OpKind.COPY,
+            TransferType.COPY,
             [self._item()],
             [{}],
             source_responses=[],
@@ -362,7 +366,7 @@ class TestCopy:
 
     def test_explicit_metadata_directive_disables_copy_props(self) -> None:
         calls, source_calls, _, _ = _run(
-            OpKind.COPY,
+            TransferType.COPY,
             [self._item(size=9 * _MIB)],
             [
                 {"UploadId": "u"},
@@ -384,7 +388,7 @@ class TestCopy:
     def test_multipart_metadata_injected_from_cached_head(self) -> None:
         head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
         calls, source_calls, _, _ = _run(
-            OpKind.COPY,
+            TransferType.COPY,
             [self._item(size=9 * _MIB, head=head)],
             [
                 {"UploadId": "u"},
@@ -414,7 +418,7 @@ class TestCopy:
             {"TagSet": [{"Key": "team", "Value": "a&b"}]},
         ]
         calls, source_calls, _, transferrer = _run(
-            OpKind.COPY,
+            TransferType.COPY,
             [self._item(size=9 * _MIB)],
             responses,
             source_responses=source_responses,
@@ -440,7 +444,10 @@ class TestCopy:
             {"TagSet": [{"Key": "k", "Value": big}]},
         ]
         calls, _, results, transferrer = _run(
-            OpKind.COPY, [self._item(size=9 * _MIB)], responses, source_responses=source_responses
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
         )
         assert _ops(calls)[-1] == "PutObjectTagging"
         assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "k", "Value": big}]}
@@ -463,7 +470,10 @@ class TestCopy:
             {"TagSet": [{"Key": "k", "Value": big}]},
         ]
         calls, _, results, transferrer = _run(
-            OpKind.COPY, [self._item(size=9 * _MIB)], responses, source_responses=source_responses
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
         )
         assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
@@ -476,7 +486,7 @@ class TestNonTransferOutcomes:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
         item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
-        with Transferrer(OpKind.UPLOAD, client, on_result=results.append) as transferrer:
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
             transferrer.dryrun(item)
         assert calls == []
         assert transferrer._manager is None  # pyright: ignore[reportPrivateUsage]
@@ -486,12 +496,12 @@ class TestNonTransferOutcomes:
     def test_warn_and_skip_count_into_the_rollup(self) -> None:
         client, _ = make_recording_client([])
         results: list[OpResult] = []
-        with Transferrer(OpKind.DOWNLOAD, client, on_result=results.append) as transferrer:
+        with Transferrer(TransferType.DOWNLOAD, client, on_result=results.append) as transferrer:
             transferrer.warn("Skipping file s3://b/k. Object is of storage class GLACIER.", key="k")
             transferrer.skip(TransferItem(compare_key="k2"))
         assert (transferrer.warned, transferrer.skipped) == (1, 1)
         assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
-        assert results[0].kind is OpKind.DOWNLOAD
+        assert results[0].transfer_type is TransferType.DOWNLOAD
 
     def test_progress_events_accumulate(self, tmp_path: Path) -> None:
         # Driven through a download: the canned GetObject Body is genuinely
@@ -510,7 +520,7 @@ class TestNonTransferOutcomes:
             dst_path=str(tmp_path / "a.bin"),
         )
         with Transferrer(
-            OpKind.DOWNLOAD, client, transfer_config=_SYNC_CONFIG, on_progress=progress.append
+            TransferType.DOWNLOAD, client, transfer_config=_SYNC_CONFIG, on_progress=progress.append
         ) as transferrer:
             transferrer.submit(item)
         assert progress[0].bytes_done == 0  # queued notification
@@ -526,7 +536,7 @@ class TestNoOverwrite:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD, [item], [{}], options=TransferOptions(no_overwrite=True)
+            TransferType.UPLOAD, [item], [{}], options=TransferOptions(no_overwrite=True)
         )
         assert calls[0].params["IfNoneMatch"] == "*"
 
@@ -537,7 +547,7 @@ class TestNoOverwrite:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, results, transferrer = _run(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             [item],
             [_client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
@@ -554,7 +564,7 @@ class TestNoOverwrite:
             compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             [item],
             [{"UploadId": "u"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
             options=TransferOptions(no_overwrite=True),
@@ -580,7 +590,7 @@ class TestNoOverwrite:
             dst_key="cp/a.bin",
         )
         calls, _, _, _ = _run(
-            OpKind.COPY,
+            TransferType.COPY,
             [item],
             [
                 {"UploadId": "u"},
@@ -618,17 +628,17 @@ class TestMove:
         item = TransferItem(
             compare_key="a.bin", size=7, src_path=str(src), dst_bucket="b", dst_key="k"
         )
-        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}], is_move=True)
+        calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert _ops(calls) == ["PutObject"]
         assert not src.exists()
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-        assert all(result.kind is OpKind.MOVE for result in results)
+        assert all(result.transfer_type is TransferType.MOVE for result in results)
 
     def test_download_move_deletes_on_the_managers_client(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, results, transferrer = _run(
-            OpKind.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
+            TransferType.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
         )
         assert _ops(calls) == ["GetObject", "DeleteObject"]
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
@@ -638,7 +648,7 @@ class TestMove:
         assert item.mtime is not None
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
-        assert [result.kind for result in results] == [OpKind.MOVE]
+        assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_copy_move_deletes_on_the_source_client(self) -> None:
         item = TransferItem(
@@ -651,7 +661,7 @@ class TestMove:
             dst_key="cp/a.bin",
         )
         calls, source_calls, _, transferrer = _run(
-            OpKind.COPY, [item], [{}], source_responses=[{}], is_move=True
+            TransferType.COPY, [item], [{}], source_responses=[{}], is_move=True
         )
         assert _ops(calls) == ["CopyObject"]
         assert _ops(source_calls) == ["DeleteObject"]
@@ -661,7 +671,7 @@ class TestMove:
     def test_request_payer_flows_to_the_delete(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, _, _ = _run(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             [item],
             [self._get_object_response(), {}],
             options=TransferOptions(request_payer="requester"),
@@ -673,7 +683,7 @@ class TestMove:
     def test_delete_failure_flips_the_move_to_failed(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, results, transferrer = _run(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             [item],
             [self._get_object_response(), _client_error("AccessDenied", 403, "DeleteObject")],
             is_move=True,
@@ -699,7 +709,7 @@ class TestMove:
             raise OSError(13, "Permission denied", str(path))
 
         monkeypatch.setattr(os, "remove", _boom)
-        _, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}], is_move=True)
+        _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         # aws prints the OS's own wording after "move failed: ...".
         assert str(results[0].error) == f"[Errno 13] Permission denied: '{src}'"
@@ -711,12 +721,15 @@ class TestMove:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, results, transferrer = _run(
-            OpKind.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")], is_move=True
+            TransferType.UPLOAD,
+            [item],
+            [_client_error("NoSuchBucket", 404, "PutObject")],
+            is_move=True,
         )
         assert _ops(calls) == ["PutObject"]
         assert src.exists()
         assert transferrer.failed == 1
-        assert [result.kind for result in results] == [OpKind.MOVE]
+        assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_no_overwrite_rejection_keeps_the_source(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
@@ -725,7 +738,7 @@ class TestMove:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, results, transferrer = _run(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             [item],
             [_client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
@@ -762,7 +775,7 @@ class TestMove:
             {"TagSet": [{"Key": "k", "Value": big}]},
         ]
         calls, source_calls, results, transferrer = _run(
-            OpKind.COPY, [item], responses, source_responses=source_responses, is_move=True
+            TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
         assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
@@ -776,7 +789,7 @@ class TestMove:
         results: list[OpResult] = []
         item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
         with Transferrer(
-            OpKind.UPLOAD, client, is_move=True, on_result=results.append
+            TransferType.UPLOAD, client, is_move=True, on_result=results.append
         ) as transferrer:
             transferrer.dryrun(item)
             transferrer.warn("Skipping file a. probe", key="a")
@@ -787,7 +800,7 @@ class TestMove:
             OpOutcome.WARNED,
             OpOutcome.SKIPPED,
         ]
-        assert all(result.kind is OpKind.MOVE for result in results)
+        assert all(result.transfer_type is TransferType.MOVE for result in results)
 
 
 class TestChecksumOptions:
@@ -800,7 +813,7 @@ class TestChecksumOptions:
             compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
         )
         calls, _, _, _ = _run(
-            OpKind.UPLOAD, [item], [{}], options=TransferOptions(checksum_algorithm="SHA256")
+            TransferType.UPLOAD, [item], [{}], options=TransferOptions(checksum_algorithm="SHA256")
         )
         assert calls[0].params["ChecksumAlgorithm"] == "SHA256"
 
@@ -814,7 +827,7 @@ class TestChecksumOptions:
             dst_path=str(tmp_path / "out.bin"),
         )
         calls, _, _, _ = _run(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             [item],
             [{"Body": io.BytesIO(b"payload"), "ContentLength": 7, "ETag": '"abc123"'}],
             options=TransferOptions(checksum_mode="ENABLED"),
@@ -832,7 +845,7 @@ class TestStreams:
             src_display="-",
             dst_display="s3://bucket/streaming.txt",
         )
-        calls, _, results, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "streaming.txt"
         # No path means no mimetypes guess: ContentType stays unset.
@@ -848,7 +861,7 @@ class TestStreams:
             dst_bucket="bucket",
             dst_key="streaming.txt",
         )
-        calls, _, _, transferrer = _run(OpKind.UPLOAD, [item], [{}])
+        calls, _, _, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
 
@@ -865,7 +878,7 @@ class TestStreams:
         # Without size+etag s3transfer probes the object itself (the aws
         # stream wire shape: HeadObject then GetObject).
         calls, _, _, transferrer = _run(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             [item],
             [
                 {"ContentLength": 4, "ETag": '"foo"'},
@@ -880,7 +893,7 @@ class TestStreams:
 class TestEngineSelection:
     """``preferred_transfer_client`` resolution at the manager seam (docs/crt.md)."""
 
-    def _transferrer(self, kind: OpKind, config: Any) -> Transferrer:
+    def _transferrer(self, kind: TransferType, config: Any) -> Transferrer:
         client, _ = make_recording_client([])
         return Transferrer(kind, client, transfer_config=config)
 
@@ -889,7 +902,7 @@ class TestEngineSelection:
 
         # conftest pins is_optimized_for_system to False; boto3's 'auto'
         # answer there is the classic manager.
-        manager = self._transferrer(OpKind.UPLOAD, None)._get_manager()
+        manager = self._transferrer(TransferType.UPLOAD, None)._get_manager()
         assert isinstance(manager, TransferManager)
 
     def test_explicit_crt_delegates_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -904,7 +917,7 @@ class TestEngineSelection:
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         config = TransferConfig(preferred_transfer_client="crt")
-        transferrer = self._transferrer(OpKind.UPLOAD, config)
+        transferrer = self._transferrer(TransferType.UPLOAD, config)
         assert transferrer._get_manager() is sentinel
         assert seen and seen[0][1] is config
 
@@ -918,7 +931,7 @@ class TestEngineSelection:
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", boom)
         config = TransferConfig(preferred_transfer_client="crt")
-        manager = self._transferrer(OpKind.COPY, config)._get_manager()
+        manager = self._transferrer(TransferType.COPY, config)._get_manager()
         assert isinstance(manager, TransferManager)
 
     def test_crt_unavailable_falls_back_to_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -930,7 +943,7 @@ class TestEngineSelection:
         # incompatible singleton) silently selects classic.
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", lambda c, cfg: None)
         config = TransferConfig(preferred_transfer_client="crt")
-        manager = self._transferrer(OpKind.UPLOAD, config)._get_manager()
+        manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
         assert isinstance(manager, TransferManager)
 
 
@@ -984,16 +997,22 @@ class TestConditionalWriteSupport:
 
     def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
         with pytest.raises(Boto3S3Error, match=r"1\.35\.16"):
-            Transferrer(OpKind.UPLOAD, model_only_client(set()), options={"no_overwrite": True})
+            Transferrer(
+                TransferType.UPLOAD, model_only_client(set()), options={"no_overwrite": True}
+            )
 
     def test_transferrer_rejects_no_overwrite_copy_on_old_botocore(self) -> None:
         client = model_only_client({"PutObject"})  # upload ok, copy not yet
         with pytest.raises(Boto3S3Error, match=r"1\.41\.0"):
-            Transferrer(OpKind.COPY, client, source_client=client, options={"no_overwrite": True})
+            Transferrer(
+                TransferType.COPY, client, source_client=client, options={"no_overwrite": True}
+            )
 
     def test_transferrer_allows_no_overwrite_download_on_old_botocore(self) -> None:
         # Downloads never send IfNoneMatch, so an old model must not block them.
-        Transferrer(OpKind.DOWNLOAD, model_only_client(set()), options={"no_overwrite": True})
+        Transferrer(TransferType.DOWNLOAD, model_only_client(set()), options={"no_overwrite": True})
 
     def test_transferrer_allows_no_overwrite_when_supported(self) -> None:
-        Transferrer(OpKind.UPLOAD, model_only_client({"PutObject"}), options={"no_overwrite": True})
+        Transferrer(
+            TransferType.UPLOAD, model_only_client({"PutObject"}), options={"no_overwrite": True}
+        )

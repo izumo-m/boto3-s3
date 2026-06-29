@@ -146,7 +146,7 @@ class TransferPrinter:
                 self.warned += 1
             if self._quiet:
                 return
-            verb = result.kind.value
+            verb = result.transfer_type.value
             if result.dest is None:
                 # A one-endpoint record (sync's deletions): aws prints
                 # `delete: <path>` with no `to` clause.

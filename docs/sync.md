@@ -46,7 +46,7 @@ dst listing -- filter (visibility) --+        |
 
 | module | role |
 |---|---|
-| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as a `SyncPair`; makes no decision), the `SyncPair` / `PairFilter` types, `compare_size_time` (the internal aws-compatible default, a function reading `pair.kind`), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as a `SyncPair`; makes no decision), the `SyncPair` / `PairFilter` types, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
@@ -76,14 +76,14 @@ decision** is a separate axis, `compare`: it selects exactly one strategy (it
 does not compose), where a custom strategy is a `PairFilter =
 Callable[[SyncPair], bool]` that needs both sides (True = copy).
 
-- `SyncPair(key, kind, src, dst)` - `key` is the relative compare key common to
-  both sides (`/`-separated); `kind` is the sync's direction, stamped on every
+- `SyncPair(key, transfer_type, src, dst)` - `key` is the relative compare key common to
+  both sides (`/`-separated); `transfer_type` is the sync's direction, stamped on every
   pair so a filter applies the direction-asymmetric rules without being told the
   route. `dst is None` = new, `src is None` = deletion candidate, both present =
   update decision.
 - `compare` is the copy decision, a single strategy: `None` (default) is the aws
   size + last-modified judgment, equivalently `AwsCliComparison()` (it reads the
-  direction from `pair.kind`, so it works across routes); `True` copies every
+  direction from `pair.transfer_type`, so it works across routes); `True` copies every
   source, `False` copies nothing; any `PairFilter` is a custom strategy - the
   building blocks `AwsCliComparison` (section 4) / `EtagComparison` /
   `ChecksumComparison` (sections 8-9) are drop-in replacements. The aws-cli
@@ -117,7 +117,7 @@ s3.sync(src, dst,
 
 `compare=None` is `AwsCliComparison()`, the public form of the internal
 `compare_size_time(pair, size_only, exact_timestamps)` (direction from
-`pair.kind`); tune it with `AwsCliComparison(size_only=...)` /
+`pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
 write-guard the sync loop applies first (section 3):
 

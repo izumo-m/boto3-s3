@@ -11,7 +11,7 @@ copy or delete. This module is layer two's material:
   records. It is a **pure pairer** - every key on either side comes out and
   no copy/delete judgment happens here (unlike aws-cli's comparator, which
   buries its strategy calls in the merge loop; splitting them keeps each
-  side replaceable). It only stamps the run's direction (``kind``) onto each
+  side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
 - A :data:`PairFilter` is a copy judgment: a predicate over a pair where
   ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
@@ -21,7 +21,7 @@ copy or delete. This module is layer two's material:
 - :func:`compare_size_time` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); ``S3.sync`` selects it
-  for ``compare=None`` and reads the direction from ``pair.kind``.
+  for ``compare=None`` and reads the direction from ``pair.transfer_type``.
 - :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
   the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
   (a copy strategy is *chosen*, not composed).
@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import TypeVar
 
-from boto3_s3.types import FileInfo, OpKind
+from boto3_s3.types import FileInfo, TransferType
 
 _T = TypeVar("_T")
 
@@ -47,9 +47,9 @@ class SyncPair:
 
     ``key`` is the compare key - the entry's path relative to its side's
     sync root, ``/``-separated on every platform - so name-based filters
-    need not care where either root lives. ``kind`` is the sync's transfer
-    direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a pair
-    filter can apply the direction-asymmetric rules without being told the
+    need not care where either root lives. ``transfer_type`` is the sync's
+    transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
+    pair filter can apply the direction-asymmetric rules without being told the
     route. ``src`` / ``dst`` are the sides' listing entries; exactly one may
     be ``None``:
 
@@ -59,7 +59,7 @@ class SyncPair:
     """
 
     key: str
-    kind: OpKind
+    transfer_type: TransferType
     src: FileInfo | None = None
     dst: FileInfo | None = None
 
@@ -104,11 +104,11 @@ class Comparator:
     Inputs must be ascending by compare key - that is the ``Storage.scan``
     ordering contract (S3 byte order; the local walk sorts to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
-    to a :data:`PairFilter` for that. ``kind`` (the run's direction) is
+    to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment.
     """
 
-    kind: OpKind
+    transfer_type: TransferType
 
     def compare(
         self,
@@ -121,27 +121,27 @@ class Comparator:
         streams, lazily consumed - pairing streams page-by-page listings
         without materializing either side.
         """
-        kind = self.kind
+        transfer_type = self.transfer_type
         src_iter = iter(src_entries)
         dst_iter = iter(dst_entries)
         src = next(src_iter, None)
         dst = next(dst_iter, None)
         while src is not None and dst is not None:
             if src[0] < dst[0]:
-                yield SyncPair(key=src[0], kind=kind, src=src[1])
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
             elif src[0] > dst[0]:
-                yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
+                yield SyncPair(key=dst[0], transfer_type=transfer_type, dst=dst[1])
                 dst = next(dst_iter, None)
             else:
-                yield SyncPair(key=src[0], kind=kind, src=src[1], dst=dst[1])
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dst=dst[1])
                 src = next(src_iter, None)
                 dst = next(dst_iter, None)
         while src is not None:
-            yield SyncPair(key=src[0], kind=kind, src=src[1])
+            yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
         while dst is not None:
-            yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
+            yield SyncPair(key=dst[0], transfer_type=transfer_type, dst=dst[1])
             dst = next(dst_iter, None)
 
 
@@ -151,7 +151,7 @@ def compare_size_time(
     """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
 
     Not a public building block: ``S3.sync`` selects it for ``compare=None``.
-    The transfer direction comes from ``pair.kind`` (the time rule is
+    The transfer direction comes from ``pair.transfer_type`` (the time rule is
     direction-asymmetric). A source-only pair always copies (aws-cli's
     ``MissingFileSync``). For a pair present on both sides:
 
@@ -181,15 +181,15 @@ def compare_size_time(
     same_size = src.size is not None and src.size == dst.size
     if size_only and not exact_timestamps:
         return not same_size
-    return not same_size or not _times_match(src, dst, pair.kind, exact_timestamps)
+    return not same_size or not _times_match(src, dst, pair.transfer_type, exact_timestamps)
 
 
-def _times_match(src: FileInfo, dst: FileInfo, kind: OpKind, exact: bool) -> bool:
+def _times_match(src: FileInfo, dst: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
     """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
     if src.mtime is None or dst.mtime is None:
         return False
     delta = (dst.mtime - src.mtime).total_seconds()
-    if kind is OpKind.DOWNLOAD:
+    if transfer_type is TransferType.DOWNLOAD:
         return delta == 0 if exact else delta <= 0
     return delta >= 0
 

@@ -47,7 +47,7 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   dispatch. `submit` / `flush` / `close` are contracted to be used from a single
   caller thread (single producer).
 - `on_result` is called **from the worker thread**. One `OpResult` per
-  dispatched key (`kind=OpKind.DELETE`, `bytes_transferred=0`, in submit order
+  dispatched key (`transfer_type=TransferType.DELETE`, `bytes_transferred=0`, in submit order
   within a batch; it is not emitted for keys in a discarded buffer). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the

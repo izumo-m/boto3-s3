@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 
 from boto3_s3.comparator import SyncPair
 from boto3_s3.localstorage import to_native_path
-from boto3_s3.types import LocalFileInfo, OpKind, S3FileInfo
+from boto3_s3.types import LocalFileInfo, S3FileInfo, TransferType
 
 if TYPE_CHECKING:
     from boto3_s3.s3 import S3
@@ -133,20 +133,21 @@ class EtagComparison:
             # Differing sizes mean differing content - copy without trusting an
             # ETag (MD5 can collide) or reading the local file.
             return True
-        if pair.kind is OpKind.COPY:
+        if pair.transfer_type is TransferType.COPY:
             # Both sides are S3 listings: the stored ETags are directly comparable.
             return _etag_differs(_s3_etag(src), _s3_etag(dst))
-        if pair.kind is OpKind.UPLOAD:
+        if pair.transfer_type is TransferType.UPLOAD:
             local, remote = src, dst
-        elif pair.kind is OpKind.DOWNLOAD:
+        elif pair.transfer_type is TransferType.DOWNLOAD:
             local, remote = dst, src
         else:  # MOVE never reaches a copy decision; guard defensively.
             raise ValueError(
-                f"etag comparison cannot judge a {pair.kind.value!r} pair: {pair.key!r}"
+                f"etag comparison cannot judge a {pair.transfer_type.value!r} pair: {pair.key!r}"
             )
         if not isinstance(local, LocalFileInfo):
             raise ValueError(
-                f"etag comparison: no local side for pair {pair.key!r} (kind={pair.kind.value})"
+                f"etag comparison: no local side for pair {pair.key!r} "
+                f"(transfer_type={pair.transfer_type.value})"
             )
         remote_etag = _s3_etag(remote)
         if not remote_etag:

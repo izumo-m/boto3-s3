@@ -50,7 +50,7 @@ solidified design is added here.
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
 | `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
 | `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_for_root` / `build_filter`: compile a globsieve matcher and wrap it to match `FileInfo.compare_key`. rm uses a key-derived root, cp / mv use a naming-derived root, sync's single filter is compiled against the source root and applied to both sides) |
-| `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. A lock-guarded aggregator called from worker threads. The verb is `OpKind.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
+| `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. A lock-guarded aggregator called from worker threads. The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form) |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
@@ -465,7 +465,7 @@ normal return is **2** if the warned count > 0, else 0.
 **Output** (`TransferPrinter`, aws-cli `ResultPrinter` shape): success
 `upload|download|copy: <src> to <dst>` (stdout. the local side is rendered
 relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryrun) `
-prefix, failure `<kind> failed: <src> to <dst> <err>` (stderr), warning `warning:
+prefix, failure `<transfer_type> failed: <src> to <dst> <err>` (stderr), warning `warning:
 <body>` (stderr, the body assembled by the library with aws-cli wording). Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask

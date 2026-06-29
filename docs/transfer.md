@@ -42,7 +42,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   boto3, classic maps `use_threads=False` to `NonThreadedExecutor` (a
   determinization lever for tests; CRT ignores the threading-family knobs - also
   as in boto3). The overall design of CRT mode is in [`crt.md`](./crt.md).
-- A `Transferrer` is **one instance with a single `OpKind` per cp / mv / sync
+- A `Transferrer` is **one instance with a single `TransferType` per cp / mv / sync
   run** (one run has a single byte direction). The client placement is: upload
   uses the dst client, download uses the src client, and an s3->s3 copy uses the
   dst client + `manager.copy(source_client=src client)` (a settled fact of the
@@ -295,7 +295,7 @@ validation, and gates (sharing `S3._run_transfer`). The differences are the two
 things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 `S3.mv`.
 
-- **The reported kind is `OpKind.MOVE` (`"move"`) on every path**. The path's
+- **The reported transfer_type is `TransferType.MOVE` (`"move"`) on every path**. The path's
   kind remains in the submit branch and in the glacier wording (section 8 - equivalent
   to operation_name). With the same separation as aws-cli's `transfer_type='move'`
   relabeling, every record of result / progress / warning / dryrun calls itself

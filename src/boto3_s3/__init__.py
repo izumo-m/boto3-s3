@@ -64,7 +64,6 @@ if TYPE_CHECKING:
         FileInfo,
         FileKind,
         LocalFileInfo,
-        OpKind,
         OpOutcome,
         OpResult,
         ProgressCallback,
@@ -73,6 +72,7 @@ if TYPE_CHECKING:
         ScanOptions,
         TransferOptions,
         TransferProgress,
+        TransferType,
     )
 
     __version__: str
@@ -98,7 +98,6 @@ __all__ = [
     "LocalStorage",
     "Location",
     "NotFoundError",
-    "OpKind",
     "OpOutcome",
     "OpResult",
     "PairFilter",
@@ -117,6 +116,7 @@ __all__ = [
     "TransferConfig",
     "TransferOptions",
     "TransferProgress",
+    "TransferType",
     "TransportError",
     "ValidationError",
     "__version__",
@@ -190,7 +190,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "FileInfo": "boto3_s3.types",
     "FileKind": "boto3_s3.types",
     "LocalFileInfo": "boto3_s3.types",
-    "OpKind": "boto3_s3.types",
+    "TransferType": "boto3_s3.types",
     "OpOutcome": "boto3_s3.types",
     "OpResult": "boto3_s3.types",
     "ProgressCallback": "boto3_s3.types",

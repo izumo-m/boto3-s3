@@ -12,24 +12,28 @@ from pathlib import Path
 
 import pytest
 
-from boto3_s3.types import OpKind, OpOutcome, OpResult, TransferProgress
+from boto3_s3.types import OpOutcome, OpResult, TransferProgress, TransferType
 from boto3_s3_cli.progress import TransferPrinter
 
 
 def _result(
     outcome: OpOutcome,
     *,
-    kind: OpKind = OpKind.UPLOAD,
+    transfer_type: TransferType = TransferType.UPLOAD,
     key: str = "a.txt",
     src: str | None = "s3://b/a.txt",
     dest: str | None = "s3://b/copy.txt",
     error: BaseException | None = None,
 ) -> OpResult:
-    return OpResult(kind=kind, key=key, outcome=outcome, src=src, dest=dest, error=error)
+    return OpResult(
+        transfer_type=transfer_type, key=key, outcome=outcome, src=src, dest=dest, error=error
+    )
 
 
 def _progress(key: str, done: int, total: int | None) -> TransferProgress:
-    return TransferProgress(kind=OpKind.UPLOAD, key=key, bytes_done=done, bytes_total=total)
+    return TransferProgress(
+        transfer_type=TransferType.UPLOAD, key=key, bytes_done=done, bytes_total=total
+    )
 
 
 class TestResultLines:
@@ -48,7 +52,7 @@ class TestResultLines:
 
     def test_dryrun_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
         printer = TransferPrinter()
-        printer.on_result(_result(OpOutcome.DRYRUN, kind=OpKind.COPY))
+        printer.on_result(_result(OpOutcome.DRYRUN, transfer_type=TransferType.COPY))
         assert capsys.readouterr().out == "(dryrun) copy: s3://b/a.txt to s3://b/copy.txt\n"
 
     def test_failure_line_goes_to_stderr_with_the_error(

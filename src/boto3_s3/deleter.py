@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
 from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, s3_errors
-from boto3_s3.types import OpKind, OpOutcome, OpResult
+from boto3_s3.types import OpOutcome, OpResult, TransferType
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -323,7 +323,12 @@ class S3Deleter:
             outcome = OpOutcome.FAILED
         if self._on_result is not None:
             self._on_result(
-                OpResult(kind=OpKind.DELETE, key=info.key, outcome=outcome, error=error)
+                OpResult(
+                    transfer_type=TransferType.DELETE,
+                    key=info.key,
+                    outcome=outcome,
+                    error=error,
+                )
             )
 
 

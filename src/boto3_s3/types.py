@@ -164,7 +164,7 @@ class ScanOptions:
     on_warning: Callable[[str], None] | None = None
 
 
-class OpKind(enum.Enum):
+class TransferType(enum.Enum):
     """Kind of byte-moving operation a result/progress record describes.
 
     ``MOVE`` is a reporting kind only: an ``mv`` run still routes each item
@@ -222,7 +222,7 @@ class CopyPropsMode(enum.Enum):
 class TransferProgress:
     """Byte-level progress for one in-flight item, passed to ``on_progress``."""
 
-    kind: OpKind
+    transfer_type: TransferType
     key: str
     bytes_done: int
     bytes_total: int | None = None
@@ -237,9 +237,11 @@ class OpResult:
     can render aws-style ``upload: {src} to {dest}`` lines without re-deriving
     the pair; ``rm`` leaves them ``None``. ``key`` stays the operation-relative
     identifier (the transfer ``compare_key`` / the deleted object key).
+    ``transfer_type`` is the wire verb of the record (aws-cli's ``transfer_type``:
+    ``upload`` / ``download`` / ``copy`` / ``move`` / ``delete``).
     """
 
-    kind: OpKind
+    transfer_type: TransferType
     key: str
     outcome: OpOutcome
     bytes_transferred: int = 0
@@ -329,7 +331,6 @@ __all__ = [
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
-    "OpKind",
     "OpOutcome",
     "OpResult",
     "ProgressCallback",
@@ -338,4 +339,5 @@ __all__ = [
     "ScanOptions",
     "TransferOptions",
     "TransferProgress",
+    "TransferType",
 ]
