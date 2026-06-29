@@ -163,6 +163,40 @@ class TestSyncUpload:
             "s3://bucket/p/sub/extra2.txt",
         ]
 
+    def test_delete_result_carries_dst_info_and_storage(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        client, _ = make_recording_client([_listing(("p/orphan.txt", 2)), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        deleted = [r for r in results if r.transfer_type is TransferType.DELETE]
+        assert len(deleted) == 1
+        assert deleted[0].dst_info is not None and deleted[0].dst_info.key == "p/orphan.txt"
+        assert deleted[0].src_info is None
+        assert isinstance(deleted[0].dst_storage, S3Storage)
+
+    def test_copy_update_result_carries_both_compared_sides(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"new")  # size 3 != the dst's 2 -> an update upload
+        client, _ = make_recording_client([_listing(("p/a.txt", 2)), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        copied = [r for r in results if r.transfer_type is not TransferType.DELETE]
+        assert len(copied) == 1
+        assert copied[0].src_info is not None and copied[0].src_info.key.endswith("a.txt")
+        assert copied[0].dst_info is not None and copied[0].dst_info.key == "p/a.txt"
+
     def test_delete_predicate_narrows_the_lane(self, tmp_path: Path) -> None:
         # A FileFilter predicate (the orphan's FileInfo) narrows which orphans
         # are deleted - the delete lane is rm over the orphans.

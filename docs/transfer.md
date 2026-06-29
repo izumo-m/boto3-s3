@@ -84,7 +84,13 @@ the SDK at module import time.
    family ahead of the Done recorder).
 6. `_Completion` (**always last**) - bridges the future's result to the rollup
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
-   a successful download it post-success stamps the mtime (section 5).
+   a successful download it post-success stamps the mtime (section 5). Each
+   record carries the item's listing entries (`src_info` / `dst_info`) and the
+   run's side `Storage`s; on success `extra_info` takes the affected object's
+   response metadata from `future.meta.etag` (`{"ETag": ...}`) - s3transfer sets
+   it for a copy (the CopyObject response) and a download (its source) but **not
+   an upload** (the PutObject response is discarded), so an upload's `extra_info`
+   is `None`.
 
 Items 3-5 are route-conditional (download / copy / mv only); the always-present
 spine is 1-2 then 6 (the numbering is the slot order, not a single chain that

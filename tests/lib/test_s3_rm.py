@@ -134,6 +134,14 @@ class TestRmSingleKey:
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "data/a.txt"}]
         assert [(r.key, r.outcome) for r in results] == [("data/a.txt", OpOutcome.SUCCEEDED)]
 
+    def test_result_carries_dst_info_and_storage(self) -> None:
+        # The deleted object rides through on dst_info / dst_storage, so an app
+        # can identify exactly what was removed.
+        client = _FakeS3Client()
+        results = _rm("s3://b/data/a.txt", client)
+        assert results[0].dst_info is not None and results[0].dst_info.key == "data/a.txt"
+        assert isinstance(results[0].dst_storage, S3Storage)
+
     def test_request_payer_forwarded(self) -> None:
         client = _FakeS3Client()
         _rm("s3://b/k", client, request_payer="requester")

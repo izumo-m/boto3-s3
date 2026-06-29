@@ -39,7 +39,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path
-from boto3_s3.s3storage import S3Storage, s3_errors
+from boto3_s3.s3storage import S3Storage, s3_errors, translate_boto_error
 from boto3_s3.storage import Location, Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
@@ -101,13 +101,21 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
 def _emit_result(
     on_result: ResultCallback | None,
     *,
-    key: str,
+    info: FileInfo,
+    storage: S3Storage,
     outcome: OpOutcome,
-    error: BaseException | None = None,
+    error: Boto3S3Error | None = None,
 ) -> None:
     if on_result is not None:
         on_result(
-            OpResult(transfer_type=TransferType.DELETE, key=key, outcome=outcome, error=error)
+            OpResult(
+                transfer_type=TransferType.DELETE,
+                key=info.key,
+                outcome=outcome,
+                error=error,
+                dst_info=info,
+                dst_storage=storage,
+            )
         )
 
 
@@ -364,7 +372,7 @@ class _SyncDeletes:
         # Storage.delete(info) - share one set of counters.
         self._local_succeeded = 0
         self._local_failed = 0
-        self._local_first_error: BaseException | None = None
+        self._local_first_error: Boto3S3Error | None = None
 
     def open(self, stack: ExitStack) -> None:
         self._stack = stack
@@ -380,17 +388,18 @@ class _SyncDeletes:
         return deleter + self._local_failed
 
     @property
-    def first_error(self) -> BaseException | None:
+    def first_error(self) -> Boto3S3Error | None:
         if self._deleter is not None and self._deleter.first_error is not None:
             return self._deleter.first_error
         return self._local_first_error
 
-    def submit(self, pair: SyncPair, plan: naming.TransferPlan) -> None:
+    def submit(self, pair: SyncPair) -> None:
+        info = pair.dst
+        assert info is not None  # the delete lane runs only on destination-only pairs
         dst = self._dst
         if isinstance(dst, S3Storage):
-            key = plan.dst_root[len(dst.bucket) + 1 :] + pair.key
             if self._dryrun:
-                self._emit(key=key, outcome=OpOutcome.DRYRUN, src=self._display(key))
+                self._emit(info=info, outcome=OpOutcome.DRYRUN, src=self._display(info.key))
                 return
             if self._deleter is None:
                 assert self._stack is not None
@@ -402,77 +411,77 @@ class _SyncDeletes:
                         operation="sync",
                     )
                 )
-            assert pair.dst is not None
-            self._deleter.submit(pair.dst)
+            self._deleter.submit(info)
             return
         # Local or custom (s3open) destination: remove the orphan synchronously
         # through the backend's own Storage.delete(info), sharing the local
-        # counters. The delete maps the OS / backend error into the library
-        # taxonomy (its message is what aws prints), so the catch is broad.
-        info = pair.dst
-        assert info is not None
+        # counters. A backend error is mapped into the library taxonomy (the same
+        # translate the byte-moving delete path uses), so every result carries a
+        # Boto3S3Error and the message aws prints survives; the catch is broad.
         if not isinstance(dst, LocalStorage):
             display = _open_side_display(dst, pair.key)
             if self._dryrun:
-                self._emit(key=pair.key, outcome=OpOutcome.DRYRUN, src=display)
+                self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
                 return
             try:
                 dst.delete(info)
             except Exception as exc:
-                self._local_failed += 1
-                if self._local_first_error is None:
-                    self._local_first_error = exc
-                self._emit(key=pair.key, outcome=OpOutcome.FAILED, src=display, error=exc)
+                self._emit(
+                    info=info, outcome=OpOutcome.FAILED, src=display, error=self._fail(exc, info)
+                )
                 return
             self._local_succeeded += 1
-            self._emit(key=pair.key, outcome=OpOutcome.SUCCEEDED, src=display)
+            self._emit(info=info, outcome=OpOutcome.SUCCEEDED, src=display)
             return
         native = to_native_path(info.key)
         if self._dryrun:
-            self._emit(key=pair.key, outcome=OpOutcome.DRYRUN, src=native)
+            self._emit(info=info, outcome=OpOutcome.DRYRUN, src=native)
             return
         try:
             dst.delete(info)
         except Exception as exc:
-            self._local_failed += 1
-            if self._local_first_error is None:
-                self._local_first_error = exc
-            self._emit(key=pair.key, outcome=OpOutcome.FAILED, src=native, error=exc)
+            self._emit(info=info, outcome=OpOutcome.FAILED, src=native, error=self._fail(exc, info))
             return
         self._local_succeeded += 1
-        self._emit(key=pair.key, outcome=OpOutcome.SUCCEEDED, src=native)
+        self._emit(info=info, outcome=OpOutcome.SUCCEEDED, src=native)
+
+    def _fail(self, exc: Exception, info: FileInfo) -> Boto3S3Error:
+        """Map a synchronous-delete error into the taxonomy and count it."""
+        error = translate_boto_error(exc, operation="sync", key=info.key)
+        self._local_failed += 1
+        if self._local_first_error is None:
+            self._local_first_error = error
+        return error
 
     def _display(self, key: str) -> str:
         assert isinstance(self._dst, S3Storage)
         return f"s3://{self._dst.bucket}/{key}"
 
     def _relay(self, result: OpResult) -> None:
-        # The deleter reports bare keys; re-emit with the rendered endpoint
-        # so consumers print aws's `delete: s3://bucket/key` without
-        # re-deriving it.
-        self._emit(
-            key=result.key,
-            outcome=result.outcome,
-            src=self._display(result.key),
-            error=result.error,
-        )
+        # The deleter builds the full delete record (dst_info / dst_storage); add
+        # the rendered endpoint so consumers print aws's `delete: s3://bucket/key`.
+        result.src = self._display(result.key)
+        if self._on_result is not None:
+            self._on_result(result)
 
     def _emit(
         self,
         *,
-        key: str,
+        info: FileInfo,
         outcome: OpOutcome,
         src: str,
-        error: BaseException | None = None,
+        error: Boto3S3Error | None = None,
     ) -> None:
         if self._on_result is not None:
             self._on_result(
                 OpResult(
                     transfer_type=TransferType.DELETE,
-                    key=key,
+                    key=info.key,
                     outcome=outcome,
                     error=error,
                     src=src,
+                    dst_info=info,
+                    dst_storage=self._dst,
                 )
             )
 
@@ -1909,7 +1918,7 @@ class S3:
                     assert pair.dst is not None
                     if not delete_keep(pair.dst):
                         return
-                deletes.submit(pair, plan)
+                deletes.submit(pair)
 
             _run_sync_pairs(
                 Comparator(transfer_type).compare(src_entries, dst_entries),
@@ -2154,7 +2163,7 @@ class S3:
 
         if dryrun:
             for info in list_storage.scan(options):
-                _emit_result(on_result, key=info.key, outcome=OpOutcome.DRYRUN)
+                _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
             return
 
         with S3Deleter(
@@ -2211,7 +2220,7 @@ class S3:
         if item_filter is not None and not item_filter(info):
             return
         if dryrun:
-            _emit_result(on_result, key=key, outcome=OpOutcome.DRYRUN)
+            _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
             return
         try:
             storage.delete(info, request_payer=request_payer)
@@ -2219,7 +2228,7 @@ class S3:
             # The single key is still one batch item (aws counts it as a task
             # failure -> "delete failed:" + rc 1), so aggregate rather than
             # re-raising the category error.
-            _emit_result(on_result, key=key, outcome=OpOutcome.FAILED, error=exc)
+            _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.FAILED, error=exc)
             raise BatchError(
                 "1 of 1 deletes failed",
                 succeeded=0,
@@ -2228,7 +2237,7 @@ class S3:
                 skipped=0,
                 operation="rm",
             ) from exc
-        _emit_result(on_result, key=key, outcome=OpOutcome.SUCCEEDED)
+        _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.SUCCEEDED)
 
     # -- bucket / signing -------------------------------------------------
 

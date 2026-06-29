@@ -397,6 +397,8 @@ class Transferrer:
                 key=key,
                 outcome=OpOutcome.WARNED,
                 error=Boto3S3Error(body, operation=self._operation),
+                src_storage=self._src_storage,
+                dst_storage=self._dst_storage,
             )
         )
 
@@ -420,6 +422,8 @@ class Transferrer:
                 key=key,
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
+                src_storage=self._src_storage,
+                dst_storage=self._dst_storage,
             )
         )
 
@@ -645,7 +649,8 @@ class Transferrer:
         outcome: OpOutcome,
         *,
         bytes_transferred: int = 0,
-        error: BaseException | None = None,
+        error: Boto3S3Error | None = None,
+        extra_info: Mapping[str, Any] | None = None,
     ) -> OpResult:
         return OpResult(
             transfer_type=self._result_transfer_type,
@@ -655,20 +660,36 @@ class Transferrer:
             error=error,
             src=item.src_display or None,
             dest=item.dst_display or None,
+            src_info=item.src_info,
+            dst_info=item.dst_info,
+            src_storage=self._src_storage,
+            dst_storage=self._dst_storage,
+            extra_info=extra_info,
         )
 
     def _emit(self, result: OpResult) -> None:
         if self._on_result is not None:
             self._on_result(result)
 
-    def _record_success(self, item: TransferItem, resolved_size: int | None = None) -> None:
+    def _record_success(
+        self, item: TransferItem, resolved_size: int | None = None, etag: str | None = None
+    ) -> None:
         # item.size is unset for an unknown-size transfer (a streaming download
         # lets s3transfer probe the object); fall back to the size s3transfer
         # resolved on the future so SUCCEEDED reports the real byte count.
         size = item.size if item.size is not None else resolved_size
+        # s3transfer records the affected object's ETag on the future for a copy
+        # (the CopyObject response) and a download (its source); an upload leaves
+        # it unset - the PutObject response is discarded - so extra_info is None
+        # there. Surface what is present as the result's S3 response metadata.
+        extra_info = {"ETag": etag} if etag else None
         with self._lock:
             self._succeeded += 1
-        self._emit(self._result(item, OpOutcome.SUCCEEDED, bytes_transferred=size or 0))
+        self._emit(
+            self._result(
+                item, OpOutcome.SUCCEEDED, bytes_transferred=size or 0, extra_info=extra_info
+            )
+        )
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
         if _is_precondition_failed(exc):
@@ -871,7 +892,7 @@ class _Completion:
         self,
         item: TransferItem,
         *,
-        on_success: Callable[[TransferItem, int | None], None],
+        on_success: Callable[[TransferItem, int | None, str | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
         post_success: Callable[[TransferItem], None] | None = None,
     ) -> None:
@@ -890,8 +911,11 @@ class _Completion:
             self._post_success(self._item)
         # s3transfer resolves the transfer size on the future (a HeadObject
         # probe for an unknown-size download); pass it so _record_success can
-        # report real bytes when the item carried no size.
-        self._on_success(self._item, getattr(future.meta, "size", None))
+        # report real bytes when the item carried no size. meta.etag carries the
+        # affected object's ETag on a copy / download (None on an upload).
+        self._on_success(
+            self._item, getattr(future.meta, "size", None), getattr(future.meta, "etag", None)
+        )
 
 
 class _ReplaceMetadataDirective:

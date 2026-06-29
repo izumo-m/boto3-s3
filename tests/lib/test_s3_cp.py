@@ -88,6 +88,26 @@ class TestUploadRoute:
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_result_carries_listing_entry_and_storages(self, tmp_path: Path) -> None:
+        # The completion surfaces the source FileInfo and both side Storages so an
+        # app can act on the result directly; cp never lists the destination, so
+        # dst_info stays None.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x" * 7)
+        client, _ = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(src),
+            S3Storage("s3://bucket/up/", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        r = results[0]
+        assert r.src_info is not None and r.src_info.key.endswith("a.txt")
+        assert r.src_storage is not None
+        assert isinstance(r.dst_storage, S3Storage) and r.dst_storage.bucket == "bucket"
+        assert r.dst_info is None
+
     def test_recursive_upload_walks_in_byte_order(self, tmp_path: Path) -> None:
         for name in ("a/inner.txt", "a.txt"):
             target = tmp_path / name

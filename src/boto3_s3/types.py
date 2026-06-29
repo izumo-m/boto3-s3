@@ -8,9 +8,13 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypedDict
+
+if TYPE_CHECKING:
+    from boto3_s3.exceptions import Boto3S3Error
+    from boto3_s3.storage import Storage
 
 
 class FileKind(enum.Enum):
@@ -238,16 +242,34 @@ class OpResult:
     the pair; ``rm`` leaves them ``None``. ``key`` stays the operation-relative
     identifier (the transfer ``compare_key`` / the deleted object key).
     ``transfer_type`` is the wire verb of the record (aws-cli's ``transfer_type``:
-    ``upload`` / ``download`` / ``copy`` / ``move`` / ``delete``).
+    ``upload`` / ``download`` / ``copy`` / ``move`` / ``delete``). ``error``
+    carries the failure / warning text as a ``Boto3S3Error`` (the library
+    exception taxonomy; every path translates into it).
+
+    ``src_info`` / ``dst_info`` are the operation's listing entries and
+    ``src_storage`` / ``dst_storage`` their backends, so a consumer can act on a
+    result object directly (e.g. ``dst_storage`` + ``dst_info.key`` to HeadObject
+    it). ``src_info`` is the source of a cp / mv / sync transfer; ``dst_info`` is
+    the sync compare-destination and the removed object of ``rm`` / sync
+    ``--delete`` - either is ``None`` where the operation has no such entry (both
+    are ``None`` on a stream transfer or a warning). ``extra_info`` is the
+    result's S3 response metadata (e.g. ``{"ETag": ...}``): the written object's
+    ETag for an s3-to-s3 copy and a download's source ETag - an upload leaves it
+    ``None`` (s3transfer discards the PutObject response, docs/transfer.md).
     """
 
     transfer_type: TransferType
     key: str
     outcome: OpOutcome
     bytes_transferred: int = 0
-    error: BaseException | None = None
+    error: Boto3S3Error | None = None
     src: str | None = None
     dest: str | None = None
+    src_info: FileInfo | None = None
+    dst_info: FileInfo | None = None
+    src_storage: Storage | None = None
+    dst_storage: Storage | None = None
+    extra_info: Mapping[str, Any] | None = None
 
 
 class CancelToken:

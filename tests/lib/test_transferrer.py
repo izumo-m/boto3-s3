@@ -129,6 +129,17 @@ class TestUpload:
         assert results[0].dest == "s3://bucket/up/a.bin"
         assert results[0].bytes_transferred == 7
 
+    def test_result_has_no_extra_info(self, tmp_path: Path) -> None:
+        # s3transfer discards the PutObject response, so an upload surfaces no
+        # result ETag (docs/transfer.md).
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+        )
+        _, _, results, _ = _run(TransferType.UPLOAD, [item], [{}])
+        assert results[0].extra_info is None
+
     def test_multipart_upload_sequence(self, tmp_path: Path) -> None:
         src = tmp_path / "big.bin"
         src.write_bytes(b"x" * (9 * _MIB))
@@ -264,6 +275,13 @@ class TestDownload:
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_result_carries_source_etag_as_extra_info(self, tmp_path: Path) -> None:
+        # s3transfer records the object's ETag on the future; it rides through to
+        # OpResult.extra_info as the result's S3 response metadata.
+        item = self._item(tmp_path)
+        _, _, results, _ = _run(TransferType.DOWNLOAD, [item], [self._get_object_response()])
+        assert results[0].extra_info == {"ETag": '"abc123"'}
 
     def test_parent_directories_are_created(self, tmp_path: Path) -> None:
         item = self._item(tmp_path, dest="deep/er/tree/a.bin")

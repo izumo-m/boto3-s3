@@ -328,6 +328,8 @@ class S3Deleter:
                     key=info.key,
                     outcome=outcome,
                     error=error,
+                    dst_info=info,
+                    dst_storage=self._storage,
                 )
             )
 
