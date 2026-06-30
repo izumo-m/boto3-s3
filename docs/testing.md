@@ -176,6 +176,7 @@ string alone cannot prove.
 
 ```
 scripts/compose-up.sh          # idempotent; waits for bucket init
+scripts/install-awscli.sh      # idempotent; aws-cli matching vendor/aws-cli -> .venv/bin
 source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
 uv run pytest                  # full suite including e2e
 scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
@@ -186,6 +187,15 @@ scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/com
 creates both `test-bucket` (manual play) and `boto3-s3-e2e` (e2e suite).
 Only one stack can own ports 9000/9001 - any other stack on those ports
 conflicts; `compose-up.sh` then fails loudly instead of mistaking it for ours.
+
+The e2e diff is only meaningful when the live `aws` matches the version the
+goldens were captured with: the differential compares both CLIs against that
+capture, so an `aws` that adds or drops a flag (e.g. `--no-overwrite`, added
+mid-2.3x) diverges spuriously. `scripts/install-awscli.sh` pins it to the
+vendored `aws-cli` submodule's version - the source the library is ported
+against - by keeping the release zip's self-contained `dist/` and symlinking
+`.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
+matching install is reused rather than re-downloaded).
 
 e2e safety contract: at collection time the suite probes that the `aws`
 binary exists and that the bucket is reachable and **empty** (refusing to run
