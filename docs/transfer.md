@@ -238,13 +238,19 @@ dest-existence check for download. We ported the same three faces:
   1. The compare key **exists at the dest in exactly matching case** -> always
      transferred (aws-cli assigns `AlwaysSync` to the at-dest entry = cp
      overwrites it; it also does not enter the conflict set).
-  2. Otherwise, if "the lowercased key is in the set already admitted this run"
-     or "`os.path.exists(dest)` is true (a case-variant on a case-insensitive
-     FS)" -> conflict. `skip` = drop it, `warn` = let it through, both display
-     aws-cli's wording as a **NOTICE** (below). `error` = a `Boto3S3Error`
-     (`Failed to download <src> -> <dest> because a file whose name differs only
-     by case either exists or is being downloaded.`), an in-pipeline fatal
-     (CLI rc 1).
+  2. Otherwise, if "the lowercased key is in the set of downloads **still in
+     flight**" or "`os.path.exists(dest)` is true (a case-variant on a
+     case-insensitive FS)" -> conflict. `skip` = drop it, `warn` = let it
+     through, both display aws-cli's wording as a **NOTICE** (below). `error` =
+     a `Boto3S3Error` (`Failed to download <src> -> <dest> because a file whose
+     name differs only by case either exists or is being downloaded.`), an
+     in-pipeline fatal (CLI rc 1). The in-flight set mirrors aws-cli's
+     `CaseConflictCleanupSubscriber`: a key is added when its download is
+     admitted and dropped when that download finishes, so a same-case twin is a
+     conflict only while the first is still transferring - which means detection
+     relies on the threaded, non-blocking submit (aws runs this at
+     `max_concurrent_requests = 1`); a fully synchronous executor would finish
+     each download before the next is judged and never see the overlap.
 - **NOTICE** (`OpOutcome.NOTICE`): a display-only record that does not enter the
   counts. aws `uni_print`s the case-conflict message directly to stderr without
   going through the printer (not counted as warned, with no effect on rc, and

@@ -47,6 +47,12 @@ from tests.utils.recorder import ApiCall, make_recording_client
 MB = 1024**2
 _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
+# See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
+# conflict only while the first twin is still in flight, which needs a threaded
+# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
+# single worker (max_concurrent_requests = 1) here. One worker keeps mv's
+# per-item get-then-delete order deterministic.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
 _OUTPOST_ARN = (
@@ -59,10 +65,11 @@ def _run_cmd(
     parsed_responses: list[dict[str, Any] | Exception],
     argv: list[str],
     expected_rc: int = 0,
+    transfer_config: TransferConfig = _SYNC_CONFIG,
 ) -> tuple[CliResult, list[ApiCall]]:
     """The port's ``self.run_cmd``: in-process main() with a recording client."""
     client, calls = make_recording_client(parsed_responses)
-    ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC_CONFIG)
+    ctx = Context(client_factory=lambda _args: client, transfer_config=transfer_config)
     result = run_cli_in_process(argv, ctx=ctx)
     assert result.rc == expected_rc, (result.rc, result.stdout, result.stderr, calls)
     return result, calls
@@ -143,15 +150,6 @@ def create_mpu_response(upload_id: str) -> dict[str, Any]:
 
 def upload_part_copy_response() -> dict[str, Any]:
     return {"CopyPartResult": {"ETag": '"etag"'}}
-
-
-def _case_insensitive_fs(path: Any) -> bool:
-    probe = path / "CaseProbe.tmp"
-    probe.write_bytes(b"")
-    try:
-        return (path / "caseprobe.tmp").exists()
-    finally:
-        probe.unlink()
 
 
 class TestMvCommand:
@@ -752,19 +750,19 @@ class TestMvRecursiveCaseConflict:
             case_conflict,
         ]
 
-    def test_warn_with_existing_file(self, tmp_path: Any) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.LOWER_KEY).write_text("mycontent")
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response(), {}],
-            self._cmd(tmp_path, "warn"),
+            self._cmd(case_insensitive_workdir, "warn"),
         )
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
     def test_warn_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
-        # A aws-cli `pass` (their threaded get/delete order is flaky); the
-        # NonThreadedExecutor makes ours deterministic: get, delete per item.
+        # A aws-cli `pass` (their threaded get/delete order is flaky); a single
+        # worker (_CASE_CONFLICT_CONFIG) makes ours deterministic - the conflict
+        # is detected (first twin still in flight) and the order is get, delete
+        # per item.
         result, calls = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -774,6 +772,7 @@ class TestMvRecursiveCaseConflict:
                 {},
             ],
             self._cmd(tmp_path, "warn"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Downloading bucket/{self.LOWER_KEY}" in result.stderr
         assert _operations(calls) == [
@@ -792,6 +791,7 @@ class TestMvRecursiveCaseConflict:
                 {},
             ],
             self._cmd(tmp_path, "skip"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Skipping bucket/{self.LOWER_KEY}" in result.stderr
         # The skipped conflict is neither downloaded nor deleted.

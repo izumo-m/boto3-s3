@@ -305,6 +305,19 @@ class _CaseConflictGate:
         self._operation = operation
         self._submitted: set[str] = set()
 
+    def _admit(self, item: TransferItem, lowered: str) -> bool:
+        """Admit a download: track it in-flight and arrange its cleanup.
+
+        Mirrors aws-cli's ``CaseConflictSync``: the casefolded key joins the
+        in-flight set, and the item carries the callback that removes it when the
+        download finishes (wired as ``_CaseConflictCleanup`` in
+        ``_submit_download``), so the set reflects only downloads still in flight -
+        not every key ever admitted.
+        """
+        self._submitted.add(lowered)
+        item.case_conflict_cleanup = lambda: self._submitted.discard(lowered)
+        return False
+
     def blocks(self, item: TransferItem, transferrer: Transferrer) -> bool:
         if item.compare_key in self._dest_keys:
             return False  # exact-case match at the destination: always copy
@@ -312,8 +325,7 @@ class _CaseConflictGate:
         src = f"{item.src_bucket}/{item.src_key}"
         dest = os.path.abspath(item.dest_path or "")
         if lowered not in self._submitted and not os.path.exists(dest):
-            self._submitted.add(lowered)
-            return False
+            return self._admit(item, lowered)
         if self._mode is CaseConflictMode.SKIP:
             transferrer.notice(
                 f"warning: Skipping {src} -> {dest} because a file whose name "
@@ -331,8 +343,7 @@ class _CaseConflictGate:
                 f"information, see {self._DOC_URI}.",
                 key=item.compare_key,
             )
-            self._submitted.add(lowered)
-            return False
+            return self._admit(item, lowered)
         raise Boto3S3Error(
             f"Failed to download {src} -> {dest} because a file whose name "
             "differs only by case either exists or is being downloaded.",
@@ -920,9 +931,20 @@ class S3:
                     case_gate=case_gate,
                     operation=operation,
                 )
-            for item in items:
+            # Check cancellation *before* pulling the next item, not after: the
+            # open routes (_open_upload_item / _open_download_item) open the
+            # backend fileobj as the generator yields, so materializing an item we
+            # then discard on cancellation would leak that open fileobj. Pulling
+            # only once the run is still live means a cancelled run never opens an
+            # item it will not submit.
+            item_iter = iter(items)
+            while True:
                 if cancel_token is not None and cancel_token.cancelled:
                     raise CancelledError(f"{operation} was cancelled", operation=operation)
+                try:
+                    item = next(item_iter)
+                except StopIteration:
+                    break
                 if dryrun:
                     transferrer.dryrun(item)
                 else:
@@ -1539,7 +1561,10 @@ class S3:
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
-                src_fileobj=src_storage.open(storage.key, "rb"),
+                # dryrun reports the item without submitting it, so skip the open -
+                # matching the open routes (_open_upload_item / _open_download_item)
+                # and keeping a side-effecting custom IOStorage untouched on a dry run.
+                src_fileobj=None if dryrun else src_storage.open(storage.key, "rb"),
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
                 src_display="-",
@@ -1552,7 +1577,8 @@ class S3:
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                dest_fileobj=dest_storage.open(storage.key, "wb"),
+                # See the upload branch: a dry run never opens the stream.
+                dest_fileobj=None if dryrun else dest_storage.open(storage.key, "wb"),
                 src_display=f"s3://{storage.bucket}/{storage.key}",
                 dest_display="-",
             )

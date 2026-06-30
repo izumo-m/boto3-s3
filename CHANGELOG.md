@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--case-conflict` (`skip` / `warn` / `error`) now tracks only the downloads
+  still in flight - the admitted key is dropped when its transfer finishes
+  (aws-cli's `CaseConflictCleanupSubscriber`), not kept for the whole run - so a
+  same-case twin is a conflict only while the first download is still running,
+  matching aws on a case-sensitive filesystem.
 - Spell the destination `dest`, not `dst`, throughout - matching aws-cli
   (`dest` is its spelling): `S3.cp` / `mv` / `sync`'s second argument,
   `ChecksumComparison`'s `dest`, `OpResult.dest_info` / `dest_storage`, and the

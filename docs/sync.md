@@ -333,7 +333,7 @@ share for concurrent calls).
   stay on the calling thread in compare-key order. That is deliberate: a content
   strategy returns "copy" for a new pair with no I/O, so there is nothing to
   parallelize there; and keeping new pairs in key order keeps the
-  `--case-conflict` gate's "first key wins" deterministic (its seen-set is
+  `--case-conflict` gate's "first key wins" deterministic (its in-flight set is
   order-sensitive, like aws-cli's `CaseConflictSync` in the not-at-dest slot).
 - **Ordering.** Pooled decisions are consumed in completion order, so transfers
   submit out of compare-key order - already true of every sync (s3transfer moves

@@ -19,6 +19,24 @@ Directory = provenance (awscli port vs own), subdirectory = mechanism
 except e2e (skipped with a reason): any CI would need no Docker, since e2e
 self-skips without `BOTO3_S3_E2E_BUCKET`.
 
+One small group needs a **case-insensitive filesystem**: the `--case-conflict`
+`*_with_existing_file` tests (aws-cli's `skip_if_case_sensitive`), where the
+conflict is seen through `os.path.exists`. They take the `case_insensitive_workdir`
+fixture (tests/conftest.py), which resolves a case-insensitive directory or skips:
+they run as part of the normal suite on macOS / Windows (the tmp dir is already
+case-insensitive) and self-skip on a case-sensitive Linux host. To run them on
+Linux, set **`BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`** to a case-insensitive
+directory - under WSL2 a `/mnt/c/...` path works directly (the Windows drive is
+case-insensitive), no Docker. Where no such path exists,
+`tests/run_case_insensitive_fs.sh` mounts a FAT loopback image in a privileged
+Docker container and points the env var at it (opt-in, like e2e; the default
+`uv run pytest` needs no Docker and self-skips). The "two S3 twins in one listing"
+case-conflict tests instead detect the conflict through the gate's in-flight set
+and run everywhere, but only under a threaded submit (`max_concurrency=1`,
+matching aws's `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
+each twin before the next is judged (docs/transfer.md section "case-conflict
+gate").
+
 ## 2. Exit-code charter enforcement
 
 The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert

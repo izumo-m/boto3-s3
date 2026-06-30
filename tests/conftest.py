@@ -15,9 +15,70 @@ closer-conftest-wins resolution).
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+#: Test-only knob: point this at a case-insensitive directory to run the
+#: ``--case-conflict`` ``*_with_existing_file`` tests on an otherwise
+#: case-sensitive host (see :func:`case_insensitive_workdir`). The ``_PYTEST_``
+#: infix marks it as test infrastructure, not a CLI/library setting; it is not
+#: ``_E2E_`` because these tests need no live endpoint.
+CASE_INSENSITIVE_DIR_ENV = "BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR"
+
+
+def _is_case_insensitive(path: Path) -> bool:
+    """Whether *path*'s filesystem resolves names case-insensitively (probe)."""
+    probe = path / "CaseProbe.tmp"
+    probe.write_bytes(b"")
+    try:
+        return (path / "caseprobe.tmp").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.fixture
+def case_insensitive_workdir(tmp_path: Path) -> Iterator[Path]:
+    """A writable directory on a CASE-INSENSITIVE filesystem, or skip the test.
+
+    The ``--case-conflict`` ``*_with_existing_file`` tests detect the conflict
+    through ``os.path.exists``, which only sees a case-variant when the
+    destination is case-insensitive. Resolution order:
+
+    1. ``$BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`` - a case-insensitive directory
+       to use; a unique subdirectory is created under it and removed. On a
+       case-sensitive Linux host point it at e.g. ``/mnt/c/...`` under WSL2 (the
+       mounted Windows drive is case-insensitive), or a ``ciopfs`` / ``vfat``
+       mount. ``tests/run_case_insensitive_fs.sh`` sets it automatically.
+    2. ``tmp_path`` when it is itself case-insensitive - macOS / Windows run
+       these as part of the normal suite, no setup.
+    3. Otherwise the test skips (a case-sensitive Linux host with nothing set).
+    """
+    base = os.environ.get(CASE_INSENSITIVE_DIR_ENV)
+    if base:
+        root = Path(base)
+        root.mkdir(parents=True, exist_ok=True)
+        if not _is_case_insensitive(root):
+            pytest.skip(f"{CASE_INSENSITIVE_DIR_ENV}={base} is not a case-insensitive directory")
+        work = Path(tempfile.mkdtemp(prefix="boto3s3-cc-", dir=root))
+        try:
+            yield work
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    elif _is_case_insensitive(tmp_path):
+        yield tmp_path
+    else:
+        pytest.skip(
+            f"requires a case-insensitive filesystem (set {CASE_INSENSITIVE_DIR_ENV} to one, "
+            "e.g. /mnt/c/... on WSL2, or run on macOS / Windows)"
+        )
 
 
 @pytest.fixture(scope="session")

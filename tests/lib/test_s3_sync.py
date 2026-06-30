@@ -38,6 +38,12 @@ from boto3_s3.types import (
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SERIAL = TransferConfig(use_threads=False)
+# The case-conflict gate detects a "two S3 twins" conflict via its in-flight set,
+# which only holds while the first twin's download is still running - it needs a
+# threaded (non-blocking) submit running ahead of completions, as aws-cli's own
+# tests do with a single worker (max_concurrent_requests = 1). _SERIAL completes
+# each twin before the next is judged, emptying the set.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 _MTIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 _OLDER = _MTIME - timedelta(hours=1)
 _NEWER = _MTIME + timedelta(hours=1)
@@ -542,7 +548,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            transfer_config=_SERIAL,
+            transfer_config=_CASE_CONFLICT_CONFIG,
             on_result=results.append,
             **TransferOptions(case_conflict=CaseConflictMode.SKIP),
         )

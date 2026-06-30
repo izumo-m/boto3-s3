@@ -143,6 +143,11 @@ class TransferItem:
     # the object itself (HeadObject) - exactly the aws stream wire shape.
     src_fileobj: Any = None
     dest_fileobj: Any = None
+    # A download admitted by the --case-conflict gate carries the callback that
+    # drops its casefolded key from the gate's in-flight set (aws-cli's
+    # CaseConflictCleanupSubscriber wiring); _submit_download fires it on the
+    # transfer's terminal. None unless the gate admitted this item.
+    case_conflict_cleanup: Callable[[], None] | None = None
 
 
 def _is_precondition_failed(exc: BaseException) -> bool:
@@ -484,6 +489,8 @@ class Transferrer:
             subscribers.append(_DirectoryCreator())
         if item.dest_fileobj is not None:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
+        if item.case_conflict_cleanup is not None:
+            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
@@ -875,6 +882,29 @@ class _CloseFileobj:
             self._fileobj.close()
         except Exception as exc:
             future.set_exception(exc)
+
+
+class _CaseConflictCleanup:
+    """Drop an admitted download's casefolded key from the gate's in-flight set.
+
+    aws-cli's ``CaseConflictCleanupSubscriber``: the ``--case-conflict`` gate adds
+    a key when it admits a download and this removes it on the transfer's terminal
+    (success *or* failure, like ``on_done``), so the set tracks only downloads
+    still in flight. Without it the set keeps every key ever admitted, and a later
+    item whose name differs only by case is wrongly judged to conflict with an
+    already-finished download (skipped, or - in ``error`` mode - a spurious
+    failure) instead of being let through as aws does. Detecting an in-flight twin
+    relies on the submit loop running ahead of completions (a non-blocking,
+    threaded manager - aws runs at ``max_concurrent_requests=1`` and still detects;
+    a fully synchronous NonThreadedExecutor completes each item before the next is
+    judged, so the set would always be empty).
+    """
+
+    def __init__(self, cleanup: Callable[[], None]) -> None:
+        self._cleanup = cleanup
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self._cleanup()
 
 
 class _Completion:

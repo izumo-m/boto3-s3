@@ -25,11 +25,11 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3 import GlobFilter
-from boto3_s3.exceptions import BatchError, Boto3S3Error, ValidationError
+from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, OpOutcome, OpResult, TransferType
+from boto3_s3.types import CancelToken, FileInfo, FileKind, OpOutcome, OpResult, TransferType
 from tests.utils.recorder import ApiCall, make_recording_client
 
 if TYPE_CHECKING:
@@ -221,6 +221,25 @@ class TestOpenUploadRoute:
             transfer_config=_SYNC,
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
+
+    def test_cancel_does_not_open_the_next_source(self) -> None:
+        # The submit loop checks the cancel token *before* pulling the next item,
+        # so a run cancelled mid-stream never opens (and thus never leaks) the
+        # fileobj of an item it will not submit. on_result cancels right after the
+        # first upload commits; the second source must never be opened.
+        src = _MemStorage({"a.txt": b"x", "b.txt": b"yy"}, location="mem://data/")
+        token = CancelToken()
+        client, _ = make_recording_client([{}, {}])
+        with pytest.raises(CancelledError):
+            S3().cp(
+                src,
+                S3Storage("s3://b/tree", client=client),
+                recursive=True,
+                transfer_config=_SYNC,
+                cancel_token=token,
+                on_result=lambda _result: token.cancel(),
+            )
+        assert src.opens == [("a.txt", "rb")]
 
     def test_glob_filter_matches_compare_keys(self) -> None:
         src = _MemStorage({"keep.txt": b"x", "drop.bin": b"y"}, location="mem://data/")

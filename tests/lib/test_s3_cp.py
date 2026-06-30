@@ -44,6 +44,13 @@ from boto3_s3.types import (
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
+# The case-conflict gate detects a "two S3 twins in one listing" conflict via its
+# in-flight set, which only holds while the first twin's download is still
+# running. That needs a non-blocking (threaded) submit so the gate runs ahead of
+# completions - aws-cli's own tests use a single worker (max_concurrent_requests =
+# 1) here. A fully synchronous NonThreadedExecutor (_SYNC) completes each twin
+# before the next is judged, emptying the set, so the conflict is never seen.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 _MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
@@ -537,6 +544,29 @@ class TestStreamRoutes:
         assert calls == []
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
+    def test_stream_dryrun_never_opens_the_stream(self) -> None:
+        # The open routes already gate open() behind dryrun; the stream route must
+        # match, so a side-effecting custom IOStorage is left untouched on a dry
+        # run (the open is skipped, not merely its bytes left unread).
+        class _SpyIO(IOStorage):
+            def __init__(self, stream: Any) -> None:
+                super().__init__(stream)
+                self.opens: list[str] = []
+
+            def open(self, key: str, mode: Any, *, size: int | None = None) -> Any:
+                self.opens.append(key)
+                return super().open(key, mode, size=size)
+
+        up = _SpyIO(io.BytesIO(b"x"))
+        client, calls = make_recording_client([])
+        S3().cp(up, S3Storage("s3://bucket/k", client=client), dryrun=True)
+        assert calls == [] and up.opens == []
+
+        down = _SpyIO(io.BytesIO())
+        client, calls = make_recording_client([])
+        S3().cp(S3Storage("s3://bucket/k", client=client), down, dryrun=True)
+        assert calls == [] and down.opens == []
+
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
@@ -619,7 +649,7 @@ class TestCaseConflictGate:
             S3Storage("s3://b/cc/", client=client),
             str(out),
             recursive=True,
-            transfer_config=_SYNC,
+            transfer_config=_CASE_CONFLICT_CONFIG,
             on_result=results.append,
             **TransferOptions(case_conflict=mode),
         )
@@ -654,7 +684,7 @@ class TestCaseConflictGate:
                 S3Storage("s3://b/cc/", client=client),
                 str(out),
                 recursive=True,
-                transfer_config=_SYNC,
+                transfer_config=_CASE_CONFLICT_CONFIG,
                 **TransferOptions(case_conflict=CaseConflictMode.ERROR),
             )
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
