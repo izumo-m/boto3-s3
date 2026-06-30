@@ -135,8 +135,12 @@ def add_common_arguments(
     conn.add_argument("--no-verify-ssl", action="store_true", default=flag)
     conn.add_argument("--ca-bundle", metavar="PATH", default=value)
     conn.add_argument("--no-sign-request", action="store_true", default=flag)
-    conn.add_argument("--cli-read-timeout", type=int, metavar="SECONDS", default=value)
-    conn.add_argument("--cli-connect-timeout", type=int, metavar="SECONDS", default=value)
+    # Not argparse type=int on purpose: aws coerces these in a post-parse session
+    # handler (globalargs._resolve_timeout), so a non-integer value raises there
+    # and exits 255 - not the parse-time 252 a type=int would give. build_client
+    # coerces and maps a bad value to rc 255 (matching aws and --page-size).
+    conn.add_argument("--cli-read-timeout", metavar="SECONDS", default=value)
+    conn.add_argument("--cli-connect-timeout", metavar="SECONDS", default=value)
     conn.add_argument("--debug", action="store_true", default=flag)
 
     ignored = parser.add_argument_group("recognized but ignored")
@@ -302,6 +306,23 @@ def build_service_client(
         raise Boto3S3Error(str(exc)) from exc
 
 
+def _coerce_cli_timeout(value: str) -> int | None:
+    """aws-cli's ``_resolve_timeout`` coercion: ``int(value)``, then ``0`` -> ``None``.
+
+    aws applies this in a post-parse session handler, so a non-integer value
+    raises a bare ``ValueError`` that reaches its general handler (rc 255), not
+    the rc 252 of an argparse/usage error - the same path ``--page-size`` already
+    takes. Translate that failure to ``Boto3S3Error`` (-> 255) for parity instead
+    of declaring the argparse arg ``type=int``. The ``0`` -> ``None`` sentinel
+    ("no timeout"; cli.json help) is preserved because ``int("0") or None`` is
+    ``None``, and botocore (via urllib3) rejects a literal ``0`` anyway.
+    """
+    try:
+        return int(value) or None
+    except ValueError as exc:
+        raise Boto3S3Error(str(exc)) from exc
+
+
 def build_client(args: argparse.Namespace) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
@@ -352,12 +373,13 @@ def build_client(args: argparse.Namespace) -> S3Client:
     }
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED
-    # aws maps a 0 timeout to None ("no timeout"; cli.json help); botocore (via
-    # urllib3) rejects a literal 0 with ValueError, so honor the same sentinel.
+    # The timeouts arrive as raw strings (see add_common_arguments) and are
+    # coerced here, aws-cli-style: int() with a 0 -> None ("no timeout") sentinel,
+    # a bad value mapped to rc 255 rather than a parse-time rc 252.
     if args.cli_read_timeout is not None:
-        overrides["read_timeout"] = args.cli_read_timeout or None
+        overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
     if args.cli_connect_timeout is not None:
-        overrides["connect_timeout"] = args.cli_connect_timeout or None
+        overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
     config = Config(**overrides)
 
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for

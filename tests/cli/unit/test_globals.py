@@ -141,6 +141,27 @@ class TestBuildClient:
         assert client.meta.config.read_timeout is None
         assert client.meta.config.connect_timeout is None
 
+    def test_integer_timeout_is_applied(self) -> None:
+        client = common.build_client(
+            _parse(
+                ["--region", "us-east-1", "--cli-read-timeout", "5", "--cli-connect-timeout", "7"]
+            )
+        )
+        assert client.meta.config.read_timeout == 5
+        assert client.meta.config.connect_timeout == 7
+
+    @pytest.mark.parametrize("flag", ["--cli-read-timeout", "--cli-connect-timeout"])
+    def test_noninteger_timeout_maps_to_255_not_a_parse_error(self, flag: str) -> None:
+        # aws coerces the timeouts in a post-parse handler (int()), so a non-integer
+        # value raises there and exits 255 - not the parse-time 252 an argparse
+        # type=int would give. The arg must still parse (no type=int rejecting it up
+        # front), and build_client must surface a base Boto3S3Error (-> 255), not a
+        # ValidationError (252) or ConfigurationError (253).
+        args = _parse(["--region", "us-east-1", flag, "abc"])
+        with pytest.raises(Boto3S3Error) as excinfo:
+            common.build_client(args)
+        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+
     def test_unknown_profile_maps_to_a_library_error(self) -> None:
         # A bad --profile raises raw botocore ProfileNotFound; build_client must
         # translate it (here -> base Boto3S3Error -> rc 255) so it does not

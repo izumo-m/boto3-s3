@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix the exit code for a non-integer `--cli-read-timeout` /
+  `--cli-connect-timeout`: it now exits 255 (the value error reaches the general
+  handler, as in `aws`) instead of 252 (an argument-parse error). A valid `0`
+  still means "no timeout".
 - Fix the `[s3]` transfer config to load from the same profile the client uses
   when both `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` are set with no `--profile`
   (aws-cli precedence `AWS_PROFILE` > `AWS_DEFAULT_PROFILE`; stock boto3/botocore
