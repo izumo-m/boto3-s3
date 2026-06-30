@@ -101,7 +101,7 @@ with no isatty gate, so piped stdout carries `Completed ...` segments and
 right-padding), drops those progress statements (time/speed-dependent), and
 **sorts** the remaining result lines (parallel completion order - the rm
 rationale). What sorting and masking relax, the end states pin: goldens
-record `remaining_keys` (bucket), `local_tree` (`dst/` as
+record `remaining_keys` (bucket), `local_tree` (`dest/` as
 `relpath:size:sha256-prefix` entries), and `head_fields` (selected
 HeadObject fields of one probe key - how ContentType/Metadata/StorageClass
 passthrough and the copy-props chain are verified end-to-end). The download
@@ -137,7 +137,7 @@ must never delete the source).
 
 **sync** is cp's model with both end states active at once -
 `remaining_keys` pins the bucket (uploads, copies, S3-side `--delete`) and
-`local_tree` pins `dst/` (downloads, local-side `--delete`); `src_tree` stays
+`local_tree` pins `dest/` (downloads, local-side `--delete`); `src_tree` stays
 `None` (sync never mutates its source, so the inherited field is neither
 captured nor compared). The new scenario knob is
 `CpScenario.local_mtimes`: workdir-relative offsets (+/-1 day) applied with

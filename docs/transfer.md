@@ -44,8 +44,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   as in boto3). The overall design of CRT mode is in [`crt.md`](./crt.md).
 - A `Transferrer` is **one instance with a single `TransferType` per cp / mv / sync
   run** (one run has a single byte direction). The client placement is: upload
-  uses the dst client, download uses the src client, and an s3->s3 copy uses the
-  dst client + `manager.copy(source_client=src client)` (a settled fact of the
+  uses the dest client, download uses the src client, and an s3->s3 copy uses the
+  dest client + `manager.copy(source_client=src client)` (a settled fact of the
   connection model).
 - The manager is **created lazily on the first `submit()`**: a dryrun or a
   fully-skipped run does not even import s3transfer (the discipline of
@@ -85,7 +85,7 @@ the SDK at module import time.
 6. `_Completion` (**always last**) - bridges the future's result to the rollup
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
    a successful download it post-success stamps the mtime (section 5). Each
-   record carries the item's listing entries (`src_info` / `dst_info`) and the
+   record carries the item's listing entries (`src_info` / `dest_info`) and the
    run's side `Storage`s; on success `extra_info` takes the affected object's
    response metadata from `future.meta.etag` (`{"ETag": ...}`) - s3transfer sets
    it for a copy (the CopyObject response) and a download (its source) but **not
@@ -175,7 +175,7 @@ The caller's stream is never closed by `IOStorage`.
   HeadObject before GetObject (exactly aws's stream wire shape). Directory
   creation and the mtime stamp are not performed (section 5 is for path destinations
   only).
-- The display renders the stream side as `-` (`src_display` / `dst_display`).
+- The display renders the stream side as `-` (`src_display` / `dest_display`).
   The `BatchError` on failure is `1 of 1 transfers failed`.
 
 ## 7. Conditional overwrite prohibition (`--no-overwrite` = `no_overwrite`)
@@ -326,7 +326,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 - **The same-path guard** (always in `S3.mv`; the CLI also does it at the argv
   stage - cli.md section 5.8): apply `naming.same_path` to the keyless-normalized URI -
   if it is an exact match, or a `/`-terminated dest + `basename(src)`
-  concatenation matches src, then `Cannot mv a file onto itself: <src> - <dst>`
+  concatenation matches src, then `Cannot mv a file onto itself: <src> - <dest>`
   (`ValidationError`). `--recursive` is also subject to this (aws-cli's faithful
   false positive; the CLI maps this `ValidationError` to rc
   252). This is a string guard and does not look at
@@ -357,7 +357,7 @@ and outside aws parity.
 
 - **bytes via `open`, the S3 side via s3transfer**: `opens3` hands `s3transfer`
   the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
-  fileobj from `plan.dst.open(key, "wb")` to download into. The transfer
+  fileobj from `plan.dest.open(key, "wb")` to download into. The transfer
   **closes every fileobj `open` returns** (`transfer._CloseFileobj`): for a
   writer that `close` is the commit (`Storage.open`'s contract), and a commit
   failure flips the settled future via `set_exception` (a failed transfer).

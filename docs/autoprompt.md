@@ -65,7 +65,7 @@ completions to be missing or off-target**. Specifically:
   (known valid values are better completed than not).
 - **Widen reachability** (section 3). aws's parser assumes a single positional
   argument, so completions are missing or off-target for `cp --storage-class
-  <TAB>` (no preceding path) or `cp src dst --<TAB>` (after the second path).
+  <TAB>` (no preceding path) or `cp src dest --<TAB>` (after the second path).
   This implementation adjusts the parser to correct these.
 
 **Out of scope**: a feature aws **does not have** - server-side completion of S3

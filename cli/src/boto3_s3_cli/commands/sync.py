@@ -53,19 +53,19 @@ class SyncCommand(Command):
         """
         page_size = parse_integer_option(args.page_size, operation="sync")
         progress_frequency = parse_integer_option(args.progress_frequency, operation="sync")
-        src, dst = args.paths
+        src, dest = args.paths
         src_type = classify(src)
-        dst_type = classify(dst)
-        if src_type == "local" and dst_type == "local":
+        dest_type = classify(dest)
+        if src_type == "local" and dest_type == "local":
             raise ValidationError(_USAGE, operation="sync")
-        if src == "-" or dst == "-":
+        if src == "-" or dest == "-":
             # aws-cli's _validate_streaming_paths: only cp streams, and its
             # wording names cp even from sync.
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="sync",
             )
-        paths_type = src_type + dst_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
         # aws-cli's _validate_path_args (one function) does BOTH the missing-source
         # check and the s3local dest-dir creation, and runs entirely BEFORE
@@ -75,7 +75,7 @@ class SyncCommand(Command):
         if src_type == "local" and not os.path.exists(src):
             # Missing local source: aws's bare RuntimeError -> rc 255.
             raise Boto3S3Error(f"The user-provided path {src} does not exist.", operation="sync")
-        if dst_type == "local" and not os.path.exists(dst):
+        if dest_type == "local" and not os.path.exists(dest):
             # aws creates the s3local destination during validation (before run),
             # so an OSError here is its pre-pipeline rc 255 - not the transfer
             # pipeline's rc 1. Pre-creating it outside finish_transfer's catch
@@ -83,11 +83,11 @@ class SyncCommand(Command):
             # library S3.sync still ensures the dir for direct callers; this
             # pre-check makes it a no-op there).
             try:
-                os.makedirs(dst)
+                os.makedirs(dest)
             except OSError as exc:
                 raise Boto3S3Error(str(exc), operation="sync") from exc
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
-        if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dst):
+        if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
             # aws-cli's _validate_not_s3express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
             raise ValidationError(
@@ -104,13 +104,13 @@ class SyncCommand(Command):
         from boto3_s3 import S3
 
         client = ctx.client_factory(args)
-        src_location, dst_location = transferargs.resolve_locations(
-            args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
+        src_location, dest_location = transferargs.resolve_locations(
+            args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
         )
 
         plan = plan_transfer(
             transferargs.path_storage(src, src_type),
-            transferargs.path_storage(dst, dst_type),
+            transferargs.path_storage(dest, dest_type),
             recursive=True,
         )
         # One symmetric filter, compiled against the source root and applied to
@@ -129,7 +129,7 @@ class SyncCommand(Command):
         def run_sync() -> None:
             S3().sync(
                 src_location,  # type: ignore[arg-type]
-                dst_location,  # type: ignore[arg-type]
+                dest_location,  # type: ignore[arg-type]
                 delete=args.delete,
                 compare=AwsCliComparison(
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps

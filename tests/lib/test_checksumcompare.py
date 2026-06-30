@@ -168,9 +168,9 @@ def _s3(key: str = "obj", *, size: int | None = None) -> S3FileInfo:
 
 
 def _pair(
-    transfer_type: TransferType, *, src: FileInfo | None = None, dst: FileInfo | None = None
+    transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
 ) -> SyncPair:
-    return SyncPair(key="obj", transfer_type=transfer_type, src=src, dst=dst)
+    return SyncPair(key="obj", transfer_type=transfer_type, src=src, dest=dest)
 
 
 # -- construction --------------------------------------------------------------
@@ -205,7 +205,7 @@ class TestConstruction:
 
 class TestNewAndMissingSides:
     @pytest.mark.parametrize("transfer_type", list(TransferType))
-    def test_dst_none_always_copies(self, transfer_type: TransferType) -> None:
+    def test_dest_none_always_copies(self, transfer_type: TransferType) -> None:
         f = _upload_filter(_FakeClient({}))
         assert f(_pair(transfer_type, src=_local("k", size=1))) is True
 
@@ -213,17 +213,17 @@ class TestNewAndMissingSides:
     def test_src_none_raises(self, transfer_type: TransferType) -> None:
         f = _upload_filter(_FakeClient({}))
         with pytest.raises(ValueError, match="without a source entry"):
-            f(_pair(transfer_type, dst=_s3()))
+            f(_pair(transfer_type, dest=_s3()))
 
     def test_move_kind_raises(self) -> None:
         f = _upload_filter(_FakeClient({}))
         with pytest.raises(ValueError, match="cannot judge a 'move' pair"):
-            f(_pair(TransferType.MOVE, src=_local("k", size=1), dst=_s3(size=1)))
+            f(_pair(TransferType.MOVE, src=_local("k", size=1), dest=_s3(size=1)))
 
     def test_upload_non_local_side_raises(self) -> None:
         f = _upload_filter(_FakeClient({}))
         with pytest.raises(ValueError, match="no local side"):
-            f(_pair(TransferType.UPLOAD, src=_s3(size=1), dst=_s3(size=1)))
+            f(_pair(TransferType.UPLOAD, src=_s3(size=1), dest=_s3(size=1)))
 
 
 # -- size pre-check ------------------------------------------------------------
@@ -234,7 +234,7 @@ class TestSizePreCheck:
         client = _FakeClient({})  # never consulted
         f = _upload_filter(client)
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(tmp_path / "nope"), size=10), dst=_s3(size=20)
+            TransferType.UPLOAD, src=_local(_key(tmp_path / "nope"), size=10), dest=_s3(size=20)
         )
         assert f(pair) is True
         assert client.calls == []
@@ -244,7 +244,7 @@ class TestSizePreCheck:
         client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
         f = _upload_filter(client, check_size=False)
         # Sizes differ but check_size is off -> it reads + hashes -> matches -> skip.
-        pair = _pair(TransferType.UPLOAD, src=_local(_key(p), size=1), dst=_s3(size=999))
+        pair = _pair(TransferType.UPLOAD, src=_local(_key(p), size=1), dest=_s3(size=999))
         assert f(pair) is False
         assert client.calls  # the GOA happened
 
@@ -257,7 +257,7 @@ class TestWholeObject:
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is False
 
@@ -265,7 +265,7 @@ class TestWholeObject:
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full("sha256", _b64(b"\x00" * 32))})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
 
@@ -273,7 +273,7 @@ class TestWholeObject:
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
         pair = _pair(
-            TransferType.DOWNLOAD, src=_s3(size=len(_DATA)), dst=_local(_key(p), size=len(_DATA))
+            TransferType.DOWNLOAD, src=_s3(size=len(_DATA)), dest=_local(_key(p), size=len(_DATA))
         )
         assert _download_filter(client)(pair) is False
 
@@ -281,7 +281,7 @@ class TestWholeObject:
         p = _write(tmp_path)
         client = _FakeClient({"obj": {"Checksum": {}}})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
 
@@ -292,7 +292,7 @@ class TestWholeObject:
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full(algorithm, _GOLDEN[algorithm])})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is False
 
@@ -321,7 +321,7 @@ class TestComposite:
         value = _composite_golden(_DATA, _PARTS, "crc32c")
         client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is False
 
@@ -331,7 +331,7 @@ class TestComposite:
         value = _composite_golden(_DATA, _PARTS, "crc32c").rsplit("-", 1)[0] + "-9"
         client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
 
@@ -340,7 +340,7 @@ class TestComposite:
         value = _composite_golden(_DATA, _PARTS, "crc32c")
         client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS, truncated_at=2)})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is False
         assert len(client.calls) == 2  # the second page was fetched
@@ -350,18 +350,18 @@ class TestComposite:
 
 
 class TestCopyDirect:
-    def _copy(self, src_resp: Any, dst_resp: Any, **kw: Any) -> Callable[[SyncPair], bool]:
+    def _copy(self, src_resp: Any, dest_resp: Any, **kw: Any) -> Callable[[SyncPair], bool]:
         s3 = _FakeS3(
             {
                 "s3://b/src": _FakeStorage("b", _FakeClient({"src": src_resp})),
-                "s3://b/dst": _FakeStorage("b", _FakeClient({"dst": dst_resp})),
+                "s3://b/dest": _FakeStorage("b", _FakeClient({"dest": dest_resp})),
             }
         )
-        return ChecksumComparison(s3, "s3://b/src", "s3://b/dst", **kw)  # pyright: ignore[reportArgumentType]
+        return ChecksumComparison(s3, "s3://b/src", "s3://b/dest", **kw)  # pyright: ignore[reportArgumentType]
 
     def _pair(self, **kw: Any) -> SyncPair:
         return SyncPair(
-            key="k", transfer_type=TransferType.COPY, src=_s3("src", **kw), dst=_s3("dst", **kw)
+            key="k", transfer_type=TransferType.COPY, src=_s3("src", **kw), dest=_s3("dest", **kw)
         )
 
     def test_equal_checksums_skip(self) -> None:
@@ -390,7 +390,7 @@ class TestCopyDirect:
             key="k",
             transfer_type=TransferType.COPY,
             src=_s3("src", size=10),
-            dst=_s3("dst", size=20),
+            dest=_s3("dest", size=20),
         )
         assert f2(pair) is True
 
@@ -403,13 +403,15 @@ class TestCopyDirect:
         # COPY compares the stored value strings directly, so a COMPOSITE object
         # (whose parts would otherwise paginate) is read with one call per side.
         src = _FakeClient({"src": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)})
-        dst = _FakeClient({"dst": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)})
-        s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dst": _FakeStorage("b", dst)})
-        f = ChecksumComparison(s3, "s3://b/src", "s3://b/dst")  # pyright: ignore[reportArgumentType]
-        pair = SyncPair(key="k", transfer_type=TransferType.COPY, src=_s3("src"), dst=_s3("dst"))
+        dest = _FakeClient(
+            {"dest": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)}
+        )
+        s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dest": _FakeStorage("b", dest)})
+        f = ChecksumComparison(s3, "s3://b/src", "s3://b/dest")  # pyright: ignore[reportArgumentType]
+        pair = SyncPair(key="k", transfer_type=TransferType.COPY, src=_s3("src"), dest=_s3("dest"))
         assert f(pair) is False
         assert len(src.calls) == 1
-        assert len(dst.calls) == 1
+        assert len(dest.calls) == 1
 
 
 # -- indeterminate -> copy on errors -------------------------------------------
@@ -423,7 +425,7 @@ class TestClientErrorIndeterminate:
         p = _write(tmp_path)
         client = _FakeClient({"obj": err})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
 
@@ -449,7 +451,7 @@ class TestClientErrorIndeterminate:
         p = _write(tmp_path)
         client = _FakeClient({"obj": respond})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
         assert len(client.calls) == 2  # first page + the failing second page
@@ -464,7 +466,7 @@ class TestClientErrorIndeterminate:
         p = _write(tmp_path)
         client = _FakeClient({"obj": resp})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
 
@@ -479,7 +481,7 @@ class TestRequestPayer:
         f = _upload_filter(client, request_payer="requester")
         f(
             _pair(
-                TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+                TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
             )
         )
         assert client.calls[0]["RequestPayer"] == "requester"
@@ -489,7 +491,7 @@ class TestRequestPayer:
         client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
         _upload_filter(client)(
             _pair(
-                TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+                TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
             )
         )
         assert "RequestPayer" not in client.calls[0]
@@ -511,7 +513,7 @@ class TestPureFallback:
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full(algorithm, _GOLDEN[algorithm])})
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dst=_s3(size=len(_DATA))
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is False
 
@@ -521,7 +523,7 @@ class TestPureFallback:
         client = _FakeClient({"obj": _full("crc64nvme", "irrelevant")})
         f = _upload_filter(client, pure_max_size=0)
         pair = _pair(
-            TransferType.UPLOAD, src=_local(_key(tmp_path / "nope"), size=10), dst=_s3(size=10)
+            TransferType.UPLOAD, src=_local(_key(tmp_path / "nope"), size=10), dest=_s3(size=10)
         )
         assert f(pair) is True
 

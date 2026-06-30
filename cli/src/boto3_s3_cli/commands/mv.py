@@ -63,21 +63,21 @@ class MvCommand(Command):
         """
         page_size = parse_integer_option(args.page_size, operation="mv")
         progress_frequency = parse_integer_option(args.progress_frequency, operation="mv")
-        src, dst = args.paths
+        src, dest = args.paths
         src_type = classify(src)
-        dst_type = classify(dst)
-        if src_type == "local" and dst_type == "local":
+        dest_type = classify(dest)
+        if src_type == "local" and dest_type == "local":
             raise ValidationError(_USAGE, operation="mv")
-        if src == "-" or dst == "-":
+        if src == "-" or dest == "-":
             # aws-cli's _validate_streaming_paths: only cp streams, and its
             # wording names cp even from mv.
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="mv",
             )
-        paths_type = src_type + dst_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
         if paths_type == "s3s3":
-            self._validate_same_paths(args, ctx, src, dst)
+            self._validate_same_paths(args, ctx, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
         if src_type == "local" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
@@ -101,13 +101,13 @@ class MvCommand(Command):
         transferargs.validate_no_overwrite_supported(
             args.no_overwrite, paths_type, client, operation="mv"
         )
-        src_location, dst_location = transferargs.resolve_locations(
-            args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
+        src_location, dest_location = transferargs.resolve_locations(
+            args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
         )
 
         plan = plan_transfer(
             transferargs.path_storage(src, src_type),
-            transferargs.path_storage(dst, dst_type),
+            transferargs.path_storage(dest, dest_type),
             recursive=args.recursive,
         )
         item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
@@ -123,7 +123,7 @@ class MvCommand(Command):
         def run_mv() -> None:
             S3().mv(
                 src_location,  # type: ignore[arg-type]
-                dst_location,  # type: ignore[arg-type]
+                dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
                 filter=item_filter,
                 follow_symlinks=args.follow_symlinks,
@@ -138,7 +138,7 @@ class MvCommand(Command):
         return transferargs.finish_transfer(printer, quiet=args.quiet, run=run_mv)
 
     @staticmethod
-    def _validate_same_paths(args: argparse.Namespace, ctx: Context, src: str, dst: str) -> None:
+    def _validate_same_paths(args: argparse.Namespace, ctx: Context, src: str, dest: str) -> None:
         """The mv s3->s3 validation block (aws-cli's ``_validate_path_args`` head).
 
         Always: the textual onto-itself guard on the keyless-normalized URIs
@@ -154,11 +154,11 @@ class MvCommand(Command):
         goes to stderr and the move proceeds.
         """
         norm_src = normalize_s3_uri(src)
-        norm_dst = normalize_s3_uri(dst)
-        message = f"Cannot mv a file onto itself: {norm_src} - {norm_dst}"
-        if same_path(norm_src, norm_dst):
+        norm_dest = normalize_s3_uri(dest)
+        message = f"Cannot mv a file onto itself: {norm_src} - {norm_dest}"
+        if same_path(norm_src, norm_dest):
             raise ValidationError(message, operation="mv")
-        if not same_key(norm_src, norm_dst):
+        if not same_key(norm_src, norm_dest):
             return
         enabled = (
             args.validate_same_s3_paths or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true"
@@ -168,17 +168,17 @@ class MvCommand(Command):
                 ctx.service_client_factory("s3control", args, region=args.source_region),
                 ctx.service_client_factory("sts", args),
             )
-            dst_resolver = S3PathResolver(
+            dest_resolver = S3PathResolver(
                 ctx.service_client_factory("s3control", args, region=args.region),
                 ctx.service_client_factory("sts", args),
             )
             src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
-            dst_paths = dst_resolver.resolve_underlying_s3_paths(norm_dst)
+            dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)
             for src_path in src_paths:
-                for dst_path in dst_paths:
-                    if same_path(src_path, dst_path):
+                for dest_path in dest_paths:
+                    if same_path(src_path, dest_path):
                         raise ValidationError(message, operation="mv")
-        elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dst):
+        elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
             sys.stderr.write(_VALIDATE_WARNING)
 
 

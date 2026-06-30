@@ -29,7 +29,7 @@ block imported by submodule path
 (``from boto3_s3.awsclicompare import AwsCliComparison``), is **not** part of the
 package's lazy root re-export, and imports no AWS SDK module - so
 ``import boto3_s3.awsclicompare`` stays SDK-free. Pass it via ``compare=`` to tune
-the default, e.g. ``s3.sync(src, dst, compare=AwsCliComparison(size_only=True))``;
+the default, e.g. ``s3.sync(src, dest, compare=AwsCliComparison(size_only=True))``;
 wrap it in :class:`~boto3_s3.comparator.ParallelCompare` to decide on a thread pool.
 """
 

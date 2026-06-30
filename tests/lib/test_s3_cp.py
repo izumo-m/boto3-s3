@@ -91,7 +91,7 @@ class TestUploadRoute:
     def test_result_carries_listing_entry_and_storages(self, tmp_path: Path) -> None:
         # The completion surfaces the source FileInfo and both side Storages so an
         # app can act on the result directly; cp never lists the destination, so
-        # dst_info stays None.
+        # dest_info stays None.
         src = tmp_path / "a.txt"
         src.write_bytes(b"x" * 7)
         client, _ = make_recording_client([{}])
@@ -105,8 +105,8 @@ class TestUploadRoute:
         r = results[0]
         assert r.src_info is not None and r.src_info.key.endswith("a.txt")
         assert r.src_storage is not None
-        assert isinstance(r.dst_storage, S3Storage) and r.dst_storage.bucket == "bucket"
-        assert r.dst_info is None
+        assert isinstance(r.dest_storage, S3Storage) and r.dest_storage.bucket == "bucket"
+        assert r.dest_info is None
 
     def test_recursive_upload_walks_in_byte_order(self, tmp_path: Path) -> None:
         for name in ("a/inner.txt", "a.txt"):
@@ -433,29 +433,29 @@ class TestGlacierGate:
 class TestCopyRoute:
     def test_single_copy_heads_the_source_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([_head_response()])
-        dst_client, dst_calls = make_recording_client([{}])
+        dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
-            S3Storage("s3://dst-b/cp/", client=dst_client),
+            S3Storage("s3://dest-b/cp/", client=dest_client),
             transfer_config=_SYNC,
         )
         assert _ops(src_calls) == ["HeadObject"]
-        assert _ops(dst_calls) == ["CopyObject"]
-        params = dst_calls[0].params
+        assert _ops(dest_calls) == ["CopyObject"]
+        params = dest_calls[0].params
         assert params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.txt"}
-        assert params["Bucket"] == "dst-b"
+        assert params["Bucket"] == "dest-b"
         assert params["Key"] == "cp/a.txt"
 
     def test_copy_options_flow_through(self, tmp_path: Path) -> None:
         src_client, _ = make_recording_client([_head_response()])
-        dst_client, dst_calls = make_recording_client([{}])
+        dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
-            S3Storage("s3://dst-b/cp/", client=dst_client),
+            S3Storage("s3://dest-b/cp/", client=dest_client),
             transfer_config=_SYNC,
             **TransferOptions(metadata={"k": "v"}),
         )
-        params = dst_calls[0].params
+        params = dest_calls[0].params
         assert params["Metadata"] == {"k": "v"}
         assert params["MetadataDirective"] == "REPLACE"
 
@@ -554,7 +554,7 @@ class TestStreamRoutes:
     def test_stream_download_with_no_overwrite_is_rejected(self) -> None:
         # A streaming download has no existing destination to guard, so
         # no_overwrite is meaningless and rejected (aws-cli rejects it too).
-        # An upload stream keeps no_overwrite (IfNoneMatch), so dst_stream gates it.
+        # An upload stream keeps no_overwrite (IfNoneMatch), so dest_stream gates it.
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().cp(

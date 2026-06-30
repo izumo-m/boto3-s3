@@ -160,7 +160,7 @@ class TestMvCommand:
         assert "Cannot mv a file onto itself" in result.stderr
 
     def test_cant_mv_object_with_implied_name(self) -> None:
-        # The "key" key name is implied in the dst argument.
+        # The "key" key name is implied in the dest argument.
         result, _ = _run_cmd([], ["mv", "s3://bucket/key", "s3://bucket/"], expected_rc=252)
         assert "Cannot mv a file onto itself" in result.stderr
 

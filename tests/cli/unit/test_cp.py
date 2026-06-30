@@ -352,7 +352,7 @@ class TestSourceRegionWiring:
             [
                 "cp",
                 "s3://src-b/k",
-                "s3://dst-b/k2",
+                "s3://dest-b/k2",
                 "--source-region",
                 "eu-west-3",
                 "--region",
@@ -372,7 +372,7 @@ class TestSourceRegionWiring:
 
     def test_without_source_region_one_client_serves_both_sides(self) -> None:
         ctx, namespaces = self._factory_recording_ctx()
-        rc = cli.main(["cp", "s3://src-b/k", "s3://dst-b/k2"], ctx=ctx)
+        rc = cli.main(["cp", "s3://src-b/k", "s3://dest-b/k2"], ctx=ctx)
         assert rc == 0
         assert len(namespaces) == 1
 

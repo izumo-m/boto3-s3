@@ -114,7 +114,7 @@ written here.
 - [`glossary.md`](./glossary.md) - glossary.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
-  callback): the fields, the `src` / `dst` convention, and which operation
+  callback): the fields, the `src` / `dest` convention, and which operation
   populates which.
 - [`s3.md`](./s3.md) - the design of the `S3` entry point (the `client` /
   `resolve` customization seams, resolution rules, module-level functions).

@@ -20,26 +20,26 @@ the record only needs to say *what happened to this item*.
 | `bytes_transferred` | bytes moved (0 for a delete or an advisory). |
 | `error` | a `Boto3S3Error` on a failure; the advisory text on `WARNED` / `NOTICE`. Always the library taxonomy (every path translates into it), never a raw exception. |
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
-| `src_info` / `dst_info` | the operation's listing entries (`FileInfo`). |
-| `src_storage` / `dst_storage` | the two sides' `Storage` backends. |
+| `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
+| `src_storage` / `dest_storage` | the two sides' `Storage` backends. |
 | `extra_info` | the result object's S3 response metadata (currently `{"ETag": ...}`). |
 
-### The `src` / `dst` convention
+### The `src` / `dest` convention
 
-The three `src_*` fields describe **one** object and the three `dst_*` fields
+The three `src_*` fields describe **one** object and the three `dest_*` fields
 the **other**, so they always agree within a side:
 
 - `src` (display) ↔ `src_info` (entry) ↔ `src_storage` (backend)
-- `dest` (display) ↔ `dst_info` (entry) ↔ `dst_storage` (backend)
+- `dest` (display) ↔ `dest_info` (entry) ↔ `dest_storage` (backend)
 
 The **source side** is the object being acted on: the source of a transfer, or
 the object a delete removes (aws models a delete as `src`=path, `dest`=None - so
-a delete fills the `src_*` trio and leaves `dst_*` empty). The **destination
-side** is where a transfer writes; `dst_info` is populated only by `sync` (the
+a delete fills the `src_*` trio and leaves `dest_*` empty). The **destination
+side** is where a transfer writes; `dest_info` is populated only by `sync` (the
 pre-existing object the copy compared against) - `cp` / `mv` never list the
-destination, so they carry `dest` / `dst_storage` but no `dst_info`.
+destination, so they carry `dest` / `dest_storage` but no `dest_info`.
 
-So `src_storage` + `src_info.key` (or `dst_storage` + `dst_info.key`) re-reaches
+So `src_storage` + `src_info.key` (or `dest_storage` + `dest_info.key`) re-reaches
 the object directly - e.g. a HeadObject - without re-deriving anything.
 
 ## Which operation populates which field
@@ -53,14 +53,14 @@ the object directly - e.g. a HeadObject - without re-deriving anything.
 | `bytes_transferred` | bytes | bytes | 0 | 0 |
 | `error` | on FAILED | on FAILED | on FAILED | the message body |
 | `src_info` | the source entry | the source entry | the removed object | — |
-| `dst_info` | — | update: the pre-existing dst / new: — | — | — |
+| `dest_info` | — | update: the pre-existing dest / new: — | — | — |
 | `src_storage` | source side | source side | the target bucket | run's source side |
-| `dst_storage` | dest side | dest side | — | run's dest side |
+| `dest_storage` | dest side | dest side | — | run's dest side |
 | `extra_info` | copy / download: `{"ETag": …}` · upload: — | same | — | — |
 
 A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
-`dst_info` are both `None` and the stream endpoint renders as `-`; the
-`src_storage` / `dst_storage` are still the two sides.
+`dest_info` are both `None` and the stream endpoint renders as `-`; the
+`src_storage` / `dest_storage` are still the two sides.
 
 ## `extra_info` (result metadata)
 

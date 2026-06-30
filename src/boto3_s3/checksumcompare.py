@@ -26,7 +26,7 @@ imports no AWS SDK module at import time; the SDK touches - the boto3 client (vi
 checksums - are all deferred into the construct / compute paths.
 
 It is a replacement ``compare=`` strategy, not composed with the default:
-``S3.sync(compare=ChecksumComparison(s3, src, dst))`` decides every pair by content.
+``S3.sync(compare=ChecksumComparison(s3, src, dest))`` decides every pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + local hash on
@@ -104,7 +104,7 @@ class ChecksumComparison:
     replacement ``compare=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
-    ``dst`` against ``s3`` (``s3.resolve`` - the same values passed to
+    ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to
     ``s3.sync``); pass ``S3Storage`` instances for a cross-account s3-to-s3 sync,
     exactly as ``sync`` does. ``bucket`` is not on a ``FileInfo``, which is why
     the endpoint is injected explicitly here rather than read from the pair.
@@ -121,7 +121,7 @@ class ChecksumComparison:
     without ``awscrt``.
     """
 
-    __slots__ = ("_dst_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
+    __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
 
     check_size: bool
     pure_max_size: int | None
@@ -130,45 +130,45 @@ class ChecksumComparison:
     # ``S3Storage`` import (which would drag ``botocore`` at import time); the
     # route (``pair.transfer_type``) tells which side is the S3 one.
     _src_storage: Any
-    _dst_storage: Any
+    _dest_storage: Any
     _request_payer: str | None
 
     def __init__(
         self,
         s3: S3,
         src: Location,
-        dst: Location,
+        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
         self._src_storage = s3.resolve(src)
-        self._dst_storage = s3.resolve(dst)
+        self._dest_storage = s3.resolve(dest)
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
     def __call__(self, pair: SyncPair) -> bool:
-        src, dst = pair.src, pair.dst
+        src, dest = pair.src, pair.dest
         if src is None:
             raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dst is None:
+        if dest is None:
             return True
         if (
             self.check_size
             and src.size is not None
-            and dst.size is not None
-            and src.size != dst.size
+            and dest.size is not None
+            and src.size != dest.size
         ):
             return True
         transfer_type = pair.transfer_type
         if transfer_type is TransferType.COPY:
-            return self._copy_differs(src.key, dst.key)
+            return self._copy_differs(src.key, dest.key)
         if transfer_type is TransferType.UPLOAD:
-            local, remote_key, storage = src, dst.key, self._dst_storage
+            local, remote_key, storage = src, dest.key, self._dest_storage
         elif transfer_type is TransferType.DOWNLOAD:
-            local, remote_key, storage = dst, src.key, self._src_storage
+            local, remote_key, storage = dest, src.key, self._src_storage
         else:  # MOVE / DELETE never reach a copy decision; guard defensively.
             raise ValueError(
                 f"checksum comparison cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
@@ -190,14 +190,14 @@ class ChecksumComparison:
             local_value = _whole_b64(path, remote.algorithm)
         return local_value != remote.value
 
-    def _copy_differs(self, src_key: str, dst_key: str) -> bool:
+    def _copy_differs(self, src_key: str, dest_key: str) -> bool:
         """s3-to-s3: compare the two objects' stored checksums (no bytes read).
 
         The stored value strings are compared directly, so the COMPOSITE part
         sizes are not needed (``need_parts=False`` skips that pagination).
         """
         a = self._remote_checksum(self._src_storage, src_key, need_parts=False)
-        b = self._remote_checksum(self._dst_storage, dst_key, need_parts=False)
+        b = self._remote_checksum(self._dest_storage, dest_key, need_parts=False)
         if a is None or b is None or a.algorithm != b.algorithm:
             return True
         return a.value != b.value

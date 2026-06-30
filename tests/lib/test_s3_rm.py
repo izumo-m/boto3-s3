@@ -143,7 +143,7 @@ class TestRmSingleKey:
         assert results[0].src == "s3://b/data/a.txt"
         assert results[0].src_info is not None and results[0].src_info.key == "data/a.txt"
         assert isinstance(results[0].src_storage, S3Storage)
-        assert results[0].dst_info is None
+        assert results[0].dest_info is None
 
     def test_request_payer_forwarded(self) -> None:
         client = _FakeS3Client()

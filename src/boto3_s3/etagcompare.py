@@ -119,27 +119,27 @@ class EtagComparison:
         self.check_size = check_size
 
     def __call__(self, pair: SyncPair) -> bool:
-        src, dst = pair.src, pair.dst
+        src, dest = pair.src, pair.dest
         if src is None:
             raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dst is None:
+        if dest is None:
             return True
         if (
             self.check_size
             and src.size is not None
-            and dst.size is not None
-            and src.size != dst.size
+            and dest.size is not None
+            and src.size != dest.size
         ):
             # Differing sizes mean differing content - copy without trusting an
             # ETag (MD5 can collide) or reading the local file.
             return True
         if pair.transfer_type is TransferType.COPY:
             # Both sides are S3 listings: the stored ETags are directly comparable.
-            return _etag_differs(_s3_etag(src), _s3_etag(dst))
+            return _etag_differs(_s3_etag(src), _s3_etag(dest))
         if pair.transfer_type is TransferType.UPLOAD:
-            local, remote = src, dst
+            local, remote = src, dest
         elif pair.transfer_type is TransferType.DOWNLOAD:
-            local, remote = dst, src
+            local, remote = dest, src
         else:  # MOVE never reaches a copy decision; guard defensively.
             raise ValueError(
                 f"etag comparison cannot judge a {pair.transfer_type.value!r} pair: {pair.key!r}"

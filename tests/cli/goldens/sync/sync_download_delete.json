@@ -2,7 +2,7 @@
   "argv": [
     "sync",
     "s3://<BUCKET>/d",
-    "dst",
+    "dest",
     "--delete"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
@@ -18,8 +18,8 @@
   "scenario": "sync_download_delete",
   "src_tree": null,
   "stdout_lines": [
-    "delete: dst/stale.txt",
-    "delete: dst/sub/stale2.txt",
-    "download: s3://<BUCKET>/d/a.txt to dst/a.txt"
+    "delete: dest/stale.txt",
+    "delete: dest/sub/stale2.txt",
+    "download: s3://<BUCKET>/d/a.txt to dest/a.txt"
   ]
 }

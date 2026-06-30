@@ -55,31 +55,31 @@ class TestSyncOpens3Upload:
 
     def test_uploads_each_source_entry(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
-        client, calls = make_recording_client([_listing(), {}, {}])  # empty dst, 2 PutObject
+        client, calls = make_recording_client([_listing(), {}, {}])  # empty dest, 2 PutObject
         S3().sync(
-            src, S3Storage("s3://b/dst/", client=client), compare=True, transfer_config=_SERIAL
+            src, S3Storage("s3://b/dest/", client=client), compare=True, transfer_config=_SERIAL
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
-        assert calls[0].params["Prefix"] == "dst/"
-        assert [call.params["Key"] for call in calls[1:]] == ["dst/a.txt", "dst/sub/b.txt"]
+        assert calls[0].params["Prefix"] == "dest/"
+        assert [call.params["Key"] for call in calls[1:]] == ["dest/a.txt", "dest/sub/b.txt"]
 
     def test_delete_removes_orphan_s3_keys(self) -> None:
         # The destination is S3, so orphans are deleted with DeleteObjects (the
         # custom source side is never deleted).
         src = _MemStorage({"a.txt": b"x"}, location="mem://data/")
         client, calls = make_recording_client(
-            [_listing(("dst/a.txt", 1), ("dst/orphan.txt", 2)), {}, {}]
+            [_listing(("dest/a.txt", 1), ("dest/orphan.txt", 2)), {}, {}]
         )
         S3().sync(
             src,
-            S3Storage("s3://b/dst/", client=client),
+            S3Storage("s3://b/dest/", client=client),
             compare=True,
             delete=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject", "DeleteObjects"]
         keys = [entry["Key"] for entry in calls[2].params["Delete"]["Objects"]]
-        assert keys == ["dst/orphan.txt"]
+        assert keys == ["dest/orphan.txt"]
 
     def test_unsorted_source_is_rejected(self) -> None:
         # No SORTED_SCAN -> the merge-join cannot trust the order, so reject up
@@ -87,7 +87,7 @@ class TestSyncOpens3Upload:
         src = _ReadOnlyMem({"a.txt": b"x"}, location="mem://data/")
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().sync(src, S3Storage("s3://b/dst/", client=client), transfer_config=_SERIAL)
+            S3().sync(src, S3Storage("s3://b/dest/", client=client), transfer_config=_SERIAL)
         assert "SORTED_SCAN" in str(excinfo.value)
         assert calls == []
 
@@ -97,7 +97,7 @@ class TestSyncS3openDownload:
 
     def test_downloads_each_source_entry(self) -> None:
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/")
+        dest = _MemStorage(store, location="mem://data/")
         client, calls = make_recording_client(
             [
                 _listing(("src/a.txt", 3), ("src/sub/b.txt", 3)),
@@ -106,7 +106,7 @@ class TestSyncS3openDownload:
             ]
         )
         S3().sync(
-            S3Storage("s3://b/src/", client=client), dst, compare=True, transfer_config=_SERIAL
+            S3Storage("s3://b/src/", client=client), dest, compare=True, transfer_config=_SERIAL
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
@@ -115,26 +115,26 @@ class TestSyncS3openDownload:
         # The destination is custom, so orphans are removed through its own
         # Storage.delete (not os.remove / DeleteObject).
         store = {"a.txt": b"old", "orphan.txt": b"gone"}
-        dst = _MemStorage(store, location="mem://data/")
+        dest = _MemStorage(store, location="mem://data/")
         client, calls = make_recording_client([_listing(("src/a.txt", 3)), _get_response(b"AAA")])
         S3().sync(
             S3Storage("s3://b/src/", client=client),
-            dst,
+            dest,
             compare=True,
             delete=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
-        assert dst.deletes == ["orphan.txt"]
+        assert dest.deletes == ["orphan.txt"]
         assert store == {"a.txt": b"AAA"}
 
     def test_delete_without_delete_capability_is_rejected(self) -> None:
-        dst = _NoDeleteMem({}, location="mem://data/")
+        dest = _NoDeleteMem({}, location="mem://data/")
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(
                 S3Storage("s3://b/src/", client=client),
-                dst,
+                dest,
                 delete=True,
                 transfer_config=_SERIAL,
             )
@@ -144,22 +144,22 @@ class TestSyncS3openDownload:
     def test_no_delete_does_not_require_delete_capability(self) -> None:
         # Without --delete the custom destination needs no DELETE; the sync runs.
         store: dict[str, bytes] = {}
-        dst = _NoDeleteMem(store, location="mem://data/")
+        dest = _NoDeleteMem(store, location="mem://data/")
         client, calls = make_recording_client([_listing(("src/a.txt", 3)), _get_response(b"AAA")])
         S3().sync(
-            S3Storage("s3://b/src/", client=client), dst, compare=True, transfer_config=_SERIAL
+            S3Storage("s3://b/src/", client=client), dest, compare=True, transfer_config=_SERIAL
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
         assert store == {"a.txt": b"AAA"}
 
     def test_dryrun_lists_but_never_opens_the_backend(self) -> None:
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/")
+        dest = _MemStorage(store, location="mem://data/")
         client, calls = make_recording_client([_listing(("src/a.txt", 3))])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://b/src/", client=client),
-            dst,
+            dest,
             compare=True,
             dryrun=True,
             transfer_config=_SERIAL,
@@ -167,5 +167,5 @@ class TestSyncS3openDownload:
         )
         assert _ops(calls) == ["ListObjectsV2"]
         assert store == {}
-        assert dst.opens == []
+        assert dest.opens == []
         assert [r.outcome for r in results] == [OpOutcome.DRYRUN]

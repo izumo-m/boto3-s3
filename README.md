@@ -105,7 +105,7 @@ callable from Python, in every direction:
 ```python
 s3.sync("./site", "s3://my-bucket/site/")       # upload
 s3.sync("s3://my-bucket/site/", "./site")       # download
-s3.sync("s3://src/data/", "s3://dst/data/")     # S3-to-S3
+s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 ```
 
 It supports the flags you know from the command:
@@ -116,7 +116,7 @@ It supports the flags you know from the command:
   uses size + mtime (equivalently `AwsCliComparison()`, tuned via
   `AwsCliComparison(size_only=True)` / `(exact_timestamps=True)`); `True` copies
   everything, `False` copies nothing; or pass a content strategy like
-  `EtagComparison(s3)` / `ChecksumComparison(s3, src, dst)` (wrap either in
+  `EtagComparison(s3)` / `ChecksumComparison(s3, src, dest)` (wrap either in
   `ParallelCompare(...)` to decide on a thread pool).
 - **`filter=`** — include/exclude matching; **`dryrun=True`** to
   preview every transfer and deletion first.
@@ -154,9 +154,9 @@ below — each mirrors an `aws s3` subcommand.
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
 | `ls(target="s3://", *, recursive, page_size, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. |
-| `cp(src, dst, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dst` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
-| `mv(src, dst, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
-| `sync(src, dst, *, delete, filter, compare, …, **options)` | `sync` | Recursively synchronize `src` into `dst`. |
+| `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
+| `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
+| `sync(src, dest, *, delete, filter, compare, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
 | `rm(target, *, recursive, filter, dryrun, request_payer, …)` | `rm` | Delete objects (a single key, a recursive prefix, or the folder-marker sweep). |
 | `mb(target, *, tags)` | `mb` | Create the bucket of `target`. |
 | `rb(target)` | `rb` | Delete the (empty) bucket of `target`. |
@@ -190,7 +190,7 @@ verbatim with its own client:
 ```python
 s3.cp(
     S3Storage("s3://src-bucket/data/", client=src_client),
-    S3Storage("s3://dst-bucket/data/", client=dst_client),
+    S3Storage("s3://dest-bucket/data/", client=dest_client),
     recursive=True,
 )
 ```
@@ -238,8 +238,8 @@ client = boto3.Session(profile_name="prod", region_name="eu-west-1").client("s3"
 
 with concurrent.futures.ThreadPoolExecutor() as pool:
     for path in paths:  # paths: an iterable of pathlib.Path
-        dst = S3Storage(f"s3://prod-bucket/{path.name}", client=client)
-        pool.submit(s3.cp, str(path), dst)
+        dest = S3Storage(f"s3://prod-bucket/{path.name}", client=client)
+        pool.submit(s3.cp, str(path), dest)
 ```
 
 Alternatively, subclass `S3` and override `client()` to return a single

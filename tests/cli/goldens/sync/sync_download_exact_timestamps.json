@@ -2,7 +2,7 @@
   "argv": [
     "sync",
     "s3://<BUCKET>/d",
-    "dst",
+    "dest",
     "--exact-timestamps"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
@@ -18,6 +18,6 @@
   "scenario": "sync_download_exact_timestamps",
   "src_tree": null,
   "stdout_lines": [
-    "download: s3://<BUCKET>/d/same.txt to dst/same.txt"
+    "download: s3://<BUCKET>/d/same.txt to dest/same.txt"
   ]
 }

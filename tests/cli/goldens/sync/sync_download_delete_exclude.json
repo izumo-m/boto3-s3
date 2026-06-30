@@ -2,7 +2,7 @@
   "argv": [
     "sync",
     "s3://<BUCKET>/d",
-    "dst",
+    "dest",
     "--delete",
     "--exclude",
     "*.log"
@@ -21,7 +21,7 @@
   "scenario": "sync_download_delete_exclude",
   "src_tree": null,
   "stdout_lines": [
-    "delete: dst/stale.txt",
-    "download: s3://<BUCKET>/d/a.txt to dst/a.txt"
+    "delete: dest/stale.txt",
+    "download: s3://<BUCKET>/d/a.txt to dest/a.txt"
   ]
 }

@@ -107,10 +107,10 @@ class TransferItem:
     ``compare_key`` is the item's operation-relative name (``naming.item_paths``)
     - the identity under which results and progress are reported. The
     per-route fields are populated by the orchestrator: ``src_path`` /
-    ``dst_path`` are native local paths; bucket/key pairs are S3 sides.
+    ``dest_path`` are native local paths; bucket/key pairs are S3 sides.
     ``head`` carries the single-source HeadObject payload so a single-file
     copy never heads the source twice; ``mtime`` is the source LastModified a
-    download stamps onto the local file; ``src_display`` / ``dst_display``
+    download stamps onto the local file; ``src_display`` / ``dest_display``
     are the rendered endpoints reported on ``OpResult``.
     """
 
@@ -124,25 +124,25 @@ class TransferItem:
     # source through its logical ``/``-key, distinct from ``src_path`` (the path
     # s3transfer reads). None only on the stream routes, which list nothing.
     src_info: FileInfo | None = None
-    # The destination listing entry, set only by ``sync`` (the pair's ``dst``):
+    # The destination listing entry, set only by ``sync`` (the pair's ``dest``):
     # the pre-existing object an update overwrites, or None for a new key. cp /
     # mv never list the destination, so it stays None there.
-    dst_info: FileInfo | None = None
-    dst_bucket: str | None = None
-    dst_key: str | None = None
-    dst_path: str | None = None
+    dest_info: FileInfo | None = None
+    dest_bucket: str | None = None
+    dest_key: str | None = None
+    dest_path: str | None = None
     etag: str | None = None
     mtime: datetime | None = None
     head: Mapping[str, Any] | None = None
     src_display: str = ""
-    dst_display: str = ""
+    dest_display: str = ""
     # Streaming sides (cp with stdin/stdout, or any caller-supplied binary
     # stream): a readable object replaces src_path on uploads, a writable one
-    # replaces dst_path on downloads. Streams get no directory creation and
+    # replaces dest_path on downloads. Streams get no directory creation and
     # no mtime stamp, and a download without size+etag lets s3transfer probe
     # the object itself (HeadObject) - exactly the aws stream wire shape.
     src_fileobj: Any = None
-    dst_fileobj: Any = None
+    dest_fileobj: Any = None
 
 
 def _is_precondition_failed(exc: BaseException) -> bool:
@@ -270,8 +270,8 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe. ``src_storage`` / ``dst_storage`` are the run's
-    two resolved side ``Storage`` objects (``plan.src`` / ``plan.dst``), retained
+    s3transfer's own size probe. ``src_storage`` / ``dest_storage`` are the run's
+    two resolved side ``Storage`` objects (``plan.src`` / ``plan.dest``), retained
     so a completion can resolve or report either endpoint alongside its listing
     entries. ``src_storage`` doubles as ``mv``'s upload-source delete handle: an
     upload source - a local file or a custom backend - is removed through its
@@ -293,7 +293,7 @@ class Transferrer:
         *,
         source_client: S3Client | None = None,
         src_storage: Storage | None = None,
-        dst_storage: Storage | None = None,
+        dest_storage: Storage | None = None,
         transfer_config: TransferConfig | None = None,
         options: TransferOptions | None = None,
         operation: str = "cp",
@@ -310,12 +310,12 @@ class Transferrer:
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
-        # The run's two resolved side Storages (plan.src / plan.dst), retained so
+        # The run's two resolved side Storages (plan.src / plan.dest), retained so
         # a completion can surface them with the listing entries; _src_storage is
         # also mv's upload-source delete handle (consulted only on the upload
         # route - a download / copy S3 source is removed with a DeleteObject).
         self._src_storage = src_storage
-        self._dst_storage = dst_storage
+        self._dest_storage = dest_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
@@ -398,7 +398,7 @@ class Transferrer:
                 outcome=OpOutcome.WARNED,
                 error=Boto3S3Error(body, operation=self._operation),
                 src_storage=self._src_storage,
-                dst_storage=self._dst_storage,
+                dest_storage=self._dest_storage,
             )
         )
 
@@ -423,7 +423,7 @@ class Transferrer:
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
                 src_storage=self._src_storage,
-                dst_storage=self._dst_storage,
+                dest_storage=self._dest_storage,
             )
         )
 
@@ -471,8 +471,8 @@ class Transferrer:
         subscribers.append(self._completion(item))
         self._get_manager().upload(
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
-            bucket=item.dst_bucket,
-            key=item.dst_key,
+            bucket=item.dest_bucket,
+            key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -480,17 +480,17 @@ class Transferrer:
     def _submit_download(self, item: TransferItem) -> None:
         extra_args = requestparams.map_get_object_params(self._options)
         subscribers = self._common_subscribers(item)
-        if item.dst_path is not None:
+        if item.dest_path is not None:
             subscribers.append(_DirectoryCreator())
-        if item.dst_fileobj is not None:
-            subscribers.append(_CloseFileobj(item.dst_fileobj))
+        if item.dest_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.dest_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
         self._get_manager().download(
             bucket=item.src_bucket,
             key=item.src_key,
-            fileobj=item.dst_fileobj if item.dst_fileobj is not None else item.dst_path,
+            fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -505,8 +505,8 @@ class Transferrer:
         subscribers.append(self._completion(item))
         self._get_manager().copy(
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
-            bucket=item.dst_bucket,
-            key=item.dst_key,
+            bucket=item.dest_bucket,
+            key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
             source_client=self._source_client,
@@ -659,11 +659,11 @@ class Transferrer:
             bytes_transferred=bytes_transferred,
             error=error,
             src=item.src_display or None,
-            dest=item.dst_display or None,
+            dest=item.dest_display or None,
             src_info=item.src_info,
-            dst_info=item.dst_info,
+            dest_info=item.dest_info,
             src_storage=self._src_storage,
-            dst_storage=self._dst_storage,
+            dest_storage=self._dest_storage,
             extra_info=extra_info,
         )
 
@@ -703,8 +703,8 @@ class Transferrer:
         error = translate_boto_error(
             exc,
             operation=self._operation,
-            bucket=item.dst_bucket or item.src_bucket,
-            key=item.dst_key or item.src_key,
+            bucket=item.dest_bucket or item.src_bucket,
+            key=item.dest_key or item.src_key,
         )
         with self._lock:
             self._failed += 1
@@ -721,13 +721,13 @@ class Transferrer:
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
         """
-        if item.mtime is None or item.dst_path is None:
+        if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dst_path, item.mtime.timestamp())
+            _set_file_utime(item.dest_path, item.mtime.timestamp())
         except Exception as exc:
             self.warn(
-                f"Skipping file {item.dst_path}. Successfully Downloaded {item.dst_path} "
+                f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
                 key=item.compare_key,
             )

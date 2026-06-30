@@ -374,7 +374,7 @@ moto.
 
 ### 5.7 `cp`
 
-Equivalent to `aws s3 cp <src> <dst>` (aws-cli `CpCommand`; transfer family =
+Equivalent to `aws s3 cp <src> <dest>` (aws-cli `CpCommand`; transfer family =
 `CommandArchitecture` + s3transfer). The engine design is in
 [`transfer.md`](./transfer.md), the implementation in `commands/cp.py` +
 `progress.py`. Routes are classified solely by the presence or absence of the
@@ -399,7 +399,7 @@ swaps the region + discards `--endpoint-url` = aws-cli `ClientFactory`)
 `--page-size`, streaming (`-`), `--expected-size`, `--no-overwrite`,
 `--case-conflict`, `--checksum-mode`, `--checksum-algorithm`.
 
-**streaming (`-`)**: src `-` = stdin upload, dst `-` = stdout download (passing
+**streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
 `sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In
 the form where the dest adopts the source name, the literal `-` becomes the
 basename, per aws's naming (`cp - s3://b/pre/` -> key `pre/-`); this is derived in
@@ -463,9 +463,9 @@ does not exist`, a listing error, a malformed `--grants`, a non-integer
 normal return is **2** if the warned count > 0, else 0.
 
 **Output** (`TransferPrinter`, aws-cli `ResultPrinter` shape): success
-`upload|download|copy: <src> to <dst>` (stdout. the local side is rendered
+`upload|download|copy: <src> to <dest>` (stdout. the local side is rendered
 relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryrun) `
-prefix, failure `<transfer_type> failed: <src> to <dst> <err>` (stderr), warning `warning:
+prefix, failure `<transfer_type> failed: <src> to <dest> <err>` (stderr), warning `warning:
 <body>` (stderr, the body assembled by the library with aws-cli wording). Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask
@@ -488,7 +488,7 @@ mtime, a parent-ref escape, the pre-warning for a >48.8 TiB upload
 
 ### 5.8 `mv`
 
-Equivalent to `aws s3 mv <src> <dst>` (aws-cli `MvCommand`). The implementation is
+Equivalent to `aws s3 mv <src> <dest>` (aws-cli `MvCommand`). The implementation is
 `commands/mv.py` + `commands/transferargs.py` (shared with cp). **The transfer
 surface is fully shared with cp (section 5.7)** - the declaration, validation, options
 conversion, location wiring, output, and rc derivation all go through the same
@@ -498,7 +498,7 @@ code. This section records only the differences. The library side is `S3.mv`
 **Differences in the declaration surface** (aws-cli ARG_TABLE: cp -
 `EXPECTED_SIZE` + `VALIDATE_SAME_S3_PATHS`): `--expected-size` is not declared
 (`Unknown options` 252). `--validate-same-s3-paths` is added. streaming is
-**rejected at declaration**: if either src / dst is `-`, it is 252 (`Streaming
+**rejected at declaration**: if either src / dest is `-`, it is 252 (`Streaming
 currently is only compatible with non-recursive cp commands` - the aws-cli wording
 stays "cp commands" even for mv. `mv - -` hits the local->local usage error
 first).
@@ -508,7 +508,7 @@ first).
 1. **The same-path guard** (always): if the keyless-normalized URI (`s3://b` ->
    `s3://b/`) matches `naming.same_path` (an exact match, or a `/`-terminated dest
    + `basename(src)` concatenation equals src) -> 252 (`Cannot mv a file onto
-   itself: <src> - <dst>`, displaying the normalized original URI). **`--recursive`
+   itself: <src> - <dest>`, displaying the normalized original URI). **`--recursive`
    is also subject to this** (`mv --recursive s3://b/d s3://b/` is 252 even when no
    key actually overlaps with itself - a faithful false positive of aws-cli.
    Confirmed by measurement).
@@ -524,7 +524,7 @@ first).
    uses the original URI). The clients go via `Context.service_client_factory`:
    the src-side s3control uses `--source-region` (when unspecified, the session
    default - it does not fall back to `--region`, like aws-cli's dead-default),
-   the dst side uses `--region`, and sts has no region (a transcription of aws-cli
+   the dest side uses `--region`, and sts has no region (a transcription of aws-cli
    `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
    alias is also 252 (the wording is verbatim from aws-cli). A ClientError from
    s3control / sts keeps `__cause__` and is **254** (aws is also 254 on
@@ -552,7 +552,7 @@ item a `move failed:` (rc 1)** (the bytes have already arrived). An emptied loca
 dir is kept (same as aws).
 
 **Output** uses the mechanism of section 5.7 with only the verb being `move` (success
-`move: <src> to <dst>`, `(dryrun) move: ...`, failure `move failed: ... <err>`).
+`move: <src> to <dest>`, `(dryrun) move: ...`, failure `move failed: ... <err>`).
 The wording of the glacier warning stays the route word ("Unable to perform
 download operations ..." - because aws-cli uses operation_name. transfer.md
 section 8).
@@ -563,7 +563,7 @@ before the operation begins = outside the transfer-exception rule).
 
 ### 5.9 `sync`
 
-Equivalent to `aws s3 sync <src> <dst>` (aws-cli `SyncCommand`). The
+Equivalent to `aws s3 sync <src> <dest>` (aws-cli `SyncCommand`). The
 implementation is `commands/sync.py` + `commands/transferargs.py` (shared with
 cp / mv). The transfer surface, output, and rc derivation are shared with cp
 (section 5.7), and this section records only the differences. The library side is

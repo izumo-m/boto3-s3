@@ -54,7 +54,7 @@ def _ops(calls: list[ApiCall]) -> list[str]:
 class _OpenSink(io.BytesIO):
     """A download sink whose ``close`` is suppressed.
 
-    The open route has the transfer ``close`` every dst fileobj it is handed
+    The open route has the transfer ``close`` every dest fileobj it is handed
     (``transfer._CloseFileobj`` - a custom backend's writer commits that way); a
     real ``IOStorage`` hands it a close-suppressing view, never the caller's raw
     stream. These lower-level tests build the ``TransferItem`` directly, so this
@@ -114,10 +114,10 @@ class TestUpload:
             compare_key="a.bin",
             size=7,
             src_path=str(src),
-            dst_bucket="bucket",
-            dst_key="up/a.bin",
+            dest_bucket="bucket",
+            dest_key="up/a.bin",
             src_display=str(src),
-            dst_display="s3://bucket/up/a.bin",
+            dest_display="s3://bucket/up/a.bin",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
@@ -135,7 +135,7 @@ class TestUpload:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         _, _, results, _ = _run(TransferType.UPLOAD, [item], [{}])
         assert results[0].extra_info is None
@@ -144,7 +144,7 @@ class TestUpload:
         src = tmp_path / "big.bin"
         src.write_bytes(b"x" * (9 * _MIB))
         item = TransferItem(
-            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dest_bucket="b", dest_key="big"
         )
         calls, _, _, transferrer = _run(
             TransferType.UPLOAD,
@@ -164,7 +164,7 @@ class TestUpload:
         src = tmp_path / "data.json"
         src.write_bytes(b"{}")
         item = TransferItem(
-            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="data.json", size=2, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(TransferType.UPLOAD, [item], [{}])
         assert calls[0].params["ContentType"] == "application/json"
@@ -173,7 +173,7 @@ class TestUpload:
         src = tmp_path / "data.json"
         src.write_bytes(b"{}")
         item = TransferItem(
-            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="data.json", size=2, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD, [item], [{}], options=TransferOptions(content_type="text/x-probe")
@@ -184,7 +184,7 @@ class TestUpload:
         src = tmp_path / "data.json"
         src.write_bytes(b"{}")
         item = TransferItem(
-            compare_key="data.json", size=2, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="data.json", size=2, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD, [item], [{}], options=TransferOptions(guess_mime_type=False)
@@ -195,7 +195,7 @@ class TestUpload:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD,
@@ -214,7 +214,7 @@ class TestUpload:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
@@ -231,7 +231,7 @@ class TestUpload:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         client, calls = make_recording_client([{}])
         transferrer = Transferrer(
@@ -254,9 +254,9 @@ class TestDownload:
             mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
-            dst_path=str(tmp_path / dest),
+            dest_path=str(tmp_path / dest),
             src_display="s3://bucket/d/a.bin",
-            dst_display=dest,
+            dest_display=dest,
         )
 
     def _get_object_response(self) -> dict[str, Any]:
@@ -305,7 +305,7 @@ class TestDownload:
         assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
         warned = results[0]
         assert "but was unable to update the last modified time." in str(warned.error)
-        assert str(warned.error).startswith(f"Skipping file {item.dst_path}.")
+        assert str(warned.error).startswith(f"Skipping file {item.dest_path}.")
         # EPERM gets aws's re-wording (aws-cli set_file_utime).
         assert "attempting to modify the utime of the file failed" in str(warned.error)
 
@@ -327,9 +327,9 @@ class TestDownload:
             compare_key="a.bin",
             src_bucket="bucket",
             src_key="d/a.bin",
-            dst_fileobj=sink,
+            dest_fileobj=sink,
             src_display="s3://bucket/d/a.bin",
-            dst_display="-",
+            dest_display="-",
         )
         head = {"ContentLength": 7, "ETag": '"abc123"'}
         calls, _, results, _ = _run(
@@ -353,8 +353,8 @@ class TestCopy:
             etag="abc123",
             src_bucket="src-b",
             src_key="d/a.bin",
-            dst_bucket="dst-b",
-            dst_key="cp/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
             head=head,
         )
 
@@ -494,7 +494,7 @@ class TestCopy:
             source_responses=source_responses,
         )
         assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
-        assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
+        assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
@@ -503,7 +503,7 @@ class TestNonTransferOutcomes:
     def test_dryrun_emits_without_building_a_manager(self) -> None:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
-        item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
+        item = TransferItem(compare_key="a", src_display="a", dest_display="s3://b/a", size=1)
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
             transferrer.dryrun(item)
         assert calls == []
@@ -535,7 +535,7 @@ class TestNonTransferOutcomes:
             etag="e",
             src_bucket="b",
             src_key="k",
-            dst_path=str(tmp_path / "a.bin"),
+            dest_path=str(tmp_path / "a.bin"),
         )
         with Transferrer(
             TransferType.DOWNLOAD, client, transfer_config=_SYNC_CONFIG, on_progress=progress.append
@@ -551,7 +551,7 @@ class TestNoOverwrite:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD, [item], [{}], options=TransferOptions(no_overwrite=True)
@@ -562,7 +562,7 @@ class TestNoOverwrite:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
@@ -579,7 +579,7 @@ class TestNoOverwrite:
         src = tmp_path / "big.bin"
         src.write_bytes(b"x" * (9 * _MIB))
         item = TransferItem(
-            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dst_bucket="b", dst_key="big"
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dest_bucket="b", dest_key="big"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD,
@@ -604,8 +604,8 @@ class TestNoOverwrite:
             etag="abc123",
             src_bucket="src-b",
             src_key="d/a.bin",
-            dst_bucket="dst-b",
-            dst_key="cp/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
         )
         calls, _, _, _ = _run(
             TransferType.COPY,
@@ -634,7 +634,7 @@ class TestMove:
             mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
-            dst_path=str(tmp_path / "out" / "a.bin"),
+            dest_path=str(tmp_path / "out" / "a.bin"),
         )
 
     def _get_object_response(self) -> dict[str, Any]:
@@ -644,7 +644,7 @@ class TestMove:
         src = tmp_path / "a.bin"
         src.write_bytes(b"payload")
         item = TransferItem(
-            compare_key="a.bin", size=7, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=7, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert _ops(calls) == ["PutObject"]
@@ -675,8 +675,8 @@ class TestMove:
             etag="abc123",
             src_bucket="src-b",
             src_key="d/a.bin",
-            dst_bucket="dst-b",
-            dst_key="cp/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
         )
         calls, source_calls, _, transferrer = _run(
             TransferType.COPY, [item], [{}], source_responses=[{}], is_move=True
@@ -720,7 +720,7 @@ class TestMove:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
 
         def _boom(path: object) -> None:
@@ -736,7 +736,7 @@ class TestMove:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
@@ -753,7 +753,7 @@ class TestMove:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
@@ -777,8 +777,8 @@ class TestMove:
             etag="abc123",
             src_bucket="src-b",
             src_key="d/a.bin",
-            dst_bucket="dst-b",
-            dst_key="cp/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
         )
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
@@ -796,7 +796,7 @@ class TestMove:
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
         assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
-        assert calls[-1].params == {"Bucket": "dst-b", "Key": "cp/a.bin"}
+        assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         # No source-side delete: the only source calls are the props reads.
         assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
@@ -805,7 +805,7 @@ class TestMove:
     def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
-        item = TransferItem(compare_key="a", src_display="a", dst_display="s3://b/a", size=1)
+        item = TransferItem(compare_key="a", src_display="a", dest_display="s3://b/a", size=1)
         with Transferrer(
             TransferType.UPLOAD, client, is_move=True, on_result=results.append
         ) as transferrer:
@@ -828,7 +828,7 @@ class TestChecksumOptions:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
-            compare_key="a.bin", size=1, src_path=str(src), dst_bucket="b", dst_key="k"
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, _, _ = _run(
             TransferType.UPLOAD, [item], [{}], options=TransferOptions(checksum_algorithm="SHA256")
@@ -842,7 +842,7 @@ class TestChecksumOptions:
             etag="abc123",
             src_bucket="b",
             src_key="k",
-            dst_path=str(tmp_path / "out.bin"),
+            dest_path=str(tmp_path / "out.bin"),
         )
         calls, _, _, _ = _run(
             TransferType.DOWNLOAD,
@@ -858,10 +858,10 @@ class TestStreams:
         item = TransferItem(
             compare_key="streaming.txt",
             src_fileobj=io.BytesIO(b"foo\n"),
-            dst_bucket="bucket",
-            dst_key="streaming.txt",
+            dest_bucket="bucket",
+            dest_key="streaming.txt",
             src_display="-",
-            dst_display="s3://bucket/streaming.txt",
+            dest_display="s3://bucket/streaming.txt",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
@@ -876,8 +876,8 @@ class TestStreams:
             compare_key="streaming.txt",
             size=4,
             src_fileobj=io.BytesIO(b"foo\n"),
-            dst_bucket="bucket",
-            dst_key="streaming.txt",
+            dest_bucket="bucket",
+            dest_key="streaming.txt",
         )
         calls, _, _, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
@@ -889,9 +889,9 @@ class TestStreams:
             compare_key="streaming.txt",
             src_bucket="bucket",
             src_key="streaming.txt",
-            dst_fileobj=sink,
+            dest_fileobj=sink,
             src_display="s3://bucket/streaming.txt",
-            dst_display="-",
+            dest_display="-",
         )
         # Without size+etag s3transfer probes the object itself (the aws
         # stream wire shape: HeadObject then GetObject).

@@ -2,7 +2,7 @@
   "argv": [
     "mv",
     "s3://<BUCKET>/d/a.txt",
-    "dst/"
+    "dest/"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
   "bucket_exists": null,
@@ -15,6 +15,6 @@
   "scenario": "mv_download_to_dir",
   "src_tree": [],
   "stdout_lines": [
-    "move: s3://<BUCKET>/d/a.txt to dst/a.txt"
+    "move: s3://<BUCKET>/d/a.txt to dest/a.txt"
   ]
 }

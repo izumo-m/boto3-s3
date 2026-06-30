@@ -50,18 +50,18 @@ class SyncPair:
     need not care where either root lives. ``transfer_type`` is the sync's
     transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
     pair filter can apply the direction-asymmetric rules without being told the
-    route. ``src`` / ``dst`` are the sides' listing entries; exactly one may
+    route. ``src`` / ``dest`` are the sides' listing entries; exactly one may
     be ``None``:
 
     - both set: the key exists on both sides (copy is an *update*),
-    - ``dst`` is ``None``: source-only (copy is a *new* transfer),
+    - ``dest`` is ``None``: source-only (copy is a *new* transfer),
     - ``src`` is ``None``: destination-only (the delete candidate).
     """
 
     key: str
     transfer_type: TransferType
     src: FileInfo | None = None
-    dst: FileInfo | None = None
+    dest: FileInfo | None = None
 
 
 PairFilter = Callable[[SyncPair], bool]
@@ -113,36 +113,36 @@ class Comparator:
     def compare(
         self,
         src_entries: Iterable[tuple[str, FileInfo]],
-        dst_entries: Iterable[tuple[str, FileInfo]],
+        dest_entries: Iterable[tuple[str, FileInfo]],
     ) -> Iterator[SyncPair]:
         """Yield every key on either side as a :class:`SyncPair`.
 
-        ``src_entries`` / ``dst_entries`` are ``(compare_key, info)``
+        ``src_entries`` / ``dest_entries`` are ``(compare_key, info)``
         streams, lazily consumed - pairing streams page-by-page listings
         without materializing either side.
         """
         transfer_type = self.transfer_type
         src_iter = iter(src_entries)
-        dst_iter = iter(dst_entries)
+        dest_iter = iter(dest_entries)
         src = next(src_iter, None)
-        dst = next(dst_iter, None)
-        while src is not None and dst is not None:
-            if src[0] < dst[0]:
+        dest = next(dest_iter, None)
+        while src is not None and dest is not None:
+            if src[0] < dest[0]:
                 yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
-            elif src[0] > dst[0]:
-                yield SyncPair(key=dst[0], transfer_type=transfer_type, dst=dst[1])
-                dst = next(dst_iter, None)
+            elif src[0] > dest[0]:
+                yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                dest = next(dest_iter, None)
             else:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dst=dst[1])
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
                 src = next(src_iter, None)
-                dst = next(dst_iter, None)
+                dest = next(dest_iter, None)
         while src is not None:
             yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
-        while dst is not None:
-            yield SyncPair(key=dst[0], transfer_type=transfer_type, dst=dst[1])
-            dst = next(dst_iter, None)
+        while dest is not None:
+            yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            dest = next(dest_iter, None)
 
 
 def compare_size_time(
@@ -173,22 +173,22 @@ def compare_size_time(
     faces one (its listings always carry both), so leaning toward copying is the
     permissive reading.
     """
-    src, dst = pair.src, pair.dst
+    src, dest = pair.src, pair.dest
     if src is None:
         raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-    if dst is None:
+    if dest is None:
         return True
-    same_size = src.size is not None and src.size == dst.size
+    same_size = src.size is not None and src.size == dest.size
     if size_only and not exact_timestamps:
         return not same_size
-    return not same_size or not _times_match(src, dst, pair.transfer_type, exact_timestamps)
+    return not same_size or not _times_match(src, dest, pair.transfer_type, exact_timestamps)
 
 
-def _times_match(src: FileInfo, dst: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
+def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
     """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
-    if src.mtime is None or dst.mtime is None:
+    if src.mtime is None or dest.mtime is None:
         return False
-    delta = (dst.mtime - src.mtime).total_seconds()
+    delta = (dest.mtime - src.mtime).total_seconds()
     if transfer_type is TransferType.DOWNLOAD:
         return delta == 0 if exact else delta <= 0
     return delta >= 0

@@ -5,8 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Spell the destination `dest`, not `dst`, throughout - matching aws-cli
+  (`dest` is its spelling): `S3.cp` / `mv` / `sync`'s second argument,
+  `ChecksumComparison`'s `dest`, `OpResult.dest_info` / `dest_storage`, and the
+  internal types. A keyword caller switches `dst=` to `dest=`.
 - `OpResult` now carries the operation's listing entries and backend handles -
-  `src_info` / `dst_info` (`FileInfo`) and `src_storage` / `dst_storage`
+  `src_info` / `dest_info` (`FileInfo`) and `src_storage` / `dest_storage`
   (`Storage`), so a consumer can act on a result object directly (e.g.
   `src_storage` + `src_info.key` to HeadObject it) - plus `extra_info`, the
   result's S3 response metadata (`{"ETag": ...}` for an s3-to-s3 copy and a

@@ -120,13 +120,13 @@ class TestCopyObjectParams:
     def test_both_sse_c_sides(self) -> None:
         options = TransferOptions(
             sse_c="AES256",
-            sse_c_key=b"dst",
+            sse_c_key=b"dest",
             sse_c_copy_source="AES256",
             sse_c_copy_source_key=b"src",
         )
         assert map_copy_object_params(options) == {
             "SSECustomerAlgorithm": "AES256",
-            "SSECustomerKey": b"dst",
+            "SSECustomerKey": b"dest",
             "CopySourceSSECustomerAlgorithm": "AES256",
             "CopySourceSSECustomerKey": b"src",
         }
@@ -150,7 +150,7 @@ class TestHeadObjectParams:
         # *source* one, mapped onto the plain SSECustomer* parameters.
         options = TransferOptions(
             sse_c="AES256",
-            sse_c_key=b"dst",
+            sse_c_key=b"dest",
             sse_c_copy_source="AES256",
             sse_c_copy_source_key=b"src",
         )

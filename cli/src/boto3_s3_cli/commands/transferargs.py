@@ -429,10 +429,10 @@ def resolve_locations(
     ctx: Context,
     client: Any,
     src: str,
-    dst: str,
+    dest: str,
     *,
     src_type: str,
-    dst_type: str,
+    dest_type: str,
 ) -> tuple[object, object]:
     """Build the library-side location pair for the non-stream routes.
 
@@ -454,16 +454,16 @@ def resolve_locations(
         return storage
 
     if src_type == "local":
-        return src, _s3(dst, client)
-    if dst_type == "local":
-        return _s3(src, client), dst
+        return src, _s3(dest, client)
+    if dest_type == "local":
+        return _s3(src, client), dest
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))
         source_args.region = args.source_region
         source_args.endpoint_url = None
         source_client = ctx.client_factory(source_args)
-    return _s3(src, source_client), _s3(dst, client)
+    return _s3(src, source_client), _s3(dest, client)
 
 
 def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:

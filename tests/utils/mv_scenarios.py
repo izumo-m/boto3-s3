@@ -132,21 +132,21 @@ SCENARIOS: tuple[CpScenario, ...] = (
     # -- downloads (the bucket shrinks) ---------------------------------------
     CpScenario(
         name="mv_download_single",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.txt"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.txt"),
         seed=_SEED_SINGLE,
         capture_tree=True,
-        mtime_key=("d/a.txt", "dst/out.txt"),
+        mtime_key=("d/a.txt", "dest/out.txt"),
     ),
     CpScenario(
         name="mv_download_to_dir",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/"),
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
     CpScenario(
         name="mv_download_recursive",
         # The folder marker and the prefix sibling survive the move.
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d", "dst/", "--recursive"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d", "dest/", "--recursive"),
         seed=_SEED_TREE,
         capture_tree=True,
     ),
@@ -155,7 +155,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "mv",
             f"s3://{BUCKET_TOKEN}/d",
-            "dst/",
+            "dest/",
             "--recursive",
             "--exclude",
             "*",
@@ -168,20 +168,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="mv_download_dryrun_recursive",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d", "dst/", "--recursive", "--dryrun"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d", "dest/", "--recursive", "--dryrun"),
         seed=_SEED_TREE,
         capture_tree=True,
     ),
     CpScenario(
         name="mv_download_missing_key",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d/none.txt", "dst/out.txt"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d/none.txt", "dest/out.txt"),
         seed=_SEED_SINGLE,
         expected_stderr_tokens_ours=("fatal error",),
         expected_stderr_tokens_aws=("fatal error",),
     ),
     CpScenario(
         name="mv_download_page_size",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/pg", "dst/", "--recursive", "--page-size", "2"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/pg", "dest/", "--recursive", "--page-size", "2"),
         seed=_SEED_PAGED,
         capture_tree=True,
     ),
@@ -267,7 +267,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="mv_local_local",
-        argv=("mv", "src/a.txt", "dst/b.txt"),
+        argv=("mv", "src/a.txt", "dest/b.txt"),
         local_src=_SRC_SINGLE,
         expected_stderr_tokens_ours=("Error: Invalid argument type",),
         expected_stderr_tokens_aws=("Error: Invalid argument type",),
@@ -283,8 +283,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="mv_no_overwrite_download_exists",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.txt", "--no-overwrite"),
-        local_src={"dst/out.txt": b"existing local\n"},
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.txt", "--no-overwrite"),
+        local_src={"dest/out.txt": b"existing local\n"},
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),

@@ -2,7 +2,7 @@
   "argv": [
     "mv",
     "s3://<BUCKET>/d/a.txt",
-    "dst/out.txt",
+    "dest/out.txt",
     "--no-overwrite"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",

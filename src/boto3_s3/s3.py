@@ -199,7 +199,7 @@ def _run_sync_pairs(
             if cancelled():
                 raise CancelledError("sync was cancelled", operation="sync")
             if pair.src is not None:
-                if no_overwrite and pair.dst is not None:
+                if no_overwrite and pair.dest is not None:
                     continue
                 if decide(pair):
                     submit_copy(pair)
@@ -217,9 +217,9 @@ def _run_sync_pairs(
                 if cancelled():
                     raise CancelledError("sync was cancelled", operation="sync")
                 if pair.src is not None:
-                    if no_overwrite and pair.dst is not None:
+                    if no_overwrite and pair.dest is not None:
                         continue
-                    if pair.dst is not None:
+                    if pair.dest is not None:
                         pool.submit(decide, pair).add_done_callback(
                             lambda f, p=pair: done.put((p, f))
                         )
@@ -310,7 +310,7 @@ class _CaseConflictGate:
             return False  # exact-case match at the destination: always copy
         lowered = item.compare_key.lower()
         src = f"{item.src_bucket}/{item.src_key}"
-        dest = os.path.abspath(item.dst_path or "")
+        dest = os.path.abspath(item.dest_path or "")
         if lowered not in self._submitted and not os.path.exists(dest):
             self._submitted.add(lowered)
             return False
@@ -357,13 +357,13 @@ class _SyncDeletes:
 
     def __init__(
         self,
-        dst_storage: Storage,
+        dest_storage: Storage,
         *,
         request_payer: str | None,
         dryrun: bool,
         on_result: ResultCallback | None,
     ) -> None:
-        self._dst = dst_storage
+        self._dest = dest_storage
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
@@ -395,10 +395,10 @@ class _SyncDeletes:
         return self._local_first_error
 
     def submit(self, pair: SyncPair) -> None:
-        info = pair.dst
+        info = pair.dest
         assert info is not None  # the delete lane runs only on destination-only pairs
-        dst = self._dst
-        if isinstance(dst, S3Storage):
+        dest = self._dest
+        if isinstance(dest, S3Storage):
             if self._dryrun:
                 self._emit(info=info, outcome=OpOutcome.DRYRUN, src=self._display(info.key))
                 return
@@ -406,7 +406,7 @@ class _SyncDeletes:
                 assert self._stack is not None
                 self._deleter = self._stack.enter_context(
                     S3Deleter(
-                        dst,
+                        dest,
                         request_payer=self._request_payer,
                         on_result=self._on_result,
                         operation="sync",
@@ -419,13 +419,13 @@ class _SyncDeletes:
         # counters. A backend error is mapped into the library taxonomy (the same
         # translate the byte-moving delete path uses), so every result carries a
         # Boto3S3Error and the message aws prints survives; the catch is broad.
-        if not isinstance(dst, LocalStorage):
-            display = _open_side_display(dst, pair.key)
+        if not isinstance(dest, LocalStorage):
+            display = _open_side_display(dest, pair.key)
             if self._dryrun:
                 self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
                 return
             try:
-                dst.delete(info)
+                dest.delete(info)
             except Exception as exc:
                 self._emit(
                     info=info, outcome=OpOutcome.FAILED, src=display, error=self._fail(exc, info)
@@ -439,7 +439,7 @@ class _SyncDeletes:
             self._emit(info=info, outcome=OpOutcome.DRYRUN, src=native)
             return
         try:
-            dst.delete(info)
+            dest.delete(info)
         except Exception as exc:
             self._emit(info=info, outcome=OpOutcome.FAILED, src=native, error=self._fail(exc, info))
             return
@@ -455,8 +455,8 @@ class _SyncDeletes:
         return error
 
     def _display(self, key: str) -> str:
-        assert isinstance(self._dst, S3Storage)
-        return f"s3://{self._dst.bucket}/{key}"
+        assert isinstance(self._dest, S3Storage)
+        return f"s3://{self._dest.bucket}/{key}"
 
     def _emit(
         self,
@@ -475,7 +475,7 @@ class _SyncDeletes:
                     error=error,
                     src=src,
                     src_info=info,
-                    src_storage=self._dst,
+                    src_storage=self._dest,
                 )
             )
 
@@ -655,7 +655,7 @@ class S3:
     def cp(
         self,
         src: Location,
-        dst: Location,
+        dest: Location,
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
@@ -670,7 +670,7 @@ class S3:
         transfer_config: TransferConfig | None = None,
         **options: Unpack[TransferOptions],
     ) -> None:
-        """Copy bytes between ``src`` and ``dst`` with ``aws s3 cp`` semantics.
+        """Copy bytes between ``src`` and ``dest`` with ``aws s3 cp`` semantics.
 
         The route follows the resolved pair: local->S3 upload, S3->local
         download, S3->S3 copy (local->local is rejected, like aws). Path
@@ -726,11 +726,11 @@ class S3:
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
-        dst_storage = self.resolve(dst)
-        if isinstance(src_storage, IOStorage) or isinstance(dst_storage, IOStorage):
+        dest_storage = self.resolve(dest)
+        if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
             self._cp_stream(
                 src_storage,
-                dst_storage,
+                dest_storage,
                 recursive=recursive,
                 dryrun=dryrun,
                 expected_size=expected_size,
@@ -742,7 +742,7 @@ class S3:
             return
         self._run_transfer(
             src_storage,
-            dst_storage,
+            dest_storage,
             operation="cp",
             is_move=False,
             recursive=recursive,
@@ -761,7 +761,7 @@ class S3:
     def _run_transfer(
         self,
         src_storage: Storage,
-        dst_storage: Storage,
+        dest_storage: Storage,
         *,
         operation: str,
         is_move: bool,
@@ -795,20 +795,20 @@ class S3:
         engine.
         """
         src_storage.validate()
-        dst_storage.validate()
+        dest_storage.validate()
         plan = naming.plan_transfer(
-            src_storage, dst_storage, recursive=recursive, operation=operation
+            src_storage, dest_storage, recursive=recursive, operation=operation
         )
 
         source_client = None
         src_s3: S3Storage | None = None
-        dst_bucket = ""
+        dest_bucket = ""
         # The built-in routes pin the concrete types the engine reaches into
         # (S3Storage's client/bucket, LocalStorage's path); the open routes pair
         # a capability-checked custom backend with S3 and move its bytes through
         # Storage.open (see this method's docstring).
         if plan.paths_type == "locals3":
-            assert isinstance(src_storage, LocalStorage) and isinstance(dst_storage, S3Storage)
+            assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
             # aws-cli's _validate_path_args: the raw user path, checked up front
             # (their bare RuntimeError -> rc 255; base category here, ditto).
             if not os.path.exists(src_storage.path):
@@ -817,37 +817,37 @@ class S3:
                     operation=operation,
                 )
             transfer_type = TransferType.UPLOAD
-            client = dst_storage.get_client()
-            dst_bucket = dst_storage.bucket
+            client = dest_storage.get_client()
+            dest_bucket = dest_storage.bucket
         elif plan.paths_type == "s3local":
-            assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, LocalStorage)
+            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)
             # aws-cli's _validate_path_args only creates the dest dir when it does
-            # not already exist; check the raw user path (plan.dst_root carries a
+            # not already exist; check the raw user path (plan.dest_root carries a
             # trailing os.sep, so exists() is False for an existing *file*). An
             # existing-file dest then skips makedirs and fails per item like aws
             # (rc 1) instead of crashing up front; an empty listing transfers
             # nothing and exits 0.
-            if recursive and not os.path.exists(dst_storage.path):
+            if recursive and not os.path.exists(dest_storage.path):
                 try:
-                    os.makedirs(plan.dst_root, exist_ok=True)
+                    os.makedirs(plan.dest_root, exist_ok=True)
                 except OSError as exc:
                     raise Boto3S3Error(str(exc), operation=operation) from exc
             transfer_type = TransferType.DOWNLOAD
             client = src_storage.get_client()
             src_s3 = src_storage
         elif plan.paths_type == "s3s3":
-            assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage)
+            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
             transfer_type = TransferType.COPY
-            client = dst_storage.get_client()
+            client = dest_storage.get_client()
             source_client = src_storage.get_client()
             src_s3 = src_storage
-            dst_bucket = dst_storage.bucket
+            dest_bucket = dest_storage.bucket
         elif plan.paths_type == "opens3":
             # Custom source -> S3: upload each entry from its Storage.open("rb").
-            assert isinstance(dst_storage, S3Storage)
+            assert isinstance(dest_storage, S3Storage)
             transfer_type = TransferType.UPLOAD
-            client = dst_storage.get_client()
-            dst_bucket = dst_storage.bucket
+            client = dest_storage.get_client()
+            dest_bucket = dest_storage.bucket
         else:  # s3open: S3 -> custom destination, download into its open("wb").
             assert isinstance(src_storage, S3Storage)
             transfer_type = TransferType.DOWNLOAD
@@ -866,7 +866,7 @@ class S3:
             # is also mv's upload-source delete handle (consulted only on the
             # upload route - a download/copy S3 source is removed via DeleteObject).
             src_storage=src_storage,
-            dst_storage=dst_storage,
+            dest_storage=dest_storage,
             transfer_config=transfer_config,
             options=options,
             operation=operation,
@@ -878,7 +878,7 @@ class S3:
             if plan.paths_type == "opens3":
                 items = self._cp_open_upload_items(
                     plan,
-                    dst_bucket=dst_bucket,
+                    dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     follow_symlinks=follow_symlinks,
                     detect_symlink_loops=detect_symlink_loops,
@@ -901,7 +901,7 @@ class S3:
             elif src_s3 is None:
                 items = self._cp_upload_items(
                     plan,
-                    dst_bucket=dst_bucket,
+                    dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     follow_symlinks=follow_symlinks,
                     detect_symlink_loops=detect_symlink_loops,
@@ -912,7 +912,7 @@ class S3:
                     plan,
                     src_s3,
                     transfer_type=transfer_type,
-                    dst_bucket=dst_bucket,
+                    dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     page_size=page_size,
                     item_filter=item_filter,
@@ -942,7 +942,7 @@ class S3:
         self,
         plan: naming.TransferPlan,
         *,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
         follow_symlinks: bool,
         detect_symlink_loops: bool,
@@ -979,7 +979,7 @@ class S3:
             if item_filter is not None and not item_filter(info):
                 continue
             yield self._upload_item_from_info(
-                plan, info, dst_bucket=dst_bucket, transferrer=transferrer
+                plan, info, dest_bucket=dest_bucket, transferrer=transferrer
             )
 
     def _upload_item_from_info(
@@ -987,7 +987,7 @@ class S3:
         plan: naming.TransferPlan,
         info: FileInfo,
         *,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
     ) -> TransferItem:
         """One upload item from a walk entry (the oversize warning included)."""
@@ -1008,10 +1008,10 @@ class S3:
             mtime=info.mtime,
             src_path=native,
             src_info=info,
-            dst_bucket=dst_bucket,
-            dst_key=dest[len(dst_bucket) + 1 :],
+            dest_bucket=dest_bucket,
+            dest_key=dest[len(dest_bucket) + 1 :],
             src_display=native,
-            dst_display=f"s3://{dest}",
+            dest_display=f"s3://{dest}",
         )
 
     def _cp_s3_source_items(
@@ -1020,7 +1020,7 @@ class S3:
         src_storage: S3Storage,
         *,
         transfer_type: TransferType,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
         page_size: int,
         item_filter: FileFilter | None,
@@ -1063,7 +1063,7 @@ class S3:
                     plan,
                     info,
                     bucket=bucket,
-                    dst_bucket=dst_bucket,
+                    dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     options=options,
                 )
@@ -1096,9 +1096,9 @@ class S3:
             src_bucket=bucket,
             src_key=info.key,
             src_info=info,
-            dst_path=dest,
+            dest_path=dest,
             src_display=src_display,
-            dst_display=dest,
+            dest_display=dest,
         )
         # The comparator-equivalent gate runs before the submitter
         # warning handlers (aws-cli instruction order).
@@ -1135,7 +1135,7 @@ class S3:
         info: FileInfo,
         *,
         bucket: str,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
         options: TransferOptions,
     ) -> TransferItem | None:
@@ -1161,10 +1161,10 @@ class S3:
             src_bucket=bucket,
             src_key=info.key,
             src_info=info,
-            dst_bucket=dst_bucket,
-            dst_key=dest[len(dst_bucket) + 1 :],
+            dest_bucket=dest_bucket,
+            dest_key=dest[len(dest_bucket) + 1 :],
             src_display=src_display,
-            dst_display=f"s3://{dest}",
+            dest_display=f"s3://{dest}",
         )
 
     def _cp_scan(
@@ -1271,7 +1271,7 @@ class S3:
             if is_move:
                 needed |= StorageCapability.DELETE
         elif plan.paths_type == "s3open":
-            custom = plan.dst
+            custom = plan.dest
             needed = StorageCapability.OPEN_WRITE
         else:
             return
@@ -1293,7 +1293,7 @@ class S3:
             custom: Storage = plan.src
             needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_READ
         elif plan.paths_type == "s3open":
-            custom = plan.dst
+            custom = plan.dest
             needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_WRITE
             if delete:
                 needed |= StorageCapability.DELETE
@@ -1318,7 +1318,7 @@ class S3:
         self,
         plan: naming.TransferPlan,
         *,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
         follow_symlinks: bool,
         detect_symlink_loops: bool,
@@ -1365,10 +1365,10 @@ class S3:
         for info in infos:
             if item_filter is not None and not item_filter(info):
                 continue
-            yield self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
+            yield self._open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
 
     def _open_upload_item(
-        self, plan: naming.TransferPlan, info: FileInfo, *, dst_bucket: str, dryrun: bool
+        self, plan: naming.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
     ) -> TransferItem:
         """One upload item reading the custom source through ``Storage.open``.
 
@@ -1389,10 +1389,10 @@ class S3:
             # key space.
             src_info=info,
             src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
-            dst_bucket=dst_bucket,
-            dst_key=dest[len(dst_bucket) + 1 :],
+            dest_bucket=dest_bucket,
+            dest_key=dest[len(dest_bucket) + 1 :],
             src_display=_open_side_display(plan.src, open_key),
-            dst_display=f"s3://{dest}",
+            dest_display=f"s3://{dest}",
         )
 
     def _cp_open_download_items(
@@ -1412,7 +1412,7 @@ class S3:
         The open-route mirror of the S3-source half of ``_cp_s3_source_items``:
         the source is enumerated identically (``_cp_scan`` for a recursive
         prefix, ``_cp_head_single`` for one object), but each entry is written
-        through ``plan.dst.open(key, "wb")`` instead of to a local path. The
+        through ``plan.dest.open(key, "wb")`` instead of to a local path. The
         destination's local-filesystem gates (case-conflict, parent-reference,
         ``no_overwrite``'s ``os.path.exists``) do not apply - the backend owns its
         own key space - so only the source-side glacier gate runs. A ``dryrun``
@@ -1484,15 +1484,15 @@ class S3:
             src_bucket=bucket,
             src_key=info.key,
             src_info=info,
-            dst_fileobj=None if dryrun else plan.dst.open(open_key, "wb", size=info.size),
+            dest_fileobj=None if dryrun else plan.dest.open(open_key, "wb", size=info.size),
             src_display=src_display,
-            dst_display=_open_side_display(plan.dst, open_key),
+            dest_display=_open_side_display(plan.dest, open_key),
         )
 
     def _cp_stream(
         self,
         src_storage: Storage,
-        dst_storage: Storage,
+        dest_storage: Storage,
         *,
         recursive: bool,
         dryrun: bool,
@@ -1514,18 +1514,18 @@ class S3:
         gates do not apply; displays render as ``-``.
         """
         src_is_stream = isinstance(src_storage, IOStorage)
-        dst_is_stream = isinstance(dst_storage, IOStorage)
+        dest_is_stream = isinstance(dest_storage, IOStorage)
         if recursive:
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="cp",
             )
-        if src_is_stream and dst_is_stream:
+        if src_is_stream and dest_is_stream:
             raise ValidationError(
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        if dst_is_stream and options.get("no_overwrite"):
+        if dest_is_stream and options.get("no_overwrite"):
             # A streaming download has no existing destination to guard, so
             # no_overwrite is meaningless here (aws-cli rejects it too); fail
             # loud rather than silently ignore. Uploads keep IfNoneMatch.
@@ -1534,16 +1534,16 @@ class S3:
                 operation="cp",
             )
         if src_is_stream:
-            storage = self._resolve_s3_target(dst_storage, operation="cp")
+            storage = self._resolve_s3_target(dest_storage, operation="cp")
             transfer_type = TransferType.UPLOAD
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
                 src_fileobj=src_storage.open(storage.key, "rb"),
-                dst_bucket=storage.bucket,
-                dst_key=storage.key,
+                dest_bucket=storage.bucket,
+                dest_key=storage.key,
                 src_display="-",
-                dst_display=f"s3://{storage.bucket}/{storage.key}",
+                dest_display=f"s3://{storage.bucket}/{storage.key}",
             )
         else:
             storage = self._resolve_s3_target(src_storage, operation="cp")
@@ -1552,15 +1552,15 @@ class S3:
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                dst_fileobj=dst_storage.open(storage.key, "wb"),
+                dest_fileobj=dest_storage.open(storage.key, "wb"),
                 src_display=f"s3://{storage.bucket}/{storage.key}",
-                dst_display="-",
+                dest_display="-",
             )
         transferrer = Transferrer(
             transfer_type,
             storage.get_client(),
             src_storage=src_storage,
-            dst_storage=dst_storage,
+            dest_storage=dest_storage,
             transfer_config=transfer_config,
             options=options,
             operation="cp",
@@ -1592,7 +1592,7 @@ class S3:
         """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
         recursive S3->local with a mode other than ``ignore``).
 
-        The destination tree is enumerated up front (through ``plan.dst.scan``)
+        The destination tree is enumerated up front (through ``plan.dest.scan``)
         into the exact-case membership set the gate's AlwaysSync arm consults -
         the observable equivalent of aws's reverse file generator + comparator.
         Each entry's stamped ``compare_key`` is the root-relative membership key.
@@ -1603,13 +1603,13 @@ class S3:
         mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
         if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
             return None
-        dest_keys = {_ckey(info) for info in plan.dst.scan(ScanOptions(recursive=True))}
+        dest_keys = {_ckey(info) for info in plan.dest.scan(ScanOptions(recursive=True))}
         return _CaseConflictGate(mode, dest_keys)
 
     def mv(
         self,
         src: Location,
-        dst: Location,
+        dest: Location,
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
@@ -1652,18 +1652,18 @@ class S3:
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
-        dst_storage = self.resolve(dst)
-        if isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage):
+        dest_storage = self.resolve(dest)
+        if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
             src_text = naming.normalize_s3_uri(src_storage.as_text())
-            dst_text = naming.normalize_s3_uri(dst_storage.as_text())
-            if naming.same_path(src_text, dst_text):
+            dest_text = naming.normalize_s3_uri(dest_storage.as_text())
+            if naming.same_path(src_text, dest_text):
                 raise ValidationError(
-                    f"Cannot mv a file onto itself: {src_text} - {dst_text}",
+                    f"Cannot mv a file onto itself: {src_text} - {dest_text}",
                     operation="mv",
                 )
         self._run_transfer(
             src_storage,
-            dst_storage,
+            dest_storage,
             operation="mv",
             is_move=True,
             recursive=recursive,
@@ -1682,7 +1682,7 @@ class S3:
     def sync(
         self,
         src: Location,
-        dst: Location,
+        dest: Location,
         *,
         delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
@@ -1697,7 +1697,7 @@ class S3:
         transfer_config: TransferConfig | None = None,
         **options: Unpack[TransferOptions],
     ) -> None:
-        """Recursively synchronize ``src`` into ``dst`` (``aws s3 sync``).
+        """Recursively synchronize ``src`` into ``dest`` (``aws s3 sync``).
 
         Always recursive (no single-file sync, aws parity) over the three
         transfer routes; a local->local pair raises ``ValidationError``. The
@@ -1764,15 +1764,15 @@ class S3:
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
-        dst_storage = self.resolve(dst)
+        dest_storage = self.resolve(dest)
         src_storage.validate()
-        dst_storage.validate()
-        plan = naming.plan_transfer(src_storage, dst_storage, recursive=True, operation="sync")
+        dest_storage.validate()
+        plan = naming.plan_transfer(src_storage, dest_storage, recursive=True, operation="sync")
 
         source_client = None
-        dst_bucket = ""
+        dest_bucket = ""
         if plan.paths_type == "locals3":
-            assert isinstance(src_storage, LocalStorage) and isinstance(dst_storage, S3Storage)
+            assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
             # aws-cli's _validate_path_args: the raw user path, checked up front.
             if not os.path.exists(src_storage.path):
                 raise Boto3S3Error(
@@ -1780,34 +1780,34 @@ class S3:
                     operation="sync",
                 )
             transfer_type = TransferType.UPLOAD
-            client = dst_storage.get_client()
-            dst_bucket = dst_storage.bucket
+            client = dest_storage.get_client()
+            dest_bucket = dest_storage.bucket
         elif plan.paths_type == "s3local":
-            assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, LocalStorage)
+            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)
             # aws-cli creates the destination directory during validation -
             # before any listing, so even an empty sync leaves it behind.
             # The bare exists() test (not exist_ok=True) is deliberate: a
             # destination that exists as a *file* passes here and fails per
             # item instead ([Errno 20], rc 1).
-            if not os.path.exists(dst_storage.path):
+            if not os.path.exists(dest_storage.path):
                 try:
-                    os.makedirs(dst_storage.path)
+                    os.makedirs(dest_storage.path)
                 except OSError as exc:
                     raise Boto3S3Error(str(exc), operation="sync") from exc
             transfer_type = TransferType.DOWNLOAD
             client = src_storage.get_client()
         elif plan.paths_type == "s3s3":
-            assert isinstance(src_storage, S3Storage) and isinstance(dst_storage, S3Storage)
+            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
             transfer_type = TransferType.COPY
-            client = dst_storage.get_client()
+            client = dest_storage.get_client()
             source_client = src_storage.get_client()
-            dst_bucket = dst_storage.bucket
+            dest_bucket = dest_storage.bucket
         elif plan.paths_type == "opens3":
             # Custom source -> S3: upload each entry from its Storage.open("rb").
-            assert isinstance(dst_storage, S3Storage)
+            assert isinstance(dest_storage, S3Storage)
             transfer_type = TransferType.UPLOAD
-            client = dst_storage.get_client()
-            dst_bucket = dst_storage.bucket
+            client = dest_storage.get_client()
+            dest_bucket = dest_storage.bucket
         else:  # s3open: S3 -> custom destination, download into its open("wb").
             assert isinstance(src_storage, S3Storage)
             transfer_type = TransferType.DOWNLOAD
@@ -1843,14 +1843,14 @@ class S3:
         # narrows which destination-only orphans are deleted (matched like rm);
         # the producer-stamped compare_key lets it read the entry directly.
         delete_keep = delete if not isinstance(delete, bool) else None
-        case_gate = self._sync_case_gate(transfer_type, dst_storage, options=options)
+        case_gate = self._sync_case_gate(transfer_type, dest_storage, options=options)
 
         transferrer = Transferrer(
             transfer_type,
             client,
             source_client=source_client,
             src_storage=src_storage,
-            dst_storage=dst_storage,
+            dest_storage=dest_storage,
             transfer_config=transfer_config,
             options=options,
             operation="sync",
@@ -1858,7 +1858,7 @@ class S3:
             on_result=on_result,
         )
         deletes = _SyncDeletes(
-            dst_storage,
+            dest_storage,
             request_payer=options.get("request_payer"),
             dryrun=dryrun,
             on_result=on_result,
@@ -1876,9 +1876,9 @@ class S3:
                 page_size=page_size,
                 options=options,
             )
-            dst_entries = self._sync_entries(
-                dst_storage,
-                root=plan.dst_root,
+            dest_entries = self._sync_entries(
+                dest_storage,
+                root=plan.dest_root,
                 item_filter=filter,
                 transferrer=transferrer,
                 follow_symlinks=follow_symlinks,
@@ -1894,7 +1894,7 @@ class S3:
                     pair,
                     transfer_type=transfer_type,
                     src_bucket=src_bucket,
-                    dst_bucket=dst_bucket,
+                    dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     options=options,
                     case_gate=case_gate,
@@ -1909,13 +1909,13 @@ class S3:
 
             def submit_delete(pair: SyncPair) -> None:
                 if delete_keep is not None:
-                    assert pair.dst is not None
-                    if not delete_keep(pair.dst):
+                    assert pair.dest is not None
+                    if not delete_keep(pair.dest):
                         return
                 deletes.submit(pair)
 
             _run_sync_pairs(
-                Comparator(transfer_type).compare(src_entries, dst_entries),
+                Comparator(transfer_type).compare(src_entries, dest_entries),
                 decide=decide,
                 submit_copy=submit_copy,
                 submit_delete=submit_delete,
@@ -1938,7 +1938,7 @@ class S3:
             ) from (transferrer.first_error or deletes.first_error)
 
     def _sync_case_gate(
-        self, transfer_type: TransferType, dst_storage: Storage, *, options: TransferOptions
+        self, transfer_type: TransferType, dest_storage: Storage, *, options: TransferOptions
     ) -> _CaseConflictGate | None:
         """The ``--case-conflict`` gate for sync downloads to a local destination.
 
@@ -1955,7 +1955,7 @@ class S3:
         if (
             transfer_type is not TransferType.DOWNLOAD
             or mode is CaseConflictMode.IGNORE
-            or not isinstance(dst_storage, LocalStorage)
+            or not isinstance(dest_storage, LocalStorage)
         ):
             return None
         return _CaseConflictGate(mode, set(), operation="sync")
@@ -2012,7 +2012,7 @@ class S3:
         *,
         transfer_type: TransferType,
         src_bucket: str,
-        dst_bucket: str,
+        dest_bucket: str,
         transferrer: Transferrer,
         options: TransferOptions,
         case_gate: _CaseConflictGate | None,
@@ -2027,7 +2027,7 @@ class S3:
         info = pair.src
         assert info is not None
         if plan.paths_type == "opens3":
-            item = self._open_upload_item(plan, info, dst_bucket=dst_bucket, dryrun=dryrun)
+            item = self._open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
         elif plan.paths_type == "s3open":
             item = self._open_download_item(
                 plan,
@@ -2039,13 +2039,13 @@ class S3:
             )
         elif transfer_type is TransferType.UPLOAD:
             item = self._upload_item_from_info(
-                plan, info, dst_bucket=dst_bucket, transferrer=transferrer
+                plan, info, dest_bucket=dest_bucket, transferrer=transferrer
             )
         elif transfer_type is TransferType.DOWNLOAD:
             # The case-conflict gate guards only pairs missing at the
             # destination (the aws-cli strategy slot); an exact-key update
             # never conflicts.
-            gate = case_gate if pair.dst is None else None
+            gate = case_gate if pair.dest is None else None
             item = self._download_item_from_info(
                 plan,
                 info,
@@ -2059,7 +2059,7 @@ class S3:
                 plan,
                 info,
                 bucket=src_bucket,
-                dst_bucket=dst_bucket,
+                dest_bucket=dest_bucket,
                 transferrer=transferrer,
                 options=options,
             )
@@ -2067,7 +2067,7 @@ class S3:
         # completion can report both sides of the sync pair. A gate that consumed
         # the item returns None - nothing to stamp.
         if item is not None:
-            item.dst_info = pair.dst
+            item.dest_info = pair.dest
         return item
 
     # -- deletion ---------------------------------------------------------

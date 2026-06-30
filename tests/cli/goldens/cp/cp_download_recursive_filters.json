@@ -2,7 +2,7 @@
   "argv": [
     "cp",
     "s3://<BUCKET>/d/",
-    "dst",
+    "dest",
     "--recursive",
     "--exclude",
     "*",
@@ -26,7 +26,7 @@
   ],
   "scenario": "cp_download_recursive_filters",
   "stdout_lines": [
-    "download: s3://<BUCKET>/d/a.txt to dst/a.txt",
-    "download: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+    "download: s3://<BUCKET>/d/a.txt to dest/a.txt",
+    "download: s3://<BUCKET>/d/sub/c.txt to dest/sub/c.txt"
   ]
 }

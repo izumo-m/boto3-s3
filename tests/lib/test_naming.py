@@ -44,13 +44,13 @@ def _storage(arg: str) -> S3Storage | LocalStorage:
 
 
 def plan_transfer(
-    src: str, dst: str, *, recursive: bool, operation: str = "cp"
+    src: str, dest: str, *, recursive: bool, operation: str = "cp"
 ) -> naming.TransferPlan:
     """Test wrapper: build each endpoint Storage from its raw path (classify-chosen)
     and call the real formatter, so the call sites below stay path-focused.
     """
     return naming.plan_transfer(
-        _storage(src), _storage(dst), recursive=recursive, operation=operation
+        _storage(src), _storage(dest), recursive=recursive, operation=operation
     )
 
 
@@ -174,21 +174,21 @@ class TestPlanTransfer:
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), "s3://bucket", recursive=False)
         assert (plan.paths_type, plan.dir_op) == ("locals3", False)
-        assert (plan.dst_root, plan.use_src_name) == ("bucket/", True)
+        assert (plan.dest_root, plan.use_src_name) == ("bucket/", True)
         assert plan.src_root == str(src)
-        assert (plan.src_sep, plan.dst_sep) == (os.sep, "/")
+        assert (plan.src_sep, plan.dest_sep) == (os.sep, "/")
 
     def test_upload_single_rename(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), "s3://bucket/up/key.bin", recursive=False)
-        assert (plan.dst_root, plan.use_src_name) == ("bucket/up/key.bin", False)
+        assert (plan.dest_root, plan.use_src_name) == ("bucket/up/key.bin", False)
 
     def test_download_recursive(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://b/pre", str(tmp_path / "out"), recursive=True)
         assert plan.paths_type == "s3local"
         assert plan.src_root == "b/pre/"
-        assert plan.dst_root == str(tmp_path / "out") + os.sep
+        assert plan.dest_root == str(tmp_path / "out") + os.sep
         assert plan.use_src_name is True
         assert plan.filter_root == "pre"
 
@@ -200,7 +200,7 @@ class TestPlanTransfer:
     def test_s3_to_s3(self) -> None:
         plan = plan_transfer("s3://a/x/", "s3://b/y", recursive=True)
         assert plan.paths_type == "s3s3"
-        assert (plan.src_root, plan.dst_root) == ("a/x/", "b/y/")
+        assert (plan.src_root, plan.dest_root) == ("a/x/", "b/y/")
 
     def test_bare_service_root_stays_empty(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://", str(tmp_path), recursive=False)
@@ -210,7 +210,7 @@ class TestPlanTransfer:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), f"s3://{_ACCESSPOINT_ARN}", recursive=False)
-        assert (plan.dst_root, plan.use_src_name) == (f"{_ACCESSPOINT_ARN}/", True)
+        assert (plan.dest_root, plan.use_src_name) == (f"{_ACCESSPOINT_ARN}/", True)
 
 
 class TestPlanTransferOpenRoute:
@@ -218,19 +218,19 @@ class TestPlanTransferOpenRoute:
     relative compare_key is handed straight to the custom side's open()."""
 
     def test_custom_source_to_s3_is_opens3(self) -> None:
-        plan = naming.plan_transfer(_FakeOpen(), S3Storage("s3://b/dst/"), recursive=True)
+        plan = naming.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
         # the custom side roots at "" and is addressed by relative compare_key
         assert (plan.src_root, plan.src_sep, plan.filter_root) == ("", "/", "")
-        # use_src_name comes from the s3 dst (dir_op -> adopts the source name)
+        # use_src_name comes from the s3 dest (dir_op -> adopts the source name)
         assert plan.use_src_name is True
-        assert dest_for(plan, "sub/f.txt") == "b/dst/sub/f.txt"
+        assert dest_for(plan, "sub/f.txt") == "b/dest/sub/f.txt"
 
     def test_s3_to_custom_dest_is_s3open(self) -> None:
         plan = naming.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
         assert plan.paths_type == "s3open"
-        # the custom dst roots at "" so dest_for hands the relative key to open()
-        assert (plan.dst_root, plan.dst_sep) == ("", "/")
+        # the custom dest roots at "" so dest_for hands the relative key to open()
+        assert (plan.dest_root, plan.dest_sep) == ("", "/")
         assert plan.use_src_name is True
         assert dest_for(plan, "sub/f.txt") == "sub/f.txt"
 

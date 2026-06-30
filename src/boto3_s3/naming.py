@@ -201,10 +201,10 @@ def same_key(src: str, dest: str) -> bool:
 class TransferPlan:
     """The resolved shape of one cp/mv/sync path pair.
 
-    ``src`` / ``dst`` are the resolved endpoint ``Storage`` objects this plan was
+    ``src`` / ``dest`` are the resolved endpoint ``Storage`` objects this plan was
     built from, retained so the transfer can drive each side's own ``scan`` (and
     honor a ``Storage`` subclass override) instead of re-deriving the walk from
-    the formatted root. ``src_root`` / ``dst_root`` are the *formatted* sides
+    the formatted root. ``src_root`` / ``dest_root`` are the *formatted* sides
     (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
     a native absolute path, and a custom ``open`` side as ``""`` (it addresses
     entries by the relative ``compare_key`` its own ``open`` takes); directory
@@ -221,11 +221,11 @@ class TransferPlan:
     dir_op: bool
     use_src_name: bool
     src: Storage
-    dst: Storage
+    dest: Storage
     src_root: str
-    dst_root: str
+    dest_root: str
     src_sep: str
-    dst_sep: str
+    dest_sep: str
     filter_root: str
 
 
@@ -249,7 +249,7 @@ def _endpoint_kind(storage: Storage) -> PathKind:
 
 
 def plan_transfer(
-    src: Storage, dst: Storage, *, recursive: bool, operation: str = "cp"
+    src: Storage, dest: Storage, *, recursive: bool, operation: str = "cp"
 ) -> TransferPlan:
     """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat``).
 
@@ -262,24 +262,24 @@ def plan_transfer(
     phrases the strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
     """
     src_kind = _endpoint_kind(src)
-    dst_kind = _endpoint_kind(dst)
+    dest_kind = _endpoint_kind(dest)
     # A custom ``open`` side moves its bytes through ``Storage.open`` while the
     # other side rides ``s3transfer``, so it can only pair with s3 - never local,
     # another custom backend, or a stream.
-    if "open" in (src_kind, dst_kind) and {src_kind, dst_kind} != {"open", "s3"}:
+    if "open" in (src_kind, dest_kind) and {src_kind, dest_kind} != {"open", "s3"}:
         raise ValidationError(
             f"{operation}: a custom-backend path transfers only with an s3:// path "
             "(not local, another custom backend, or a stream)",
             operation=operation,
         )
-    if src_kind == "local" and dst_kind == "local":
+    if src_kind == "local" and dest_kind == "local":
         raise ValidationError(
             f"{operation} requires at least one s3:// path (local to local is not supported)",
             operation=operation,
         )
 
     src_text = src.as_text()
-    dst_text = dst.as_text()
+    dest_text = dest.as_text()
     if src_kind == "s3":
         src_rest = _strip_scheme_normalized(src_text)
         src_root = s3_format(src_rest, dir_op=recursive)[0]
@@ -294,24 +294,24 @@ def plan_transfer(
         src_sep = os.sep
         filter_root = _local_filter_root(src_text, dir_op=recursive)
 
-    if dst_kind == "s3":
-        dst_root, use_src_name = s3_format(_strip_scheme_normalized(dst_text), dir_op=recursive)
-        dst_sep = "/"
-    elif dst_kind == "open":
-        dst_root, use_src_name = _open_format(dst_text, dir_op=recursive)
-        dst_sep = "/"
+    if dest_kind == "s3":
+        dest_root, use_src_name = s3_format(_strip_scheme_normalized(dest_text), dir_op=recursive)
+        dest_sep = "/"
+    elif dest_kind == "open":
+        dest_root, use_src_name = _open_format(dest_text, dir_op=recursive)
+        dest_sep = "/"
     else:
-        dst_root, use_src_name = local_format(dst_text, dir_op=recursive)
-        dst_sep = os.sep
+        dest_root, use_src_name = local_format(dest_text, dir_op=recursive)
+        dest_sep = os.sep
 
     paths_type: PathsType
     if src_kind == "open":
         paths_type = "opens3"
-    elif dst_kind == "open":
+    elif dest_kind == "open":
         paths_type = "s3open"
     elif src_kind == "local":
         paths_type = "locals3"
-    elif dst_kind == "local":
+    elif dest_kind == "local":
         paths_type = "s3local"
     else:
         paths_type = "s3s3"
@@ -320,11 +320,11 @@ def plan_transfer(
         dir_op=recursive,
         use_src_name=use_src_name,
         src=src,
-        dst=dst,
+        dest=dest,
         src_root=src_root,
-        dst_root=dst_root,
+        dest_root=dest_root,
         src_sep=src_sep,
-        dst_sep=dst_sep,
+        dest_sep=dest_sep,
         filter_root=filter_root,
     )
 
@@ -359,8 +359,8 @@ def dest_for(plan: TransferPlan, compare_key: str) -> str:
     feeds this directly, so a transfer needs no re-derivation from the full key.
     """
     if plan.use_src_name:
-        return plan.dst_root + compare_key.replace("/", plan.dst_sep)
-    return plan.dst_root
+        return plan.dest_root + compare_key.replace("/", plan.dest_sep)
+    return plan.dest_root
 
 
 def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:

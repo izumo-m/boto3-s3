@@ -6,7 +6,7 @@ per-run workdir the CLI runs *in* - argv and result lines then carry
 cwd-stable relative paths, no path masking needed), the remote layout
 (``seed`` / ``seed_kwargs``), and the argv. End states are compared three
 ways: the bucket (``remaining_keys``), the local destination tree
-(``capture_tree`` -> ``harness.capture_local_tree`` of ``dst/``), and one
+(``capture_tree`` -> ``harness.capture_local_tree`` of ``dest/``), and one
 probe object's HeadObject fields (``head_key`` / ``head_fields``); the
 download mtime stamp (``mtime_key``) is asserted live per side, not via
 goldens. stdout is normalized by ``harness.normalize_cp_stdout`` (progress
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 _MB = 1024 * 1024
 
 # Local source trees (workdir-relative). "src" is the directory form; single
-# files address "src/<name>" directly. A "dst/" directory is always created
+# files address "src/<name>" directly. A "dest/" directory is always created
 # by materialize_workdir so existing-directory destination semantics hold.
 _SRC_SINGLE: Mapping[str, bytes] = {"src/a.txt": b"upload single body\n"}
 _SRC_JSON: Mapping[str, bytes] = {"src/data.json": b'{"k": 1}\n'}
@@ -91,7 +91,7 @@ class CpScenario:
     compare_stdout: bool = True
     # rc-equality-only scenarios whose outcome is endpoint-relative (no golden).
     diff_only: bool = False
-    # Golden-record the dst/ tree (downloads; uploads leave it empty anyway).
+    # Golden-record the dest/ tree (downloads; uploads leave it empty anyway).
     capture_tree: bool = False
     # Golden-record HeadObject fields of one probe key.
     head_key: str | None = None
@@ -116,11 +116,11 @@ def resolve_argv(scenario: CpScenario, bucket: str) -> list[str]:
 
 
 def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
-    """Create the scenario's local source tree (plus the standing ``dst/``)."""
+    """Create the scenario's local source tree (plus the standing ``dest/``)."""
     import os
     import time
 
-    (workdir / "dst").mkdir(parents=True, exist_ok=True)
+    (workdir / "dest").mkdir(parents=True, exist_ok=True)
     for rel, body in scenario.local_src.items():
         target = workdir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -344,40 +344,40 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_locallocal",
-        argv=("cp", "src/a.txt", "dst/b.txt"),
+        argv=("cp", "src/a.txt", "dest/b.txt"),
         local_src=_SRC_SINGLE,
         expected_stderr_tokens_ours=("Invalid argument type",),
         expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
         name="cp_page_size_nonint",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "abc"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "abc"),
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
     # -- downloads ----------------------------------------------------------
     CpScenario(
         name="cp_download_single",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.bin"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.bin"),
         seed=_SEED_SINGLE,
         capture_tree=True,
-        mtime_key=("d/a.txt", "dst/out.bin"),
+        mtime_key=("d/a.txt", "dest/out.bin"),
     ),
     CpScenario(
         name="cp_download_to_existing_dir",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest"),
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
     CpScenario(
         name="cp_download_trailing_sep_new_dir",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/new/"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/new/"),
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
     CpScenario(
         name="cp_download_recursive",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dst", "--recursive"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dest", "--recursive"),
         seed=_SEED_TREE,
         capture_tree=True,
     ),
@@ -386,7 +386,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/d/",
-            "dst",
+            "dest",
             "--recursive",
             "--exclude",
             "*",
@@ -398,7 +398,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_download_missing_key",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", "dst/x"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", "dest/x"),
         expected_stderr_tokens_ours=("fatal error", 'Key "no-such-key" does not exist'),
         expected_stderr_tokens_aws=("fatal error", 'Key "no-such-key" does not exist'),
     ),
@@ -406,20 +406,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # A trailing-slash key is a *single* path: HeadObject on "d/" -> 404
         # (the marker object is deliberately not seeded here).
         name="cp_download_prefix_slash_nonrecursive",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dst/x"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dest/x"),
         seed=_SEED_SINGLE,
         expected_stderr_tokens_ours=("fatal error", 'Key "d/" does not exist'),
         expected_stderr_tokens_aws=("fatal error", 'Key "d/" does not exist'),
     ),
     CpScenario(
         name="cp_download_dryrun",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/x", "--dryrun"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/x", "--dryrun"),
         seed=_SEED_SINGLE,
         capture_tree=True,  # stays empty: HEAD only
     ),
     CpScenario(
         name="cp_download_page_size",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "2"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "2"),
         seed=_SEED_PAGED,
         capture_tree=True,
     ),
@@ -427,7 +427,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # MinIO answers InvalidArgument for MaxKeys=-1 (rm precedent); the
         # message text is endpoint-specific.
         name="cp_download_page_size_negative",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "-1"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "-1"),
         seed=_SEED_PAGED,
         diff_only=True,
     ),
@@ -575,8 +575,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_no_overwrite_download_exists",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.bin", "--no-overwrite"),
-        local_src={"dst/out.bin": b"keep the local bytes"},
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.bin", "--no-overwrite"),
+        local_src={"dest/out.bin": b"keep the local bytes"},
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
@@ -634,7 +634,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/d/a.txt",
-            "dst/out.bin",
+            "dest/out.bin",
             "--checksum-mode",
             "ENABLED",
         ),
@@ -650,7 +650,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "skip",
@@ -665,7 +665,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "warn",
@@ -680,7 +680,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "error",

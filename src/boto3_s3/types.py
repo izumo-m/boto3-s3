@@ -239,8 +239,8 @@ class OpResult:
     One record per item, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` from a
     worker thread (keep the callback fast and non-raising). A single type keyed
     by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
-    acted on (a transfer's source, or a delete's removed object); the ``dst_*``
-    trio the destination side. The fields, the ``src`` / ``dst`` convention, and
+    acted on (a transfer's source, or a delete's removed object); the ``dest_*``
+    trio the destination side. The fields, the ``src`` / ``dest`` convention, and
     which operation populates which field are documented in docs/opresult.md.
     """
 
@@ -252,9 +252,9 @@ class OpResult:
     src: str | None = None
     dest: str | None = None
     src_info: FileInfo | None = None
-    dst_info: FileInfo | None = None
+    dest_info: FileInfo | None = None
     src_storage: Storage | None = None
-    dst_storage: Storage | None = None
+    dest_storage: Storage | None = None
     extra_info: Mapping[str, Any] | None = None
 
 

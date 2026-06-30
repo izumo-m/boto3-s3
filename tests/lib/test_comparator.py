@@ -40,8 +40,8 @@ def _entries(*keys: str) -> list[tuple[str, FileInfo]]:
     return [(key, _info(key)) for key in keys]
 
 
-def _pairs(src: list[tuple[str, FileInfo]], dst: list[tuple[str, FileInfo]]) -> list[SyncPair]:
-    return list(Comparator(_KIND).compare(iter(src), iter(dst)))
+def _pairs(src: list[tuple[str, FileInfo]], dest: list[tuple[str, FileInfo]]) -> list[SyncPair]:
+    return list(Comparator(_KIND).compare(iter(src), iter(dest)))
 
 
 class TestComparatorPairing:
@@ -49,36 +49,36 @@ class TestComparatorPairing:
 
     def test_equal_keys_pair_both_sides(self) -> None:
         src = _entries("a.txt")
-        dst = _entries("a.txt")
-        pairs = _pairs(src, dst)
-        assert pairs == [SyncPair(key="a.txt", transfer_type=_KIND, src=src[0][1], dst=dst[0][1])]
+        dest = _entries("a.txt")
+        pairs = _pairs(src, dest)
+        assert pairs == [SyncPair(key="a.txt", transfer_type=_KIND, src=src[0][1], dest=dest[0][1])]
 
     def test_source_only_key_yields_src_pair(self) -> None:
         # aws-cli's test_compare_key_less: 'b...' sorts before 'c...', so the
         # source-only entry surfaces first, then the dest-only one.
         src = _entries("bomparator_test.py")
-        dst = _entries("comparator_test.py")
-        pairs = _pairs(src, dst)
+        dest = _entries("comparator_test.py")
+        pairs = _pairs(src, dest)
         assert pairs == [
             SyncPair(key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
-            SyncPair(key="comparator_test.py", transfer_type=_KIND, dst=dst[0][1]),
+            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
         ]
 
-    def test_dest_only_key_yields_dst_pair(self) -> None:
+    def test_dest_only_key_yields_dest_pair(self) -> None:
         # aws-cli's test_compare_key_greater: the dest-only entry sorts first.
         src = _entries("domparator_test.py")
-        dst = _entries("comparator_test.py")
-        pairs = _pairs(src, dst)
+        dest = _entries("comparator_test.py")
+        pairs = _pairs(src, dest)
         assert pairs == [
-            SyncPair(key="comparator_test.py", transfer_type=_KIND, dst=dst[0][1]),
+            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
             SyncPair(key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
         ]
 
     def test_empty_src_flushes_dest(self) -> None:
-        dst = _entries("a", "b")
-        assert _pairs([], dst) == [
-            SyncPair(key="a", transfer_type=_KIND, dst=dst[0][1]),
-            SyncPair(key="b", transfer_type=_KIND, dst=dst[1][1]),
+        dest = _entries("a", "b")
+        assert _pairs([], dest) == [
+            SyncPair(key="a", transfer_type=_KIND, dest=dest[0][1]),
+            SyncPair(key="b", transfer_type=_KIND, dest=dest[1][1]),
         ]
 
     def test_empty_dest_flushes_src(self) -> None:
@@ -93,9 +93,9 @@ class TestComparatorPairing:
 
     def test_interleaved_streams_merge_in_key_order(self) -> None:
         src = _entries("a", "c", "d", "f")
-        dst = _entries("b", "c", "e", "f")
-        pairs = _pairs(src, dst)
-        assert [(p.key, p.src is not None, p.dst is not None) for p in pairs] == [
+        dest = _entries("b", "c", "e", "f")
+        pairs = _pairs(src, dest)
+        assert [(p.key, p.src is not None, p.dest is not None) for p in pairs] == [
             ("a", True, False),
             ("b", False, True),
             ("c", True, True),
@@ -116,15 +116,15 @@ class TestComparatorPairing:
         # Pairing must stream: the first pair comes out before either side
         # is fully consumed (both sides are paged listings in practice).
         src = iter(_entries("a", "b", "c"))
-        dst = iter(_entries("a", "b", "c"))
-        stream = Comparator(_KIND).compare(src, dst)
+        dest = iter(_entries("a", "b", "c"))
+        stream = Comparator(_KIND).compare(src, dest)
         assert next(stream).key == "a"
         assert next(src, None) is not None, "source stream was drained eagerly"
 
 
-def _both(transfer_type: TransferType, src: FileInfo, dst: FileInfo, **flags: bool) -> bool:
+def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: bool) -> bool:
     return compare_size_time(
-        SyncPair(key=src.key, transfer_type=transfer_type, src=src, dst=dst), **flags
+        SyncPair(key=src.key, transfer_type=transfer_type, src=src, dest=dest), **flags
     )
 
 
@@ -141,15 +141,15 @@ class TestCompareSizeTime:
 
     def test_rejects_pair_without_source(self) -> None:
         with pytest.raises(ValueError, match="without a source entry"):
-            compare_size_time(SyncPair(key="k", transfer_type=TransferType.UPLOAD, dst=_info()))
+            compare_size_time(SyncPair(key="k", transfer_type=TransferType.UPLOAD, dest=_info()))
 
     # -- size + last-modified (the default judgment) -----------------------
 
     def test_size_difference_copies_regardless_of_time(self) -> None:
         src = _info(size=10)
-        dst = _info(size=11, mtime=_TIME + timedelta(days=1))
-        assert _both(TransferType.UPLOAD, src, dst) is True
-        assert _both(TransferType.DOWNLOAD, src, dst) is True
+        dest = _info(size=11, mtime=_TIME + timedelta(days=1))
+        assert _both(TransferType.UPLOAD, src, dest) is True
+        assert _both(TransferType.DOWNLOAD, src, dest) is True
 
     def test_upload_skips_when_dest_is_newer_or_equal(self) -> None:
         # aws-cli's compare_time upload/copy: delta = dest - src >= 0 -> skip.
@@ -258,11 +258,13 @@ class TestCombinators:
         base = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = any_of(_json_only, base)
         up_to_date = SyncPair(
-            key="a.json", transfer_type=_KIND, src=_info("a.json"), dst=_info("a.json")
+            key="a.json", transfer_type=_KIND, src=_info("a.json"), dest=_info("a.json")
         )
         assert base(up_to_date) is False
         assert combined(up_to_date) is True
-        skipped = SyncPair(key="a.txt", transfer_type=_KIND, src=_info("a.txt"), dst=_info("a.txt"))
+        skipped = SyncPair(
+            key="a.txt", transfer_type=_KIND, src=_info("a.txt"), dest=_info("a.txt")
+        )
         assert combined(skipped) is False
 
     def test_empty_combinators_follow_all_any_semantics(self) -> None:

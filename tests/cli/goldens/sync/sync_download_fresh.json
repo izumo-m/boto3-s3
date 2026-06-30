@@ -2,7 +2,7 @@
   "argv": [
     "sync",
     "s3://<BUCKET>/d",
-    "dst"
+    "dest"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
   "bucket_exists": null,
@@ -23,8 +23,8 @@
   "scenario": "sync_download_fresh",
   "src_tree": null,
   "stdout_lines": [
-    "download: s3://<BUCKET>/d/a.txt to dst/a.txt",
-    "download: s3://<BUCKET>/d/b.bin to dst/b.bin",
-    "download: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+    "download: s3://<BUCKET>/d/a.txt to dest/a.txt",
+    "download: s3://<BUCKET>/d/b.bin to dest/b.bin",
+    "download: s3://<BUCKET>/d/sub/c.txt to dest/sub/c.txt"
   ]
 }

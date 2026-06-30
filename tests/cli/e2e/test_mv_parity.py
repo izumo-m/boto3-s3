@@ -82,7 +82,7 @@ def _run_side(
         result=result,
         lines=normalize_cp_stdout(result.stdout, bucket=bucket),
         remaining=remaining_keys(s3_client, bucket),
-        tree=capture_local_tree(str(workdir / "dst")) if scenario.capture_tree else None,
+        tree=capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None,
         src_tree=capture_local_tree(str(workdir / "src")),
         head=head,
     )

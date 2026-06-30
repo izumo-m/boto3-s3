@@ -50,12 +50,12 @@ def _get_response(body: bytes = b"payload") -> dict[str, Any]:
 class TestSamePathGuard:
     """aws-cli's ``Cannot mv a file onto itself`` - before any client work."""
 
-    def _assert_guard(self, src: str, dst: str, message: str, **kwargs: Any) -> None:
+    def _assert_guard(self, src: str, dest: str, message: str, **kwargs: Any) -> None:
         from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().mv(S3Storage(src, client=client), S3Storage(dst, client=client), **kwargs)
+            S3().mv(S3Storage(src, client=client), S3Storage(dest, client=client), **kwargs)
         assert str(excinfo.value) == message
         assert calls == []
 
@@ -271,7 +271,7 @@ class TestCopyMove:
         results: list[OpResult] = []
         S3().mv(
             S3Storage("s3://src-b/d/a.txt", client=source_client),
-            S3Storage("s3://dst-b/moved/a.txt", client=dest_client),
+            S3Storage("s3://dest-b/moved/a.txt", client=dest_client),
             transfer_config=_SYNC,
             on_result=results.append,
         )
@@ -287,7 +287,7 @@ class TestCopyMove:
         source_client, source_calls = make_recording_client([_head_response(), {}])
         S3().mv(
             S3Storage("s3://src-b/k", client=source_client),
-            S3Storage("s3://dst-b/k2", client=dest_client),
+            S3Storage("s3://dest-b/k2", client=dest_client),
             request_payer="requester",
             transfer_config=_SYNC,
         )

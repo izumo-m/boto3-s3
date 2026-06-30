@@ -2,7 +2,7 @@
   "argv": [
     "mv",
     "s3://<BUCKET>/d",
-    "dst/",
+    "dest/",
     "--recursive",
     "--dryrun"
   ],
@@ -21,8 +21,8 @@
   "scenario": "mv_download_dryrun_recursive",
   "src_tree": [],
   "stdout_lines": [
-    "(dryrun) move: s3://<BUCKET>/d/a.txt to dst/a.txt",
-    "(dryrun) move: s3://<BUCKET>/d/b.bin to dst/b.bin",
-    "(dryrun) move: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+    "(dryrun) move: s3://<BUCKET>/d/a.txt to dest/a.txt",
+    "(dryrun) move: s3://<BUCKET>/d/b.bin to dest/b.bin",
+    "(dryrun) move: s3://<BUCKET>/d/sub/c.txt to dest/sub/c.txt"
   ]
 }

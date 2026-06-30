@@ -99,7 +99,7 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "a.txt", b"x")
         (src / "loop").symlink_to(src)  # a directory cycle
-        client, calls = make_recording_client([_listing(), {}])  # empty dst, PutObject a.txt
+        client, calls = make_recording_client([_listing(), {}])  # empty dest, PutObject a.txt
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -180,11 +180,11 @@ class TestSyncUpload:
         assert deleted[0].src == "s3://bucket/p/orphan.txt"
         assert deleted[0].src_info is not None and deleted[0].src_info.key == "p/orphan.txt"
         assert isinstance(deleted[0].src_storage, S3Storage)
-        assert deleted[0].dst_info is None
+        assert deleted[0].dest_info is None
 
     def test_copy_update_result_carries_both_compared_sides(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
-        _write(src, "a.txt", b"new")  # size 3 != the dst's 2 -> an update upload
+        _write(src, "a.txt", b"new")  # size 3 != the dest's 2 -> an update upload
         client, _ = make_recording_client([_listing(("p/a.txt", 2)), {}])
         results: list[OpResult] = []
         S3().sync(
@@ -196,7 +196,7 @@ class TestSyncUpload:
         copied = [r for r in results if r.transfer_type is not TransferType.DELETE]
         assert len(copied) == 1
         assert copied[0].src_info is not None and copied[0].src_info.key.endswith("a.txt")
-        assert copied[0].dst_info is not None and copied[0].dst_info.key == "p/a.txt"
+        assert copied[0].dest_info is not None and copied[0].dest_info.key == "p/a.txt"
 
     def test_delete_predicate_narrows_the_lane(self, tmp_path: Path) -> None:
         # A FileFilter predicate (the orphan's FileInfo) narrows which orphans
@@ -556,20 +556,20 @@ class TestSyncDownload:
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([_listing(("s/new.txt", 2))])
-        dst_client, dst_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
+        dest_client, dest_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
         S3().sync(
             S3Storage("s3://src-b/s", client=src_client),
-            S3Storage("s3://dst-b/t", client=dst_client),
+            S3Storage("s3://dest-b/t", client=dest_client),
             delete=True,
             transfer_config=_SERIAL,
         )
         assert _ops(src_calls) == ["ListObjectsV2"]
-        assert _ops(dst_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
-        copy = dst_calls[1].params
+        assert _ops(dest_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
+        copy = dest_calls[1].params
         assert copy["CopySource"] == {"Bucket": "src-b", "Key": "s/new.txt"}
-        assert copy["Bucket"] == "dst-b"
+        assert copy["Bucket"] == "dest-b"
         assert copy["Key"] == "t/new.txt"
-        keys = [entry["Key"] for entry in dst_calls[2].params["Delete"]["Objects"]]
+        keys = [entry["Key"] for entry in dest_calls[2].params["Delete"]["Objects"]]
         assert keys == ["t/extra.txt"]
 
     def test_same_location_sync_is_a_silent_noop(self, tmp_path: Path) -> None:
@@ -608,7 +608,7 @@ class TestParallelCompare:
             _write(src, name, b"xx")
 
         def decide(pair: SyncPair) -> bool:
-            return pair.dst is None or pair.key in {"a.txt", "c.txt"}
+            return pair.dest is None or pair.key in {"a.txt", "c.txt"}
 
         listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
         client, calls = make_recording_client([listing, {}, {}, {}])
@@ -632,7 +632,7 @@ class TestParallelCompare:
         seen: list[str] = []
 
         def decide(pair: SyncPair) -> bool:
-            assert pair.dst is None  # an empty listing leaves every pair new
+            assert pair.dest is None  # an empty listing leaves every pair new
             assert threading.get_ident() == main
             seen.append(pair.key)
             return False  # copy nothing; the test only pins the call order

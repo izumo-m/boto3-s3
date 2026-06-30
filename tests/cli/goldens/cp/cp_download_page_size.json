@@ -2,7 +2,7 @@
   "argv": [
     "cp",
     "s3://<BUCKET>/pg/",
-    "dst",
+    "dest",
     "--recursive",
     "--page-size",
     "2"
@@ -27,10 +27,10 @@
   ],
   "scenario": "cp_download_page_size",
   "stdout_lines": [
-    "download: s3://<BUCKET>/pg/k00 to dst/k00",
-    "download: s3://<BUCKET>/pg/k01 to dst/k01",
-    "download: s3://<BUCKET>/pg/k02 to dst/k02",
-    "download: s3://<BUCKET>/pg/k03 to dst/k03",
-    "download: s3://<BUCKET>/pg/k04 to dst/k04"
+    "download: s3://<BUCKET>/pg/k00 to dest/k00",
+    "download: s3://<BUCKET>/pg/k01 to dest/k01",
+    "download: s3://<BUCKET>/pg/k02 to dest/k02",
+    "download: s3://<BUCKET>/pg/k03 to dest/k03",
+    "download: s3://<BUCKET>/pg/k04 to dest/k04"
   ]
 }

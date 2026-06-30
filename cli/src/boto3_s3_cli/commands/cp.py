@@ -50,12 +50,12 @@ class CpCommand(Command):
         """
         page_size = parse_integer_option(args.page_size, operation="cp")
         progress_frequency = parse_integer_option(args.progress_frequency, operation="cp")
-        src, dst = args.paths
+        src, dest = args.paths
         src_type = classify(src)
-        dst_type = classify(dst)
-        if src_type == "local" and dst_type == "local":
+        dest_type = classify(dest)
+        if src_type == "local" and dest_type == "local":
             raise ValidationError(_USAGE, operation="cp")
-        is_stream = src == "-" or dst == "-"
+        is_stream = src == "-" or dest == "-"
         if is_stream:
             # aws-cli's _validate_streaming_paths: cp-only, never recursive, and
             # a streaming download cannot honor --no-overwrite.
@@ -64,12 +64,12 @@ class CpCommand(Command):
                     "Streaming currently is only compatible with non-recursive cp commands",
                     operation="cp",
                 )
-            if dst == "-" and args.no_overwrite:
+            if dest == "-" and args.no_overwrite:
                 raise ValidationError(
                     "--no-overwrite parameter is not supported for streaming downloads",
                     operation="cp",
                 )
-        paths_type = src_type + dst_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
         if src_type == "local" and src != "-" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
@@ -94,7 +94,7 @@ class CpCommand(Command):
             args.no_overwrite, paths_type, client, operation="cp"
         )
         src_location: object
-        dst_location: object
+        dest_location: object
         if src == "-":
             # The destination key reproduces aws's quirk of appending the
             # source's basename - literally "-" - when the dest takes the source
@@ -103,28 +103,28 @@ class CpCommand(Command):
             src_location = StdioStorage()
             plan = plan_transfer(
                 transferargs.path_storage(src, src_type),
-                transferargs.path_storage(dst, dst_type),
+                transferargs.path_storage(dest, dest_type),
                 recursive=False,
             )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            dst_s3 = S3Storage(f"s3://{dest}", client=client)
-            dst_s3.validate()  # permissive construction; reject bad forms pre-pipeline
-            dst_location = dst_s3
-        elif dst == "-":
+            dest_s3 = S3Storage(f"s3://{dest}", client=client)
+            dest_s3.validate()  # permissive construction; reject bad forms pre-pipeline
+            dest_location = dest_s3
+        elif dest == "-":
             src_s3 = S3Storage(src, client=client)
             src_s3.validate()  # permissive construction; reject bad forms pre-pipeline
             src_location = src_s3
-            dst_location = StdioStorage()
+            dest_location = StdioStorage()
         else:
-            src_location, dst_location = transferargs.resolve_locations(
-                args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
+            src_location, dest_location = transferargs.resolve_locations(
+                args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
             )
 
         item_filter = None
         if not is_stream:
             plan = plan_transfer(
                 transferargs.path_storage(src, src_type),
-                transferargs.path_storage(dst, dst_type),
+                transferargs.path_storage(dest, dest_type),
                 recursive=args.recursive,
             )
             item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
@@ -150,7 +150,7 @@ class CpCommand(Command):
                 expected_size = int(args.expected_size)
             S3().cp(
                 src_location,  # type: ignore[arg-type]
-                dst_location,  # type: ignore[arg-type]
+                dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
                 filter=item_filter,
                 follow_symlinks=args.follow_symlinks,

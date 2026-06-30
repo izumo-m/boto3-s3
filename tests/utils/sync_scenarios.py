@@ -87,14 +87,14 @@ _DL_TREE_SEED: Mapping[str, bytes] = {
 
 # The at-both download matrix (note the inverted rule: local-older skips).
 _DL_MIX_SRC: Mapping[str, bytes] = {
-    "dst/same.txt": b"zz\n",
-    "dst/touch.txt": b"qq\n",
-    "dst/short.txt": b"s\n",
+    "dest/same.txt": b"zz\n",
+    "dest/touch.txt": b"qq\n",
+    "dest/short.txt": b"s\n",
 }
 _DL_MIX_MTIMES: Mapping[str, int] = {
-    "dst/same.txt": -_DAY,  # local older -> skip (aws-cli asymmetry)
-    "dst/touch.txt": _DAY,  # local newer -> download
-    "dst/short.txt": -_DAY,  # size differs -> download regardless
+    "dest/same.txt": -_DAY,  # local older -> skip (aws-cli asymmetry)
+    "dest/touch.txt": _DAY,  # local newer -> download
+    "dest/short.txt": -_DAY,  # size differs -> download regardless
 }
 _DL_MIX_SEED: Mapping[str, bytes] = {
     "d/new.txt": b"fresh\n",
@@ -192,9 +192,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="sync_upload_empty_dir",
-        # dst/ is the harness's standing empty directory; an empty sync is a
+        # dest/ is the harness's standing empty directory; an empty sync is a
         # silent rc-0 no-op.
-        argv=("sync", "dst", f"s3://{BUCKET_TOKEN}/empty"),
+        argv=("sync", "dest", f"s3://{BUCKET_TOKEN}/empty"),
     ),
     CpScenario(
         name="sync_upload_missing_source",
@@ -212,14 +212,14 @@ SCENARIOS: tuple[CpScenario, ...] = (
     # -- downloads ------------------------------------------------------------
     CpScenario(
         name="sync_download_fresh",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest"),
         seed=_DL_TREE_SEED,
         capture_tree=True,
-        mtime_key=("d/a.txt", "dst/a.txt"),
+        mtime_key=("d/a.txt", "dest/a.txt"),
     ),
     CpScenario(
         name="sync_download_mixed_times",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest"),
         local_src=_DL_MIX_SRC,
         local_mtimes=_DL_MIX_MTIMES,
         seed=_DL_MIX_SEED,
@@ -227,53 +227,53 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="sync_download_exact_timestamps",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst", "--exact-timestamps"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--exact-timestamps"),
         # Same size, local older: the default skips; --exact-timestamps
         # downloads on any skew.
-        local_src={"dst/same.txt": b"zz\n"},
-        local_mtimes={"dst/same.txt": -_DAY},
+        local_src={"dest/same.txt": b"zz\n"},
+        local_mtimes={"dest/same.txt": -_DAY},
         seed={"d/same.txt": b"xx\n"},
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_size_only",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst", "--size-only"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--size-only"),
         # Same size, local newer: the default downloads; --size-only skips.
-        local_src={"dst/touch.txt": b"qq\n"},
-        local_mtimes={"dst/touch.txt": _DAY},
+        local_src={"dest/touch.txt": b"qq\n"},
+        local_mtimes={"dest/touch.txt": _DAY},
         seed={"d/touch.txt": b"yy\n"},
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_delete",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst", "--delete"),
-        local_src={"dst/stale.txt": b"old\n", "dst/sub/stale2.txt": b"old2\n"},
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--delete"),
+        local_src={"dest/stale.txt": b"old\n", "dest/sub/stale2.txt": b"old2\n"},
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_delete_dryrun",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst", "--delete", "--dryrun"),
-        local_src={"dst/stale.txt": b"old\n"},
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--delete", "--dryrun"),
+        local_src={"dest/stale.txt": b"old\n"},
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_delete_exclude",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst", "--delete", "--exclude", "*.log"),
-        local_src={"dst/stale.txt": b"old\n", "dst/keep.log": b"log\n"},
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--delete", "--exclude", "*.log"),
+        local_src={"dest/stale.txt": b"old\n", "dest/keep.log": b"log\n"},
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_empty_prefix_creates_dir",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/no-such-prefix", "dst/newdir"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/no-such-prefix", "dest/newdir"),
         capture_tree=True,
     ),
     CpScenario(
         name="sync_download_dest_is_a_file",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dst/afile.txt"),
-        local_src={"dst/afile.txt": b"zz"},
+        argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest/afile.txt"),
+        local_src={"dest/afile.txt": b"zz"},
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
         # The dest walk warns (file-as-directory), then each download fails
@@ -328,7 +328,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     # -- usage errors ----------------------------------------------------------
     CpScenario(
         name="sync_local_to_local",
-        argv=("sync", "src", "dst"),
+        argv=("sync", "src", "dest"),
         local_src={"src/a.txt": b"alpha\n"},
         expected_stderr_tokens_ours=("Error: Invalid argument type",),
         expected_stderr_tokens_aws=("Error: Invalid argument type",),
