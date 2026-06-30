@@ -234,28 +234,14 @@ class TransferProgress:
 
 @dataclass(slots=True, kw_only=True)
 class OpResult:
-    """Per-item completion record, passed to ``on_result``.
+    """Per-item completion record passed to the ``on_result`` callback.
 
-    ``src`` / ``dest`` are display-oriented endpoints (``s3://bucket/key`` or
-    a native local path) populated by the byte-moving operations so consumers
-    can render aws-style ``upload: {src} to {dest}`` lines without re-deriving
-    the pair; ``rm`` leaves them ``None``. ``key`` stays the operation-relative
-    identifier (the transfer ``compare_key`` / the deleted object key).
-    ``transfer_type`` is the wire verb of the record (aws-cli's ``transfer_type``:
-    ``upload`` / ``download`` / ``copy`` / ``move`` / ``delete``). ``error``
-    carries the failure / warning text as a ``Boto3S3Error`` (the library
-    exception taxonomy; every path translates into it).
-
-    ``src_info`` / ``dst_info`` are the operation's listing entries and
-    ``src_storage`` / ``dst_storage`` their backends, so a consumer can act on a
-    result object directly (e.g. ``dst_storage`` + ``dst_info.key`` to HeadObject
-    it). ``src_info`` is the source of a cp / mv / sync transfer; ``dst_info`` is
-    the sync compare-destination and the removed object of ``rm`` / sync
-    ``--delete`` - either is ``None`` where the operation has no such entry (both
-    are ``None`` on a stream transfer or a warning). ``extra_info`` is the
-    result's S3 response metadata (e.g. ``{"ETag": ...}``): the written object's
-    ETag for an s3-to-s3 copy and a download's source ETag - an upload leaves it
-    ``None`` (s3transfer discards the PutObject response, docs/transfer.md).
+    One record per item, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` from a
+    worker thread (keep the callback fast and non-raising). A single type keyed
+    by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
+    acted on (a transfer's source, or a delete's removed object); the ``dst_*``
+    trio the destination side. The fields, the ``src`` / ``dst`` convention, and
+    which operation populates which field are documented in docs/opresult.md.
     """
 
     transfer_type: TransferType

@@ -113,8 +113,9 @@ def _emit_result(
                 key=info.key,
                 outcome=outcome,
                 error=error,
-                dst_info=info,
-                dst_storage=storage,
+                src=f"s3://{storage.bucket}/{info.key}",
+                src_info=info,
+                src_storage=storage,
             )
         )
 
@@ -407,7 +408,7 @@ class _SyncDeletes:
                     S3Deleter(
                         dst,
                         request_payer=self._request_payer,
-                        on_result=self._relay,
+                        on_result=self._on_result,
                         operation="sync",
                     )
                 )
@@ -457,13 +458,6 @@ class _SyncDeletes:
         assert isinstance(self._dst, S3Storage)
         return f"s3://{self._dst.bucket}/{key}"
 
-    def _relay(self, result: OpResult) -> None:
-        # The deleter builds the full delete record (dst_info / dst_storage); add
-        # the rendered endpoint so consumers print aws's `delete: s3://bucket/key`.
-        result.src = self._display(result.key)
-        if self._on_result is not None:
-            self._on_result(result)
-
     def _emit(
         self,
         *,
@@ -480,8 +474,8 @@ class _SyncDeletes:
                     outcome=outcome,
                     error=error,
                     src=src,
-                    dst_info=info,
-                    dst_storage=self._dst,
+                    src_info=info,
+                    src_storage=self._dst,
                 )
             )
 

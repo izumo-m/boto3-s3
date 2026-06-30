@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `OpResult` now carries the operation's listing entries and backend handles -
   `src_info` / `dst_info` (`FileInfo`) and `src_storage` / `dst_storage`
   (`Storage`), so a consumer can act on a result object directly (e.g.
-  `dst_storage` + `dst_info.key` to HeadObject it) - plus `extra_info`, the
+  `src_storage` + `src_info.key` to HeadObject it) - plus `extra_info`, the
   result's S3 response metadata (`{"ETag": ...}` for an s3-to-s3 copy and a
   download's source; an upload leaves it `None`, as s3transfer discards the
   PutObject response). `error` is now typed `Boto3S3Error` (was `BaseException`).
+  See docs/opresult.md for which operation populates which field.
 - Rename `OpKind` to `TransferType`, and the `kind` field on `OpResult` /
   `TransferProgress` to `transfer_type` (aws-cli's name for the record's verb).
   Frees `.kind` to mean only a `FileInfo`'s `FileKind`.

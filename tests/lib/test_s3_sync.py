@@ -163,7 +163,7 @@ class TestSyncUpload:
             "s3://bucket/p/sub/extra2.txt",
         ]
 
-    def test_delete_result_carries_dst_info_and_storage(self, tmp_path: Path) -> None:
+    def test_delete_result_carries_src_info_and_storage(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
         client, _ = make_recording_client([_listing(("p/orphan.txt", 2)), {}])
@@ -177,9 +177,10 @@ class TestSyncUpload:
         )
         deleted = [r for r in results if r.transfer_type is TransferType.DELETE]
         assert len(deleted) == 1
-        assert deleted[0].dst_info is not None and deleted[0].dst_info.key == "p/orphan.txt"
-        assert deleted[0].src_info is None
-        assert isinstance(deleted[0].dst_storage, S3Storage)
+        assert deleted[0].src == "s3://bucket/p/orphan.txt"
+        assert deleted[0].src_info is not None and deleted[0].src_info.key == "p/orphan.txt"
+        assert isinstance(deleted[0].src_storage, S3Storage)
+        assert deleted[0].dst_info is None
 
     def test_copy_update_result_carries_both_compared_sides(self, tmp_path: Path) -> None:
         src = tmp_path / "src"

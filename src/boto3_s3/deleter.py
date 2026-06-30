@@ -328,8 +328,9 @@ class S3Deleter:
                     key=info.key,
                     outcome=outcome,
                     error=error,
-                    dst_info=info,
-                    dst_storage=self._storage,
+                    src=f"s3://{self._bucket}/{info.key}",
+                    src_info=info,
+                    src_storage=self._storage,
                 )
             )
 
