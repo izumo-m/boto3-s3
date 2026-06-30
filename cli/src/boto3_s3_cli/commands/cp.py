@@ -122,12 +122,7 @@ class CpCommand(Command):
 
         item_filter = None
         if not is_stream:
-            plan = plan_transfer(
-                transferargs.path_storage(src, src_type),
-                transferargs.path_storage(dest, dest_type),
-                recursive=args.recursive,
-            )
-            item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
+            item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,

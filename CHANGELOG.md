@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A root-anchored (absolute) `--exclude` / `--include` pattern now matches an
+  entry's full key instead of a root-stripped one, so the single `sync` filter
+  prunes each side against its own path (aws-cli's per-side roots).
+  `globsieve.Matcher.included` gains a `full_key`, a new `Anchored` matcher joins
+  each absolute pattern onto it, and `GlobFilter` passes `FileInfo.key`. Removed
+  `globsieve.translate_pattern_for_root` and `TransferPlan.filter_root`.
 - `--case-conflict` (`skip` / `warn` / `error`) now tracks only the downloads
   still in flight - the admitted key is dropped when its transfer finishes
   (aws-cli's `CaseConflictCleanupSubscriber`), not kept for the whole run - so a

@@ -12,6 +12,8 @@ Three layers:
 
 from __future__ import annotations
 
+import ntpath
+
 import pytest
 
 from boto3_s3 import FileInfo, globsieve
@@ -349,78 +351,75 @@ class TestSemanticEquivalence:
             )
 
 
-class TestTranslatePatternForRoot:
-    """Pin :func:`translate_pattern_for_root` semantics.
-
-    Mirrors aws-cli's filter behaviour
-    (aws-cli's ``awscli/customizations/s3/filters.py:_full_path_patterns``)
-    but emits a relative-key form so the existing fast-path matchers
-    keep working against root-stripped keys.
+class TestAnchored:
+    """Root-anchored (absolute) patterns: matched against ``full_key`` by joining
+    each pattern onto the entry's anchor with ``os.path.join``, the way aws-cli
+    joins each pattern onto the per-side root (its ``filters._full_path_patterns``).
     """
 
-    def test_relative_pattern_passes_through_unchanged(self) -> None:
-        # Plain relative patterns are already in relative-key form;
-        # the rootdir prefix gets joined on then stripped, leaving
-        # the original.
-        assert globsieve.translate_pattern_for_root("*.log", "/abs/data") == "*.log"
-        assert globsieve.translate_pattern_for_root("sub/*", "/abs/data") == "sub/*"
-        assert globsieve.translate_pattern_for_root("**/*.py", "/abs/data") == "**/*.py"
+    def test_relative_only_list_keeps_a_fast_path(self) -> None:
+        # No anchored pattern -> a macro-shape fast path, full_key never read.
+        m = globsieve.compile([GlobPattern.exclude("*"), GlobPattern.include("*.txt")])
+        assert not isinstance(m, globsieve.Anchored)
+        assert m.included("a.txt", "/anywhere/a.txt") is True
+        assert m.included("a.log", "/anywhere/a.log") is False
 
-    def test_absolute_pattern_under_root_is_stripped(self) -> None:
-        # ``--exclude /abs/data/secret/*`` against rootdir ``/abs/data``:
-        # the rootdir prefix is stripped to leave ``secret/*``.
-        assert globsieve.translate_pattern_for_root("/abs/data/secret/*", "/abs/data") == "secret/*"
+    def test_anchored_pattern_matches_the_full_key(self) -> None:
+        # An absolute pattern selects Anchored and matches the full key, not the
+        # bare compare_key, so it only bites under its own root.
+        m = globsieve.compile([GlobPattern.exclude("/data/src/keep/*")])
+        assert isinstance(m, globsieve.Anchored)
+        assert m.included("keep/a", "/data/src/keep/a") is False  # under root -> excluded
+        assert m.included("keep/a", "/other/keep/a") is True  # different root -> visible
 
-    def test_absolute_pattern_outside_root_returns_none(self) -> None:
-        # ``/foreign/X/*`` cannot match any file under ``/abs/data``;
-        # the translator drops the entry.
-        assert globsieve.translate_pattern_for_root("/foreign/X/*", "/abs/data") is None
+    def test_one_pattern_prunes_two_sides_independently(self) -> None:
+        # The #85 scenario: --exclude '/data/src/keep/*' excludes the local source
+        # but not the anchorless S3 destination, so --delete still removes it.
+        m = globsieve.compile([GlobPattern.exclude("/data/src/keep/*")])
+        assert m.included("keep/a", "/data/src/keep/a") is False  # source (local) excluded
+        assert m.included("keep/a", "dst/keep/a") is True  # dest (s3 key) visible
+        assert m.included("keep/a", None) is True  # no anchor (s3 listing) -> visible
 
-    def test_windows_backslash_pattern_is_normalized(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # On Windows (os.sep == "\\") backslash-separated patterns fold to
-        # ``/`` so they match the always-``/`` relative-key form. Rootdir
-        # ``C:\data`` + pattern ``sub\file.*`` -> relative ``sub/file.*``.
-        # Folding is os.sep-gated (aws-cli filters._match_pattern s3/local
-        # branches), so simulate Windows here; on POSIX a backslash is a legal
-        # key/filename char and is preserved (test_posix_backslash_is_preserved).
+    def test_wildcard_in_the_root_region_matches(self) -> None:
+        # ``*`` is greedy across ``/``, so a wildcard in the anchored region
+        # matches (the old strip-based translation wrongly dropped this).
+        m = globsieve.compile([GlobPattern.exclude("/data/*/secret")])
+        assert m.included("secret", "/data/src/secret") is False  # * == src -> excluded
+        assert m.included("secret", "/data/a/b/secret") is False  # * == a/b -> excluded
+
+    def test_relative_and_anchored_interleave_last_match_wins(self) -> None:
+        m = globsieve.compile(
+            [GlobPattern.exclude("*"), GlobPattern.include("/data/src/keep/*.txt")]
+        )
+        assert m.included("keep/a.txt", "/data/src/keep/a.txt") is True  # re-included
+        assert m.included("keep/a.log", "/data/src/keep/a.log") is False  # stays excluded
+
+    def test_windows_driveless_absolute_anchors_to_the_entry_drive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows ``os.path.join`` lends the entry's own drive to a driveless
+        # absolute pattern (``/data/...`` under ``C:\\...`` -> ``C:/data/...``),
+        # exactly like aws-cli's join onto the (single, drive-bearing) root;
+        # simulate it with ntpath on POSIX. In one scan every entry shares that
+        # drive, so the pattern bites whichever drive the entry is on.
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
         monkeypatch.setattr(globsieve.os, "sep", "\\")
-        assert globsieve.translate_pattern_for_root("sub\\file.*", "C:\\data") == "sub/file.*"
+        m = globsieve.compile([GlobPattern.exclude("/data/src/keep/*")])
+        assert isinstance(m, globsieve.Anchored)
+        assert m.included("keep/a", "C:/data/src/keep/a") is False
+        assert m.included("keep/a", "D:/data/src/keep/a") is False
 
-    def test_windows_drive_pattern_under_drive_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Drive-rooted pattern ``C:\data\secret\*`` under rootdir ``C:\data``
-        # strips to ``secret/*`` (Windows: os.sep == "\\").
+    def test_windows_drive_qualified_pattern_only_matches_its_drive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pattern that names its own drive matches only that drive (os.path.join
+        # keeps the pattern's drive over the entry's), so a different-drive entry
+        # is visible.
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
         monkeypatch.setattr(globsieve.os, "sep", "\\")
-        assert globsieve.translate_pattern_for_root("C:\\data\\secret\\*", "C:\\data") == "secret/*"
-
-    def test_posix_backslash_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # On POSIX (os.sep == "/") a literal backslash is NOT folded: aws-cli's
-        # s3 branch is ``pattern.replace(os.sep, "/")`` (a no-op on POSIX), and
-        # an s3 key may legally contain a backslash, so it must survive for the
-        # pattern to keep matching it (the POSIX-s3 parity fix).
-        monkeypatch.setattr(globsieve.os, "sep", "/")
-        assert globsieve.translate_pattern_for_root("a\\b.txt", "") == "a\\b.txt"
-        assert globsieve.translate_pattern_for_root("a\\b.*", "data") == "a\\b.*"
-
-    def test_absolute_pattern_equal_to_root_returns_none(self) -> None:
-        # ``--exclude /abs/data`` (no trailing slash) cannot match any
-        # key under the rootdir - there is no relative key that maps
-        # to the rootdir itself.
-        assert globsieve.translate_pattern_for_root("/abs/data", "/abs/data") is None
-
-    def test_absolute_pattern_collapses_to_catchall(self) -> None:
-        # ``--exclude /abs/data/*`` strips to ``*`` - the same outcome
-        # as a plain ``--exclude *``. After translation it should be
-        # eligible for the AlwaysExclude / IncludeOnly fast paths.
-        assert globsieve.translate_pattern_for_root("/abs/data/*", "/abs/data") == "*"
-
-    def test_empty_rootdir_passes_through(self) -> None:
-        # No rootdir -> no anchoring; pattern passes through unchanged.
-        assert globsieve.translate_pattern_for_root("/foo/*", "") == "/foo/*"
-        assert globsieve.translate_pattern_for_root("*.log", "") == "*.log"
-
-    def test_trailing_slash_in_rootdir_does_not_break_strip(self) -> None:
-        # The translator must tolerate trailing separators on rootdir.
-        assert globsieve.translate_pattern_for_root("/abs/data/sub/*", "/abs/data/") == "sub/*"
+        m = globsieve.compile([GlobPattern.exclude("C:/data/src/keep/*")])
+        assert m.included("keep/a", "C:/data/src/keep/a") is False  # same drive -> excluded
+        assert m.included("keep/a", "D:/data/src/keep/a") is True  # other drive -> visible
 
 
 class TestGlobFilter:

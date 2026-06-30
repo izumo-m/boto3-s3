@@ -221,17 +221,17 @@ class TestAppendFilterAction:
             GlobPattern(PatternKind.INCLUDE, "c"),
         ]
 
-    def test_build_filter_none_for_no_patterns(self) -> None:
-        assert filters.build_filter(None, key="k", recursive=False) is None
-        assert filters.build_filter([], key="k", recursive=False) is None
+    def test_compile_filter_none_for_no_patterns(self) -> None:
+        assert filters.compile_filter(None) is None
+        assert filters.compile_filter([]) is None
 
-    def test_build_filter_drops_dead_absolute_patterns(self) -> None:
-        # A pattern anchored outside the root can never match (aws joins it
-        # onto the root and fnmatch misses every listed key).
-        keep = filters.build_filter(
-            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
-            key="data/",
-            recursive=True,
+    def test_absolute_pattern_is_dead_against_an_s3_key(self) -> None:
+        # rm lists S3 keys, which carry no drive / UNC anchor, so an absolute
+        # pattern can never match one (os.path.join drops the root onto an
+        # anchorless key, fnmatch misses) - exactly aws-cli, whose s3 paths are
+        # anchorless. Only the relative '*' bites here.
+        keep = filters.compile_filter(
+            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")]
         )
         assert keep is not None
         assert keep(FileInfo(key="anything", compare_key="anything")) is False

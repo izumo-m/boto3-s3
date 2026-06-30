@@ -25,19 +25,22 @@ dest listing -- filter (visibility) --+        |
 ```
 
 - **Visibility layer** (before pairing, decided on one side's `FileInfo`
-  alone): the single `filter` is applied **to both streams**, each against its
-  own root-relative compare key - one symmetric predicate, not a per-side pair.
-  `--exclude` / `--include` thus prune the source and destination identically
-  (aws evaluates the same pattern list against both sides). An entry excluded
-  this way is "nonexistent" on **both** sides and is therefore protected from
-  `--delete` - not a special rule on the delete-decision side but a consequence
-  of symmetric visibility; a one-sided prune would manufacture a phantom
-  new/delete pair, so visibility is never one-sided (per-side / per-lane
-  narrowing lives in the pair layer). Folder markers (size 0, trailing `/`) are
-  dropped from the S3 side here; the local walk never produces them - either way
-  sync neither transfers nor deletes markers. The implementation is
-  `ScanOptions.filter` (S3 side, pruned at the listing-page stage) and the
-  filter immediately after the local walk.
+  alone): the single `filter` is applied **to both streams**. A **relative**
+  `--exclude` / `--include` matches each side's root-relative compare key, so it
+  prunes the source and destination identically (symmetric); an entry excluded
+  this way is "nonexistent" on **both** sides and is thus protected from
+  `--delete` (aws's "files excluded by filters are excluded from deletion"). A
+  **root-anchored** (absolute) pattern instead matches each side's full key, so
+  it prunes **per-side** - the same per-side roots aws gets from joining the
+  pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching only
+  the source leaves the destination visible, so `--delete` still removes it).
+  The same one filter expresses both because `globsieve.Anchored` routes a
+  relative pattern to `compare_key` and an absolute one to the full key (one is
+  symmetric, the other per-side automatically); see globsieve.md. Folder markers
+  (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
+  produces them - either way sync neither transfers nor deletes markers. The
+  implementation is `ScanOptions.filter` (S3 side, pruned at the listing-page
+  stage) and the filter immediately after the local walk.
 - **Pair-decision layer** (after merge, per `SyncPair`): every decision that
   looks at both sides - size / timestamp / ETag, etc. - lives here. The default
   is aws-compatible, and this is the only layer an application swaps.
@@ -191,14 +194,6 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 
 ## 7. Known divergences (recorded only)
 
-- **filter cross-root edge**: aws-cli applies the pattern lists of both the src
-  and dest roots to both streams. We compile the pattern list once (against the
-  source root, aws's "evaluate against the source") and apply that single
-  filter to both sides' compare keys. For ordinary **relative** patterns this
-  is exactly equivalent (a relative pattern is root-independent); an **absolute**
-  pattern anchored to one root is relativized once and applied to both sides
-  rather than per-root - the only divergence, and only for the rare
-  absolute-pattern-in-sync case.
 - **delete batching and output timing**: the batch is finalized all at once on
   flush (the final state, line set, and rc match; as with the rm precedent).
 - **restored glacier**: because sync decides from the listing, `Restore` is not

@@ -10,7 +10,7 @@ import os
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
-from boto3_s3.naming import classify, plan_transfer
+from boto3_s3.naming import classify
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
@@ -108,15 +108,11 @@ class SyncCommand(Command):
             args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
         )
 
-        plan = plan_transfer(
-            transferargs.path_storage(src, src_type),
-            transferargs.path_storage(dest, dest_type),
-            recursive=True,
-        )
-        # One symmetric filter, compiled against the source root and applied to
-        # both sides by S3.sync (sync.md section 1; relative patterns are
-        # root-independent, so one compilation suffices).
-        item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
+        # One symmetric filter applied to both sides by S3.sync (sync.md section
+        # 1). It needs no root: a relative pattern matches each entry's
+        # compare_key, an absolute one its full key, so the same filter prunes
+        # the source and destination per-side (globsieve.Anchored).
+        item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,

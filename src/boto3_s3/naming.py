@@ -10,7 +10,6 @@ derive identical shapes from one code path:
 - ``CommandParameters._normalize_s3_trailing_slash`` -> applied inside
   :func:`plan_transfer` (keyless ``s3://bucket`` reads as ``s3://bucket/``)
 - ``utils.find_dest_path_comp_key``      -> :func:`item_paths`
-- ``filters._get_s3_root`` / ``_get_local_root``     -> ``TransferPlan.filter_root``
 
 S3 paths inside a :class:`TransferPlan` use aws-cli's internal
 ``bucket/key`` form (scheme stripped); local paths are native (``os.sep``).
@@ -208,13 +207,10 @@ class TransferPlan:
     (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
     a native absolute path, and a custom ``open`` side as ``""`` (it addresses
     entries by the relative ``compare_key`` its own ``open`` takes); directory
-    semantics are expressed by a trailing separator. ``filter_root`` is what
-    ``--exclude`` / ``--include`` patterns
-    resolve against (aws-cli's ``filters._get_*_root``): for an S3 source the
-    *key*-derived root (the bucket cancels out of the relative match, exactly
-    like ``rm_filter_root``), for a local source an absolute directory; feed
-    it to ``globsieve.translate_pattern_for_root`` and feed the resulting
-    matcher each item's ``compare_key``.
+    semantics are expressed by a trailing separator. ``--exclude`` / ``--include``
+    need no root here: :mod:`boto3_s3.globsieve` matches a relative pattern
+    against each item's ``compare_key`` and a root-anchored one against its full
+    ``key`` at match time.
     """
 
     paths_type: PathsType
@@ -226,7 +222,6 @@ class TransferPlan:
     dest_root: str
     src_sep: str
     dest_sep: str
-    filter_root: str
 
 
 def _endpoint_kind(storage: Storage) -> PathKind:
@@ -281,18 +276,14 @@ def plan_transfer(
     src_text = src.as_text()
     dest_text = dest.as_text()
     if src_kind == "s3":
-        src_rest = _strip_scheme_normalized(src_text)
-        src_root = s3_format(src_rest, dir_op=recursive)[0]
+        src_root = s3_format(_strip_scheme_normalized(src_text), dir_op=recursive)[0]
         src_sep = "/"
-        filter_root = _s3_filter_root(src_rest, dir_op=recursive)
     elif src_kind == "open":
         src_root = _open_format(src_text, dir_op=recursive)[0]
         src_sep = "/"
-        filter_root = ""
     else:
         src_root = local_format(src_text, dir_op=recursive)[0]
         src_sep = os.sep
-        filter_root = _local_filter_root(src_text, dir_op=recursive)
 
     if dest_kind == "s3":
         dest_root, use_src_name = s3_format(_strip_scheme_normalized(dest_text), dir_op=recursive)
@@ -325,28 +316,7 @@ def plan_transfer(
         dest_root=dest_root,
         src_sep=src_sep,
         dest_sep=dest_sep,
-        filter_root=filter_root,
     )
-
-
-def _s3_filter_root(rest: str, *, dir_op: bool) -> str:
-    """Key-derived filter root (aws-cli's ``_get_s3_root`` minus the bucket).
-
-    Non-dir-op keys root at their parent prefix; the bucket segment cancels
-    out of the relative comparison (``rm`` precedent), so only the key part
-    is returned.
-    """
-    _bucket, key = split_bucket_key(rest)
-    if not dir_op and not key.endswith("/"):
-        key = "/".join(key.split("/")[:-1])
-    return key
-
-
-def _local_filter_root(path: str, *, dir_op: bool) -> str:
-    """Absolute local filter root (aws-cli's ``_get_local_root``)."""
-    if dir_op:
-        return os.path.abspath(path)
-    return os.path.abspath(os.path.dirname(path))
 
 
 def dest_for(plan: TransferPlan, compare_key: str) -> str:

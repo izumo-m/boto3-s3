@@ -130,7 +130,7 @@ class RmCommand(Command):
         storage = S3Storage(target, client=ctx.client_factory(args))
         storage.validate()
 
-        item_filter = filters.build_filter(args.filters, key=storage.key, recursive=args.recursive)
+        item_filter = filters.compile_filter(args.filters)
         printer = _DeletePrinter(
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )

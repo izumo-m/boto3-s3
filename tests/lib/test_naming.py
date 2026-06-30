@@ -1,10 +1,9 @@
 """``boto3_s3.naming``: the pure path-shape rules behind cp/mv/sync.
 
 Pins the aws-cli parity contracts (aws-cli ``fileformat.py`` +
-``find_dest_path_comp_key`` + ``filters._get_*_root``): how a path pair
-resolves to roots and ``use_src_name``, how each item's destination and
-``compare_key`` derive from its source path, and how the filter root feeds
-``globsieve.translate_pattern_for_root``.
+``find_dest_path_comp_key``): how a path pair resolves to roots and
+``use_src_name``, and how each item's destination and ``compare_key`` derive
+from its source path.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from typing_extensions import override
 
 from boto3_s3 import LocalStorage, S3Storage, Storage, naming
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.globsieve import translate_pattern_for_root
 from boto3_s3.naming import (
     classify,
     dest_for,
@@ -190,12 +188,10 @@ class TestPlanTransfer:
         assert plan.src_root == "b/pre/"
         assert plan.dest_root == str(tmp_path / "out") + os.sep
         assert plan.use_src_name is True
-        assert plan.filter_root == "pre"
 
     def test_s3_single_source_roots_at_parent(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://b/pre/key", str(tmp_path / "f"), recursive=False)
         assert plan.src_root == "b/pre/key"
-        assert plan.filter_root == "pre"
 
     def test_s3_to_s3(self) -> None:
         plan = plan_transfer("s3://a/x/", "s3://b/y", recursive=True)
@@ -221,7 +217,7 @@ class TestPlanTransferOpenRoute:
         plan = naming.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
         # the custom side roots at "" and is addressed by relative compare_key
-        assert (plan.src_root, plan.src_sep, plan.filter_root) == ("", "/", "")
+        assert (plan.src_root, plan.src_sep) == ("", "/")
         # use_src_name comes from the s3 dest (dir_op -> adopts the source name)
         assert plan.use_src_name is True
         assert dest_for(plan, "sub/f.txt") == "b/dest/sub/f.txt"
@@ -330,36 +326,6 @@ class TestDestFor:
         src_path = plan.src_root + os.path.join("sub", "f.txt")
         dest, compare_key = item_paths(plan, src_path)
         assert dest_for(plan, compare_key) == dest
-
-
-class TestFilterRoot:
-    """The plan's filter root composes with translate_pattern_for_root so the
-    matcher - fed each item's compare_key - selects the same set aws-cli's
-    rootdir-joined fnmatch selects."""
-
-    def test_local_single_roots_at_the_parent_directory(self, tmp_path: Path) -> None:
-        src = tmp_path / "a.txt"
-        src.write_bytes(b"x")
-        plan = plan_transfer(str(src), "s3://b/k", recursive=False)
-        assert plan.filter_root == str(tmp_path)
-        assert translate_pattern_for_root("*.txt", plan.filter_root) == "*.txt"
-
-    def test_local_recursive_roots_at_the_directory(self, tmp_path: Path) -> None:
-        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
-        assert plan.filter_root == str(tmp_path)
-        anchored = str(tmp_path / "sub") + "/*"
-        assert translate_pattern_for_root(anchored, plan.filter_root) == "sub/*"
-        assert translate_pattern_for_root("/elsewhere/*", plan.filter_root) is None
-
-    def test_s3_recursive_root_is_the_raw_key(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://b/pre", str(tmp_path), recursive=True)
-        assert plan.filter_root == "pre"
-        assert translate_pattern_for_root("*.txt", "pre") == "*.txt"
-
-    def test_s3_bucket_root_single_key(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://b/key", str(tmp_path / "f"), recursive=False)
-        assert plan.filter_root == ""
-        assert translate_pattern_for_root("key*", "") == "key*"
 
 
 class TestMvSamePathGuards:

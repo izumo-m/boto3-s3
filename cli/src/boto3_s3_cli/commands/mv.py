@@ -10,7 +10,7 @@ import sys
 # on the parse path; S3 / S3Storage reach botocore and are imported in run()
 # instead (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3.naming import classify, normalize_s3_uri, plan_transfer, same_key, same_path
+from boto3_s3.naming import classify, normalize_s3_uri, same_key, same_path
 from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -105,12 +105,7 @@ class MvCommand(Command):
             args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
         )
 
-        plan = plan_transfer(
-            transferargs.path_storage(src, src_type),
-            transferargs.path_storage(dest, dest_type),
-            recursive=args.recursive,
-        )
-        item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
+        item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
         printer = TransferPrinter(
             quiet=args.quiet,

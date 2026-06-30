@@ -709,9 +709,9 @@ class S3:
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
         ``compare_key`` is stamped to the source path relative to the transfer
-        root (``TransferPlan.filter_root`` is the translation root for
-        patterns) - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key
-        while a richer predicate can read size / mtime / storage_class.
+        root - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key (a
+        relative pattern) or the full ``key`` (an absolute one) while a richer
+        predicate can read size / mtime / storage_class.
         ``detect_symlink_loops`` (default ``False``; a library extension - ``aws
         s3`` has no such option, so off keeps parity) guards a recursive local
         walk against symlink cycles: with it (and ``follow_symlinks``) a directory

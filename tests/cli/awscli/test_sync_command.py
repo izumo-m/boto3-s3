@@ -444,6 +444,37 @@ class TestSyncCommand:
             ),
         ]
 
+    def test_absolute_exclude_does_not_protect_the_destination_from_delete(
+        self, tmp_path: Path
+    ) -> None:
+        # #85: an absolute --exclude anchors at the local source, so it hides the
+        # source's keep/a.txt but NOT the anchorless S3 destination key. The dest
+        # key is therefore a dest-only orphan and --delete removes it - matching
+        # aws-cli, which roots the pattern per side (src_rootdir vs dst_rootdir).
+        src = tmp_path / "src"
+        (src / "keep").mkdir(parents=True)
+        (src / "keep" / "a.txt").write_text("x")
+        _, calls = _run_cmd(
+            [list_objects_response(["keep/a.txt"]), {}],
+            ["sync", str(src), "s3://bucket", "--delete", "--exclude", f"{src}/keep/*"],
+        )
+        assert _operations(calls) == ["ListObjectsV2", "DeleteObjects"]  # source not uploaded
+        delete = next(c for c in calls if c.operation == "DeleteObjects")
+        assert delete.params["Delete"]["Objects"] == [{"Key": "keep/a.txt"}]
+
+    def test_relative_exclude_protects_the_destination_from_delete(self, tmp_path: Path) -> None:
+        # A relative --exclude matches each side's compare_key, so it hides
+        # keep/a.txt on BOTH sides; the dest is invisible and --delete leaves it
+        # (aws-cli "files excluded by filters are excluded from deletion").
+        src = tmp_path / "src"
+        (src / "keep").mkdir(parents=True)
+        (src / "keep" / "a.txt").write_text("x")
+        _, calls = _run_cmd(
+            [list_objects_response(["keep/a.txt"])],
+            ["sync", str(src), "s3://bucket", "--delete", "--exclude", "keep/*"],
+        )
+        assert _operations(calls) == ["ListObjectsV2"]  # no DeleteObjects
+
     def test_with_accesspoint_arn(self, tmp_path: Path) -> None:
         accesspoint_arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
         _, calls = _run_cmd(

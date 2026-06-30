@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix `sync` `--exclude` / `--include` anchoring to match `aws s3`: a
+  root-anchored (absolute) pattern now prunes each side against its own full
+  path, so a pattern matching only the source no longer wrongly protects the
+  matching destination key from `--delete`.
 - Fix the exit code for a non-integer `--cli-read-timeout` /
   `--cli-connect-timeout`: it now exits 255 (the value error reaches the general
   handler, as in `aws`) instead of 252 (an argument-parse error). A valid `0`
