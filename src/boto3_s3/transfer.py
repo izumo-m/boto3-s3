@@ -643,6 +643,12 @@ class Transferrer:
             from s3transfer.futures import NonThreadedExecutor
 
             executor_cls = NonThreadedExecutor
+        # TransferManager registers handlers on self._client at construction and
+        # leaves them there - shutdown() never removes them. Intentional and
+        # boto3-faithful (boto3's own TransferManager does the same): we do not
+        # restore the client, because it may be shared and unregistering could
+        # disrupt a concurrent transfer. Run parallel operations with one client
+        # per thread (docs/s3.md thread-safety note).
         return TransferManager(self._client, config=config, executor_cls=executor_cls)
 
     @property

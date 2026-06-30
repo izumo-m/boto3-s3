@@ -523,10 +523,14 @@ class S3:
     test double), or ``resolve`` to interpret new URL schemes (e.g. ``http://``).
     A second account for S3-to-S3, or a per-location client, is expressed by an
     explicit ``S3Storage(url, client=...)``. Debug-log secret masking is
-    configured via :func:`boto3_s3.set_stream_logger`. The instance is safe to
-    share across threads (immutable defaults plus one benign cache); building
-    clients concurrently is bounded by boto3's own thread-safety, so for heavy
-    parallelism reuse a prebuilt client via ``S3Storage(url, client=...)``.
+    configured via :func:`boto3_s3.set_stream_logger`. The instance's own state
+    is thread-safe to share, but its clients need care: ``client()`` is not safe
+    to call concurrently (boto3's session construction path), and boto3-s3 uses
+    ``s3transfer``, whose per-transfer setup is not thread-safe on a shared
+    client. To run operations in parallel across threads, build one client per
+    thread sequentially, up front, then give each thread its own
+    ``S3Storage(url, client=...)`` - never share a client, never build clients
+    concurrently.
     """
 
     def __init__(
