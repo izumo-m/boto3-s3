@@ -473,6 +473,16 @@ class LocalStorage(Storage):
 
         ``"wb"`` creates missing parent directories first. ``size`` is unused
         locally. OS errors translate to the library taxonomy.
+
+        ``key`` is joined under the location with ``os.path.join``, so a ``..``
+        or absolute ``key`` resolves outside it (``"../sib"`` -> the parent's
+        ``sib``). That is deliberate, not a hole: this is a building block whose
+        caller owns both the location and the key, so there is no trust boundary
+        to confine - ``..`` should navigate the parent rather than be rejected.
+        The one genuinely untrusted path - a *remote* S3 key steering a recursive
+        download's local target - is guarded separately, where the key arrives
+        from the bucket (``s3.py``'s ``_warn_parent_reference`` port, warn-and-skip
+        for ``aws s3`` parity).
         """
         target = os.path.join(self._path, to_native_path(key))
         try:
@@ -506,7 +516,9 @@ class LocalStorage(Storage):
 
         Anchored at the absolutized path (``self._abspath``, joined with ``key``
         for a child), so ``FileInfo.key`` is absolute; ``compare_key`` is its
-        basename.
+        basename. As with :meth:`open`, ``key`` is joined under the location and
+        a ``..`` / absolute ``key`` deliberately resolves outside it (a building
+        block an app drives, not a confinement boundary - see :meth:`open`).
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)

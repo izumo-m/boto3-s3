@@ -288,6 +288,18 @@ class TestGetFileinfo:
         assert info.key == str(tmp_path / "sub" / "f.txt").replace(os.sep, "/")
         assert info.compare_key == "f.txt"
 
+    def test_parent_reference_key_resolves_outside_the_location(self, tmp_path: Path) -> None:
+        # No trust boundary in the API (the caller owns both the location and the
+        # key), so a "../" key navigates the parent as an app expects - it is not
+        # confined. This is by design; see LocalStorage.open's docstring.
+        root = tmp_path / "root"
+        root.mkdir()
+        (tmp_path / "sibling.txt").write_bytes(b"x")
+        info = LocalStorage(str(root)).get_fileinfo("../sibling.txt")
+        assert info is not None
+        assert info.size == 1
+        assert info.compare_key == "sibling.txt"
+
 
 class TestLocalStorageScan:
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
