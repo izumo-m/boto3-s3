@@ -15,8 +15,10 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   ``'CRC32'`` on upload-path operations (PutObject / CreateMultipartUpload /
   UploadPart): both engines inject a default integrity checksum - aws via its
   bundled botocore, ours via pip s3transfer - they just pick different
-  algorithms. ``ChecksumMode: 'ENABLED'`` on HeadObject is dropped (the
-  checksum option surface is stage 2, docs/cli.md section 5.7).
+  algorithms. ``ChecksumMode: 'ENABLED'`` on the single-source HeadObject is
+  kept verbatim: like aws's filegenerator we setdefault it when the client
+  resolves ``response_checksum_validation`` to ``when_supported`` (the botocore
+  default), so the recorded HEAD matches aws.
 - ``LastModified`` strings become ``datetime`` objects and string
   ``ContentLength``/sizes become ints (no output parser runs, recorder rule).
 - ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
@@ -28,7 +30,10 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   aws-cli's ``BufferedBytesIO`` onto ``sys.stdin``.
 - The case-conflict ``*_with_existing_file`` variants keep the aws-cli's
   skip-on-case-sensitive-filesystem guard (``os.path.exists`` cannot see a
-  case variant on Linux), expressed as a runtime probe of the test tmpdir.
+  case variant on Linux), via the ``case_insensitive_workdir`` fixture
+  (tests/conftest.py): it runs them on a case-insensitive dir from
+  ``BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`` (or a natively case-insensitive
+  tmp dir on macOS / Windows) and skips otherwise.
 
 Not ported, with reasons:
 
@@ -343,7 +348,7 @@ class TestCPCommand:
             [head_object_response()], ["cp", "s3://bucket/key.txt", target, "--dryrun"]
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})
+            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
         ]
         assert f"(dryrun) download: s3://bucket/key.txt to {relative_path(target)}" in (
             result.stdout
@@ -365,7 +370,7 @@ class TestCPCommand:
             ["cp", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--dryrun"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})
+            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
         ]
         assert "(dryrun) copy: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
@@ -779,7 +784,15 @@ class TestCpCommandWithRequesterPayer:
             ["cp", "s3://mybucket/mykey", str(tmp_path), "--request-payer"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
+            (
+                "HeadObject",
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
+            ),
             ("GetObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
         ]
 
@@ -793,7 +806,15 @@ class TestCpCommandWithRequesterPayer:
             ["cp", "s3://mybucket/mykey", str(tmp_path), "--request-payer"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
+            (
+                "HeadObject",
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
+            ),
             (
                 "GetObject",
                 {
@@ -842,7 +863,12 @@ class TestCpCommandWithRequesterPayer:
         assert [(c.operation, c.params) for c in calls] == [
             (
                 "HeadObject",
-                {"Bucket": "sourcebucket", "Key": "sourcekey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "sourcebucket",
+                    "Key": "sourcekey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             (
                 "CopyObject",
@@ -886,7 +912,12 @@ class TestCpCommandWithRequesterPayer:
         assert [(c.operation, c.params) for c in calls] == [
             (
                 "HeadObject",
-                {"Bucket": "sourcebucket", "Key": "sourcekey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "sourcebucket",
+                    "Key": "sourcekey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             (
                 "CreateMultipartUpload",

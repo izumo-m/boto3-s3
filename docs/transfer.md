@@ -264,6 +264,12 @@ dest-existence check for download. We ported the same three faces:
   specification beats pip s3transfer's default injection (`setdefault`)**.
 - `checksum_mode` (download) -> GetObject's `ChecksumMode: ENABLED` (botocore
   verifies the response's checksum).
+- The single-source HeadObject (`_cp_head_single`, the download / copy point op)
+  also `setdefault`s `ChecksumMode: ENABLED` when the client resolves
+  `response_checksum_validation` to `when_supported` (the botocore default since
+  checksums GA), mirroring aws-cli's filegenerator - so the HEAD's request shape
+  matches aws even without `--checksum-mode`. An explicit `--checksum-mode` wins
+  (`setdefault`), and an old botocore lacking the config knob just omits it.
 - The computation of the CRT-family algorithms (`CRC32C` / `CRC64NVME` /
   `XXHASH64` / `XXHASH3` / `XXHASH128`) is delegated by botocore to `awscrt`.
   Because botocore auto-detects awscrt at import time, it is enabled with no

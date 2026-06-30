@@ -1238,18 +1238,26 @@ class S3:
         """Resolve a single S3 source by HeadObject (aws-cli's `_list_single_object`).
 
         Any 404 is rewritten to aws's ``Key "..." does not exist`` message; a
-        copy source is headed with the copy-source SSE-C parameters.
+        copy source is headed with the copy-source SSE-C parameters. Like aws-cli's
+        filegenerator, the HEAD carries ``ChecksumMode=ENABLED`` when the client
+        resolves checksum validation to ``when_supported`` (the botocore default).
         """
         key = src_storage.key
         if transfer_type is TransferType.COPY:
             params = requestparams.map_head_object_params_with_copy_source_sse(options)
         else:
             params = requestparams.map_head_object_params(options)
+        client = src_storage.get_client()
+        # aws-cli's filegenerator sends ChecksumMode=ENABLED on the single-source
+        # HeadObject whenever the client resolves checksum validation to
+        # 'when_supported' (the botocore default since checksums GA), so the HEAD
+        # request matches aws even without an explicit --checksum-mode. setdefault
+        # keeps an explicit mode; getattr guards botocore floors predating the knob.
+        if getattr(client.meta.config, "response_checksum_validation", None) == "when_supported":
+            params.setdefault("ChecksumMode", "ENABLED")
         try:
             with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
-                head = src_storage.get_client().head_object(
-                    Bucket=src_storage.bucket, Key=key, **params
-                )
+                head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
         except NotFoundError as exc:
             raise NotFoundError(
                 "An error occurred (404) when calling the HeadObject operation: "

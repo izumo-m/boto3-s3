@@ -276,7 +276,7 @@ class TestDownloadRoute:
         dest = tmp_path / "out.bin"
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
         assert _ops(calls) == ["HeadObject", "GetObject"]
-        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt"}
+        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt", "ChecksumMode": "ENABLED"}
         assert dest.read_bytes() == b"payload"
         assert os.stat(dest).st_mtime == _MTIME.timestamp()
 

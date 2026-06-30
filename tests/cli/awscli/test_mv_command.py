@@ -16,9 +16,9 @@ Adaptation rules (on top of the cp port's - see its module docstring):
 - The aws-cli's exact ``aws: [ERROR]: ...`` stderr equality for the
   MRAP-not-found case becomes a message-token assertion (our error prefix
   is ``boto3-s3: [ERROR]:``; the message body is the aws-cli's verbatim).
-- ``ChecksumMode: 'ENABLED'`` on HeadObject expectations is dropped where it
-  is aws's bundled-botocore *default* injection; it stays where the test
-  passes ``--checksum-mode ENABLED`` itself (cp port rule).
+- ``ChecksumMode: 'ENABLED'`` is kept on the single-source HeadObject - we
+  setdefault it like aws's filegenerator when the client resolves
+  ``response_checksum_validation`` to ``when_supported`` (cp port rule).
 
 Not ported, with reasons:
 
@@ -167,7 +167,9 @@ class TestMvCommand:
             [head_object_response()],
             ["mv", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--dryrun"],
         )
-        assert calls == [ApiCall("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})]
+        assert calls == [
+            ApiCall("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
+        ]
         assert "(dryrun) move: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
     def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:
@@ -221,7 +223,12 @@ class TestMvCommand:
         assert calls == [
             ApiCall(
                 "HeadObject",
-                {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             ApiCall(
                 "GetObject",
@@ -243,6 +250,7 @@ class TestMvCommand:
             "Bucket": "sourcebucket",
             "Key": "sourcekey",
             "RequestPayer": "requester",
+            "ChecksumMode": "ENABLED",
         }
         assert calls[1].params["CopySource"] == {"Bucket": "sourcebucket", "Key": "sourcekey"}
         assert calls[1].params["RequestPayer"] == "requester"
