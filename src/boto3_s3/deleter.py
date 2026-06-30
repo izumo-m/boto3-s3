@@ -245,6 +245,12 @@ class S3Deleter:
         if self._request_payer is not None:
             kwargs["RequestPayer"] = self._request_payer
         failures: dict[str, Boto3S3Error]
+        # Intentional aws-cli wire-level deviation: recursive rm and sync --delete
+        # use DeleteObjects batches for throughput instead of aws-cli's per-key
+        # DeleteObject. This is accepted and documented in docs/deleter.md section 4.
+        # Do not swap in per-key deletes for parity unless that design decision
+        # changes; the known non-parity case is keys that cannot be represented in
+        # the DeleteObjects XML body (e.g. some control characters).
         try:
             with s3_errors(operation=self._operation, bucket=self._bucket):
                 response = self._client.delete_objects(**kwargs)
