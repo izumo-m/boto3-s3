@@ -253,7 +253,13 @@ def _fetch_remote(
         if algorithm is None or value is None:
             return None
         part_sizes: tuple[int, ...] | None = None
-        if need_parts and "-" in value:  # a COMPOSITE multipart checksum ("base64-N")
+        # A composite (multipart) checksum is reported as "base64-N" (the part
+        # count suffix); a full-object checksum has no suffix. The standard base64
+        # alphabet plus '=' padding never contains '-', so the substring test
+        # reliably tells the two apart on real S3 responses - the model's
+        # ChecksumType would be marginally more robust, but S3's aws-cli
+        # customizations carry no COMPOSITE handling to mirror.
+        if need_parts and "-" in value:
             part_sizes = _part_sizes(client, bucket, key, resp, request_payer)
             if part_sizes is None:
                 return None

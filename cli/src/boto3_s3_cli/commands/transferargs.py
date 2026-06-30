@@ -156,6 +156,11 @@ def add_transfer_arguments(
         "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
     )
     parser.add_argument("--checksum-mode", choices=["ENABLED"])
+    # This set matches aws-cli 2.35.5's CHECKSUM_ALGORITHM choices verbatim
+    # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
+    # SHA512 / XXHASH* because that build predates them - a version skew, not a
+    # parity bug: the design tracks the aws-cli source, not whatever `aws`
+    # happens to be on PATH.
     parser.add_argument(
         "--checksum-algorithm",
         choices=[
