@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3Storage.get_fileinfo(key)` now joins a non-empty child `key` under the
+  prefix with a `/` boundary (was a bare concat that only resolved correctly
+  when the prefix already ended in `/`), matching `LocalStorage` and the "an
+  entry beneath it" contract.
 - A root-anchored (absolute) `--exclude` / `--include` pattern now matches an
   entry's full key instead of a root-stripped one, so the single `sync` filter
   prunes each side against its own path (aws-cli's per-side roots).

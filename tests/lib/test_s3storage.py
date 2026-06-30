@@ -320,6 +320,24 @@ class TestGetFileinfo:
         assert info.compare_key == "f.txt"
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
 
+    def test_child_key_joins_under_a_slashless_prefix(self) -> None:
+        # The "/" boundary is inserted even when the prefix lacks one, so a child
+        # key is an entry beneath the location (not a bare-concat "prefixsub/...").
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket/prefix", head_response=head)
+        info = storage.get_fileinfo("sub/f.txt")
+        assert info is not None
+        assert info.key == "prefix/sub/f.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
+
+    def test_child_key_under_a_keyless_location_has_no_leading_slash(self) -> None:
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket", head_response=head)
+        info = storage.get_fileinfo("a.txt")
+        assert info is not None
+        assert info.key == "a.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "a.txt"}]
+
 
 def _bucket_entry(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": _MTIME}

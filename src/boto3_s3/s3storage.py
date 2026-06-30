@@ -494,13 +494,23 @@ class S3Storage(Storage):
         """HeadObject a single key (:meth:`Storage.get_fileinfo`).
 
         ``key`` is relative to this storage's location: ``""`` heads
-        :attr:`key`, a non-empty ``key`` an entry beneath it. A ``404`` returns
-        ``None`` (definitively absent); any other error (``403``, transport, 5xx)
-        is raised - existence could not be determined. ``follow_symlinks`` /
+        :attr:`key`, a non-empty ``key`` an entry beneath it - joined under the
+        prefix with a ``/`` boundary (mirroring ``LocalStorage``'s
+        ``os.path.join``), so a keyless or trailing-``/`` prefix needs none and a
+        bare ``prefix`` still yields ``prefix/key``. A ``404`` returns ``None``
+        (definitively absent); any other error (``403``, transport, 5xx) is
+        raised - existence could not be determined. ``follow_symlinks`` /
         ``on_warning`` do not apply to S3 and are ignored. This is the generic
         HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
         """
-        target_key = self._key + key
+        target_key = self._key
+        if key:
+            # Insert the "/" boundary unless the prefix already ends in one (or
+            # is empty), so "<prefix>/<key>" is an entry beneath the location -
+            # os.path.join semantics in S3 key space.
+            if target_key and not target_key.endswith("/"):
+                target_key += "/"
+            target_key += key
         try:
             with s3_errors(operation="head", bucket=self._bucket, key=target_key):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
