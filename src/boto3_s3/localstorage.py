@@ -205,6 +205,12 @@ class LocalStorage(Storage):
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)
+        # Absolutize once, at construction (against the cwd then): every scan /
+        # get_fileinfo anchors here so ``FileInfo.key`` comes out absolute, and
+        # ``os.path.abspath`` calls ``os.getcwd()`` - too costly to repeat per
+        # entry. Binding the cwd here also keeps a relative path resolving
+        # consistently if the process later chdir's.
+        self._abspath = os.path.abspath(self._path)
 
     @property
     def path(self) -> str:
@@ -229,7 +235,7 @@ class LocalStorage(Storage):
         guard, and the aws-cli-worded warning channel a transfer needs.
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
-        ends with ``/``), anchored at ``os.path.abspath(self._path)`` so
+        ends with ``/``), anchored at the absolutized path (``self._abspath``) so
         ``FileInfo.key`` is absolute. The S3 listing knobs on ``options``
         (``page_size`` / ``request_payer`` / ...) are ignored here (docs on
         ``ScanOptions``).
@@ -245,7 +251,7 @@ class LocalStorage(Storage):
             return
         yield from _paged(
             self._scan_one_level(
-                os.path.abspath(self._path),
+                self._abspath,
                 follow_symlinks=options.follow_symlinks,
                 on_warning=options.on_warning,
             )
@@ -283,8 +289,8 @@ class LocalStorage(Storage):
         # Anchor at the absolutized path with a trailing separator (aws-cli's
         # local_format(dir_op=True) form): FileInfo.key comes out absolute, and a
         # non-directory root degrades to a "does not exist" warning rather than an
-        # os.listdir error.
-        start = os.path.abspath(self._path) + os.sep
+        # os.listdir error. self._abspath is computed once at construction.
+        start = self._abspath + os.sep
         # No detector unless asked and reachable (a cycle needs a followed
         # symlink); None then costs no per-directory stat.
         detector = LoopDetector(start) if detect_loops and follow_symlinks else None
@@ -498,13 +504,14 @@ class LocalStorage(Storage):
     ) -> LocalFileInfo | None:
         """Stat a single path (:meth:`Storage.get_fileinfo`).
 
-        Anchored at ``os.path.abspath(self._path)`` (joined with ``key`` for a
-        child), so ``FileInfo.key`` is absolute; ``compare_key`` is its basename.
+        Anchored at the absolutized path (``self._abspath``, joined with ``key``
+        for a child), so ``FileInfo.key`` is absolute; ``compare_key`` is its
+        basename.
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
         )
-        target = os.path.abspath(self._path)
+        target = self._abspath
         if key:
             target = os.path.join(target, to_native_path(key))
         info = self._stat_one(target, follow_symlinks=follow_symlinks, notify=notify)

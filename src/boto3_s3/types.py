@@ -42,9 +42,11 @@ class FileInfo:
     local-only notions such as symlinks are attributes of ``LocalFileInfo`` rather
     than distinct types.
 
-    ``key`` is the full, ``/``-separated identifier (object key, prefix, or
-    bucket name; never platform ``os.sep`` - ``LocalFileInfo`` translates it). It
-    doubles as the cross-backend merge/sort key: two ``Storage.scan`` streams
+    ``key`` is the full, ``/``-separated identifier: an S3 object key, prefix, or
+    bucket name, or - for a ``LocalFileInfo`` - the **absolute filesystem path**
+    (``os.sep`` normalized to ``/``; ``to_native_path`` inverts it). It is never
+    a relative path and never platform ``os.sep``. It doubles as the
+    cross-backend merge/sort key: two ``Storage.scan`` streams
     ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
     is relativized to its scan root, so every backend must emit ``/``-separated
     keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
@@ -75,6 +77,10 @@ class FileInfo:
 @dataclass(slots=True, kw_only=True)
 class LocalFileInfo(FileInfo):
     """``FileInfo`` for a local filesystem entry.
+
+    Its ``key`` is the **absolute** path with ``os.sep`` normalized to ``/``
+    (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
+    turns it back into a host path for I/O.
 
     ``entry`` is the same object ``os.scandir()`` yields when the producer had
     one, so callers can reuse its ``stat()`` cache and other methods without
