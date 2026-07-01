@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3.cp` gains `capture_response=True`: the transferred object's full S3 write
+  response (`PutObject` / `CopyObject` / `CompleteMultipartUpload`, minus
+  `ResponseMetadata`) is surfaced on `OpResult.extra_info["write"]`, and `"ETag"`
+  is promoted from it so an upload carries one too. Classic-only - the flag forces
+  the classic transfer engine, since capture rides the botocore client events the
+  CRT data plane bypasses.
 - `S3Storage.get_fileinfo(key)` now joins a non-empty child `key` under the
   prefix with a `/` boundary (was a bare concat that only resolved correctly
   when the prefix already ended in `/`), matching `LocalStorage` and the "an

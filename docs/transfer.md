@@ -42,6 +42,17 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   boto3, classic maps `use_threads=False` to `NonThreadedExecutor` (a
   determinization lever for tests; CRT ignores the threading-family knobs - also
   as in boto3). The overall design of CRT mode is in [`crt.md`](./crt.md).
+- **`capture_response=True` forces the classic engine.** The write-response
+  capture ([`opresult.md`](./opresult.md)) rides the botocore client's
+  `before-parameter-build` / `after-call` events, which the CRT data plane
+  bypasses, so `_create_crt_manager` returns `None` (selecting classic) whenever
+  the flag is set - logged as a `transfer engine: classic forced by
+  capture_response` breadcrumb. A `_ResponseCapture` is then registered on the
+  client before the first submit and removed after the manager shuts down (so no
+  request is emitting during a registration change); its handlers are per-instance
+  bound methods, so register / unregister never disturb the application's or
+  another run's handlers on a shared client. Being a library-only flag with no
+  `aws s3` equivalent, the forcing has no parity impact.
 - A `Transferrer` is **one instance with a single `TransferType` per cp / mv / sync
   run** (one run has a single byte direction). The client placement is: upload
   uses the dest client, download uses the src client, and an s3->s3 copy uses the

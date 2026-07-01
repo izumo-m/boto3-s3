@@ -683,6 +683,7 @@ class S3:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
+        capture_response: bool = False,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Copy bytes between ``src`` and ``dest`` with ``aws s3 cp`` semantics.
@@ -752,6 +753,7 @@ class S3:
                 on_progress=on_progress,
                 on_result=on_result,
                 transfer_config=transfer_config,
+                capture_response=capture_response,
                 options=options,
             )
             return
@@ -770,6 +772,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             transfer_config=transfer_config,
+            capture_response=capture_response,
             options=options,
         )
 
@@ -790,6 +793,7 @@ class S3:
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
         transfer_config: TransferConfig | None,
+        capture_response: bool = False,
         options: TransferOptions,
     ) -> None:
         """The shared cp/mv pipeline for parsed, non-stream locations.
@@ -888,6 +892,7 @@ class S3:
             is_move=is_move,
             on_progress=on_progress,
             on_result=on_result,
+            capture_response=capture_response,
         )
         with transferrer:
             if plan.paths_type == "opens3":
@@ -1534,6 +1539,7 @@ class S3:
         on_progress: ProgressCallback | None,
         on_result: ResultCallback | None,
         transfer_config: TransferConfig | None,
+        capture_response: bool = False,
         options: TransferOptions,
     ) -> None:
         """One streaming transfer: an ``IOStorage`` on exactly one side.
@@ -1604,6 +1610,7 @@ class S3:
             operation="cp",
             on_progress=on_progress,
             on_result=on_result,
+            capture_response=capture_response,
         )
         with transferrer:
             if dryrun:

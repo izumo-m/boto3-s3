@@ -22,7 +22,7 @@ the record only needs to say *what happened to this item*.
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
 | `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
 | `src_storage` / `dest_storage` | the two sides' `Storage` backends. |
-| `extra_info` | the result object's S3 response metadata (currently `{"ETag": ...}`). |
+| `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write response under `"write"` when the operation ran with `capture_response=True`. |
 
 ### The `src` / `dest` convention
 
@@ -64,20 +64,38 @@ A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
 
 ## `extra_info` (result metadata)
 
-`extra_info` is the affected object's S3 response metadata - currently the
-ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
+`extra_info` is the affected object's S3 response metadata. By default it is just
+the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
 
 - **copy** - the written object's ETag (the CopyObject response).
 - **download** - the source object's ETag.
 - **upload** - `None`: s3transfer discards the PutObject response, so the
-  written object's ETag is not available here (docs/transfer.md). To capture an
-  upload's ETag / VersionId, an opt-in HEAD or a botocore hook would be needed -
-  not done by default.
+  written object's ETag is not available by default (docs/transfer.md).
 - **delete** / **warning** - `None`.
 
-The ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
-exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be
-`None` - a documented degradation, like the awscrt extra.
+The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
+exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None`
+- a documented degradation, like the awscrt extra.
+
+### `capture_response` - the full write response
+
+Passing `capture_response=True` to `cp` also surfaces the **full S3 write
+response** of each transferred object under `extra_info["write"]` - the
+`PutObject`, `CopyObject`, or `CompleteMultipartUpload` response (whichever
+s3transfer issued for the object), with its `ResponseMetadata` dropped. `"ETag"`
+is then promoted from that response - normalized, since `CopyObject` nests it
+under `CopyObjectResult` - so an **upload** carries an ETag too. Only the terminal
+write is captured (the intermediate multipart calls are not), and the response
+shape therefore varies by which write API ran (a single-part `PutObject` vs a
+multipart `CompleteMultipartUpload`, which also carries `Location` / `Bucket` /
+`Key`).
+
+The flag is **classic-only**: capture rides the botocore client's event stream,
+which the CRT data plane bypasses, so `capture_response=True` forces the classic
+transfer engine (a library-only flag with no `aws s3` equivalent, so no parity
+impact). It registers handlers on the transfer's client for the operation's span
+and removes them after; run a capture operation with a client not used
+concurrently elsewhere (docs/s3.md thread-safety note).
 
 ## `error`
 
@@ -96,7 +114,7 @@ def on_result(r: OpResult) -> None:
     if r.transfer_type is TransferType.DELETE:
         print("removed", r.src_info.key if r.src_info else r.key)
         return
-    etag = (r.extra_info or {}).get("ETag")  # copy / download; None on upload
+    etag = (r.extra_info or {}).get("ETag")  # copy / download; upload only under capture_response
     print("transferred", r.src_info.key if r.src_info else r.key, etag)
 ```
 

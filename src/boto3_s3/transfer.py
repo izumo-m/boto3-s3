@@ -262,6 +262,90 @@ def _guess_content_type(path: str) -> str | None:
         return None
 
 
+def _extract_etag(response: Mapping[str, Any]) -> str | None:
+    """The written object's ETag from a write response, normalized.
+
+    ``PutObject`` / ``CompleteMultipartUpload`` carry ``ETag`` at the top level;
+    ``CopyObject`` nests it under ``CopyObjectResult``. Collapse both to one
+    access so ``extra_info["ETag"]`` reads the same regardless of which write
+    API s3transfer chose.
+    """
+    etag: Any = response.get("ETag")
+    if etag is None:
+        result: Any = response.get("CopyObjectResult")
+        if result is not None:
+            etag = result.get("ETag")
+    return etag
+
+
+class _ResponseCapture:
+    """Capture a transfer's terminal write response via botocore client events.
+
+    ``capture_response`` opt-in: s3transfer discards the ``PutObject`` /
+    ``CopyObject`` / ``CompleteMultipartUpload`` response, so the only way to
+    surface it is to observe the client's event stream. A
+    ``before-parameter-build`` handler stashes the call's ``(Bucket, Key)`` in the
+    per-request botocore ``context``; the paired ``after-call`` handler reads the
+    parsed response back out (dropping ``ResponseMetadata``) and files it under
+    that key. ``_build_extra_info`` drains it per item.
+
+    One instance per operation, registered on the transfer client just before the
+    first submit and unregistered after the manager shuts down (so no request is
+    emitting on the client during a registration change). The handlers are this
+    instance's bound methods, held once so unregister removes exactly what register
+    added - never colliding with another operation's capture or with a handler the
+    application put on a shared client. The events engine has no lock, so a capture
+    operation needs exclusive use of its client for the operation's span
+    (docs/s3.md).
+    """
+
+    #: The terminal object-writing operations. The intermediate multipart calls
+    #: (CreateMultipartUpload / UploadPart / UploadPartCopy) are deliberately not
+    #: observed - only the response describing the finished object is wanted.
+    _WRITE_OPS = ("PutObject", "CopyObject", "CompleteMultipartUpload")
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        # Bind once so unregister removes the same objects register added.
+        self._stash_handler = self._stash_key
+        self._record_handler = self._record_response
+
+    def _stash_key(self, params: Mapping[str, Any], context: dict[str, Any], **kwargs: Any) -> None:
+        bucket = params.get("Bucket")
+        key = params.get("Key")
+        if bucket is not None and key is not None:
+            context["boto3_s3_capture_key"] = (bucket, key)
+
+    def _record_response(
+        self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        bucket_key = context.get("boto3_s3_capture_key")
+        if bucket_key is None:
+            return
+        response = {k: v for k, v in parsed.items() if k != "ResponseMetadata"}
+        with self._lock:
+            self._store[bucket_key] = response
+
+    def register(self, client: Any) -> None:
+        events = client.meta.events
+        for op in self._WRITE_OPS:
+            events.register(f"before-parameter-build.s3.{op}", self._stash_handler)
+            events.register(f"after-call.s3.{op}", self._record_handler)
+
+    def unregister(self, client: Any) -> None:
+        events = client.meta.events
+        for op in self._WRITE_OPS:
+            events.unregister(f"before-parameter-build.s3.{op}", self._stash_handler)
+            events.unregister(f"after-call.s3.{op}", self._record_handler)
+
+    def pop(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        if bucket is None or key is None:
+            return None
+        with self._lock:
+            return self._store.pop((bucket, key), None)
+
+
 class Transferrer:
     """Submit transfer items of one kind and aggregate their outcomes.
 
@@ -305,6 +389,7 @@ class Transferrer:
         is_move: bool = False,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
+        capture_response: bool = False,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -337,7 +422,9 @@ class Transferrer:
                 raise Boto3S3Error(reason, operation=operation)
         self._on_progress = on_progress
         self._on_result = on_result
+        self._capture_response = capture_response
         self._manager: Any = None
+        self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
         self._succeeded = 0
         self._failed = 0
@@ -362,6 +449,10 @@ class Transferrer:
             isinstance(exc, CancelledError) or not isinstance(exc, Exception)
         )
         self._manager.shutdown(cancel=cancel)
+        if self._capture is not None:
+            # After shutdown every transfer is drained, so no request is emitting
+            # on the client while the capture handlers are removed.
+            self._capture.unregister(self._client)
 
     # -- rollup (approximate until the with block exits) --------------------
 
@@ -608,6 +699,12 @@ class Transferrer:
             # after any CRT->classic fallback. Lets --debug distinguish a real
             # CRT transfer from a silent classic fallback (docs/testing.md).
             logger.debug("transfer engine: %s", type(manager).__name__)
+            if self._capture_response:
+                # Registered once, before the first submit; drained per item by
+                # _build_extra_info; removed in __exit__ after the manager shuts
+                # down (capture forces the classic engine, so it is always live).
+                self._capture = _ResponseCapture()
+                self._capture.register(self._client)
             self._manager = manager
         return self._manager
 
@@ -619,6 +716,13 @@ class Transferrer:
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
         """
         if self._transfer_type is TransferType.COPY:
+            return None
+        if self._capture_response:
+            # Response capture rides the botocore client's event stream, which the
+            # CRT data plane bypasses; force the classic engine so the write
+            # response is observable. A deliberate capture_response trade - the
+            # flag is library-only (no aws-cli equivalent), so no parity impact.
+            logger.debug("transfer engine: classic forced by capture_response")
             return None
         preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
         if str(preferred).lower() == "classic":
@@ -691,11 +795,7 @@ class Transferrer:
         # lets s3transfer probe the object); fall back to the size s3transfer
         # resolved on the future so SUCCEEDED reports the real byte count.
         size = item.size if item.size is not None else resolved_size
-        # s3transfer records the affected object's ETag on the future for a copy
-        # (the CopyObject response) and a download (its source); an upload leaves
-        # it unset - the PutObject response is discarded - so extra_info is None
-        # there. Surface what is present as the result's S3 response metadata.
-        extra_info = {"ETag": etag} if etag else None
+        extra_info = self._build_extra_info(item, etag)
         with self._lock:
             self._succeeded += 1
         self._emit(
@@ -703,6 +803,32 @@ class Transferrer:
                 item, OpOutcome.SUCCEEDED, bytes_transferred=size or 0, extra_info=extra_info
             )
         )
+
+    def _build_extra_info(self, item: TransferItem, etag: str | None) -> dict[str, Any] | None:
+        """Assemble the result's ``extra_info`` from the captured S3 response.
+
+        Without ``capture_response`` this keeps the historical shape: the affected
+        object's ETag as ``{"ETag": ...}`` - s3transfer records it on the future
+        for a copy (the CopyObject response) and a download (its source); an upload
+        has none, so ``extra_info`` is then ``None``. With ``capture_response`` a
+        classic upload / copy also carries the full write response under ``"write"``
+        (``PutObject`` / ``CopyObject`` / ``CompleteMultipartUpload``, minus
+        ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
+        object's own ETag, the one field whose location varies by write API.
+        """
+        write: dict[str, Any] | None = None
+        if self._capture is not None and self._transfer_type in (
+            TransferType.UPLOAD,
+            TransferType.COPY,
+        ):
+            write = self._capture.pop(item.dest_bucket, item.dest_key)
+        info: dict[str, Any] = {}
+        if write is not None:
+            info["write"] = write
+        etag_value = _extract_etag(write) if write is not None else etag
+        if etag_value:
+            info["ETag"] = etag_value
+        return info or None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
         if _is_precondition_failed(exc):
