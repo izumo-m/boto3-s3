@@ -932,6 +932,11 @@ class S3:
             capture_response=capture_response,
         )
         with transferrer:
+            if not dryrun:
+                # Build the manager (registers client-event handlers) before the
+                # producers start their scan prefetch worker on this same client
+                # (Transferrer.prepare).
+                transferrer.prepare()
             if plan.paths_type == "opens3":
                 items = self._cp_open_upload_items(
                     plan,
@@ -1973,6 +1978,10 @@ class S3:
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
+            if not dryrun:
+                # Build the manager before either side's scan prefetch worker
+                # starts on the manager's client (Transferrer.prepare).
+                transferrer.prepare()
             deletes.open(stack)
             src_entries = self._sync_entries(
                 src_storage,

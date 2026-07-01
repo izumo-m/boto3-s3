@@ -2,9 +2,11 @@
 
 One ``Transferrer`` serves one ``cp`` / ``mv`` / ``sync`` run, whose items all
 share a single :class:`TransferType` (a run moves bytes in one direction). It owns
-the ``s3transfer.manager.TransferManager`` - built lazily on the first
-:meth:`Transferrer.submit`, so dry runs and all-skipped runs never instantiate
-it (no thread pools spun up; the ``s3transfer`` module itself is imported
+the ``s3transfer.manager.TransferManager`` - built via :meth:`Transferrer.prepare`
+before a listing-driven run starts enumerating (client-event registration must
+happen-before the scan prefetch worker's traffic on the same client), at the
+first :meth:`Transferrer.submit` for a stream run, and never for a dry run (no
+thread pools spun up; the ``s3transfer`` module itself is imported
 earlier regardless, by ``boto3`` when a client is built) - and bridges
 completions to the library's result model:
 per-item ``OpResult`` records to ``on_result`` (from s3transfer worker
@@ -298,9 +300,11 @@ class _ResponseCapture:
     ranged ``GetObject`` calls, so the first stored wins and the range-specific
     fields are dropped, leaving the object-level metadata.
 
-    One instance per operation, registered on the transfer client just before the
-    first submit and unregistered after the manager shuts down (so no request is
-    emitting on the client during a registration change). The handlers are this
+    One instance per operation, registered on the transfer client when the
+    manager is built - before enumeration starts for a listing-driven run
+    (``Transferrer.prepare``), at the first submit for a stream run - and
+    unregistered after the manager shuts down (so no request is emitting on the
+    client during a registration change). The handlers are this
     instance's bound methods, held once so unregister removes exactly what register
     added - never colliding with another operation's capture or with a handler the
     application put on a shared client. The events engine has no lock, so a capture
@@ -557,6 +561,21 @@ class Transferrer:
 
     # -- submission ----------------------------------------------------------
 
+    def prepare(self) -> None:
+        """Build the manager (and register capture) before enumeration starts.
+
+        Building the manager mutates the client's event registry
+        (``request-created.s3`` handlers; the capture handlers too), and the
+        events engine has no lock - the mutation must happen-before any
+        concurrent traffic on this client. A listing-driven run fetches pages
+        on the scan prefetch worker with this same client while the caller
+        submits, so the orchestrator calls this once, before pulling the first
+        item (aws-cli likewise builds its TransferManager before the file
+        generator starts). A dry run never calls it: no manager is built, so
+        listing traffic races no registration.
+        """
+        self._get_manager()
+
     def submit(self, item: TransferItem) -> None:
         """Queue one transfer (blocks when the manager queue is full).
 
@@ -725,10 +744,12 @@ class Transferrer:
 
     def _get_manager(self) -> Any:
         if self._manager is None:
-            # Built lazily: the TransferManager (and its thread pools) is
-            # created only when bytes actually move, so dryrun and all-skipped
-            # runs never reach here (docs/imports.md). The s3transfer.manager
-            # module itself is already imported (by boto3 at client build).
+            # Built lazily so a dryrun never constructs a manager (no thread
+            # pools, no client-event registration). Listing-driven live runs
+            # build it up front via prepare() - registration must precede the
+            # scan prefetch worker's traffic on this client; a stream run
+            # builds it here at first submit. The s3transfer.manager module
+            # itself is already imported (by boto3 at client build).
             manager = self._create_crt_manager()
             if manager is None:
                 manager = self._create_classic_manager()
