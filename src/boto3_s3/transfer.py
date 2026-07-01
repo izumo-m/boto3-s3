@@ -54,7 +54,7 @@ from urllib.parse import quote
 
 from boto3_s3 import requestparams
 from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
-from boto3_s3.s3storage import translate_boto_error
+from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
     FileInfo,
@@ -682,10 +682,17 @@ class Transferrer:
         bucket = item.src_bucket
         key = item.src_key
         params = requestparams.map_delete_object_params(self._options)
-        return _DeleteSource(
-            lambda: client.delete_object(Bucket=bucket, Key=key, **params),
-            capture=self._capture_response,
-        )
+
+        def delete_s3_source() -> Any:
+            # Pre-translate to the taxonomy carrying the *source* bucket/key, as
+            # S3Storage.delete and the upload path's Storage.delete already do.
+            # Otherwise _record_failure re-tags the raw ClientError with the copy
+            # destination (dest_bucket/dest_key), mis-attributing a source-delete
+            # failure to the object that copied fine.
+            with s3_errors(operation=self._operation, bucket=bucket, key=key):
+                return client.delete_object(Bucket=bucket, Key=key, **params)
+
+        return _DeleteSource(delete_s3_source, capture=self._capture_response)
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
         mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))

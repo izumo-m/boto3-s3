@@ -129,17 +129,17 @@ The content strategies are opt-in submodule imports —
 
 Because it runs in-process, sync hands back **structured results that `aws s3`
 can't**: `on_result` fires once per item as the run proceeds, so you know exactly
-what changed without parsing any output. Each result carries a `kind`
+what changed without parsing any output. Each result carries a `transfer_type`
 (upload / download / copy / delete) and an `outcome`
 (succeeded / failed / warned / skipped):
 
 ```python
-from boto3_s3 import OpKind, OpOutcome
+from boto3_s3 import TransferType, OpOutcome
 
 uploaded = []
 
 def track(r):
-    if r.kind is OpKind.UPLOAD and r.outcome is OpOutcome.SUCCEEDED:
+    if r.transfer_type is TransferType.UPLOAD and r.outcome is OpOutcome.SUCCEEDED:
         uploaded.append(r.key)
 
 s3.sync("./site", "s3://my-bucket/site/", delete=True, on_result=track)

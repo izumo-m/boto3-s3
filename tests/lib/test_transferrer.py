@@ -686,6 +686,32 @@ class TestMove:
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert transferrer.succeeded == 1
 
+    def test_copy_move_delete_failure_attributes_to_the_source(self) -> None:
+        # Copy lands, the source DeleteObject fails: the structured error must
+        # name the *source* object (the one that failed to delete), not the copy
+        # destination that succeeded.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        _, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [item],
+            [{}],
+            source_responses=[_client_error("AccessDenied", 403, "DeleteObject")],
+            is_move=True,
+        )
+        assert _ops(source_calls) == ["DeleteObject"]
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert error is not None
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+
     def test_request_payer_flows_to_the_delete(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, _, _ = _run(
