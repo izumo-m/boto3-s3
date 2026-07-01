@@ -89,8 +89,7 @@ tiers, the exit-code charter, and the golden contract — is in
 
 ## Submitting changes
 
-The public repository is still being prepared. The best first step for a bug or
-a proposed change is to **open an
+The best first step for a bug or a proposed change is to **open an
 [issue](https://github.com/izumo-m/boto3-s3/issues)** so it can be discussed
 before any code is written. Keep each change focused and follow the conventions
 above.

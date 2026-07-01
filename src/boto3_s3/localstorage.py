@@ -471,7 +471,11 @@ class LocalStorage(Storage):
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         """Open ``key`` (resolved against the absolutized :attr:`path`) as a binary stream.
 
-        ``"wb"`` creates missing parent directories first. ``size`` is unused
+        ``"wb"`` creates missing parent directories first and writes **in
+        place** - no temp-file + rename, so an aborted write leaves a partial
+        file (the built-in s3->local download route is atomic-on-failure via
+        s3transfer's temp file instead; this building block keeps the plain
+        open-write contract). ``size`` is unused
         locally. OS errors translate to the library taxonomy.
 
         ``key`` is joined under the location with ``os.path.join``, so a ``..``

@@ -315,8 +315,8 @@ a transfer, the other side always S3** (the built-in `IOStorage` /
 `StdioStorage` stream wrappers are this same seam). A backend declares its
 `capabilities`, which a transfer pre-checks, failing fast if it needs more.
 
-See **[`docs/storage.md`](docs/storage.md)** for the `Storage` contract,
-capabilities, and a worked example.
+See **[`docs/storage.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/storage.md)**
+for the `Storage` contract, capabilities, and a worked example.
 
 ## Errors
 

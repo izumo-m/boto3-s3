@@ -58,8 +58,15 @@ maintaining high functional compatibility (parity).
   algorithm. The bucket-listing filters `ls --bucket-name-prefix` /
   `--bucket-region` (paginated `ListBuckets`, late 2024 / botocore 1.34.162)
   are likewise silently inert below that botocore - `ls` itself still works,
-  falling back to an unpaginated `ListBuckets`. Everything else works at the
-  floor.
+  falling back to an unpaginated `ListBuckets`. Two more degradations at the
+  floor: `mb --tags` / `mb --bucket-name-prefix`-era CreateBucket parameters
+  (`CreateBucketConfiguration.Tags` / `Location`) fail client-side with a clean
+  ParamValidationError on a botocore that predates them; and without a modern
+  s3transfer the engine cannot pre-provide the copy/download source ETag
+  (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
+  `{"ETag": ...}` is `None` there unless `capture_response=True` supplies it
+  from the captured response, and s3transfer's own `CopySourceIfMatch`
+  consistency pin on copies is absent. Everything else works at the floor.
 
 ## 3. Design policy
 
