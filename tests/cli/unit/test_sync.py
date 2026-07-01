@@ -110,8 +110,16 @@ class TestUsageErrors:
         ],
     )
     def test_directory_buckets_are_rejected(
-        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+        self,
+        argv: list[str],
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # chdir: aws (and this CLI, faithfully) pre-creates a local dest dir
+        # during validation, before the directory-bucket rejection - keep the
+        # "dl" byproduct out of the repo working tree.
+        monkeypatch.chdir(tmp_path)
         rc = cli.main(argv, ctx=_failing_factory_ctx())
         assert rc == 252
         assert "Cannot use sync command with a directory bucket." in capsys.readouterr().err

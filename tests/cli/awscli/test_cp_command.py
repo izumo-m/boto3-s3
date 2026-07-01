@@ -1766,8 +1766,10 @@ class TestCpRecursiveCaseConflict:
         assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+        # The first (admitted) key still downloads; only the conflicting
+        # second key trips the error gate - so one GetObject is scripted.
         result, _ = _run_cmd(
-            [list_objects_response([self.UPPER_KEY, self.LOWER_KEY])],
+            [list_objects_response([self.UPPER_KEY, self.LOWER_KEY]), get_object_response()],
             self._cmd(tmp_path, "error"),
             expected_rc=1,
             transfer_config=_CASE_CONFLICT_CONFIG,

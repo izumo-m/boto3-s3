@@ -112,6 +112,23 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
 
 
 @pytest.fixture(autouse=True)
+def _fail_on_recorder_exhaustion() -> Iterator[None]:
+    """Fail any test whose recording client was called past its script.
+
+    The recorder raises AssertionError at the call site, but on the transfer
+    path that happens on an s3transfer worker thread where the engine folds it
+    into an ordinary FAILED item - a ``pytest.raises(BatchError)`` test would
+    then pass for the wrong reason. Draining the recorder's exhaustion log at
+    teardown makes the harness bug loud wherever the AssertionError landed.
+    """
+    yield
+    from tests.utils import recorder
+
+    events, recorder.exhausted_calls[:] = list(recorder.exhausted_calls), []
+    assert not events, f"recording client called past its scripted responses: {events}"
+
+
+@pytest.fixture(autouse=True)
 def _pin_classic_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve the in-process 'auto' engine preference to classic.
 
