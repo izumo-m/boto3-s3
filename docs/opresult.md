@@ -22,7 +22,7 @@ the record only needs to say *what happened to this item*.
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
 | `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
 | `src_storage` / `dest_storage` | the two sides' `Storage` backends. |
-| `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write / delete responses under `"write"` / `"delete"` when the operation ran with `capture_response=True`. |
+| `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write / read / delete responses under `"write"` / `"read"` / `"delete"` when the operation ran with `capture_response=True`. |
 
 ### The `src` / `dest` convention
 
@@ -67,7 +67,8 @@ A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
 `extra_info` is the affected object's S3 response metadata. By default it is just
 the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
 
-- **copy** - the written object's ETag (the CopyObject response).
+- **copy** - the source object's ETag (`future.meta.etag`, which boto3-s3 provides
+  to s3transfer; the same as the written object's except for a multipart copy).
 - **download** - the source object's ETag.
 - **upload** - `None`: s3transfer discards the PutObject response, so the
   written object's ETag is not available by default (docs/transfer.md).
@@ -100,12 +101,14 @@ apply are present:
   slot reads like a whole-object response. `"ETag"` is promoted from it.
 - **`extra_info["delete"]`** - the removed object's `DeleteObject`-shaped
   response (`VersionId` / `DeleteMarker` / `DeleteMarkerVersionId` /
-  `RequestCharged`, whichever apply): an `mv`'s S3 source removal, and each object
-  `rm` / `sync --delete` removes. The batched path reconstructs one per key from
-  its `DeleteObjects` `Deleted[]` entry plus the shared `RequestCharged`, so the
-  caller sees the same single-object shape regardless of the batch wire form
-  (docs/deleter.md); `rm`'s blind single-key path (a non-recursive exact key)
-  carries the `Storage.delete` response directly.
+  `RequestCharged`, whichever apply), whenever the backend produces one: an `mv`'s
+  S3 source removal, and each object `rm` / `sync --delete` removes from S3 or from
+  a custom backend whose `Storage.delete` returns a response. The batched path
+  reconstructs one per key from its `DeleteObjects` `Deleted[]` entry plus the
+  shared `RequestCharged`, so the caller sees the same single-object shape
+  regardless of the batch wire form (docs/deleter.md); `rm`'s blind single-key path
+  (a non-recursive exact key) carries the `Storage.delete` response directly. A
+  local file unlink returns `None`, so it has no slot.
 
 So an `mv` of one S3 object to another carries both `"write"` (the copy) and
 `"delete"` (the source removal); a `cp` upload carries `"write"`, a download

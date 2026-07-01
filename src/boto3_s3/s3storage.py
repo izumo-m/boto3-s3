@@ -476,8 +476,9 @@ class S3Storage(Storage):
         204). The object is ``info.key`` (a full bucket key). ``request_payer``
         is an S3-specific knob added on top of the cross-backend
         ``Storage.delete`` signature. Returns the ``DeleteObject`` response, which
-        ``rm`` / ``mv`` surface under ``extra_info["delete"]`` for
-        ``capture_response``.
+        ``rm``'s blind single-key path surfaces under ``extra_info["delete"]`` for
+        ``capture_response`` (``mv`` and the batched ``rm`` / ``sync`` lanes issue
+        their own delete calls, not this method).
         """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:

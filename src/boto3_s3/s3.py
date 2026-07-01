@@ -441,26 +441,36 @@ class _SyncDeletes:
                 self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
                 return
             try:
-                dest.delete(info)
+                response = dest.delete(info)
             except Exception as exc:
                 self._emit(
                     info=info, outcome=OpOutcome.FAILED, src=display, error=self._fail(exc, info)
                 )
                 return
             self._local_succeeded += 1
-            self._emit(info=info, outcome=OpOutcome.SUCCEEDED, src=display)
+            self._emit(
+                info=info,
+                outcome=OpOutcome.SUCCEEDED,
+                src=display,
+                extra_info=self._delete_slot(response),
+            )
             return
         native = to_native_path(info.key)
         if self._dryrun:
             self._emit(info=info, outcome=OpOutcome.DRYRUN, src=native)
             return
         try:
-            dest.delete(info)
+            response = dest.delete(info)
         except Exception as exc:
             self._emit(info=info, outcome=OpOutcome.FAILED, src=native, error=self._fail(exc, info))
             return
         self._local_succeeded += 1
-        self._emit(info=info, outcome=OpOutcome.SUCCEEDED, src=native)
+        self._emit(
+            info=info,
+            outcome=OpOutcome.SUCCEEDED,
+            src=native,
+            extra_info=self._delete_slot(response),
+        )
 
     def _fail(self, exc: Exception, info: FileInfo) -> Boto3S3Error:
         """Map a synchronous-delete error into the taxonomy and count it."""
@@ -474,6 +484,18 @@ class _SyncDeletes:
         assert isinstance(self._dest, S3Storage)
         return f"s3://{self._dest.bucket}/{key}"
 
+    def _delete_slot(self, response: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        """A ``capture_response`` ``{"delete": ...}`` from a backend delete response.
+
+        A custom (open-route) destination's ``Storage.delete`` may return its
+        delete response (a ``Mapping``, surfaced under ``extra_info["delete"]``);
+        a ``LocalStorage`` unlink returns ``None``, so a local orphan removal has
+        no slot.
+        """
+        if not self._capture_response or response is None:
+            return None
+        return {"delete": {k: v for k, v in response.items() if k != "ResponseMetadata"}}
+
     def _emit(
         self,
         *,
@@ -481,6 +503,7 @@ class _SyncDeletes:
         outcome: OpOutcome,
         src: str,
         error: Boto3S3Error | None = None,
+        extra_info: Mapping[str, Any] | None = None,
     ) -> None:
         if self._on_result is not None:
             self._on_result(
@@ -492,6 +515,7 @@ class _SyncDeletes:
                     src=src,
                     src_info=info,
                     src_storage=self._dest,
+                    extra_info=extra_info,
                 )
             )
 

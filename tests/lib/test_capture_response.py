@@ -267,6 +267,23 @@ class TestReadSlot:
         assert "ETag" in info
 
 
+class TestSyncDelete:
+    def test_sync_delete_s3_dest_carries_delete_slot(self, s3_client: Any, tmp_path: Path) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        # an orphan in the S3 destination, absent from the (empty) local source
+        s3_client.put_object(Bucket=BUCKET, Key="dst/orphan.txt", Body=b"x")
+        src = tmp_path / "src"
+        src.mkdir()
+        out, cb = _sink()
+        S3().sync(str(src), f"s3://{BUCKET}/dst", delete=True, capture_response=True, on_result=cb)
+        assert len(out) == 1  # just the orphan removal (nothing to transfer)
+        info = cast("dict[str, Any]", out[0].extra_info)
+        assert "delete" in info  # the batched DeleteObjects entry, reconstructed
+        assert info["delete"].get("DeleteMarker") is True
+
+
 def test_capture_response_forces_classic_engine(
     s3_client: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

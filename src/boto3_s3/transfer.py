@@ -47,6 +47,7 @@ import logging
 import mimetypes
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
@@ -67,7 +68,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from datetime import datetime
 
     from boto3.s3.transfer import TransferConfig
@@ -268,12 +269,12 @@ def _guess_content_type(path: str) -> str | None:
 
 
 def _extract_etag(response: Mapping[str, Any]) -> str | None:
-    """The written object's ETag from a write response, normalized.
+    """An object's ETag from a captured write or read response, normalized.
 
-    ``PutObject`` / ``CompleteMultipartUpload`` carry ``ETag`` at the top level;
-    ``CopyObject`` nests it under ``CopyObjectResult``. Collapse both to one
-    access so ``extra_info["ETag"]`` reads the same regardless of which write
-    API s3transfer chose.
+    ``PutObject`` / ``CompleteMultipartUpload`` / ``GetObject`` carry ``ETag`` at
+    the top level; ``CopyObject`` nests it under ``CopyObjectResult``. Collapse
+    both so ``extra_info["ETag"]`` reads the same regardless of which API produced
+    the response.
     """
     etag: Any = response.get("ETag")
     if etag is None:
@@ -840,10 +841,11 @@ class Transferrer:
     ) -> dict[str, Any] | None:
         """Assemble the result's ``extra_info`` from the captured S3 responses.
 
-        Without ``capture_response`` this keeps the historical shape: the affected
-        object's ETag as ``{"ETag": ...}`` - s3transfer records it on the future
-        for a copy (the CopyObject response) and a download (its source); an upload
-        has none, so ``extra_info`` is then ``None``. With ``capture_response`` a
+        Without ``capture_response`` this keeps the historical shape: the ETag as
+        ``{"ETag": ...}`` from ``future.meta.etag`` - the source object's ETag that
+        boto3-s3 hands s3transfer for a copy and a download (the same as the written
+        object's except for a multipart copy); an upload has none, so ``extra_info``
+        is then ``None``. With ``capture_response`` a
         classic upload / copy also carries the full write response under ``"write"``
         (``PutObject`` / ``CopyObject`` / ``CompleteMultipartUpload``, minus
         ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
@@ -1029,9 +1031,10 @@ class _DeleteSource:
             return
         # mv's S3 source removal returns a DeleteObject response; stash it (minus
         # ResponseMetadata) for _Completion to surface under extra_info["delete"].
-        # A local / custom-backend source delete returns None - nothing to capture.
-        if self._capture and isinstance(response, dict):
-            captured = cast("dict[str, Any]", response)
+        # A local source delete returns None (nothing to capture); a custom backend
+        # may return its own Mapping response.
+        if self._capture and isinstance(response, Mapping):
+            captured = cast("Mapping[str, Any]", response)
             future.meta.user_context[_DELETE_RESPONSE_KEY] = {
                 k: v for k, v in captured.items() if k != "ResponseMetadata"
             }

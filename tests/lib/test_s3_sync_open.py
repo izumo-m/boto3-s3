@@ -16,6 +16,7 @@ not the comparator (covered in ``test_s3_sync.py``) - is what is under test.
 from __future__ import annotations
 
 import io
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -25,7 +26,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3.exceptions import ValidationError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.types import OpOutcome, OpResult
+from boto3_s3.types import FileInfo, OpOutcome, OpResult
 from tests.lib.test_s3_cp_open import _MemStorage, _NoDeleteMem, _ReadOnlyMem
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -127,6 +128,32 @@ class TestSyncS3openDownload:
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
         assert dest.deletes == ["orphan.txt"]
         assert store == {"a.txt": b"AAA"}
+
+    def test_delete_capture_surfaces_custom_backend_response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A custom destination's Storage.delete response is surfaced under
+        # extra_info["delete"] when capture_response=True (ResponseMetadata stripped).
+        store = {"orphan.txt": b"gone"}
+        dest = _MemStorage(store, location="mem://data/")
+
+        def _delete_with_response(info: FileInfo) -> Mapping[str, Any]:
+            del store[info.key]
+            return {"VersionId": "v1", "ResponseMetadata": {"HTTPStatusCode": 204}}
+
+        monkeypatch.setattr(dest, "delete", _delete_with_response)
+        # empty source -> nothing to transfer, only the orphan removal
+        client, _calls = make_recording_client([_listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://b/src/", client=client),
+            dest,
+            delete=True,
+            capture_response=True,
+            on_result=results.append,
+            transfer_config=_SERIAL,
+        )
+        assert [r.extra_info for r in results] == [{"delete": {"VersionId": "v1"}}]
 
     def test_delete_without_delete_capability_is_rejected(self) -> None:
         dest = _NoDeleteMem({}, location="mem://data/")
