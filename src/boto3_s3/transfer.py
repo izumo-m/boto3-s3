@@ -470,11 +470,17 @@ class Transferrer:
         cancel = exc is not None and (
             isinstance(exc, CancelledError) or not isinstance(exc, Exception)
         )
-        self._manager.shutdown(cancel=cancel)
-        if self._capture is not None:
-            # After shutdown every transfer is drained, so no request is emitting
-            # on the client while the capture handlers are removed.
-            self._capture.unregister(self._client)
+        try:
+            self._manager.shutdown(cancel=cancel)
+        finally:
+            if self._capture is not None:
+                # After shutdown every transfer is drained, so no request is
+                # emitting on the client while the capture handlers are removed.
+                # The finally covers shutdown itself raising (s3transfer re-raises
+                # a KeyboardInterrupt arriving during its drain wait): better to
+                # unregister with stragglers in flight than to leave the handlers
+                # feeding _store forever on a longer-lived client.
+                self._capture.unregister(self._client)
 
     # -- rollup (approximate until the with block exits) --------------------
 
@@ -861,13 +867,7 @@ class Transferrer:
         under ``"delete"`` (captured by ``_DeleteSource``), and a download carries
         the source's GetObject response (Body-stripped) under ``"read"``.
         """
-        write: dict[str, Any] | None = None
-        read: dict[str, Any] | None = None
-        if self._capture is not None:
-            if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
-                write = self._capture.pop(item.dest_bucket, item.dest_key)
-            elif self._transfer_type is TransferType.DOWNLOAD:
-                read = self._capture.pop(item.src_bucket, item.src_key)
+        write, read = self._drain_captured(item)
         info: dict[str, Any] = {}
         if write is not None:
             info["write"] = write
@@ -883,7 +883,29 @@ class Transferrer:
             info["ETag"] = etag_value
         return info or None
 
+    def _drain_captured(
+        self, item: TransferItem
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Pop the item's captured ``(write, read)`` responses, if any.
+
+        Every terminal outcome must drain: ``after-call`` fires before botocore
+        raises for a >=300 status, so a FAILED / SKIPPED item may have stored a
+        response (possibly an error payload) - and an ``mv`` whose source delete
+        failed has stored its successful write - that would otherwise sit in the
+        store for the rest of the run.
+        """
+        if self._capture is None:
+            return None, None
+        if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
+            return self._capture.pop(item.dest_bucket, item.dest_key), None
+        if self._transfer_type is TransferType.DOWNLOAD:
+            return None, self._capture.pop(item.src_bucket, item.src_key)
+        return None, None
+
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
+        # Failed / skipped items surface no captured response, but the entry
+        # must still leave the store (see _drain_captured).
+        self._drain_captured(item)
         if _is_precondition_failed(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a

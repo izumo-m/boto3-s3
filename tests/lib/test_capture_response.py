@@ -21,7 +21,8 @@ from moto import mock_aws
 
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.types import OpResult
+from boto3_s3.transfer import TransferItem, Transferrer
+from boto3_s3.types import OpOutcome, OpResult, TransferType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -158,6 +159,35 @@ class TestClientHygiene:
         out2, cb2 = _sink()
         S3().cp(str(src), S3Storage(f"s3://{BUCKET}/b.txt", client=s3_client), on_result=cb2)
         assert out2[0].extra_info is None
+
+    def test_failed_upload_drains_the_captured_error_response(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        # after-call fires before botocore raises for a >=300 status, so the
+        # failed PutObject stores an error payload under the dest key; the
+        # FAILED path must drain it - surfacing no extra_info and leaving
+        # nothing behind in the capture store for the rest of the run.
+        src = tmp_path / "f.txt"
+        src.write_bytes(b"x")
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        results, cb = _sink()
+        item = TransferItem(
+            compare_key="f.txt",
+            size=1,
+            src_path=str(src),
+            dest_bucket="no-such-bucket-anywhere",
+            dest_key="f.txt",
+            src_display=str(src),
+            dest_display="s3://no-such-bucket-anywhere/f.txt",
+        )
+        transferrer = Transferrer(TransferType.UPLOAD, client, capture_response=True, on_result=cb)
+        with transferrer:
+            transferrer.submit(item)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert results[0].extra_info is None
+        capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
+        assert capture is not None
+        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
 
 
 class TestMvDeleteSlot:
