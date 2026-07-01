@@ -284,15 +284,18 @@ def _extract_etag(response: Mapping[str, Any]) -> str | None:
 
 
 class _ResponseCapture:
-    """Capture a transfer's terminal write response via botocore client events.
+    """Capture a transfer's terminal write / read response via botocore events.
 
     ``capture_response`` opt-in: s3transfer discards the ``PutObject`` /
-    ``CopyObject`` / ``CompleteMultipartUpload`` response, so the only way to
-    surface it is to observe the client's event stream. A
-    ``before-parameter-build`` handler stashes the call's ``(Bucket, Key)`` in the
-    per-request botocore ``context``; the paired ``after-call`` handler reads the
-    parsed response back out (dropping ``ResponseMetadata``) and files it under
-    that key. ``_build_extra_info`` drains it per item.
+    ``CopyObject`` / ``CompleteMultipartUpload`` (write) and ``GetObject`` (read)
+    responses, so the only way to surface them is to observe the client's event
+    stream. A ``before-parameter-build`` handler stashes the call's
+    ``(Bucket, Key)`` in the per-request botocore ``context``; the paired
+    ``after-call`` handler reads the parsed response back out (dropping the
+    streaming ``Body`` and ``ResponseMetadata``) and files it under that key.
+    ``_build_extra_info`` drains it per item. A multipart download issues many
+    ranged ``GetObject`` calls, so the first stored wins and the range-specific
+    fields are dropped, leaving the object-level metadata.
 
     One instance per operation, registered on the transfer client just before the
     first submit and unregistered after the manager shuts down (so no request is
@@ -308,6 +311,8 @@ class _ResponseCapture:
     #: (CreateMultipartUpload / UploadPart / UploadPartCopy) are deliberately not
     #: observed - only the response describing the finished object is wanted.
     _WRITE_OPS = ("PutObject", "CopyObject", "CompleteMultipartUpload")
+    #: The object-reading operation (a download). HeadObject is not observed.
+    _READ_OPS = ("GetObject",)
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], dict[str, Any]] = {}
@@ -328,19 +333,30 @@ class _ResponseCapture:
         bucket_key = context.get("boto3_s3_capture_key")
         if bucket_key is None:
             return
-        response = {k: v for k, v in parsed.items() if k != "ResponseMetadata"}
+        # Drop the streaming Body (a download response carries the object bytes)
+        # and ResponseMetadata (HTTP transport internals).
+        response = {k: v for k, v in parsed.items() if k not in ("Body", "ResponseMetadata")}
+        if "ContentRange" in response:
+            # A ranged (partial) GetObject from a multipart download: the
+            # object-level fields (ETag / VersionId / Metadata / ...) describe the
+            # object, but ContentRange / ContentLength describe one range - drop
+            # them so the slot reads like a whole-object response.
+            response.pop("ContentRange", None)
+            response.pop("ContentLength", None)
         with self._lock:
-            self._store[bucket_key] = response
+            # First stored wins: a multipart download issues many ranged GETs for
+            # the same key, all carrying the same object-level metadata.
+            self._store.setdefault(bucket_key, response)
 
     def register(self, client: Any) -> None:
         events = client.meta.events
-        for op in self._WRITE_OPS:
+        for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.register(f"before-parameter-build.s3.{op}", self._stash_handler)
             events.register(f"after-call.s3.{op}", self._record_handler)
 
     def unregister(self, client: Any) -> None:
         events = client.meta.events
-        for op in self._WRITE_OPS:
+        for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.unregister(f"before-parameter-build.s3.{op}", self._stash_handler)
             events.unregister(f"after-call.s3.{op}", self._record_handler)
 
@@ -833,20 +849,27 @@ class Transferrer:
         ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
         object's own ETag, the one field whose location varies by write API. An
         ``mv`` whose source is S3 also carries that source's DeleteObject response
-        under ``"delete"`` (captured by ``_DeleteSource``).
+        under ``"delete"`` (captured by ``_DeleteSource``), and a download carries
+        the source's GetObject response (Body-stripped) under ``"read"``.
         """
         write: dict[str, Any] | None = None
-        if self._capture is not None and self._transfer_type in (
-            TransferType.UPLOAD,
-            TransferType.COPY,
-        ):
-            write = self._capture.pop(item.dest_bucket, item.dest_key)
+        read: dict[str, Any] | None = None
+        if self._capture is not None:
+            if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
+                write = self._capture.pop(item.dest_bucket, item.dest_key)
+            elif self._transfer_type is TransferType.DOWNLOAD:
+                read = self._capture.pop(item.src_bucket, item.src_key)
         info: dict[str, Any] = {}
         if write is not None:
             info["write"] = write
+        if read is not None:
+            info["read"] = read
         if delete_response is not None:
             info["delete"] = delete_response
-        etag_value = _extract_etag(write) if write is not None else etag
+        # ETag comes from the transferred object's own response when captured
+        # (write for upload/copy, read for download), else the s3transfer etag.
+        captured = write if write is not None else read
+        etag_value = _extract_etag(captured) if captured is not None else etag
         if etag_value:
             info["ETag"] = etag_value
         return info or None

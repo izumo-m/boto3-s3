@@ -92,6 +92,12 @@ apply are present:
   also carries `Location` / `Bucket` / `Key`). `"ETag"` is promoted from it -
   normalized, since `CopyObject` nests it under `CopyObjectResult` - so an upload
   carries an ETag too.
+- **`extra_info["read"]`** - a **download**'s source read response: the
+  `GetObject` response with its streaming `Body` and `ResponseMetadata` dropped
+  (leaving the object's `ETag` / `VersionId` / `Metadata` / `ContentType` / ...).
+  A multipart download issues many ranged `GetObject` calls; the first is kept and
+  its range-specific fields (`ContentRange` / `ContentLength`) are dropped, so the
+  slot reads like a whole-object response. `"ETag"` is promoted from it.
 - **`extra_info["delete"]`** - the removed object's `DeleteObject`-shaped
   response (`VersionId` / `DeleteMarker` / `DeleteMarkerVersionId` /
   `RequestCharged`, whichever apply): an `mv`'s S3 source removal, and each object
@@ -102,12 +108,13 @@ apply are present:
   carries the `Storage.delete` response directly.
 
 So an `mv` of one S3 object to another carries both `"write"` (the copy) and
-`"delete"` (the source removal); a `cp` upload carries `"write"`; an `rm` carries
-`"delete"`.
+`"delete"` (the source removal); a `cp` upload carries `"write"`, a download
+`"read"`; an `rm` carries `"delete"`.
 
-The **`"write"`** slot rides the botocore client's event stream, which the CRT
-data plane bypasses, so `capture_response=True` **forces the classic transfer
-engine** (a library-only flag with no `aws s3` equivalent, so no parity impact).
+The **`"write"`** and **`"read"`** slots ride the botocore client's event stream,
+which the CRT data plane bypasses, so `capture_response=True` **forces the classic
+transfer engine** (a library-only flag with no `aws s3` equivalent, so no parity
+impact).
 It registers handlers on the transfer's client for the operation's span and
 removes them after; run a capture operation with a client not used concurrently
 elsewhere (docs/s3.md thread-safety note). The **`"delete"`** slot rides no

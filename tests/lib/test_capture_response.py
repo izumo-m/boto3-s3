@@ -1,11 +1,12 @@
-"""``capture_response``: surfacing the S3 write response on ``OpResult.extra_info``.
+"""``capture_response``: surfacing S3 responses on ``OpResult.extra_info``.
 
-The write slot rides botocore's client event stream (``before-parameter-build`` +
-``after-call``), so these run against a real moto-backed client - the recording
-client the other transfer suites use stubs ``_make_api_call`` and would never
-emit those events. Covered: the ``write`` slot (upload / copy, ETag promotion) and
-the ``delete`` slot (an ``mv`` source, and ``rm`` / ``sync --delete``, batched or
-blind single-key). The ``read`` slot (download) is not captured yet.
+The write / read slots ride botocore's client event stream
+(``before-parameter-build`` + ``after-call``), so these run against a real
+moto-backed client - the recording client the other transfer suites use stubs
+``_make_api_call`` and would never emit those events. Covered: the ``write`` slot
+(upload / copy, ETag promotion), the ``read`` slot (download), and the ``delete``
+slot (an ``mv`` source, and ``rm`` / ``sync --delete``, batched or blind
+single-key).
 """
 
 from __future__ import annotations
@@ -226,6 +227,44 @@ class TestRmDeleteSlot:
         out, cb = _sink()
         S3().rm(f"s3://{BUCKET}/d", recursive=True, on_result=cb)
         assert all(r.extra_info is None for r in out)
+
+
+class TestReadSlot:
+    def test_single_download_captures_get_response(self, s3_client: Any, tmp_path: Path) -> None:
+        s3_client.put_object(Bucket=BUCKET, Key="a.txt", Body=b"hello")
+        out, cb = _sink()
+        S3().cp(
+            f"s3://{BUCKET}/a.txt", str(tmp_path / "a.txt"), capture_response=True, on_result=cb
+        )
+        info = cast("dict[str, Any]", out[0].extra_info)
+        assert "read" in info
+        assert "Body" not in info["read"]  # the streaming body is stripped
+        assert "ResponseMetadata" not in info["read"]
+        assert info["read"]["ETag"] == info["ETag"] == _etag(b"hello")
+
+    def test_multipart_download_read_is_whole_object_shaped(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        big = b"x" * (9 * 1024 * 1024)  # over the 8 MiB threshold -> ranged GetObjects
+        s3_client.put_object(Bucket=BUCKET, Key="big.bin", Body=big)
+        out, cb = _sink()
+        S3().cp(
+            f"s3://{BUCKET}/big.bin", str(tmp_path / "big.bin"), capture_response=True, on_result=cb
+        )
+        info = cast("dict[str, Any]", out[0].extra_info)
+        assert "read" in info
+        # the range-specific fields of a partial GET are dropped
+        assert "ContentRange" not in info["read"]
+        assert info["read"]["ETag"] == _etag(big)
+
+    def test_download_without_flag_keeps_etag_only(self, s3_client: Any, tmp_path: Path) -> None:
+        s3_client.put_object(Bucket=BUCKET, Key="a.txt", Body=b"hello")
+        out, cb = _sink()
+        S3().cp(f"s3://{BUCKET}/a.txt", str(tmp_path / "a.txt"), on_result=cb)
+        info = out[0].extra_info
+        assert info is not None
+        assert "read" not in info
+        assert "ETag" in info
 
 
 def test_capture_response_forces_classic_engine(

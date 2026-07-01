@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `S3.cp` / `mv` / `rm` / `sync` gain `capture_response=True`, which surfaces the
   operation's full S3 responses on `OpResult.extra_info`: the write response
   (`PutObject` / `CopyObject` / `CompleteMultipartUpload`, minus `ResponseMetadata`)
-  under `"write"`, with `"ETag"` promoted from it so an upload carries one too, and
-  the removed object's `DeleteObject`-shaped response under `"delete"` (an `mv`
-  source, or each `rm` / `sync --delete` object on the batched path, reconstructed
-  from the `DeleteObjects` batch). The `"write"` slot forces the classic transfer
+  under `"write"` with `"ETag"` promoted from it (so an upload carries one too), a
+  download's `GetObject` response (`Body`-stripped) under `"read"`, and the removed
+  object's `DeleteObject`-shaped response under `"delete"` (an `mv` source, or each
+  `rm` / `sync --delete` object, the batched path reconstructed from the
+  `DeleteObjects` batch). The `"write"` / `"read"` slots force the classic transfer
   engine (capture rides botocore client events the CRT data plane bypasses).
 - `S3Storage.get_fileinfo(key)` now joins a non-empty child `key` under the
   prefix with a `/` boundary (was a bare concat that only resolved correctly

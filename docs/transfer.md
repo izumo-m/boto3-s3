@@ -42,11 +42,12 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   boto3, classic maps `use_threads=False` to `NonThreadedExecutor` (a
   determinization lever for tests; CRT ignores the threading-family knobs - also
   as in boto3). The overall design of CRT mode is in [`crt.md`](./crt.md).
-- **`capture_response=True` forces the classic engine.** The write-response
-  capture ([`opresult.md`](./opresult.md)) rides the botocore client's
-  `before-parameter-build` / `after-call` events, which the CRT data plane
-  bypasses, so `_create_crt_manager` returns `None` (selecting classic) whenever
-  the flag is set - logged as a `transfer engine: classic forced by
+- **`capture_response=True` forces the classic engine.** The write / read
+  response capture ([`opresult.md`](./opresult.md)) rides the botocore client's
+  `before-parameter-build` / `after-call` events (the `PutObject` / `CopyObject` /
+  `CompleteMultipartUpload` write and the `GetObject` read), which the CRT data
+  plane bypasses, so `_create_crt_manager` returns `None` (selecting classic)
+  whenever the flag is set - logged as a `transfer engine: classic forced by
   capture_response` breadcrumb. A `_ResponseCapture` is then registered on the
   client before the first submit and removed after the manager shuts down (so no
   request is emitting during a registration change); its handlers are per-instance
