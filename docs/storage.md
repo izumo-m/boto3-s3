@@ -152,8 +152,8 @@ S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download
 ## 5. Streams: `IOStorage` and `StdioStorage`
 
 `IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
-as a single `open`-able endpoint, so a stream can be one side of a `cp` / `mv`
-(the other side always S3) without a temp file:
+as a single `open`-able endpoint, so a stream can be one side of a
+non-recursive `cp` (the other side always S3) without a temp file:
 
 ```python
 import gzip
@@ -196,8 +196,10 @@ The contract:
   land wherever the stream sends them (the `.gz` file, the console), and the
   caller's own `with` / `close` finalizes it.
 - **A single endpoint, not a container.** Only `open` is meaningful; `scan` /
-  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` / `mv`
-  side only — never `ls` / `rm`, and not stream↔stream.
+  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` side
+  only — never `mv` (a move deletes its source, which the one-shot stream
+  pairing was never meant to trigger; `S3.mv` rejects a stream on either side
+  with `ValidationError`), never `ls` / `rm`, and not stream↔stream.
 
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the

@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3.mv` now rejects a stream (`IOStorage`) on either side with
+  `ValidationError`, per its documented contract - a stream destination
+  previously slipped through the capability gate and deleted the source after
+  writing to the pipe. Streams remain a non-recursive `cp` feature.
 - A failed client build (e.g. `AWS_PROFILE` naming a missing profile) now raises
   the documented `ConfigurationError` from every public API - `S3.client()`, the
   lazy `S3Storage` default client, and the scan path previously leaked the raw

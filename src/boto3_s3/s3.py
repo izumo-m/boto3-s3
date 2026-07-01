@@ -1718,8 +1718,9 @@ class S3:
         keeps its source; a deletion failure turns that item into the
         failure aws prints as ``move failed`` (the bytes already arrived).
         Filters prune both the transfer and the deletion. Streams are not a
-        move source or destination (aws rejects ``-`` for mv; the CLI owns
-        that exact error), and emptied local source directories are left
+        move source or destination - a stream on either side raises
+        ``ValidationError`` (aws rejects ``-`` for mv; the CLI owns that
+        exact error text) - and emptied local source directories are left
         behind like aws.
 
         Moving an object onto itself (same URI, or a ``/``-terminated
@@ -1736,6 +1737,16 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
+        if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
+            # cp's stream route has no mv counterpart: a move deletes its source
+            # after the write, which the one-shot stream pairing was never meant
+            # to trigger. Guarded on both sides (without this, a stream
+            # destination would slip through the s3open gate and delete the
+            # source after writing to the pipe).
+            raise ValidationError(
+                "mv does not support streams: a stream cannot be a move source or destination",
+                operation="mv",
+            )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
             src_text = naming.normalize_s3_uri(src_storage.as_text())
             dest_text = naming.normalize_s3_uri(dest_storage.as_text())

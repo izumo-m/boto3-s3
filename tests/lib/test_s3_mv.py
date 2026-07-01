@@ -19,6 +19,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3.exceptions import BatchError, ValidationError
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import OpOutcome, OpResult, TransferType
@@ -45,6 +46,23 @@ def _head_response(**extra: Any) -> dict[str, Any]:
 
 def _get_response(body: bytes = b"payload") -> dict[str, Any]:
     return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
+
+
+class TestStreamGuard:
+    """Streams are not a move source or destination (the mv docstring contract).
+
+    Both sides must be guarded: without the guard a stream destination would
+    slip through the s3open capability gate (it only asks OPEN_WRITE) and
+    delete the source after writing to the pipe.
+    """
+
+    def test_stream_source_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="mv does not support streams"):
+            S3().mv(IOStorage(io.BytesIO(b"x")), S3Storage("s3://bucket/k"))
+
+    def test_stream_destination_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="mv does not support streams"):
+            S3().mv(S3Storage("s3://bucket/k"), IOStorage(io.BytesIO()))
 
 
 class TestSamePathGuard:
