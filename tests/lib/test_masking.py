@@ -123,6 +123,32 @@ class TestMaskTextNotation:
         assert SSE_C_KEY not in out
         assert "'x-amz-copy-source-server-side-encryption-customer-key': '***'" in out
 
+    def test_sse_c_key_s3transfer_task_kwargs_masked_md5_kept(self) -> None:
+        # s3transfer logs each task's kwargs at DEBUG *before* botocore's
+        # parameter build base64-encodes the key, so the boto3 parameter-name
+        # form carries the raw secret - the one SSE-C surface that is not a
+        # wire header.
+        out = m.mask_text(
+            "PutObjectTask(transfer_id=0, {'bucket': 'b', 'key': 'k', 'extra_args': "
+            f"{{'SSECustomerAlgorithm': 'AES256', 'SSECustomerKey': '{SSE_C_KEY}', "
+            "'SSECustomerKeyMD5': 'aGFzaA=='}) about to wait"
+        )
+        assert SSE_C_KEY not in out
+        assert "'SSECustomerKey': '***'" in out
+        assert "'SSECustomerKeyMD5': 'aGFzaA=='" in out
+
+    def test_sse_c_copy_source_param_and_bytes_repr_masked(self) -> None:
+        # A raw-bytes key logs as a bytes repr full of backslash escapes (and
+        # possibly the other quote character); the mask runs to the closing
+        # quote of the opener.
+        out = m.mask_text(
+            "'extra_args': {'CopySourceSSECustomerKey': b'\\x01\\x02raw\"byte\\'s', "
+            "'CopySourceSSECustomerKeyMD5': 'aGFzaA=='}"
+        )
+        assert "raw" not in out
+        assert "'CopySourceSSECustomerKey': b'***'" in out
+        assert "'CopySourceSSECustomerKeyMD5': 'aGFzaA=='" in out
+
     def test_sigv2_authorization_header_signature_masked(self) -> None:
         # Legacy SigV2 header `AWS <id>:<sig>` (signature_version='s3'): the
         # signature after the colon is a secret; the id is tail-revealed.

@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Masking now also covers the SSE-C customer key in its boto3 parameter form
+  (`'SSECustomerKey': ...` / `'CopySourceSSECustomerKey': ...`): s3transfer
+  logs each task's kwargs at DEBUG with the raw key, which the wire-header
+  patterns did not match - `set_stream_logger` / the CLI's `--debug` leaked it
+  in cleartext.
 - `LocalStorage.open` now anchors on the construction-time absolutized path
   like `scan` / `get_fileinfo`, so a later `chdir` cannot move where a relative
   location's keys resolve.

@@ -11,9 +11,10 @@ contract (docs/imports.md).
 
 The credential leak under ``--debug`` flows through the Python ``logging``
 system (botocore logs the signed ``AWSPreparedRequest`` - Authorization /
-Signature / X-Amz-Security-Token - and parsed response bodies, both at DEBUG),
-so masking lives in a logging filter on the handler, not in an ``http.client``
-patch (the wire dump only
+Signature / X-Amz-Security-Token - and parsed response bodies, and s3transfer
+logs each task's kwargs including ``extra_args`` with the raw ``SSECustomerKey``,
+all at DEBUG), so masking lives in a logging filter on the handler, not in an
+``http.client`` patch (the wire dump only
 appears when ``http.client.debuglevel`` is raised, which this project never
 does).
 
@@ -97,6 +98,19 @@ _SSE_C_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The same secret in its boto3 API-parameter form: s3transfer logs every task's
+# kwargs at DEBUG (``s3transfer.tasks`` / ``s3transfer.futures``, e.g.
+# ``PutObjectTask(... 'extra_args': {'SSECustomerKey': '<raw key>', ...})``)
+# *before* botocore's parameter build base64-encodes the key - the one SSE-C
+# surface that is not a wire header. The value may be a str or bytes repr, so
+# the match runs to the unescaped quote that closes the opener (backslash
+# escapes inside a bytes repr are consumed). ``'SSECustomerKeyMD5'`` cannot
+# match: the name must be immediately closed by its quote.
+_SSE_C_PARAM_RE = re.compile(
+    r"(?P<key>['\"](?:CopySource)?SSECustomerKey['\"]\s*:\s*b?(?P<q>['\"]))"
+    r"(?P<val>(?:\\.|(?!(?P=q))[^\\])+)"
+)
+
 # SigV2 (HmacV1) Authorization header ``AWS <access-key-id>:<signature>`` (legacy
 # signature_version='s3'; non-default for the library, never for the CLI which
 # pins s3v4). Mask the signature after the colon; the access key id in the kept
@@ -162,6 +176,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     """
     text = _SECURITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_JSON_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)

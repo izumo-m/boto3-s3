@@ -106,6 +106,7 @@ botocore emits (`'X-Amz-Security-Token': '...'`, including `b'...'`).
 | Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
 | STS response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML and `"SecretAccessKey"`/`"SessionToken"` JSON; an AssumeRole / GetSessionToken body logged at DEBUG) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>` | `***` |
 | SSE-C customer key (`x-amz-server-side-encryption-customer-key` and the `copy-source` variant, dict / colon form, case-insensitive) | `'x-amz-server-side-encryption-customer-key': '<b64>'` -> `'...customer-key': '***'` | `***`. The `-md5` companion header (a non-secret hash) is kept |
+| SSE-C customer key, boto3 parameter form (`'SSECustomerKey'` / `'CopySourceSSECustomerKey'` in a logged kwargs dict - s3transfer logs each task's `extra_args` at DEBUG *before* botocore base64-encodes the key) | `'SSECustomerKey': '<raw key>'` -> `'SSECustomerKey': '***'` (str or bytes repr) | `***`. The `...KeyMD5` companion is kept |
 | Proxy URL userinfo | `https://user:pass@proxy:8080` -> `https://***:***@proxy:8080` | `***:***` (per `mask_proxy_url`) |
 | `Proxy-Authorization` (dict / colon form, defensive) | `Proxy-Authorization: Basic ...` -> `Proxy-Authorization: ***` | `***` |
 | `extra_secrets` (caller-specified actual values, at least `MASK_MIN_LEN`) | each occurrence -> `***` | `***` |
