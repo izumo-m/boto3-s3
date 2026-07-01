@@ -48,7 +48,7 @@ import mimetypes
 import os
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 from boto3_s3 import requestparams
@@ -96,6 +96,11 @@ _MAX_TAGGING_HEADER_SIZE = 2 * 1024
 
 # user_context slot handing an oversized TagSet from on_queued to on_done.
 _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
+
+# user_context slot handing mv's source DeleteObject response from _DeleteSource
+# to _Completion for capture_response (extra_info["delete"]); an S3 source delete
+# populates it, a local / custom-backend one returns None and leaves it unset.
+_DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
 
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
@@ -653,14 +658,17 @@ class Transferrer:
             src_storage = self._src_storage
             info = item.src_info
             assert src_storage is not None and info is not None
-            return _DeleteSource(lambda: src_storage.delete(info))
+            return _DeleteSource(lambda: src_storage.delete(info), capture=self._capture_response)
         client: Any = (
             self._client if self._transfer_type is TransferType.DOWNLOAD else self._source_client
         )
         bucket = item.src_bucket
         key = item.src_key
         params = requestparams.map_delete_object_params(self._options)
-        return _DeleteSource(lambda: client.delete_object(Bucket=bucket, Key=key, **params))
+        return _DeleteSource(
+            lambda: client.delete_object(Bucket=bucket, Key=key, **params),
+            capture=self._capture_response,
+        )
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
         mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
@@ -789,13 +797,17 @@ class Transferrer:
             self._on_result(result)
 
     def _record_success(
-        self, item: TransferItem, resolved_size: int | None = None, etag: str | None = None
+        self,
+        item: TransferItem,
+        resolved_size: int | None = None,
+        etag: str | None = None,
+        delete_response: dict[str, Any] | None = None,
     ) -> None:
         # item.size is unset for an unknown-size transfer (a streaming download
         # lets s3transfer probe the object); fall back to the size s3transfer
         # resolved on the future so SUCCEEDED reports the real byte count.
         size = item.size if item.size is not None else resolved_size
-        extra_info = self._build_extra_info(item, etag)
+        extra_info = self._build_extra_info(item, etag, delete_response)
         with self._lock:
             self._succeeded += 1
         self._emit(
@@ -804,8 +816,13 @@ class Transferrer:
             )
         )
 
-    def _build_extra_info(self, item: TransferItem, etag: str | None) -> dict[str, Any] | None:
-        """Assemble the result's ``extra_info`` from the captured S3 response.
+    def _build_extra_info(
+        self,
+        item: TransferItem,
+        etag: str | None,
+        delete_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Assemble the result's ``extra_info`` from the captured S3 responses.
 
         Without ``capture_response`` this keeps the historical shape: the affected
         object's ETag as ``{"ETag": ...}`` - s3transfer records it on the future
@@ -814,7 +831,9 @@ class Transferrer:
         classic upload / copy also carries the full write response under ``"write"``
         (``PutObject`` / ``CopyObject`` / ``CompleteMultipartUpload``, minus
         ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
-        object's own ETag, the one field whose location varies by write API.
+        object's own ETag, the one field whose location varies by write API. An
+        ``mv`` whose source is S3 also carries that source's DeleteObject response
+        under ``"delete"`` (captured by ``_DeleteSource``).
         """
         write: dict[str, Any] | None = None
         if self._capture is not None and self._transfer_type in (
@@ -825,6 +844,8 @@ class Transferrer:
         info: dict[str, Any] = {}
         if write is not None:
             info["write"] = write
+        if delete_response is not None:
+            info["delete"] = delete_response
         etag_value = _extract_etag(write) if write is not None else etag
         if etag_value:
             info["ETag"] = etag_value
@@ -969,8 +990,9 @@ class _DeleteSource:
     failed`` outcome. A failed transfer leaves the source untouched.
     """
 
-    def __init__(self, delete: Callable[[], None]) -> None:
+    def __init__(self, delete: Callable[[], Any], *, capture: bool = False) -> None:
         self._delete = delete
+        self._capture = capture
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         try:
@@ -978,9 +1000,18 @@ class _DeleteSource:
         except Exception:
             return
         try:
-            self._delete()
+            response = self._delete()
         except Exception as exc:
             future.set_exception(exc)
+            return
+        # mv's S3 source removal returns a DeleteObject response; stash it (minus
+        # ResponseMetadata) for _Completion to surface under extra_info["delete"].
+        # A local / custom-backend source delete returns None - nothing to capture.
+        if self._capture and isinstance(response, dict):
+            captured = cast("dict[str, Any]", response)
+            future.meta.user_context[_DELETE_RESPONSE_KEY] = {
+                k: v for k, v in captured.items() if k != "ResponseMetadata"
+            }
 
 
 class _CloseFileobj:
@@ -1054,7 +1085,7 @@ class _Completion:
         self,
         item: TransferItem,
         *,
-        on_success: Callable[[TransferItem, int | None, str | None], None],
+        on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
         post_success: Callable[[TransferItem], None] | None = None,
     ) -> None:
@@ -1074,9 +1105,13 @@ class _Completion:
         # s3transfer resolves the transfer size on the future (a HeadObject
         # probe for an unknown-size download); pass it so _record_success can
         # report real bytes when the item carried no size. meta.etag carries the
-        # affected object's ETag on a copy / download (None on an upload).
+        # affected object's ETag on a copy / download (None on an upload); the
+        # user_context slot carries mv's source-delete response (capture_response).
         self._on_success(
-            self._item, getattr(future.meta, "size", None), getattr(future.meta, "etag", None)
+            self._item,
+            getattr(future.meta, "size", None),
+            getattr(future.meta, "etag", None),
+            future.meta.user_context.get(_DELETE_RESPONSE_KEY),
         )
 
 

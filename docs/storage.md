@@ -52,8 +52,11 @@ declared capabilities promise:
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry
   here".
-- **`delete(info) -> None`** — remove the entry `info` identifies, by
-  `info.key`.
+- **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
+  `info.key`. Return the backend's delete response (surfaced under
+  `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
+  none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
+  response.
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.

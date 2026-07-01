@@ -22,7 +22,7 @@ the record only needs to say *what happened to this item*.
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
 | `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
 | `src_storage` / `dest_storage` | the two sides' `Storage` backends. |
-| `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write response under `"write"` when the operation ran with `capture_response=True`. |
+| `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write / delete responses under `"write"` / `"delete"` when the operation ran with `capture_response=True`. |
 
 ### The `src` / `dest` convention
 
@@ -77,25 +77,41 @@ The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfe
 exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None`
 - a documented degradation, like the awscrt extra.
 
-### `capture_response` - the full write response
+### `capture_response` - the full S3 responses
 
-Passing `capture_response=True` to `cp` also surfaces the **full S3 write
-response** of each transferred object under `extra_info["write"]` - the
-`PutObject`, `CopyObject`, or `CompleteMultipartUpload` response (whichever
-s3transfer issued for the object), with its `ResponseMetadata` dropped. `"ETag"`
-is then promoted from that response - normalized, since `CopyObject` nests it
-under `CopyObjectResult` - so an **upload** carries an ETag too. Only the terminal
-write is captured (the intermediate multipart calls are not), and the response
-shape therefore varies by which write API ran (a single-part `PutObject` vs a
-multipart `CompleteMultipartUpload`, which also carries `Location` / `Bucket` /
-`Key`).
+`cp` / `mv` / `rm` / `sync` accept `capture_response=True`, which surfaces the
+**full S3 responses** an operation produced, keyed by role - only the slots that
+apply are present:
 
-The flag is **classic-only**: capture rides the botocore client's event stream,
-which the CRT data plane bypasses, so `capture_response=True` forces the classic
-transfer engine (a library-only flag with no `aws s3` equivalent, so no parity
-impact). It registers handlers on the transfer's client for the operation's span
-and removes them after; run a capture operation with a client not used
-concurrently elsewhere (docs/s3.md thread-safety note).
+- **`extra_info["write"]`** - the transferred object's write response for an
+  **upload** or **copy**: the `PutObject`, `CopyObject`, or
+  `CompleteMultipartUpload` response (whichever s3transfer issued), with its
+  `ResponseMetadata` dropped. Only the terminal write is captured (the
+  intermediate multipart calls are not), so the shape varies by which write API
+  ran (a single-part `PutObject` vs a multipart `CompleteMultipartUpload`, which
+  also carries `Location` / `Bucket` / `Key`). `"ETag"` is promoted from it -
+  normalized, since `CopyObject` nests it under `CopyObjectResult` - so an upload
+  carries an ETag too.
+- **`extra_info["delete"]`** - the removed object's `DeleteObject`-shaped
+  response (`VersionId` / `DeleteMarker` / `DeleteMarkerVersionId` /
+  `RequestCharged`, whichever apply): an `mv`'s S3 source removal, and each object
+  `rm` / `sync --delete` removes. The batched path reconstructs one per key from
+  its `DeleteObjects` `Deleted[]` entry plus the shared `RequestCharged`, so the
+  caller sees the same single-object shape regardless of the batch wire form
+  (docs/deleter.md); `rm`'s blind single-key path (a non-recursive exact key)
+  carries the `Storage.delete` response directly.
+
+So an `mv` of one S3 object to another carries both `"write"` (the copy) and
+`"delete"` (the source removal); a `cp` upload carries `"write"`; an `rm` carries
+`"delete"`.
+
+The **`"write"`** slot rides the botocore client's event stream, which the CRT
+data plane bypasses, so `capture_response=True` **forces the classic transfer
+engine** (a library-only flag with no `aws s3` equivalent, so no parity impact).
+It registers handlers on the transfer's client for the operation's span and
+removes them after; run a capture operation with a client not used concurrently
+elsewhere (docs/s3.md thread-safety note). The **`"delete"`** slot rides no
+events - the delete calls are issued directly - so it works on any engine.
 
 ## `error`
 

@@ -42,9 +42,9 @@ from __future__ import annotations
 
 import abc
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import Flag, auto
-from typing import BinaryIO, ClassVar, Literal
+from typing import Any, BinaryIO, ClassVar, Literal
 
 from boto3_s3.concurrency import prefetch
 from boto3_s3.types import FileInfo, ScanOptions
@@ -218,13 +218,18 @@ class Storage(abc.ABC):
         """
 
     @abc.abstractmethod
-    def delete(self, info: FileInfo) -> None:
+    def delete(self, info: FileInfo) -> Mapping[str, Any] | None:
         """Delete the entry ``info`` identifies (``rm`` / ``mv`` source / ``sync --delete``).
 
         ``info`` is a listing entry (from :meth:`scan` / :meth:`get_fileinfo`) or
         one built by hand; the backend locates the object by ``info.key`` in its
         own address space - a local absolute path, an S3 full key, or a custom
         backend's own key.
+
+        May return the backend's delete response - surfaced under
+        ``OpResult.extra_info["delete"]`` when the operation runs with
+        ``capture_response=True`` - or ``None`` when there is none. A local unlink
+        returns ``None``; ``S3Storage`` returns its ``DeleteObject`` response.
         """
 
     @abc.abstractmethod

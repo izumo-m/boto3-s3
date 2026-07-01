@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -468,20 +468,22 @@ class S3Storage(Storage):
         raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
 
     @override
-    def delete(self, info: FileInfo, *, request_payer: str | None = None) -> None:
+    def delete(self, info: FileInfo, *, request_payer: str | None = None) -> Mapping[str, Any]:
         """Delete one object with a single blind ``DeleteObject`` call.
 
         Blind like ``aws s3 rm``'s single-key path: no listing and no
         HeadObject - deleting a key that does not exist succeeds (S3 returns
         204). The object is ``info.key`` (a full bucket key). ``request_payer``
         is an S3-specific knob added on top of the cross-backend
-        ``Storage.delete`` signature.
+        ``Storage.delete`` signature. Returns the ``DeleteObject`` response, which
+        ``rm`` / ``mv`` surface under ``extra_info["delete"]`` for
+        ``capture_response``.
         """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
         with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
-            self.get_client().delete_object(**kwargs)
+            return self.get_client().delete_object(**kwargs)
 
     @override
     def get_fileinfo(

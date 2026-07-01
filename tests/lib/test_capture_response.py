@@ -1,10 +1,11 @@
 """``capture_response``: surfacing the S3 write response on ``OpResult.extra_info``.
 
-Capture rides botocore's client event stream (``before-parameter-build`` +
+The write slot rides botocore's client event stream (``before-parameter-build`` +
 ``after-call``), so these run against a real moto-backed client - the recording
 client the other transfer suites use stubs ``_make_api_call`` and would never
-emit those events. Stage 1 covers the ``write`` slot (upload / copy) and the
-ETag promotion; ``delete`` / ``read`` land in later stages.
+emit those events. Covered: the ``write`` slot (upload / copy, ETag promotion) and
+the ``delete`` slot (an ``mv`` source, and ``rm`` / ``sync --delete``, batched or
+blind single-key). The ``read`` slot (download) is not captured yet.
 """
 
 from __future__ import annotations
@@ -156,6 +157,75 @@ class TestClientHygiene:
         out2, cb2 = _sink()
         S3().cp(str(src), S3Storage(f"s3://{BUCKET}/b.txt", client=s3_client), on_result=cb2)
         assert out2[0].extra_info is None
+
+
+class TestMvDeleteSlot:
+    def test_mv_s3_to_s3_carries_write_and_delete(self, s3_client: Any, tmp_path: Path) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"hello")
+        S3().cp(str(src), f"s3://{BUCKET}/a.txt")  # seed the source object
+        out, cb = _sink()
+        S3().mv(f"s3://{BUCKET}/a.txt", f"s3://{BUCKET}/b.txt", capture_response=True, on_result=cb)
+        info = cast("dict[str, Any]", out[0].extra_info)
+        assert "write" in info  # the CopyObject that created the destination
+        assert "delete" in info  # the source's DeleteObject
+        assert info["delete"].get("DeleteMarker") is True
+        assert info["ETag"] == info["write"]["CopyObjectResult"]["ETag"]
+
+    def test_mv_without_flag_has_etag_only(self, s3_client: Any, tmp_path: Path) -> None:
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"hello")
+        S3().cp(str(src), f"s3://{BUCKET}/a.txt")
+        out, cb = _sink()
+        S3().mv(f"s3://{BUCKET}/a.txt", f"s3://{BUCKET}/b.txt", on_result=cb)
+        info = out[0].extra_info
+        assert info is not None
+        assert "write" not in info
+        assert "delete" not in info
+        assert "ETag" in info
+
+
+class TestRmDeleteSlot:
+    def test_rm_recursive_batch_reconstructs_delete_slot(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        for i in range(3):
+            s3_client.put_object(Bucket=BUCKET, Key=f"d/f{i}.txt", Body=b"x")
+        out, cb = _sink()
+        S3().rm(f"s3://{BUCKET}/d", recursive=True, capture_response=True, on_result=cb)
+        assert len(out) == 3
+        for r in out:
+            info = cast("dict[str, Any]", r.extra_info)
+            # the batch DeleteObjects entry, reconstructed to a DeleteObject shape
+            assert "delete" in info
+            assert info["delete"].get("DeleteMarker") is True
+
+    def test_rm_single_key_blind_carries_delete_slot(self, s3_client: Any, tmp_path: Path) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        s3_client.put_object(Bucket=BUCKET, Key="solo.txt", Body=b"x")
+        out, cb = _sink()
+        # non-recursive exact key: the blind Storage.delete path, not the batcher
+        S3().rm(f"s3://{BUCKET}/solo.txt", capture_response=True, on_result=cb)
+        info = cast("dict[str, Any]", out[0].extra_info)
+        assert "delete" in info
+        assert info["delete"].get("DeleteMarker") is True
+
+    def test_rm_recursive_without_flag_has_no_extra_info(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        for i in range(2):
+            s3_client.put_object(Bucket=BUCKET, Key=f"d/f{i}.txt", Body=b"x")
+        out, cb = _sink()
+        S3().rm(f"s3://{BUCKET}/d", recursive=True, on_result=cb)
+        assert all(r.extra_info is None for r in out)
 
 
 def test_capture_response_forces_classic_engine(

@@ -105,6 +105,7 @@ def _emit_result(
     storage: S3Storage,
     outcome: OpOutcome,
     error: Boto3S3Error | None = None,
+    extra_info: Mapping[str, Any] | None = None,
 ) -> None:
     if on_result is not None:
         on_result(
@@ -116,6 +117,7 @@ def _emit_result(
                 src=f"s3://{storage.bucket}/{info.key}",
                 src_info=info,
                 src_storage=storage,
+                extra_info=extra_info,
             )
         )
 
@@ -373,11 +375,13 @@ class _SyncDeletes:
         request_payer: str | None,
         dryrun: bool,
         on_result: ResultCallback | None,
+        capture_response: bool = False,
     ) -> None:
         self._dest = dest_storage
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
+        self._capture_response = capture_response
         self._stack: ExitStack | None = None
         self._deleter: S3Deleter | None = None
         # Synchronous (non-batched) deletes - a local or custom dest's own
@@ -421,6 +425,7 @@ class _SyncDeletes:
                         request_payer=self._request_payer,
                         on_result=self._on_result,
                         operation="sync",
+                        capture_response=self._capture_response,
                     )
                 )
             self._deleter.submit(info)
@@ -1666,6 +1671,7 @@ class S3:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
+        capture_response: bool = False,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Move bytes with ``aws s3 mv`` semantics: ``cp``, then delete the source.
@@ -1721,6 +1727,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             transfer_config=transfer_config,
+            capture_response=capture_response,
             options=options,
         )
 
@@ -1740,6 +1747,7 @@ class S3:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
+        capture_response: bool = False,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Recursively synchronize ``src`` into ``dest`` (``aws s3 sync``).
@@ -1901,12 +1909,14 @@ class S3:
             operation="sync",
             on_progress=on_progress,
             on_result=on_result,
+            capture_response=capture_response,
         )
         deletes = _SyncDeletes(
             dest_storage,
             request_payer=options.get("request_payer"),
             dryrun=dryrun,
             on_result=on_result,
+            capture_response=capture_response,
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
@@ -2127,6 +2137,7 @@ class S3:
         page_size: int = 1000,
         request_payer: str | None = None,
         on_result: ResultCallback | None = None,
+        capture_response: bool = False,
     ) -> None:
         """Delete objects under ``target`` with ``aws s3 rm`` semantics.
 
@@ -2182,6 +2193,7 @@ class S3:
                 root=root,
                 dryrun=dryrun,
                 request_payer=request_payer,
+                capture_response=capture_response,
                 on_result=on_result,
             )
             return
@@ -2206,7 +2218,11 @@ class S3:
             return
 
         with S3Deleter(
-            storage, request_payer=request_payer, on_result=on_result, operation="rm"
+            storage,
+            request_payer=request_payer,
+            on_result=on_result,
+            operation="rm",
+            capture_response=capture_response,
         ) as deleter:
             for info in list_storage.scan(options):
                 deleter.submit(info)
@@ -2246,6 +2262,7 @@ class S3:
         root: str,
         dryrun: bool,
         request_payer: str | None,
+        capture_response: bool,
         on_result: ResultCallback | None,
     ) -> None:
         """The blind single-key path (no listing; aws ``_list_single_object``).
@@ -2262,7 +2279,7 @@ class S3:
             _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
             return
         try:
-            storage.delete(info, request_payer=request_payer)
+            response = storage.delete(info, request_payer=request_payer)
         except Boto3S3Error as exc:
             # The single key is still one batch item (aws counts it as a task
             # failure -> "delete failed:" + rc 1), so aggregate rather than
@@ -2276,7 +2293,21 @@ class S3:
                 skipped=0,
                 operation="rm",
             ) from exc
-        _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.SUCCEEDED)
+        # capture_response surfaces the DeleteObject response (minus
+        # ResponseMetadata) under extra_info["delete"], the same shape the batched
+        # path reconstructs from a DeleteObjects entry.
+        extra_info = (
+            {"delete": {k: v for k, v in response.items() if k != "ResponseMetadata"}}
+            if capture_response
+            else None
+        )
+        _emit_result(
+            on_result,
+            info=info,
+            storage=storage,
+            outcome=OpOutcome.SUCCEEDED,
+            extra_info=extra_info,
+        )
 
     # -- bucket / signing -------------------------------------------------
 

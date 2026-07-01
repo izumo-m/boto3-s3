@@ -88,6 +88,7 @@ class S3Deleter:
         on_result: ResultCallback | None = None,
         batch_size: int = S3_DELETE_BATCH,
         operation: str = "delete",
+        capture_response: bool = False,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -113,6 +114,7 @@ class S3Deleter:
         self._on_result = on_result
         self._batch_size = batch_size
         self._operation = operation
+        self._capture_response = capture_response
 
         self._buffer: list[FileInfo] = []
         self._pending: Future[None] | None = None  # at most one in-flight batch
@@ -238,13 +240,17 @@ class S3Deleter:
         """Delete one batch with a single ``DeleteObjects`` call (worker thread)."""
         logger.debug("deleting %d object(s) from s3://%s", len(batch), self._bucket)
         objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for info in batch]
+        # capture_response needs the per-key Deleted[] entries, which Quiet=True
+        # suppresses; request the full (larger) response only then.
+        quiet = not self._capture_response
         kwargs: dict[str, Any] = {
             "Bucket": self._bucket,
-            "Delete": {"Objects": objects, "Quiet": True},
+            "Delete": {"Objects": objects, "Quiet": quiet},
         }
         if self._request_payer is not None:
             kwargs["RequestPayer"] = self._request_payer
         failures: dict[str, Boto3S3Error]
+        deleted: dict[str, dict[str, Any]] = {}
         # Intentional aws-cli wire-level deviation: recursive rm and sync --delete
         # use DeleteObjects batches for throughput instead of aws-cli's per-key
         # DeleteObject. This is accepted and documented in docs/deleter.md section 4.
@@ -263,8 +269,30 @@ class S3Deleter:
             failures = {info.key: exc for info in batch}
         else:
             failures = self._translate_errors(response.get("Errors", []), batch)
+            if self._capture_response:
+                deleted = self._delete_slots(response)
         for info in batch:
-            self._record(info, failures.get(info.key))
+            self._record(info, failures.get(info.key), deleted.get(info.key))
+
+    def _delete_slots(self, response: Any) -> dict[str, dict[str, Any]]:
+        """Per-key DeleteObject-shaped slots from a non-Quiet DeleteObjects response.
+
+        capture_response reads ``Deleted[]`` (present only with ``Quiet=False``)
+        into one slot per key: the entry minus its ``Key`` (already the result's
+        key) plus the batch-wide ``RequestCharged`` - the shape a single
+        DeleteObject would return, hiding the batch wire form (docs/deleter.md).
+        """
+        charged = response.get("RequestCharged")
+        slots: dict[str, dict[str, Any]] = {}
+        for entry in response.get("Deleted", []):
+            key = entry.get("Key")
+            if key is None:
+                continue
+            slot: dict[str, Any] = {k: v for k, v in entry.items() if k != "Key"}
+            if charged is not None:
+                slot["RequestCharged"] = charged
+            slots[key] = slot
+        return slots
 
     def _translate_errors(
         self, entries: list[ErrorTypeDef], batch: list[FileInfo]
@@ -312,12 +340,16 @@ class S3Deleter:
         text = f"An error occurred ({code}) when calling the DeleteObjects operation: {message}"
         return category(text, operation=self._operation, bucket=self._bucket, key=key)
 
-    def _record(self, info: FileInfo, error: Boto3S3Error | None) -> None:
+    def _record(
+        self, info: FileInfo, error: Boto3S3Error | None, delete: dict[str, Any] | None = None
+    ) -> None:
         """Update the rollup and dispatch one ``OpResult`` (worker thread).
 
         Counters update before ``on_result`` runs: if the callback raises, its
         record is already counted, the rest of the batch is abandoned, and the
         exception surfaces at the next non-empty ``flush()`` or at ``close()``.
+        ``delete`` is the per-key response slot under ``capture_response`` (a
+        successful delete only); it lands on ``extra_info["delete"]``.
         """
         if error is None:
             self._succeeded += 1
@@ -337,6 +369,7 @@ class S3Deleter:
                     src=f"s3://{self._bucket}/{info.key}",
                     src_info=info,
                     src_storage=self._storage,
+                    extra_info={"delete": delete} if delete is not None else None,
                 )
             )
 
