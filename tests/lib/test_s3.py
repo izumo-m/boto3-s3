@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from typing import Any
+from typing import Any, cast
 
 import boto3
 import pytest
@@ -114,6 +114,18 @@ class TestClientSeam:
         monkeypatch.setattr(boto3, "client", boom)
         with pytest.raises(ConfigurationError) as exc_info:
             S3().client()
+        assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    def test_session_build_failure_maps_to_configuration_error(self) -> None:
+        # The session branch of client() is wrapped like the default-session
+        # branch: a session whose client build fails raises the translated
+        # ConfigurationError, not the raw botocore error.
+        class _BrokenSession:
+            def client(self, *args: Any, **kwargs: Any) -> Any:
+                raise ProfileNotFound(profile="missing-profile")
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            S3(session=cast("Any", _BrokenSession())).client()
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
 

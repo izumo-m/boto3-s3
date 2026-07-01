@@ -12,6 +12,7 @@ single-key).
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,10 +20,11 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.transfer import TransferItem, Transferrer
-from boto3_s3.types import OpOutcome, OpResult, TransferType
+from boto3_s3.types import OpOutcome, OpResult, TransferOptions, TransferType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -188,6 +190,110 @@ class TestClientHygiene:
         capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
         assert capture is not None
         assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+
+    def test_no_overwrite_skip_drains_the_captured_412(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        # --no-overwrite's IfNoneMatch rejection is a silent SKIPPED, and
+        # after-call already stored the 412 error payload under the dest key;
+        # the skip branch must drain it like the failure branch.
+        s3_client.put_object(Bucket=BUCKET, Key="exists.txt", Body=b"old")
+        src = tmp_path / "exists.txt"
+        src.write_bytes(b"new")
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        results, cb = _sink()
+        item = TransferItem(
+            compare_key="exists.txt",
+            size=3,
+            src_path=str(src),
+            dest_bucket=BUCKET,
+            dest_key="exists.txt",
+        )
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            options=TransferOptions(no_overwrite=True),
+            capture_response=True,
+            on_result=cb,
+        )
+        with transferrer:
+            transferrer.submit(item)
+        assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+        assert results[0].extra_info is None
+        capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
+        assert capture is not None
+        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+
+    def test_exit_unregisters_capture_even_when_shutdown_raises(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        # Transferrer.__exit__ unregisters the capture handlers in a finally:
+        # even a manager shutdown that raises must not leave them feeding the
+        # store on a longer-lived client.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        transferrer = Transferrer(TransferType.UPLOAD, client, capture_response=True)
+        item = TransferItem(
+            compare_key="a.txt", size=1, src_path=str(src), dest_bucket=BUCKET, dest_key="a.txt"
+        )
+        real_shutdown: list[Any] = []
+
+        def _boom(**kwargs: Any) -> None:
+            raise RuntimeError("shutdown boom")
+
+        with pytest.raises(RuntimeError, match="shutdown boom"):
+            with transferrer:
+                transferrer.submit(item)
+                manager = transferrer._manager  # pyright: ignore[reportPrivateUsage]
+                assert manager is not None
+                real_shutdown.append(manager.shutdown)
+                manager.shutdown = _boom
+        real_shutdown[0]()  # drain the real manager (test hygiene)
+        capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
+        assert capture is not None
+        # Handlers left the client despite the raise: a later PutObject on the
+        # same client must not feed the old capture store.
+        client.put_object(Bucket=BUCKET, Key="later.txt", Body=b"y")
+        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+
+
+class TestStreamRoutes:
+    def test_stream_download_carries_read_slot_and_lists_nothing(self, s3_client: Any) -> None:
+        s3_client.put_object(Bucket=BUCKET, Key="a.txt", Body=b"hello")
+        buf = io.BytesIO()
+        out, cb = _sink()
+        S3().cp(f"s3://{BUCKET}/a.txt", IOStorage(buf), capture_response=True, on_result=cb)
+        info = out[0].extra_info
+        assert info is not None and "read" in info
+        assert "Body" not in info["read"]
+        assert info["ETag"] == info["read"]["ETag"] == _etag(b"hello")
+        assert buf.getvalue() == b"hello"
+        # opresult.md: a stream cp lists nothing - both listing entries are None.
+        assert out[0].src_info is None and out[0].dest_info is None
+
+    def test_stream_upload_carries_write_slot(self, s3_client: Any) -> None:
+        out, cb = _sink()
+        S3().cp(
+            IOStorage(io.BytesIO(b"hello")),
+            f"s3://{BUCKET}/up.txt",
+            capture_response=True,
+            on_result=cb,
+        )
+        info = out[0].extra_info
+        assert info is not None and "write" in info
+        assert info["ETag"] == info["write"]["ETag"] == _etag(b"hello")
+
+    def test_mv_to_stream_carries_read_and_delete(self, s3_client: Any) -> None:
+        s3_client.put_object(Bucket=BUCKET, Key="gone.txt", Body=b"hello")
+        buf = io.BytesIO()
+        out, cb = _sink()
+        S3().mv(f"s3://{BUCKET}/gone.txt", IOStorage(buf), capture_response=True, on_result=cb)
+        info = out[0].extra_info
+        assert info is not None
+        assert "read" in info and "delete" in info
+        assert buf.getvalue() == b"hello"
+        assert s3_client.list_objects_v2(Bucket=BUCKET).get("KeyCount") == 0
 
 
 class TestMvDeleteSlot:

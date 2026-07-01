@@ -415,6 +415,41 @@ class TestResults:
         assert exc_info.value.operation == "rm"
 
 
+class TestCaptureSlots:
+    def test_batch_slot_strips_key_and_copies_request_charged(self) -> None:
+        # docs/deleter.md: each Deleted[] entry becomes a per-key slot shaped
+        # like a single DeleteObject response - the entry minus its Key
+        # (already the result's key), plus the batch-wide RequestCharged.
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Deleted": [
+                        {
+                            "Key": "prefix/a.txt",
+                            "DeleteMarker": True,
+                            "DeleteMarkerVersionId": "dm1",
+                        },
+                        {"Key": "prefix/b.txt", "VersionId": "v2"},
+                    ],
+                    "RequestCharged": "requester",
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, capture_response=True)
+        deleter.submit(_info("prefix/a.txt"))
+        deleter.submit(_info("prefix/b.txt"))
+        deleter.close()
+        slots = [(r.extra_info or {}).get("delete") for r in results]
+        assert slots[0] == {
+            "DeleteMarker": True,
+            "DeleteMarkerVersionId": "dm1",
+            "RequestCharged": "requester",
+        }
+        assert slots[1] == {"VersionId": "v2", "RequestCharged": "requester"}
+        assert all(slot is not None and "Key" not in slot for slot in slots)
+
+
 class TestThreading:
     def test_flush_returns_while_batch_in_flight(self) -> None:
         fake = _FakeS3Client()

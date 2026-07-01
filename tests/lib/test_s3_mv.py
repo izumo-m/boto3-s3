@@ -77,6 +77,27 @@ class TestStreams:
             (TransferType.MOVE, OpOutcome.SUCCEEDED)
         ]
 
+    def test_stream_destination_dryrun_moves_nothing(self) -> None:
+        from tests.utils.recorder import make_recording_client
+
+        buf = io.BytesIO()
+        client, calls = make_recording_client([_head_response()])
+        results: list[OpResult] = []
+        S3().mv(
+            S3Storage("s3://b/d/a.txt", client=client),
+            IOStorage(buf),
+            dryrun=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        # dryrun still resolves the single source (HeadObject) but neither
+        # reads bytes nor deletes the source, and never touches the stream.
+        assert _ops(calls) == ["HeadObject"]
+        assert buf.getvalue() == b""
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.DRYRUN)
+        ]
+
     def test_stream_source_rejected(self) -> None:
         with pytest.raises(ValidationError, match="mv does not support a stream source"):
             S3().mv(IOStorage(io.BytesIO(b"x")), S3Storage("s3://bucket/k"))

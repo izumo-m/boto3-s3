@@ -17,6 +17,7 @@ from botocore.exceptions import ClientError, ProfileNotFound
 from boto3_s3 import (
     S3,
     AccessDeniedError,
+    Boto3S3Error,
     ConfigurationError,
     FileInfo,
     FileKind,
@@ -25,6 +26,7 @@ from boto3_s3 import (
     S3FileInfo,
     S3Storage,
     ScanOptions,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.storage import _sieve_pages
@@ -445,6 +447,34 @@ class TestScanErrorMapping:
         with pytest.raises(ConfigurationError) as exc_info:
             list(S3Storage("s3://bucket/prefix/").scan())
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    @pytest.mark.parametrize(
+        ("status", "category"),
+        [(500, TransportError), (None, Boto3S3Error)],
+    )
+    def test_unknown_code_widens_on_http_status(
+        self, status: int | None, category: type[Boto3S3Error]
+    ) -> None:
+        # docs/exceptions.md section 3: a code not in the table falls back to
+        # HTTP-status widening - 5xx -> TransportError, no usable status ->
+        # the base Boto3S3Error.
+        meta: dict[str, Any] = {"HTTPStatusCode": status} if status is not None else {}
+        error = ClientError(
+            {"Error": {"Code": "SomethingNovel", "Message": "boom"}, "ResponseMetadata": meta},
+            "ListObjectsV2",
+        )
+        storage, _ = _storage(error=error)
+        with pytest.raises(Boto3S3Error) as exc_info:
+            list(storage.scan())
+        assert type(exc_info.value) is category
+
+    def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
+        # docs/exceptions.md section 2: KeyboardInterrupt is never wrapped.
+        from boto3_s3.s3storage import s3_errors
+
+        with pytest.raises(KeyboardInterrupt):
+            with s3_errors(operation="ls"):
+                raise KeyboardInterrupt
 
 
 class _DeleteRecordingClient:

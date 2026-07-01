@@ -204,6 +204,24 @@ class TestSyncUpload:
         assert copied[0].src_info is not None and copied[0].src_info.key.endswith("a.txt")
         assert copied[0].dest_info is not None and copied[0].dest_info.key == "p/a.txt"
 
+    def test_copy_new_result_has_no_dest_info(self, tmp_path: Path) -> None:
+        # docs/opresult.md: only an update pairs with a pre-existing
+        # destination entry; a new-file record carries dest_info=None.
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx")
+        client, _ = make_recording_client([_listing(), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        copied = [r for r in results if r.transfer_type is not TransferType.DELETE]
+        assert len(copied) == 1
+        assert copied[0].src_info is not None
+        assert copied[0].dest_info is None
+
     def test_delete_predicate_narrows_the_lane(self, tmp_path: Path) -> None:
         # A FileFilter predicate (the orphan's FileInfo) narrows which orphans
         # are deleted - the delete lane is rm over the orphans.
@@ -605,6 +623,24 @@ class TestParallelCompare:
 
         assert _compare_workers(None) == 10
         assert _compare_workers(TransferConfig(max_concurrency=7)) == 7
+
+    def test_cancel_token_aborts_the_pooled_path(self, tmp_path: Path) -> None:
+        # docs/sync.md: cancel_token is polled between pairs on the pooled
+        # (ParallelCompare) dispatch too, not only on the serial loop.
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"xx")
+        client, calls = make_recording_client([_listing()])
+        token = CancelToken()
+        token.cancel()
+        with pytest.raises(CancelledError):
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                compare=ParallelCompare(_always_copies, workers=2),
+                transfer_config=_SERIAL,
+                cancel_token=token,
+            )
+        assert not [call for call in calls if call.operation == "PutObject"]
 
     def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
         # Update pairs (a/b/c already at the destination) are pooled; new.txt is
