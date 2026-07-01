@@ -244,6 +244,27 @@ class TestUpload:
             transferrer.submit(item)
         assert calls == []
 
+    def test_submit_failure_closes_an_already_open_fileobj(self) -> None:
+        # The open routes / _cp_stream hand submit an already-open stream; a
+        # submit-time failure (here: the grants ValidationError from param
+        # mapping) must release it - no future exists, so _CloseFileobj never
+        # runs.
+        fileobj = io.BytesIO(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_fileobj=fileobj, dest_bucket="b", dest_key="k"
+        )
+        client, calls = make_recording_client([{}])
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            options=TransferOptions(grants=["bogus"]),
+            transfer_config=_SYNC_CONFIG,
+        )
+        with pytest.raises(ValidationError), transferrer:
+            transferrer.submit(item)
+        assert calls == []
+        assert fileobj.closed
+
 
 class TestDownload:
     def _item(self, tmp_path: Path, dest: str = "out/a.bin") -> TransferItem:

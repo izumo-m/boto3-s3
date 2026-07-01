@@ -583,12 +583,32 @@ class Transferrer:
         ``grants`` shape surfaces as an in-flight error like aws (rc 1 via
         the fatal-error path), never as an upfront usage error.
         """
-        if self._transfer_type is TransferType.UPLOAD:
-            self._submit_upload(item)
-        elif self._transfer_type is TransferType.DOWNLOAD:
-            self._submit_download(item)
-        else:
-            self._submit_copy(item)
+        try:
+            if self._transfer_type is TransferType.UPLOAD:
+                self._submit_upload(item)
+            elif self._transfer_type is TransferType.DOWNLOAD:
+                self._submit_download(item)
+            else:
+                self._submit_copy(item)
+        except BaseException:
+            # The producer may have opened the item's stream before handing it
+            # over (the open routes / _cp_stream). A submit that raises before
+            # the manager accepted the work - the grants ValidationError from
+            # param mapping, a manager-build failure - means _CloseFileobj
+            # never runs, so release the handle here (best-effort; mirrors
+            # _CloseFileobj, which also closes on a failed transfer).
+            self._close_item_fileobjs(item)
+            raise
+
+    @staticmethod
+    def _close_item_fileobjs(item: TransferItem) -> None:
+        for fileobj in (item.src_fileobj, item.dest_fileobj):
+            if fileobj is None:
+                continue
+            try:
+                fileobj.close()
+            except Exception:
+                logger.debug("closing a fileobj after a submit error failed", exc_info=True)
 
     def _submit_upload(self, item: TransferItem) -> None:
         # A directory source is handed through to fail like aws-cli ([Errno 21]
