@@ -152,6 +152,8 @@ class IOStorage(Storage):
 
     Pass it to ``cp`` as a ``Location``: ``cp("s3://b/k", IOStorage(io.BytesIO()))``
     downloads into the stream, ``cp(IOStorage(buf), "s3://b/k")`` uploads from it.
+    ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
+    the bytes land (a stream is never a move *source* - it cannot be deleted).
     A binary stream is used as-is; a text stream is wrapped with ``encoding``
     (default utf-8). The caller's stream is never closed by this class. As a single
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.

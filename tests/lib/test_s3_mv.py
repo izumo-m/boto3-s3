@@ -48,21 +48,42 @@ def _get_response(body: bytes = b"payload") -> dict[str, Any]:
     return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
 
 
-class TestStreamGuard:
-    """Streams are not a move source or destination (the mv docstring contract).
+class TestStreams:
+    """A stream is a valid single-object move destination, never a source.
 
-    Both sides must be guarded: without the guard a stream destination would
-    slip through the s3open capability gate (it only asks OPEN_WRITE) and
-    delete the source after writing to the pipe.
+    S3 -> stream rides the s3open route (write to the stream, then delete the
+    S3 source). A stream source cannot satisfy the move contract (a move
+    deletes its source), and a recursive stream destination would concatenate
+    every object into one stream - both are rejected up front. The CLI rejects
+    ``-`` for mv on either side outright (aws parity, tests/cli/unit/test_mv.py).
     """
 
+    def test_stream_destination_downloads_then_deletes_source(self) -> None:
+        from tests.utils.recorder import make_recording_client
+
+        buf = io.BytesIO()
+        client, calls = make_recording_client([_head_response(), _get_response(), {}])
+        results: list[OpResult] = []
+        S3().mv(
+            S3Storage("s3://b/d/a.txt", client=client),
+            IOStorage(buf),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
+        assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
+        assert buf.getvalue() == b"payload"
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.SUCCEEDED)
+        ]
+
     def test_stream_source_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="mv does not support streams"):
+        with pytest.raises(ValidationError, match="mv does not support a stream source"):
             S3().mv(IOStorage(io.BytesIO(b"x")), S3Storage("s3://bucket/k"))
 
-    def test_stream_destination_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="mv does not support streams"):
-            S3().mv(S3Storage("s3://bucket/k"), IOStorage(io.BytesIO()))
+    def test_recursive_stream_destination_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="only for a single object"):
+            S3().mv(S3Storage("s3://bucket/pre/"), IOStorage(io.BytesIO()), recursive=True)
 
 
 class TestSamePathGuard:

@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LocalStorage.open` now anchors on the construction-time absolutized path
   like `scan` / `get_fileinfo`, so a later `chdir` cannot move where a relative
   location's keys resolve.
-- `S3.mv` now rejects a stream (`IOStorage`) on either side with
-  `ValidationError`, per its documented contract - a stream destination
-  previously slipped through the capability gate and deleted the source after
-  writing to the pipe. Streams remain a non-recursive `cp` feature.
+- `S3.mv` now supports a stream (`IOStorage`) **destination** for a single
+  object - the bytes land on the stream, then the S3 source is deleted. A
+  stream source (a move deletes its source, which a stream cannot be) and a
+  recursive stream destination raise `ValidationError` with clear messages.
+  The CLI keeps aws's blanket rejection of `-` for `mv`.
 - A failed client build (e.g. `AWS_PROFILE` naming a missing profile) now raises
   the documented `ConfigurationError` from every public API - `S3.client()`, the
   lazy `S3Storage` default client, and the scan path previously leaked the raw

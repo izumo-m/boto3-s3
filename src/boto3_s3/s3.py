@@ -1717,11 +1717,14 @@ class S3:
         forwarded). A failed, skipped, or dry-run item
         keeps its source; a deletion failure turns that item into the
         failure aws prints as ``move failed`` (the bytes already arrived).
-        Filters prune both the transfer and the deletion. Streams are not a
-        move source or destination - a stream on either side raises
-        ``ValidationError`` (aws rejects ``-`` for mv; the CLI owns that
-        exact error text) - and emptied local source directories are left
-        behind like aws.
+        Filters prune both the transfer and the deletion. A stream
+        (``IOStorage``) can be the destination of a single-object move -
+        the bytes land on the stream, then the S3 source is deleted - but
+        not a recursive one (a stream is a single endpoint) and never the
+        source (a move deletes its source, which a stream cannot be); both
+        raise ``ValidationError``. The CLI rejects ``-`` for mv on either
+        side outright (aws parity; it owns that exact error text). Emptied
+        local source directories are left behind like aws.
 
         Moving an object onto itself (same URI, or a ``/``-terminated
         destination plus the source's basename - checked for ``--recursive``
@@ -1737,14 +1740,21 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
-            # cp's stream route has no mv counterpart: a move deletes its source
-            # after the write, which the one-shot stream pairing was never meant
-            # to trigger. Guarded on both sides (without this, a stream
-            # destination would slip through the s3open gate and delete the
-            # source after writing to the pipe).
+        if isinstance(src_storage, IOStorage):
+            # A move deletes its source, which a stream cannot be (no delete).
+            # The destination side is different: a single-object move onto a
+            # stream is well-formed (bytes land on the stream, then the S3
+            # source is deleted) and rides the s3open route below.
             raise ValidationError(
-                "mv does not support streams: a stream cannot be a move source or destination",
+                "mv does not support a stream source: a move deletes its source, "
+                "which a stream cannot be",
+                operation="mv",
+            )
+        if isinstance(dest_storage, IOStorage) and recursive:
+            # A stream is a single endpoint: a recursive move would concatenate
+            # every object into it while deleting the sources.
+            raise ValidationError(
+                "mv supports a stream destination only for a single object (non-recursive)",
                 operation="mv",
             )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
