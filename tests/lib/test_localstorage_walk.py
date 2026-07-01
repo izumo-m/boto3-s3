@@ -338,6 +338,20 @@ class TestLocalStorageIO:
         with pytest.raises(NotFoundError):
             LocalStorage(tmp_path).open("missing.bin", "rb")
 
+    def test_open_relative_path_is_chdir_stable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # open anchors on the construction-time absolutized path like scan /
+        # get_fileinfo: a later chdir must not move where keys resolve.
+        (tmp_path / "root").mkdir()
+        (tmp_path / "root" / "f.bin").write_bytes(b"payload")
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path)
+        storage = LocalStorage("root")
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        with storage.open("f.bin", "rb") as handle:
+            assert handle.read() == b"payload"
+
     def test_delete(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(tmp_path)

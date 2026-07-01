@@ -469,7 +469,7 @@ class LocalStorage(Storage):
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Open ``key`` (resolved against :attr:`path`) as a binary stream.
+        """Open ``key`` (resolved against the absolutized :attr:`path`) as a binary stream.
 
         ``"wb"`` creates missing parent directories first. ``size`` is unused
         locally. OS errors translate to the library taxonomy.
@@ -484,7 +484,10 @@ class LocalStorage(Storage):
         from the bucket (``s3.py``'s ``_warn_parent_reference`` port, warn-and-skip
         for ``aws s3`` parity).
         """
-        target = os.path.join(self._path, to_native_path(key))
+        # Anchor on the construction-time absolutized path like scan /
+        # get_fileinfo, so a later chdir cannot move where a relative
+        # location's keys resolve.
+        target = os.path.join(self._abspath, to_native_path(key))
         try:
             if mode == "rb":
                 return cast("BinaryIO", open(target, "rb"))

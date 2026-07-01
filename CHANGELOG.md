@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `LocalStorage.open` now anchors on the construction-time absolutized path
+  like `scan` / `get_fileinfo`, so a later `chdir` cannot move where a relative
+  location's keys resolve.
 - `S3.mv` now rejects a stream (`IOStorage`) on either side with
   `ValidationError`, per its documented contract - a stream destination
   previously slipped through the capability gate and deleted the source after
