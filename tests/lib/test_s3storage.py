@@ -12,11 +12,12 @@ import threading
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
     S3,
     AccessDeniedError,
+    ConfigurationError,
     FileInfo,
     FileKind,
     LocalStorage,
@@ -427,6 +428,23 @@ class TestScanErrorMapping:
         with pytest.raises(NotFoundError) as exc_info:
             list(storage.scan())
         assert isinstance(exc_info.value.__cause__, ClientError)
+
+    def test_lazy_client_build_failure_maps_to_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A lazily-built default client whose construction fails - e.g.
+        # AWS_PROFILE naming a missing profile - surfaces as the documented
+        # ConfigurationError (docs/exceptions.md section 3), not the raw
+        # botocore error.
+        import boto3
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise ProfileNotFound(profile="missing-profile")
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(ConfigurationError) as exc_info:
+            list(S3Storage("s3://bucket/prefix/").scan())
+        assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
 
 class _DeleteRecordingClient:

@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A failed client build (e.g. `AWS_PROFILE` naming a missing profile) now raises
+  the documented `ConfigurationError` from every public API - `S3.client()`, the
+  lazy `S3Storage` default client, and the scan path previously leaked the raw
+  botocore error.
 - `S3.cp` / `mv` / `rm` / `sync` gain `capture_response=True`, which surfaces the
   operation's full S3 responses on `OpResult.extra_info`: the write response
   (`PutObject` / `CopyObject` / `CompleteMultipartUpload`, minus `ResponseMetadata`)

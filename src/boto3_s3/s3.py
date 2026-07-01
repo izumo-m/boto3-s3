@@ -586,15 +586,23 @@ class S3:
         connection, hence no ``close()``. Built from ``session`` (or boto3's
         default session) with ``endpoint_url`` / ``config`` applied. Override to
         change credentials, reuse a cached client, or return a test double; reuse
-        one explicitly via ``S3Storage(url, client=s3.client())``.
+        one explicitly via ``S3Storage(url, client=s3.client())``. A failed build
+        (e.g. an unresolvable ``AWS_PROFILE``) raises the translated
+        ``Boto3S3Error`` - ``ConfigurationError`` for the profile / credential /
+        region family - never the raw botocore error (docs/exceptions.md
+        section 1).
         """
-        if self._session is not None:
-            return self._session.client("s3", endpoint_url=self._endpoint_url, config=self._config)
-        # Deferred: only this SDK-touching seam loads boto3 (import contract,
-        # docs/imports.md); constructing an `S3` stays SDK-free.
-        import boto3
+        # operation=None: no subcommand is in scope at build time.
+        with s3_errors(operation=None):
+            if self._session is not None:
+                return self._session.client(
+                    "s3", endpoint_url=self._endpoint_url, config=self._config
+                )
+            # Deferred: only this SDK-touching seam loads boto3 (import contract,
+            # docs/imports.md); constructing an `S3` stays SDK-free.
+            import boto3
 
-        return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+            return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).

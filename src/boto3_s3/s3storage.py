@@ -28,6 +28,7 @@ from botocore.exceptions import (
     NoRegionError,
     ParamValidationError,
     PartialCredentialsError,
+    ProfileNotFound,
 )
 from botocore.exceptions import (
     ConnectionError as BotoConnectionError,
@@ -71,6 +72,7 @@ _CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     PartialCredentialsError,
     NoRegionError,
+    ProfileNotFound,
 )
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (EndpointConnectionError, BotoConnectionError)
 
@@ -122,7 +124,7 @@ def _parse_s3_url(url: str) -> tuple[str, str]:
 
 
 def _translate_client_error(
-    exc: ClientError, *, operation: str, bucket: str | None, key: str | None
+    exc: ClientError, *, operation: str | None, bucket: str | None, key: str | None
 ) -> Boto3S3Error:
     """Map a botocore ``ClientError`` to the matching ``Boto3S3Error`` category.
 
@@ -151,7 +153,7 @@ def _translate_client_error(
 
 
 def translate_boto_error(
-    exc: BaseException, *, operation: str, bucket: str | None = None, key: str | None = None
+    exc: BaseException, *, operation: str | None, bucket: str | None = None, key: str | None = None
 ) -> Boto3S3Error:
     """Map any transfer-path exception to the matching ``Boto3S3Error``.
 
@@ -179,7 +181,7 @@ def translate_boto_error(
 
 @contextmanager
 def s3_errors(
-    *, operation: str, bucket: str | None = None, key: str | None = None
+    *, operation: str | None, bucket: str | None = None, key: str | None = None
 ) -> Generator[None, None, None]:
     """Convert botocore errors from an S3 call into ``Boto3S3Error`` (keeping ``__cause__``)."""
     try:
@@ -360,7 +362,11 @@ class S3Storage(Storage):
 
         Memoized: the first call builds (or returns the supplied) client and
         every later call returns the same instance. Deliberately not guarded by
-        a lock; build the client on the caller side for concurrent use.
+        a lock; build the client on the caller side for concurrent use. A failed
+        default build (e.g. an unresolvable ``AWS_PROFILE``) raises the
+        translated ``Boto3S3Error`` - ``ConfigurationError`` for the profile /
+        credential / region family - never the raw botocore error
+        (docs/exceptions.md section 1).
         """
         if self._client is None:
             # Deferred: only the default-client fallback needs boto3, and
@@ -368,7 +374,9 @@ class S3Storage(Storage):
             # docs/imports.md). Callers passing a client never load it here.
             import boto3
 
-            self._client = boto3.client("s3")
+            # operation=None: no subcommand is in scope at build time.
+            with s3_errors(operation=None):
+                self._client = boto3.client("s3")
         return self._client
 
     def close(self) -> None:
@@ -406,7 +414,6 @@ class S3Storage(Storage):
         if not self._bucket:
             yield from self._scan_bucket_pages(options)
             return
-        paginator = self.get_client().get_paginator("list_objects_v2")
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": self._key,
@@ -418,7 +425,10 @@ class S3Storage(Storage):
             paging["RequestPayer"] = options.request_payer
         if options.fetch_owner:
             paging["FetchOwner"] = True
+        # get_client inside the translation scope like delete / get_fileinfo, so
+        # a lazy-build failure also surfaces as a Boto3S3Error on the first pull.
         with s3_errors(operation="ls", bucket=self._bucket):
+            paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
                 yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
 
@@ -429,8 +439,8 @@ class S3Storage(Storage):
         ``BucketRegion`` and are omitted when falsy (matching aws-cli's
         truthiness check, so ``""`` behaves like "not given").
         """
-        client = self.get_client()
         with s3_errors(operation="ls"):
+            client = self.get_client()
             if not client.can_paginate("list_buckets"):
                 # Back-compat (floor botocore 1.31, docs/overview.md section 2):
                 # the ListBuckets paginator and its Prefix / BucketRegion /
