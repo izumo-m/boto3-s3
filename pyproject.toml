@@ -20,6 +20,9 @@ classifiers = [
 ]
 dependencies = [
     "boto3>=1.28",
+    # Imported directly (exceptions, config types); floor per docs/overview.md
+    # section 2 (boto3 1.28 already requires it, so this is declarative).
+    "botocore>=1.31",
     "s3transfer>=0.6.2",
     "typing-extensions>=4.6",
 ]

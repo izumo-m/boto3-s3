@@ -18,10 +18,11 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Topic :: Utilities",
+    "Typing :: Typed",
 ]
 dependencies = [
     # Released in lockstep; floor pins the library version this CLI is built against.
-    "boto3-s3>=0.3.0,<0.4.0",
+    "boto3-s3>=0.4.0,<0.5.0",
     # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's boto3 pin.
     "botocore>=1.31",
 ]
