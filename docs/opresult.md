@@ -54,7 +54,7 @@ the object directly - e.g. a HeadObject - without re-deriving anything.
 | `error` | on FAILED | on FAILED | on FAILED | the message body |
 | `src_info` | the source entry | the source entry | the removed object | — |
 | `dest_info` | — | update: the pre-existing dest / new: — | — | — |
-| `src_storage` | source side | source side | the target bucket | run's source side |
+| `src_storage` | source side | source side | the deleted-from side (`rm`: the target bucket; `sync --delete`: the run's dest) | run's source side |
 | `dest_storage` | dest side | dest side | — | run's dest side |
 | `extra_info` | copy / download: `{"ETag": …}` · upload: — | same | — | — |
 

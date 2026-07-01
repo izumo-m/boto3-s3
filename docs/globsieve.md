@@ -97,8 +97,9 @@ first use).
 entry's `FileInfo` - returning True = include (a deletion target), False = skip
 (silently; as with aws, no OpResult is emitted either).
 
-`Storage.scan` stamps **`info.compare_key`** on each listing entry (the
-single-key path stamps it inline): the entry's key relative to the root
+The listing stamps **`info.compare_key`** on each entry - a contract the
+concrete backend's `scan_pages` producer fulfils, not the base `Storage.scan`
+(the single-key path stamps it inline): the entry's key relative to the root
 determined by `rm_filter_root(key,
 recursive=...)`. The root is, for recursive = the prefix normalized to a
 `/`-terminated form, for a single key = its parent "directory", for the bucket
@@ -124,8 +125,9 @@ relativization, so it is not part of the root.
 ### Application mechanism (`ScanOptions.filter`)
 
 `S3.rm` wraps the filter (for the folder-marker sweep) and passes it as
-`ScanOptions.filter` to the enumeration; `Storage.scan` stamps each entry's
-root-relative `compare_key` (`info.key[len(root):]`) before the predicate runs.
+`ScanOptions.filter` to the enumeration; the backend's `scan_pages` producer
+stamps each entry's root-relative `compare_key` (`info.key[len(root):]`) before
+the predicate runs.
 The evaluation is done **per page** by
 `Storage.scan` (the concrete base-class method) on the listing's prefetch
 worker thread - an excluded

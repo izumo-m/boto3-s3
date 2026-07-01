@@ -67,8 +67,9 @@ S3().sync(src, dest, *,
     delete: bool | FileFilter = False,             # False / True / predicate: lane + scope
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
     compare: bool | PairFilter | ParallelCompare | None = None,  # None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelCompare=pooled
-    follow_symlinks=True, dryrun=False, page_size=1000,
+    follow_symlinks=True, detect_symlink_loops=False, dryrun=False, page_size=1000,
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
+    capture_response=False,             # surface S3 responses on extra_info (opresult.md)
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
 ```
 

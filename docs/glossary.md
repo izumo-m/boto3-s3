@@ -83,7 +83,10 @@ group (`aws s3`).
 - **compare key** - the **key** relative to its scan root (the full key with the
   root prefix stripped), `/`-separated. It is what sync's merge-join pairs on and
   what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`) is matched
-  against; it is carried on `FileInfo.compare_key`, stamped by `Storage.scan` on
-  every entry it yields, so a custom filter can read it directly. The name mirrors
+  against; it is carried on `FileInfo.compare_key`, stamped by each backend's
+  listing on every entry it yields (a `scan` contract of the backend, not
+  something the base `Storage.scan` does - see
+  [`storage.md`](./storage.md) section 2), so a custom filter can read it
+  directly. The name mirrors
   aws-cli's `FileInfo.compare_key`. Pattern form and OS handling are in
   [`globsieve.md`](./globsieve.md) section 4.

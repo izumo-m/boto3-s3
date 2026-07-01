@@ -85,11 +85,12 @@ to overview.md's "performance equal to or better").
 
 ## 5. Discipline for the transfer subcommands (cp / mv / sync)
 
-- Keep `S3` a thin orchestrator, and **have each method import its own engine
-  module inside the method**. Isolate the transfer engine that uses s3transfer /
-  `TransferManager` in a dedicated module (e.g., `boto3_s3/transfer.py`), and do
-  not import it until cp / mv / sync actually run. Do not bring the s3transfer
-  dependency into the rm / ls paths (the deleter and the scan / scan_pages path).
+- Keep `S3` a thin orchestrator, and keep the transfer engine that uses
+  s3transfer / `TransferManager` in a dedicated module (`boto3_s3/transfer.py`)
+  that is **SDK-free at import**: the `s3transfer.manager` import is deferred
+  into the functions that build the manager, which run only when cp / mv / sync
+  actually submit work. Do not bring the s3transfer dependency into the rm / ls
+  paths (the deleter and the scan / scan_pages path).
 - The entry point's boto3 dependency is isolated in `S3.client()`: it imports
   boto3 only when called. Constructing an `S3` (with or without `session` /
   `endpoint_url` / `config`) is therefore SDK-free; boto3 loads when `client()`

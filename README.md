@@ -300,9 +300,9 @@ needs copying** (by size + mtime, or by content with `EtagComparison` / `Checksu
 Batch operations stream their per-item outcomes instead of returning a list:
 
 - `on_result(OpResult)` — fires once per item as the run proceeds. Each
-  `OpResult` carries a `kind` (upload / download / copy / delete) and an
-  `outcome` (succeeded / failed / warned / skipped). It is called from worker
-  threads, so keep it fast and non-raising.
+  `OpResult` carries a `transfer_type` (upload / download / copy / move /
+  delete) and an `outcome` (succeeded / failed / warned / skipped / dryrun /
+  notice). It is called from worker threads, so keep it fast and non-raising.
 - `on_progress(TransferProgress)` — byte-level transfer progress.
 - `cancel_token` — a `CancelToken` whose `cancel()` cooperatively stops the run.
 - `dryrun=True` — reports every would-be action without any mutating call.

@@ -11,7 +11,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 
 | module | role |
 |---|---|
-| `naming.py` | Pure-function port of the path-shape rules (aws-cli `FileFormat` / `find_bucket_key` / keyless normalization / `find_dest_path_comp_key` / filter root). SDK-independent, so the CLI and the library derive paths, key naming, and the filter root from the **same code** |
+| `naming.py` | Pure-function port of the path-shape rules (aws-cli `FileFormat` / `find_bucket_key` / keyless normalization / `find_dest_path_comp_key`). SDK-independent, so the CLI and the library derive paths and key naming from the **same code** |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path). Its recursive walk `LocalStorage.walk_local` is a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules), split into overridable protected methods (`_walk` / `_should_ignore` / `_stat_info` / ...) so a subclass can extend the traversal; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
@@ -98,11 +98,14 @@ the SDK at module import time.
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
    a successful download it post-success stamps the mtime (section 5). Each
    record carries the item's listing entries (`src_info` / `dest_info`) and the
-   run's side `Storage`s; on success `extra_info` takes the affected object's
-   response metadata from `future.meta.etag` (`{"ETag": ...}`) - s3transfer sets
-   it for a copy (the CopyObject response) and a download (its source) but **not
-   an upload** (the PutObject response is discarded), so an upload's `extra_info`
-   is `None`.
+   run's side `Storage`s; on success `extra_info` takes `{"ETag": ...}` from
+   `future.meta.etag` - the **source object's** ETag, which boto3-s3 provides up
+   front from the listing / HEAD entry (`_ProvideETag`, item 1) for a copy and a
+   download (s3transfer's own probe fills it from a source HeadObject only when
+   it was not provided) but **not an upload** (an upload has no source ETag and
+   the PutObject response is discarded), so an upload's `extra_info` is `None`.
+   `capture_response` layers the written / read object's own response on top
+   ([`opresult.md`](./opresult.md)).
 
 Items 3-5 are route-conditional (download / copy / mv only); the always-present
 spine is 1-2 then 6 (the numbering is the slot order, not a single chain that
