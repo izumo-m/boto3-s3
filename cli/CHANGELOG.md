@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Progress repaints now have a 0.1 s floor when `--progress-frequency` is 0
+  (the default): repaints run inline on the transfer worker threads, so
+  unthrottled console I/O could serialize them and cap throughput on a slow
+  terminal or pipe.
 - Fix `--metadata` shorthand to accept an empty key like `aws` (`=bar` parses
   to `{"": "bar"}` and the transfer proceeds; it wrongly exited 252), and align
   the leading-comma error with aws's `Expected: '='` wording.

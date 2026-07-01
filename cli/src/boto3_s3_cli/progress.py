@@ -25,8 +25,10 @@ builds no output at all - failures included - while the warned/failed
 counters still feed the exit code; ``--only-show-errors`` drops successes
 and progress but keeps dryrun lines; ``--no-progress`` drops only progress.
 ``--progress-frequency N`` throttles progress repaints to one per N seconds;
-``--progress-multiline`` terminates each progress statement with a newline
-instead of rewriting.
+0 (the default) applies the ``_MIN_REPAINT_INTERVAL`` floor - repaints run
+inline on the s3transfer worker threads, so unthrottled they would serialize
+the workers behind console I/O. ``--progress-multiline`` terminates each
+progress statement with a newline instead of rewriting.
 
 One lock serializes counters and writes (multipart parts complete on several
 threads); streams are looked up via ``sys`` on every call so in-process tests
@@ -46,6 +48,15 @@ from boto3_s3_cli.output import human_readable_size
 
 if TYPE_CHECKING:
     from boto3_s3 import OpResult, TransferProgress
+
+
+# Repaint floor when --progress-frequency is 0 (the default). Progress fires
+# per transferred chunk (~256 KiB) on the s3transfer worker threads and the
+# write+flush runs inline on the calling worker, so an unthrottled repaint
+# serializes concurrent workers behind console I/O (aws-cli instead decouples
+# rendering onto its dedicated printer thread). ~10 repaints/s keeps the meter
+# live while bounding the inline cost; the first paint is never delayed.
+_MIN_REPAINT_INTERVAL = 0.1
 
 
 def _render_path(path: str | None) -> str:
@@ -72,7 +83,7 @@ class TransferPrinter:
         self._quiet = quiet
         self._only_show_errors = only_show_errors
         self._show_progress = progress and not quiet and not only_show_errors
-        self._frequency = frequency
+        self._frequency = max(float(frequency), _MIN_REPAINT_INTERVAL)
         self._multiline = multiline
         self._lock = threading.Lock()
         # rc inputs - counted even when fully silenced (--quiet).

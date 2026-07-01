@@ -176,6 +176,20 @@ class TestCarriageReturnProtocol:
         assert "\r" not in out
         assert out.endswith("file(s) remaining\n")
 
+    def test_default_frequency_floors_rapid_repaints(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # frequency=0 (the default) floors repaints at _MIN_REPAINT_INTERVAL:
+        # progress renders inline on the s3transfer worker threads, so
+        # unthrottled repaints would serialize them behind console I/O.
+        clock = iter([0.0, 1.0, 1.05, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        printer = TransferPrinter()  # start consumes 0.0
+        printer.on_progress(_progress("a.txt", 1024, 4096))  # t=1.0 -> paints
+        printer.on_progress(_progress("a.txt", 2048, 4096))  # t=1.05 -> floored
+        printer.on_progress(_progress("a.txt", 4096, 4096))  # t=2.0 -> paints
+        assert capsys.readouterr().out.count("Completed") == 2
+
     def test_frequency_throttles_repaints(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
