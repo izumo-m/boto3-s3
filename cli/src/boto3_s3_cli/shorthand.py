@@ -115,12 +115,11 @@ class _Parser:
         return params
 
     def _keyval(self) -> tuple[str, str]:
+        # No empty-key guard - aws-cli's _keyval has none: with the cursor on
+        # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
+        # proceeds, rc 0), and anything else fails _expect with aws's
+        # "Expected: '='" wording (rc 252 either way).
         key = self._key()
-        if not key:
-            raise _ShorthandParseError(
-                f"Expected: '<key>', received: '{self._current_for_msg()}' for input:\n"
-                f"{self._error_marker(self._index)}"
-            )
         self._expect("=", consume_whitespace=True)
         return key, self._scalar_value()
 
@@ -183,9 +182,6 @@ class _Parser:
     def _consume_whitespace(self) -> None:
         while not self._at_eof() and self._value[self._index] in string.whitespace:
             self._index += 1
-
-    def _current_for_msg(self) -> str:
-        return self._value[self._index] if self._index < len(self._value) else "EOF"
 
     def _at_eof(self) -> bool:
         return self._index >= len(self._value)

@@ -44,6 +44,13 @@ class TestParseMapOption:
     def test_json_object_form(self) -> None:
         assert _parse('{"a":"b","c":"d"}') == {"a": "b", "c": "d"}
 
+    def test_empty_key_accepted_like_aws(self) -> None:
+        # aws-cli's _keyval has no empty-key guard: with the cursor on "=" the
+        # key is "" and the pair parses (verified against the real binary:
+        # `aws s3 cp ... --metadata "=bar" --dryrun` proceeds, rc 0).
+        assert _parse("=bar") == {"": "bar"}
+        assert _parse("foo=1,=bar") == {"foo": "1", "": "bar"}
+
 
 class TestParseMapOptionErrors:
     def test_duplicate_key_rejected(self) -> None:
@@ -57,6 +64,13 @@ class TestParseMapOptionErrors:
         with pytest.raises(ValidationError) as excinfo:
             _parse("foo")
         assert "Error parsing parameter '--metadata'" in str(excinfo.value)
+
+    def test_leading_comma_rejected_with_aws_wording(self) -> None:
+        # An empty key NOT followed by "=" still fails, through _expect - the
+        # same message the real aws prints for `--metadata ",foo=1"` (rc 252).
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(",foo=1")
+        assert "Expected: '=', received: ','" in str(excinfo.value)
 
     def test_invalid_json_rejected(self) -> None:
         with pytest.raises(ValidationError) as excinfo:

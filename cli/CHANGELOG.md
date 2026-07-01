@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix `--metadata` shorthand to accept an empty key like `aws` (`=bar` parses
+  to `{"": "bar"}` and the transfer proceeds; it wrongly exited 252), and align
+  the leading-comma error with aws's `Expected: '='` wording.
 - Fix `sync` `--exclude` / `--include` anchoring to match `aws s3`: a
   root-anchored (absolute) pattern now prunes each side against its own full
   path, so a pattern matching only the source no longer wrongly protects the
