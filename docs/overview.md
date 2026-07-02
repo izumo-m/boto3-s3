@@ -74,6 +74,16 @@ maintaining high functional compatibility (parity).
   **prefer the one with higher parity with aws-cli**. When aws-cli's behavior is
   ambiguous, read the aws-cli source as the primary
   source rather than third-party documentation.
+- **Symbol-name traceability against aws-cli**: parity work depends on reading
+  this codebase side by side with the aws-cli source. When a symbol here (a
+  class, function, or option/config key) corresponds to an aws-cli counterpart,
+  keep the same name with the same meaning, or an extended form whose
+  correspondence remains easy to trace (e.g., the CLI's
+  `human_readable_to_int` keeps aws-cli's function name because it is a
+  verbatim port). Renaming such a symbol to something unrelated - or reusing an
+  aws-cli name for a different meaning - obscures the port; a change (including
+  a refactoring) that would significantly break this correspondence is
+  rejected.
 - **Responsibility boundary for parity**: the layer that ultimately guarantees
   full compatibility with `aws s3` is the **CLI layer (`boto3-s3-cli`)**. The
   library layer only needs to provide building blocks from which a compatible

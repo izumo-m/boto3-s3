@@ -67,6 +67,7 @@ from boto3_s3.types import (
     TransferOptions,
     TransferProgress,
     TransferType,
+    strip_response_metadata,
 )
 
 if TYPE_CHECKING:
@@ -339,8 +340,8 @@ class _ResponseCapture:
         if bucket_key is None:
             return
         # Drop the streaming Body (a download response carries the object bytes)
-        # and ResponseMetadata (HTTP transport internals).
-        response = {k: v for k, v in parsed.items() if k not in ("Body", "ResponseMetadata")}
+        # along with the transport internals.
+        response = strip_response_metadata(parsed, drop_body=True)
         if "ContentRange" in response:
             # A ranged (partial) GetObject from a multipart download: the
             # object-level fields (ETag / VersionId / Metadata / ...) describe the
@@ -1105,9 +1106,7 @@ class _DeleteSource:
         # may return its own Mapping response.
         if self._capture and isinstance(response, Mapping):
             captured = cast("Mapping[str, Any]", response)
-            future.meta.user_context[_DELETE_RESPONSE_KEY] = {
-                k: v for k, v in captured.items() if k != "ResponseMetadata"
-            }
+            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(captured)
 
 
 class _CloseFileobj:

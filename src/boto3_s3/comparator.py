@@ -20,8 +20,10 @@ copy or delete. This module is layer two's material:
   ``FileFilter`` over the destination-only orphan.)
 - :func:`compare_size_time` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
-  re-exported building block (kept out of ``__all__``); ``S3.sync`` selects it
-  for ``compare=None`` and reads the direction from ``pair.transfer_type``.
+  re-exported building block (kept out of ``__all__``); it is the judgment
+  behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
+  selects for ``compare=None``. The direction is read from
+  ``pair.transfer_type``.
 - :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
   the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
   (a copy strategy is *chosen*, not composed).
@@ -150,7 +152,9 @@ def compare_size_time(
 ) -> bool:
     """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
 
-    Not a public building block: ``S3.sync`` selects it for ``compare=None``.
+    Not a public building block: it implements
+    :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
+    for ``compare=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
     direction-asymmetric). A source-only pair always copies (aws-cli's
     ``MissingFileSync``). For a pair present on both sides:

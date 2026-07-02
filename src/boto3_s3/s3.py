@@ -55,6 +55,7 @@ from boto3_s3.types import (
     ScanOptions,
     TransferOptions,
     TransferType,
+    strip_response_metadata,
 )
 
 if TYPE_CHECKING:
@@ -248,16 +249,14 @@ def _run_sync_pairs(
                 inflight += 1
 
 
-def _glacier_blocked(
-    info: FileInfo, *, transfer_type: TransferType, options: TransferOptions
-) -> bool:
+def _glacier_blocked(info: FileInfo, *, options: TransferOptions) -> bool:
     """Whether the aws-cli glacier gate skips this source object.
 
     GLACIER / DEEP_ARCHIVE sources block downloads and copies unless restored
-    (``Restore`` carries ``ongoing-request="false"``) or forced. Only the
-    single-object path has a HeadObject to read ``Restore`` from - a
-    recursive listing has none, so restored objects still skip there
-    (aws-cli-faithful; ``fileinfo.is_glacier_compatible``).
+    (``Restore`` carries ``ongoing-request="false"``) or forced; an upload
+    never reaches this gate. Only the single-object path has a HeadObject to
+    read ``Restore`` from - a recursive listing has none, so restored objects
+    still skip there (aws-cli-faithful; ``fileinfo.is_glacier_compatible``).
     """
     if options.get("force_glacier_transfer"):
         return False
@@ -266,7 +265,6 @@ def _glacier_blocked(
     restore = ""
     if info.head is not None:
         restore = str(info.head.get("Restore", ""))
-    del transfer_type  # download and copy both gate; upload never reaches here
     return 'ongoing-request="false"' not in restore
 
 
@@ -280,6 +278,29 @@ def _glacier_warning(src_display: str, transfer_type: TransferType) -> str:
         f"s3 {op} help for additional parameter options to ignore or force "
         "these transfers."
     )
+
+
+def _glacier_gate(
+    info: FileInfo,
+    *,
+    transfer_type: TransferType,
+    options: TransferOptions,
+    transferrer: Transferrer,
+    compare_key: str,
+    src_display: str,
+) -> bool:
+    """Run the glacier gate; ``True`` when it consumed the item.
+
+    A blocked item is either silently skipped (``ignore_glacier_warnings``,
+    counted) or warned away with aws's message - the caller drops it either way.
+    """
+    if not _glacier_blocked(info, options=options):
+        return False
+    if options.get("ignore_glacier_warnings"):
+        transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
+    else:
+        transferrer.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
+    return True
 
 
 class _CaseConflictGate:
@@ -435,40 +456,28 @@ class _SyncDeletes:
         # counters. A backend error is mapped into the library taxonomy (the same
         # translate the byte-moving delete path uses), so every result carries a
         # Boto3S3Error and the message aws prints survives; the catch is broad.
-        if not isinstance(dest, LocalStorage):
-            display = _open_side_display(dest, pair.key)
-            if self._dryrun:
-                self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
-                return
-            try:
-                response = dest.delete(info)
-            except Exception as exc:
-                self._emit(
-                    info=info, outcome=OpOutcome.FAILED, src=display, error=self._fail(exc, info)
-                )
-                return
-            self._local_succeeded += 1
-            self._emit(
-                info=info,
-                outcome=OpOutcome.SUCCEEDED,
-                src=display,
-                extra_info=self._delete_slot(response),
-            )
-            return
-        native = to_native_path(info.key)
+        # Only the display form differs: a local orphan reads as a native path,
+        # a custom one through the backend's own rendering.
+        display = (
+            to_native_path(info.key)
+            if isinstance(dest, LocalStorage)
+            else _open_side_display(dest, pair.key)
+        )
         if self._dryrun:
-            self._emit(info=info, outcome=OpOutcome.DRYRUN, src=native)
+            self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
             return
         try:
             response = dest.delete(info)
         except Exception as exc:
-            self._emit(info=info, outcome=OpOutcome.FAILED, src=native, error=self._fail(exc, info))
+            self._emit(
+                info=info, outcome=OpOutcome.FAILED, src=display, error=self._fail(exc, info)
+            )
             return
         self._local_succeeded += 1
         self._emit(
             info=info,
             outcome=OpOutcome.SUCCEEDED,
-            src=native,
+            src=display,
             extra_info=self._delete_slot(response),
         )
 
@@ -494,7 +503,7 @@ class _SyncDeletes:
         """
         if not self._capture_response or response is None:
             return None
-        return {"delete": {k: v for k, v in response.items() if k != "ResponseMetadata"}}
+        return {"delete": strip_response_metadata(response)}
 
     def _emit(
         self,
@@ -1177,13 +1186,14 @@ class S3:
         # warning handlers (aws-cli instruction order).
         if case_gate is not None and case_gate.blocks(item, transferrer):
             return None
-        if _glacier_blocked(info, transfer_type=TransferType.DOWNLOAD, options=options):
-            if options.get("ignore_glacier_warnings"):
-                transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
-            else:
-                transferrer.warn(
-                    _glacier_warning(src_display, TransferType.DOWNLOAD), key=compare_key
-                )
+        if _glacier_gate(
+            info,
+            transfer_type=TransferType.DOWNLOAD,
+            options=options,
+            transferrer=transferrer,
+            compare_key=compare_key,
+            src_display=src_display,
+        ):
             return None
         # Anchor with "./" before normpath (aws-cli's _warn_parent_reference): a
         # compare_key that relativizes to a leading slash (e.g. "/../secret" from
@@ -1219,11 +1229,14 @@ class S3:
         dest = naming.dest_for(plan, compare_key)
         src_display = f"s3://{src_path}"
         is_s3_info = isinstance(info, S3FileInfo)
-        if _glacier_blocked(info, transfer_type=TransferType.COPY, options=options):
-            if options.get("ignore_glacier_warnings"):
-                transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
-            else:
-                transferrer.warn(_glacier_warning(src_display, TransferType.COPY), key=compare_key)
+        if _glacier_gate(
+            info,
+            transfer_type=TransferType.COPY,
+            options=options,
+            transferrer=transferrer,
+            compare_key=compare_key,
+            src_display=src_display,
+        ):
             return None
         return TransferItem(
             compare_key=compare_key,
@@ -1548,13 +1561,14 @@ class S3:
         open_key = naming.dest_for(plan, compare_key)
         src_display = f"s3://{bucket}/{info.key}"
         is_s3_info = isinstance(info, S3FileInfo)
-        if _glacier_blocked(info, transfer_type=TransferType.DOWNLOAD, options=options):
-            if options.get("ignore_glacier_warnings"):
-                transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
-            else:
-                transferrer.warn(
-                    _glacier_warning(src_display, TransferType.DOWNLOAD), key=compare_key
-                )
+        if _glacier_gate(
+            info,
+            transfer_type=TransferType.DOWNLOAD,
+            options=options,
+            transferrer=transferrer,
+            compare_key=compare_key,
+            src_display=src_display,
+        ):
             return None
         return TransferItem(
             compare_key=compare_key,
@@ -2358,11 +2372,7 @@ class S3:
         # capture_response surfaces the DeleteObject response (minus
         # ResponseMetadata) under extra_info["delete"], the same shape the batched
         # path reconstructs from a DeleteObjects entry.
-        extra_info = (
-            {"delete": {k: v for k, v in response.items() if k != "ResponseMetadata"}}
-            if capture_response
-            else None
-        )
+        extra_info = {"delete": strip_response_metadata(response)} if capture_response else None
         _emit_result(
             on_result,
             info=info,

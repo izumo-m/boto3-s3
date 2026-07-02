@@ -337,6 +337,20 @@ ResultCallback = Callable[[OpResult], None]
 FileFilter = Callable[[FileInfo], bool]
 
 
+def strip_response_metadata(
+    response: Mapping[str, Any], *, drop_body: bool = False
+) -> dict[str, Any]:
+    """A parsed S3 response minus ``ResponseMetadata`` (HTTP transport internals).
+
+    The wire-shape convention for everything surfaced under
+    ``OpResult.extra_info``: response slots carry the operation's parsed fields
+    only. ``drop_body`` additionally removes the streaming ``Body`` a
+    ``GetObject`` response carries (the object bytes, never a metadata field).
+    """
+    dropped = ("Body", "ResponseMetadata") if drop_body else ("ResponseMetadata",)
+    return {k: v for k, v in response.items() if k not in dropped}
+
+
 __all__ = [
     "CancelToken",
     "CaseConflictMode",

@@ -13,7 +13,9 @@ warning has no Python-3 equivalent (``os.listdir`` of a ``str`` path always yiel
 ``str``) and is not ported.
 
 The walk is a pipeline of **protected, overridable** ``LocalStorage`` methods -
-:meth:`~LocalStorage._walk` (recursion), :meth:`~LocalStorage._should_ignore` (the
+:meth:`~LocalStorage._walk` (recursion), :meth:`~LocalStorage._sorted_child_names`
+(one directory's vetted names in the aws-cli sort order shared with the
+one-level scan), :meth:`~LocalStorage._should_ignore` (the
 symlink-skip + warning battery), :meth:`~LocalStorage._triggers_warning`,
 :meth:`~LocalStorage._stat_info` (one walk entry's ``LocalFileInfo``), and
 :meth:`~LocalStorage._stat_one` (a single path, for ``get_fileinfo``) - so a
@@ -314,20 +316,7 @@ class LocalStorage(Storage):
         """The recursive worker behind :meth:`walk_local` (an override seam)."""
         if self._should_ignore(path, follow_symlinks=follow_symlinks, notify=notify):
             return
-        names: list[str] = []
-        for name in os.listdir(path):
-            entry_path = os.path.join(path, name)
-            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
-                continue
-            if os.path.isdir(entry_path):
-                name += os.sep
-            names.append(name)
-        # str sorts by code point, which equals UTF-8 byte order (UTF-8 preserves
-        # code-point order), so this is S3's exact key order, not an approximation.
-        # The os.sep -> "/" fold puts a directory ("foo/") after a sibling file
-        # ("foo.txt"), since "/" (0x2F) > "." (0x2E) - matching aws-cli.
-        names.sort(key=lambda item: item.replace(os.sep, "/"))
-        for name in names:
+        for name in self._sorted_child_names(path, follow_symlinks=follow_symlinks, notify=notify):
             entry_path = os.path.join(path, name)
             if os.path.isdir(entry_path):
                 if detector is not None and detector.is_cycle(entry_path):
@@ -351,6 +340,29 @@ class LocalStorage(Storage):
                 info = self._stat_info(entry_path, notify)
                 if info is not None:
                     yield info
+
+    def _sorted_child_names(
+        self, dir_path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
+    ) -> list[str]:
+        """One directory's vetted child names in aws-cli order (an override seam).
+
+        Entries :meth:`_should_ignore` skips are dropped; a directory name gains
+        a trailing ``os.sep``. str sorts by code point, which equals UTF-8 byte
+        order (UTF-8 preserves code-point order), so this is S3's exact key
+        order, not an approximation. The os.sep -> "/" fold puts a directory
+        ("foo/") after a sibling file ("foo.txt"), since "/" (0x2F) > "." (0x2E)
+        - matching aws-cli.
+        """
+        names: list[str] = []
+        for name in os.listdir(dir_path):
+            entry_path = os.path.join(dir_path, name)
+            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
+                continue
+            if os.path.isdir(entry_path):
+                name += os.sep
+            names.append(name)
+        names.sort(key=lambda item: item.replace(os.sep, "/"))
+        return names
 
     def _should_ignore(
         self, path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
@@ -441,16 +453,7 @@ class LocalStorage(Storage):
             if info is not None:
                 yield info
             return
-        names: list[str] = []
-        for name in os.listdir(root):
-            entry_path = os.path.join(root, name)
-            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
-                continue
-            if os.path.isdir(entry_path):
-                name += os.sep
-            names.append(name)
-        names.sort(key=lambda item: item.replace(os.sep, "/"))
-        for name in names:
+        for name in self._sorted_child_names(root, follow_symlinks=follow_symlinks, notify=notify):
             entry_path = os.path.join(root, name)
             # One level down: the entry name itself is the root-relative key
             # (directory names already carry a trailing separator).
