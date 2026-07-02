@@ -303,6 +303,57 @@ def _glacier_gate(
     return True
 
 
+def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None:
+    """aws-cli's ``_validate_path_args`` missing-source check, run up front.
+
+    (Their bare RuntimeError -> rc 255; the base category here maps the same.)
+    """
+    if not os.path.exists(storage.path):
+        raise Boto3S3Error(
+            f"The user-provided path {storage.path} does not exist.", operation=operation
+        )
+
+
+def _classify_transfer_route(
+    plan: naming.TransferPlan, *, operation: str
+) -> tuple[TransferType, S3Storage, S3Storage | None, str]:
+    """Map a plan's route onto the engine wiring cp/mv and sync share.
+
+    Returns ``(transfer_type, client_provider, source_client_provider,
+    dest_bucket)``: the providers are the S3 side(s) whose ``get_client()``
+    drives s3transfer (``source_client_provider`` only on the s3s3 route) -
+    handed back unresolved so each caller keeps its established effect order
+    (its destination-directory creation runs before any client is built).
+    The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
+    pair, because the engine reaches into ``S3Storage``'s client/bucket and
+    ``LocalStorage``'s path directly; an open route pairs a capability-checked
+    custom backend with S3. The missing-local-source check runs here
+    (identical in cp/mv and sync); the destination-directory creation does
+    not - its guard shapes deliberately differ (cp's recursive-gated
+    ``exist_ok=True`` vs sync's unconditional bare ``makedirs``) and stay with
+    the callers.
+    """
+    src_storage = plan.src
+    dest_storage = plan.dest
+    if plan.paths_type == "locals3":
+        assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
+        _check_local_source_exists(src_storage, operation=operation)
+        return TransferType.UPLOAD, dest_storage, None, dest_storage.bucket
+    if plan.paths_type == "s3local":
+        assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)
+        return TransferType.DOWNLOAD, src_storage, None, ""
+    if plan.paths_type == "s3s3":
+        assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
+        return TransferType.COPY, dest_storage, src_storage, dest_storage.bucket
+    if plan.paths_type == "opens3":
+        # Custom source -> S3: upload each entry from its Storage.open("rb").
+        assert isinstance(dest_storage, S3Storage)
+        return TransferType.UPLOAD, dest_storage, None, dest_storage.bucket
+    # s3open: S3 -> custom destination, download into its open("wb").
+    assert isinstance(src_storage, S3Storage)
+    return TransferType.DOWNLOAD, src_storage, None, ""
+
+
 class _CaseConflictGate:
     """The ``--case-conflict`` decision for recursive downloads.
 
@@ -865,59 +916,30 @@ class S3:
             src_storage, dest_storage, recursive=recursive, operation=operation
         )
 
-        source_client = None
-        src_s3: S3Storage | None = None
-        dest_bucket = ""
-        # The built-in routes pin the concrete types the engine reaches into
-        # (S3Storage's client/bucket, LocalStorage's path); the open routes pair
-        # a capability-checked custom backend with S3 and move its bytes through
-        # Storage.open (see this method's docstring).
-        if plan.paths_type == "locals3":
-            assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
-            # aws-cli's _validate_path_args: the raw user path, checked up front
-            # (their bare RuntimeError -> rc 255; base category here, ditto).
-            if not os.path.exists(src_storage.path):
-                raise Boto3S3Error(
-                    f"The user-provided path {src_storage.path} does not exist.",
-                    operation=operation,
-                )
-            transfer_type = TransferType.UPLOAD
-            client = dest_storage.get_client()
-            dest_bucket = dest_storage.bucket
-        elif plan.paths_type == "s3local":
-            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)
-            # aws-cli's _validate_path_args only creates the dest dir when it does
-            # not already exist; check the raw user path (plan.dest_root carries a
-            # trailing os.sep, so exists() is False for an existing *file*). An
-            # existing-file dest then skips makedirs and fails per item like aws
-            # (rc 1) instead of crashing up front; an empty listing transfers
-            # nothing and exits 0.
-            if recursive and not os.path.exists(dest_storage.path):
-                try:
-                    os.makedirs(plan.dest_root, exist_ok=True)
-                except OSError as exc:
-                    raise Boto3S3Error(str(exc), operation=operation) from exc
-            transfer_type = TransferType.DOWNLOAD
-            client = src_storage.get_client()
-            src_s3 = src_storage
-        elif plan.paths_type == "s3s3":
-            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
-            transfer_type = TransferType.COPY
-            client = dest_storage.get_client()
-            source_client = src_storage.get_client()
-            src_s3 = src_storage
-            dest_bucket = dest_storage.bucket
-        elif plan.paths_type == "opens3":
-            # Custom source -> S3: upload each entry from its Storage.open("rb").
-            assert isinstance(dest_storage, S3Storage)
-            transfer_type = TransferType.UPLOAD
-            client = dest_storage.get_client()
-            dest_bucket = dest_storage.bucket
-        else:  # s3open: S3 -> custom destination, download into its open("wb").
-            assert isinstance(src_storage, S3Storage)
-            transfer_type = TransferType.DOWNLOAD
-            client = src_storage.get_client()
-            src_s3 = src_storage
+        transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
+            plan, operation=operation
+        )
+        # aws-cli's _validate_path_args only creates the dest dir when it does
+        # not already exist; check the raw user path (plan.dest_root carries a
+        # trailing os.sep, so exists() is False for an existing *file*). An
+        # existing-file dest then skips makedirs and fails per item like aws
+        # (rc 1) instead of crashing up front; an empty listing transfers
+        # nothing and exits 0. (sync's guard differs: unconditional, bare
+        # makedirs.)
+        if (
+            recursive
+            and isinstance(dest_storage, LocalStorage)
+            and not os.path.exists(dest_storage.path)
+        ):
+            try:
+                os.makedirs(plan.dest_root, exist_ok=True)
+            except OSError as exc:
+                raise Boto3S3Error(str(exc), operation=operation) from exc
+        client = client_provider.get_client()
+        source_client = source_provider.get_client() if source_provider is not None else None
+        # The S3 listing source (s3local / s3s3 / s3open); None on the
+        # local/custom-source upload routes.
+        src_s3 = src_storage if isinstance(src_storage, S3Storage) else None
 
         self._require_open_capabilities(
             plan, recursive=recursive, is_move=is_move, operation=operation
@@ -1894,49 +1916,21 @@ class S3:
         dest_storage.validate()
         plan = naming.plan_transfer(src_storage, dest_storage, recursive=True, operation="sync")
 
-        source_client = None
-        dest_bucket = ""
-        if plan.paths_type == "locals3":
-            assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
-            # aws-cli's _validate_path_args: the raw user path, checked up front.
-            if not os.path.exists(src_storage.path):
-                raise Boto3S3Error(
-                    f"The user-provided path {src_storage.path} does not exist.",
-                    operation="sync",
-                )
-            transfer_type = TransferType.UPLOAD
-            client = dest_storage.get_client()
-            dest_bucket = dest_storage.bucket
-        elif plan.paths_type == "s3local":
-            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)
-            # aws-cli creates the destination directory during validation -
-            # before any listing, so even an empty sync leaves it behind.
-            # The bare exists() test (not exist_ok=True) is deliberate: a
-            # destination that exists as a *file* passes here and fails per
-            # item instead ([Errno 20], rc 1).
-            if not os.path.exists(dest_storage.path):
-                try:
-                    os.makedirs(dest_storage.path)
-                except OSError as exc:
-                    raise Boto3S3Error(str(exc), operation="sync") from exc
-            transfer_type = TransferType.DOWNLOAD
-            client = src_storage.get_client()
-        elif plan.paths_type == "s3s3":
-            assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
-            transfer_type = TransferType.COPY
-            client = dest_storage.get_client()
-            source_client = src_storage.get_client()
-            dest_bucket = dest_storage.bucket
-        elif plan.paths_type == "opens3":
-            # Custom source -> S3: upload each entry from its Storage.open("rb").
-            assert isinstance(dest_storage, S3Storage)
-            transfer_type = TransferType.UPLOAD
-            client = dest_storage.get_client()
-            dest_bucket = dest_storage.bucket
-        else:  # s3open: S3 -> custom destination, download into its open("wb").
-            assert isinstance(src_storage, S3Storage)
-            transfer_type = TransferType.DOWNLOAD
-            client = src_storage.get_client()
+        transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
+            plan, operation="sync"
+        )
+        # aws-cli creates the destination directory during validation - before
+        # any listing, so even an empty sync leaves it behind. The bare
+        # exists() test (not exist_ok=True) is deliberate: a destination that
+        # exists as a *file* passes here and fails per item instead
+        # ([Errno 20], rc 1). (cp's guard differs: recursive-gated, exist_ok.)
+        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.path):
+            try:
+                os.makedirs(dest_storage.path)
+            except OSError as exc:
+                raise Boto3S3Error(str(exc), operation="sync") from exc
+        client = client_provider.get_client()
+        source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the
         # I/O the route uses; reject up front before any listing (gate below).
         self._require_open_sync_capabilities(plan, delete=bool(delete), operation="sync")
