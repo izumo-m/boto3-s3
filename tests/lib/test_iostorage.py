@@ -11,7 +11,7 @@ import io
 
 import pytest
 
-from boto3_s3.exceptions import Boto3S3Error
+from boto3_s3.exceptions import ValidationError
 from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.types import FileInfo, ScanOptions
 
@@ -115,5 +115,6 @@ class TestStdioStorage:
 
     def test_read_without_stdin_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdin", None)
-        with pytest.raises(Boto3S3Error, match="stdin is required"):
+        # ValidationError: a runtime-state precondition (exceptions.md section 3).
+        with pytest.raises(ValidationError, match="stdin is required"):
             StdioStorage().open("k", "rb")

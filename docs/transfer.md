@@ -307,7 +307,7 @@ dest-existence check for download. We ported the same three faces:
   specification beats pip s3transfer's default injection (`setdefault`)**.
 - `checksum_mode` (download) -> GetObject's `ChecksumMode: ENABLED` (botocore
   verifies the response's checksum).
-- The single-source HeadObject (`_cp_head_single`, the download / copy point op)
+- The single-source HeadObject (`producers.head_single`, the download / copy point op)
   also `setdefault`s `ChecksumMode: ENABLED` when the client resolves
   `response_checksum_validation` to `when_supported` (the botocore default since
   checksums GA), mirroring aws-cli's filegenerator - so the HEAD's request shape
@@ -400,9 +400,11 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
-A custom `Storage` (any `scheme` other than `"s3"` / `"local"`) transfers as one
+A custom `Storage` (anything that is not an `S3Storage` / `LocalStorage`,
+whatever its `scheme` string says) transfers as one
 side of `cp` / `mv` / `sync`, the other side always S3. `transferplan.plan_transfer`
-classifies the pair from the two `scheme`s into `opens3` (custom source -> S3, an
+classifies the pair by the endpoints' concrete types (the structural match in
+`_paths_type`) into `opens3` (custom source -> S3, an
 UPLOAD) or `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer`
 (cp / mv) and `S3.sync` route both. The S3 side rides `s3transfer` as usual; the
 custom side's bytes move through its `Storage.open(key, mode)` - the same
@@ -433,7 +435,7 @@ and outside aws parity.
   nothing (rc 0, like an empty S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
   download (recursive `ListObjectsV2` / single `HeadObject`, folder markers
   dropped).
-- **capability gate** (`S3._require_open_capabilities`, before any bytes move):
+- **capability gate** (`producers.require_open_capabilities`, before any bytes move):
   the custom side is pre-checked against `Storage.capabilities` and a missing
   contract method is a clear `ValidationError` naming the gap (not a deep
   failure). `opens3` needs `OPEN_READ` + (`SCAN` if recursive else
@@ -457,7 +459,7 @@ and outside aws parity.
 - **mv** (section 11): every upload deletes its source through that source's own
   `Storage.delete(info)` after each successful upload - the source listing entry
   rides on `TransferItem.src_info` (its `info.key` locates the object), and
-  `Transferrer.source_storage` carries the source `Storage` (local or custom
+  `Transferrer`'s `src_storage` carries the source `Storage` (local or custom
   backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
   download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
@@ -465,7 +467,7 @@ and outside aws parity.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
   custom side must declare `SORTED_SCAN` - an unsorted listing would manufacture
   phantom new/delete pairs and, with `--delete`, corrupt the destination. A
-  dedicated gate (`S3._require_open_sync_capabilities`) requires `SORTED_SCAN` +
+  dedicated gate (`producers.require_open_sync_capabilities`) requires `SORTED_SCAN` +
   `OPEN_READ` (an `opens3` source) / `OPEN_WRITE` (an `s3open` destination), plus
   `DELETE` when `--delete` removes orphans from an `s3open` custom destination
   (`opens3` orphans are S3, deleted without the custom side). `sync` passes

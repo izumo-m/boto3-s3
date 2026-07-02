@@ -522,12 +522,13 @@ def resolve_locations(
 
 
 def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
-    """The scheme-bearing Storage ``naming.plan_transfer`` reads for cp/mv/sync.
+    """A plan-only endpoint Storage for ``transferplan.plan_transfer``.
 
-    ``plan_transfer`` needs only ``.scheme`` / ``.as_text()``, so the S3 side
-    carries no client here - this is the throwaway used purely to derive the path
-    shapes (roots, the stdin dest key). The real transfer storages (with a client)
-    are built in :func:`resolve_locations`.
+    The planner routes by concrete type and each side formats itself from its
+    held state (``Storage.format``), so the S3 side carries no client here -
+    this is the throwaway used purely to derive the path shapes (roots, the
+    stdin dest key). The real transfer storages (with a client) are built in
+    :func:`resolve_locations`.
     """
     from boto3_s3 import LocalStorage, S3Storage
 

@@ -738,26 +738,30 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 
 ## 7. Import discipline (startup cost)
 
-Paths that end in `--help` / `--version` / a usage error import neither the AWS
-SDK (boto3 / botocore / s3transfer) nor **`prompt_toolkit`** at all. The contract
-and the implementation as a whole are in [`imports.md`](./imports.md); enforcement
-is in `tests/cli/unit/test_import_contract.py` (the forbidden roots include
+Until the subcommand is determined (stage 1 of the two-stage dispatch), no
+AWS SDK module (boto3 / botocore / s3transfer), no command module, and no
+**`prompt_toolkit`** loads - so the top-level `--help` / `--version` and the
+stage-1 usage errors stay SDK-free. Once the subcommand is determined, a
+command module may top-import names that reach `botocore.exceptions`, and its
+`run()` may load botocore (the profile resolution, the error path); the
+boto3 / s3transfer **client stack** still loads only in `build_client` /
+`build_service_client`. The contract and the implementation as a whole are in
+[`imports.md`](./imports.md) (section 2 item 4 - the old "SDK imports go
+inside `run()`" rule is retired); enforcement is in
+`tests/cli/unit/test_import_contract.py` (the forbidden roots include
 `prompt_toolkit`). The key points on the CLI side:
 
-- Imports that reach the SDK go inside `build_client` and each `Command.run()`.
-  They are not placed at the module top level where `configure()` runs (names
-  derived from pure-Python `types` / `exceptions` / `globsieve` are allowed at the
-  top level).
 - The `--version` line is assembled when the action fires, and the boto3 /
   botocore versions are read from the distribution metadata (the package proper is
   not imported).
 - The help choices / help text are a static mirror of aws-cli's static
   tables (the same idiom as the `cli.json` mirror of section 4). They are not taken
   dynamically from botocore's models.
-- `runtimeconfig.py`'s top level is also pure Python (only `Boto3S3Error` /
-  `ConfigurationError`). boto3 (the scoped config read), awscrt (the decision
-  tree), and `TransferConfig` construction are imported inside functions, paid for
-  only when a transfer path is reached.
+- `runtimeconfig.py`'s top level is also pure Python (the exception classes
+  plus `awsconfig`'s shared size core - itself SDK-free at import). boto3
+  (the scoped config read), awscrt (the decision tree), and `TransferConfig`
+  construction are imported inside functions, paid for only when a transfer
+  path is reached.
 - The `autoprompt` package and `prompt_toolkit` are imported only when
   `--cli-auto-prompt` fires (`cli.main`'s resolver only scans the raw argv and
   needs no import). The completion engine proper (`model` / `parser` /
@@ -779,16 +783,19 @@ the library. The overall design and the library side (boto3-faithful) are in
   env vars are set), and
   `RuntimeConfig.build_config` converts sizes / rates / bools exactly as aws-cli
   `transferconfig.py`, resolves the `default` -> `classic` alias, and validates
-  invalid values. An invalid value is a `Boto3S3Error` (rc 255 - aws-cli's
-  `InvalidConfigError` is also 255 at the general handler. It is placed **after**
+  invalid values. An invalid value is the library's `InvalidConfigError`
+  (rc 255 - aws-cli's class of the same name is also 255 at the general
+  handler. It is placed **after**
   the usage 252 / src-absent 255 validation: an invalid `[s3]` value loses to
   both). This also closes the existing gap where classic's
   `multipart_threshold` etc. did not take effect from the config.
 - **The engine decision tree** (`resolve_transfer_client`, a port of aws-cli
   `TransferManagerFactory`): `s3s3` -> unconditionally classic; `preferred` is
-  `classic` -> classic; `crt` -> crt if awscrt is present (if absent, a
-  `ConfigurationError` rc 253 = a CLI-specific degradation); `auto` -> crt if
-  `is_optimized_for_system()` and the lock can be acquired, otherwise classic.
+  `classic` -> classic; `crt` -> crt if awscrt is present *and* the installed
+  s3transfer carries the CRT surface (>= 0.8.0) - if either is missing, a
+  plain `ConfigurationError` rc 253 = a CLI-specific degradation; `auto` -> crt
+  if `is_optimized_for_system()` and the lock can be acquired (an s3transfer
+  without the CRT surface silently resolves classic), otherwise classic.
   Streaming does not force classic.
 - **`TransferConfig` construction** (`build_transfer_config`): pass only the keys
   explicitly present in `[s3]` to the ctor (an unset one keeps boto3's

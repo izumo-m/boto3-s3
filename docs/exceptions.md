@@ -100,8 +100,11 @@ An S3 `ClientError` code is matched first against `S3_CODE_CATEGORIES`
 (`s3storage.py`); a code not in the table falls back to HTTP-status widening:
 403 -> `AccessDeniedError`, 404 -> `NotFoundError`, 5xx -> `TransportError`,
 other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. That last
-fallback - and `translate_boto_error`'s final clause for an exception nothing
-classifies - are the only places a direct base instance is created (section 1).
+fallback, `translate_boto_error`'s final clause for an exception nothing
+classifies, and the deleter's per-key `Errors[]` translation (whose entries
+carry a bare code with no HTTP status to widen on - an unknown code is the
+base category, deleter.md section 3) are the only places a direct base
+instance is created (section 1).
 
 ## 4. The batch aggregation exception `BatchError`
 

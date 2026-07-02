@@ -7,8 +7,9 @@ class Boto3S3Error(Exception):
     Never raised directly for a known failure - every raise site uses one of
     the subclasses below, so ``except Boto3S3Error`` is the catch-all. Direct
     instances appear only where no classification exists: the error
-    translators' last-resort fallback (``s3storage.translate_boto_error``) and
-    the message envelope on WARNED / NOTICE ``OpResult`` records.
+    translators' last-resort fallbacks (``s3storage.translate_boto_error``,
+    the deleter's per-key unknown-code entries) and the message envelope on
+    WARNED / NOTICE ``OpResult`` records.
     """
 
     def __init__(

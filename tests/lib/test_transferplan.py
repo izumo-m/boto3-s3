@@ -21,7 +21,7 @@ from boto3_s3.exceptions import ValidationError
 from boto3_s3.transferplan import dest_for, item_paths
 from boto3_s3.types import FileInfo, ScanOptions
 
-# The S3 string grammar lives on S3Storage (A6); alias the names so the
+# The S3 string grammar lives on S3Storage; alias the names so the
 # pinned aws-parity cases below read unchanged.
 split_bucket_key = S3Storage.split_bucket_key
 normalize_s3_uri = S3Storage.normalize_s3_uri

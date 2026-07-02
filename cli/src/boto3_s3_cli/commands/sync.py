@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 
-# Pure-Python names only (exceptions / naming modules) - safe on the parse
-# path; S3 / S3Storage reach botocore and are imported in run() instead
-# (import contract, docs/imports.md).
+# Loaded only once sync is determined (stage 2 of the lazy dispatch), so these
+# may reach botocore.exceptions - transferargs does, through S3Storage (import
+# contract, docs/imports.md); the boto3 / s3transfer client stack still waits
+# for build_client.
 from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters

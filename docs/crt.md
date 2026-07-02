@@ -4,7 +4,7 @@ The established design for the `aws s3` CRT transfer engine
 (`preferred_transfer_client`) equivalent. The core of the transfer side lives in
 [`transfer.md`](./transfer.md), the CLI wiring in [`cli.md`](./cli.md) section 8, and
 the tests in [`testing.md`](./testing.md). Behavior matches aws
-2.34.53, cross-checked against MinIO and the aws-cli / boto3 /
+2.35.5, cross-checked against MinIO and the aws-cli / boto3 /
 s3transfer source.
 
 ## 1. The two-layer split of responsibilities
@@ -150,9 +150,10 @@ A port of aws-cli `TransferManagerFactory._compute_transfer_client_type`.
 |---|---|
 | `paths_type == 's3s3'` | `classic` (unconditional; CRT has no copy) |
 | `preferred == 'classic'` | `classic` |
-| `preferred == 'crt'` and awscrt present | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
+| `preferred == 'crt'` and awscrt present and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
 | `preferred == 'crt'` and awscrt **absent** | `ConfigurationError` (rc 253, section 6) |
-| `preferred == 'auto'` and `is_optimized_for_system()` and the lock is acquirable | `crt` |
+| `preferred == 'crt'` and s3transfer **< 0.8.0** (no CRT surface at the supported floor 0.6.2) | `ConfigurationError` (rc 253, the same clean degradation) |
+| `preferred == 'auto'` and `is_optimized_for_system()` and the lock is acquirable | `crt` (an s3transfer without the CRT surface silently resolves `classic`) |
 | otherwise (`auto` with non-optimized / lock contention) | `classic` |
 
 The CLI settles `auto` and places the resolved `'classic'` / `'crt'` onto

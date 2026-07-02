@@ -20,7 +20,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
-from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
+from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
 from boto3_s3.types import (
@@ -1077,14 +1077,16 @@ class TestConditionalWriteSupport:
         assert "1.41.0" in reason and "CopyObject" in reason
 
     def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
-        with pytest.raises(Boto3S3Error, match=r"1\.35\.16"):
+        # ConfigurationError: the environment (SDK floor) lacks the
+        # capability, not the caller's arguments (exceptions.md section 3).
+        with pytest.raises(ConfigurationError, match=r"1\.35\.16"):
             Transferrer(
                 TransferType.UPLOAD, model_only_client(set()), options={"no_overwrite": True}
             )
 
     def test_transferrer_rejects_no_overwrite_copy_on_old_botocore(self) -> None:
         client = model_only_client({"PutObject"})  # upload ok, copy not yet
-        with pytest.raises(Boto3S3Error, match=r"1\.41\.0"):
+        with pytest.raises(ConfigurationError, match=r"1\.41\.0"):
             Transferrer(
                 TransferType.COPY, client, source_client=client, options={"no_overwrite": True}
             )

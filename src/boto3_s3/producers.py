@@ -217,7 +217,7 @@ def upload_items(
 
     A recursive source enumerates through ``plan.src.scan`` so a ``LocalStorage``
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
-    a point op walked directly (the local analog of ``_cp_head_single`` - no
+    a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
     with [Errno 21] Is a directory, rc 1, like aws-cli). Either way the
     producer stamps each entry's ``compare_key``, so ``item_filter`` reads it
@@ -692,7 +692,7 @@ def open_download_items(
 
     The open-route mirror of the S3-source half of ``_cp_s3_source_items``:
     the source is enumerated identically (``_cp_scan`` for a recursive
-    prefix, ``_cp_head_single`` for one object), but each entry is written
+    prefix, ``head_single`` for one object), but each entry is written
     through ``plan.dest.open(key, "wb")`` instead of to a local path. The
     destination's local-filesystem gates (case-conflict, parent-reference,
     ``no_overwrite``'s ``os.path.exists``) do not apply - the backend owns its

@@ -15,8 +15,10 @@ path/usage validation).
 :func:`load_scoped_s3_config` reads the section the way aws-cli's
 ``_get_runtime_config`` does - the profile's scoped config, so nested
 ``s3 =`` INI syntax, ``AWS_CONFIG_FILE`` and ``--profile`` all behave like
-aws. The engine decision tree over the parsed config lives in
-:mod:`boto3_s3_cli.commands.transferargs` (docs/cli.md).
+aws. The engine decision tree over the parsed config is
+:func:`resolve_transfer_client` below (a port of aws-cli
+``TransferManagerFactory._compute_transfer_client_type``; docs/crt.md
+section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 """
 
 from __future__ import annotations
