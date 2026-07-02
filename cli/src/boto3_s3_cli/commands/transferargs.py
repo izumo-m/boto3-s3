@@ -26,7 +26,7 @@ from boto3_s3 import (
     TransferOptions,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, shorthand, usage
+from boto3_s3_cli import clientfactory, filters, paramfile, shorthand, usage
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
@@ -453,51 +453,6 @@ def build_transfer_options(
     return options
 
 
-def _read_text_paramfile(original: str, *, name: str, operation: str) -> str:
-    """Load a ``file://`` reference as text (aws paramfile ``mode='r'``).
-
-    Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``
-    (expanduser inner). The encoding honors ``AWS_CLI_FILE_ENCODING`` (aws's
-    ``compat_open`` / ``getpreferredencoding``), falling back to the locale
-    default (``open``'s default when ``encoding`` is ``None``).
-    """
-    path = os.path.expandvars(os.path.expanduser(original[len("file://") :]))
-    encoding = os.environ.get("AWS_CLI_FILE_ENCODING")
-    try:
-        with open(path, encoding=encoding) as handle:
-            return handle.read()
-    except UnicodeDecodeError as exc:
-        # aws wording (paramfile.get_file): the decode-error message names the
-        # EXPANDED path in parentheses; the OSError one names the full original.
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile ({path}), "
-            "text contents could not be decoded.  If this is a binary file, please use "
-            "the fileb:// prefix instead of the file:// prefix.",
-            operation=operation,
-        ) from exc
-    except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
-        ) from exc
-
-
-def _read_binary_paramfile(original: str, *, name: str, operation: str) -> bytes:
-    """Load a ``fileb://`` reference as raw bytes (aws paramfile ``mode='rb'``).
-
-    Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``.
-    """
-    path = os.path.expandvars(os.path.expanduser(original[len("fileb://") :]))
-    try:
-        with open(path, "rb") as handle:
-            return handle.read()
-    except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
-        ) from exc
-
-
 def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     """Apply aws's ``file://`` (text) paramfile resolution to a string argument.
 
@@ -506,7 +461,7 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     without the prefix passes through verbatim.
     """
     if value.startswith("file://"):
-        return _read_text_paramfile(value, name=name, operation=operation)
+        return paramfile.read_text_paramfile(value, name=name, operation=operation)
     return value
 
 
@@ -520,7 +475,7 @@ def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
     key is *not* a usage error.
     """
     if value.startswith("fileb://"):
-        return _read_binary_paramfile(value, name=name, operation=operation)
+        return paramfile.read_binary_paramfile(value, name=name, operation=operation)
     return resolve_text_paramfile(value, name, operation=operation)
 
 

@@ -172,6 +172,7 @@ def build_service_client(
     # access-point paths pays the boto3 import.
     import boto3
     import botocore.session
+    from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
     verify: bool | str | None
@@ -185,8 +186,14 @@ def build_service_client(
     try:
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
         session = boto3.Session(botocore_session=botocore_session)
+        # aws's bundled botocore applies its standard/3 retry defaults to
+        # these validator clients too.
+        service_overrides: dict[str, Any] = {"retries": _retry_defaults(botocore_session)}
         return session.client(
-            service, region_name=_resolve_region(region, botocore_session), verify=verify
+            service,
+            region_name=_resolve_region(region, botocore_session),
+            verify=verify,
+            config=Config(**service_overrides),
         )
     except (NoCredentialsError, NoRegionError) as exc:
         raise ConfigurationError(str(exc)) from exc
@@ -264,7 +271,6 @@ def build_client(args: argparse.Namespace) -> S3Client:
         overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
     if args.cli_connect_timeout is not None:
         overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
-    config = Config(**overrides)
 
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile, or credential/region resolution failures). Translate them
@@ -273,6 +279,8 @@ def build_client(args: argparse.Namespace) -> S3Client:
     # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
     try:
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
+        overrides["retries"] = _retry_defaults(botocore_session)
+        config = Config(**overrides)
         session = boto3.Session(botocore_session=botocore_session)
         return session.client(
             "s3",
@@ -289,3 +297,24 @@ def build_client(args: argparse.Namespace) -> S3Client:
         raise ConfigurationError(str(exc)) from exc
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
+
+
+def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
+    """aws v2's retry defaults, honoring the user's env/config overrides.
+
+    aws v2's bundled botocore hard-codes ``retry_mode='standard'`` and
+    ``max_attempts=3`` as its session defaults (its ``configprovider``),
+    where stock botocore defaults to ``legacy`` with 5 total attempts - a
+    user-visible difference in how ``aws s3`` behaves under throttling. The
+    aws default fills in only when neither ``AWS_RETRY_MODE`` /
+    ``AWS_MAX_ATTEMPTS`` nor the profile's ``retry_mode`` / ``max_attempts``
+    supplies a value, exactly like the bundled default chain. An
+    unconvertible ``max_attempts`` raises ``ValueError`` like the bundled
+    botocore's int cast (aws's general handler, rc 255 - main()'s backstop
+    maps it the same).
+    """
+    scoped = botocore_session.get_scoped_config()
+    mode = os.environ.get("AWS_RETRY_MODE") or scoped.get("retry_mode") or "standard"
+    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS") or scoped.get("max_attempts")
+    attempts = 3 if attempts_raw is None else int(attempts_raw)
+    return {"mode": mode, "total_max_attempts": attempts}

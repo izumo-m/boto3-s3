@@ -28,6 +28,24 @@ class TestBuildClient:
         client = clientfactory.build_client(_parse([]))
         assert client.meta.service_model.service_name == "s3"
 
+    def test_retry_defaults_match_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws v2's bundled botocore hard-codes retry_mode='standard' /
+        # max_attempts=3 as its defaults (stock botocore: legacy / 5), so
+        # every request retries like aws s3's.
+        monkeypatch.delenv("AWS_RETRY_MODE", raising=False)
+        monkeypatch.delenv("AWS_MAX_ATTEMPTS", raising=False)
+        client = clientfactory.build_client(_parse([]))
+        assert client.meta.config.retries == {"mode": "standard", "total_max_attempts": 3}
+
+    def test_retry_env_overrides_beat_the_aws_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The aws default only fills in; the user's env/config still wins.
+        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
+        client = clientfactory.build_client(_parse([]))
+        assert client.meta.config.retries == {"mode": "legacy", "total_max_attempts": 7}
+
     def test_aws_region_env_honored_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws v2 resolves AWS_REGION ahead of AWS_DEFAULT_REGION; stock
         # botocore only knows AWS_DEFAULT_REGION (which the test fixture pins

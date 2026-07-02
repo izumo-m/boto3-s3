@@ -1,11 +1,14 @@
 """Unit tests for boto3_s3_cli.shorthand (``--metadata`` map parsing).
 
 Pins the aws-cli shorthand corner cases the naive split/partition parser got
-wrong: duplicate-key rejection, escaped commas, and quoted values with commas
+wrong: duplicate-key rejection, escaped commas, quoted values with commas,
+and the ``@=`` paramfile operator
 (triangulated against the aws-cli awscli/shorthand.py).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +16,7 @@ from boto3_s3 import ValidationError
 from boto3_s3_cli.shorthand import parse_map_option
 
 
-def _parse(value: str) -> dict[str, str]:
+def _parse(value: str) -> dict[str, str | bytes]:
     return parse_map_option(value, name="--metadata", operation="cp")
 
 
@@ -50,6 +53,42 @@ class TestParseMapOption:
         # `aws s3 cp ... --metadata "=bar" --dryrun` proceeds, rc 0).
         assert _parse("=bar") == {"": "bar"}
         assert _parse("foo=1,=bar") == {"foo": "1", "": "bar"}
+
+
+class TestAtEqualsParamfile:
+    """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
+    ``file://`` loads text, ``fileb://`` bytes, a prefix-less value passes
+    through (verified against aws 2.35.5: ``--metadata a@=file://f`` parses
+    and transfers)."""
+
+    def test_plain_value_passes_through(self) -> None:
+        assert _parse("a@=v") == {"a": "v"}
+
+    def test_file_prefix_loads_text(self, tmp_path: Path) -> None:
+        ref = tmp_path / "val.txt"
+        ref.write_text("loaded")
+        assert _parse(f"a@=file://{ref}") == {"a": "loaded"}
+
+    def test_fileb_prefix_loads_bytes(self, tmp_path: Path) -> None:
+        ref = tmp_path / "val.bin"
+        ref.write_bytes(b"\x00\x01")
+        assert _parse(f"a@=fileb://{ref}") == {"a": b"\x00\x01"}
+
+    def test_missing_paramfile_is_a_usage_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(f"a@=file://{tmp_path}/no-such-file")
+        assert "Unable to load paramfile" in str(excinfo.value)
+
+    def test_at_without_equals_is_a_parse_error(self) -> None:
+        # "a@b=c": the '@' is consumed as the operator probe, then the '='
+        # expectation lands on 'b' - aws's "Expected: '='" wording.
+        with pytest.raises(ValidationError, match="Expected: '='"):
+            _parse("a@b=c")
+
+    def test_mixed_with_plain_pairs(self, tmp_path: Path) -> None:
+        ref = tmp_path / "v.txt"
+        ref.write_text("x")
+        assert _parse(f"k=1,a@=file://{ref}") == {"k": "1", "a": "x"}
 
 
 class TestParseMapOptionErrors:

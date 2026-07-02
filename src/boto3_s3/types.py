@@ -301,7 +301,10 @@ class TransferOptions(TypedDict, total=False):
     sse_c_key: str | bytes
     sse_c_copy_source: str
     sse_c_copy_source_key: str | bytes
-    metadata: Mapping[str, str]
+    # str values, except a bytes one loaded by the CLI shorthand's ``@=``
+    # fileb:// operator - which rides through to botocore's own parameter
+    # rejection, exactly like aws (rc 1, not a usage error).
+    metadata: Mapping[str, str | bytes]
     metadata_directive: str
     copy_props: CopyPropsMode
     cache_control: str
