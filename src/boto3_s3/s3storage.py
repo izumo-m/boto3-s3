@@ -39,6 +39,7 @@ from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
     ConfigurationError,
+    InvalidConfigError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -67,10 +68,16 @@ _OPEN_NOT_IMPLEMENTED = (
     "only add direct programmatic S3 stream access (see storage.py)."
 )
 
-_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
+# The unresolvable credentials/region pair keeps the plain ConfigurationError
+# (aws's dedicated rc-253 handlers); the present-but-unusable configuration
+# family below refines to InvalidConfigError (aws's general handler, rc 255) -
+# the same split the CLI's clientfactory applies (docs/exceptions.md section 3).
+_UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
-    PartialCredentialsError,
     NoRegionError,
+)
+_INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
+    PartialCredentialsError,
     ProfileNotFound,
 )
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (EndpointConnectionError, BotoConnectionError)
@@ -174,20 +181,24 @@ def translate_boto_error(
     """Map any transfer-path exception to the matching ``Boto3S3Error``.
 
     ``ClientError`` goes through the code/status table; botocore's credential,
-    transport, and request-shape errors map to their categories
-    (``ParamValidationError`` is client-side validation - no HTTP happened -
-    which aws-cli files under its usage rc). An existing ``Boto3S3Error``
-    passes through unchanged, and anything else - an ``OSError`` raised by
-    local file I/O inside s3transfer, say - becomes the base category carrying
-    its message (the ``[Errno 21] Is a directory`` text aws prints for a
-    directory source survives verbatim).
+    transport, and request-shape errors map to their categories - unresolvable
+    credentials/region to ``ConfigurationError``, a present-but-unusable
+    profile or partial credentials to its ``InvalidConfigError`` refinement,
+    and ``ParamValidationError`` (client-side validation - no HTTP happened)
+    to ``ValidationError``, which aws-cli files under its usage rc. An
+    existing ``Boto3S3Error`` passes through unchanged, and anything else -
+    an ``OSError`` raised by local file I/O inside s3transfer, say - becomes
+    the base category carrying its message (the ``[Errno 21] Is a directory``
+    text aws prints for a directory source survives verbatim).
     """
     if isinstance(exc, Boto3S3Error):
         return exc
     if isinstance(exc, ClientError):
         return _translate_client_error(exc, operation=operation, bucket=bucket, key=key)
-    if isinstance(exc, _CONFIG_ERRORS):
+    if isinstance(exc, _UNRESOLVED_CONFIG_ERRORS):
         return ConfigurationError(str(exc), operation=operation, bucket=bucket, key=key)
+    if isinstance(exc, _INVALID_CONFIG_ERRORS):
+        return InvalidConfigError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _TRANSPORT_ERRORS):
         return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, ParamValidationError):
@@ -478,10 +489,11 @@ class S3Storage(Storage):
         Memoized: the first call builds (or returns the supplied) client and
         every later call returns the same instance. Deliberately not guarded by
         a lock; build the client on the caller side for concurrent use. A failed
-        default build (e.g. an unresolvable ``AWS_PROFILE``) raises the
-        translated ``Boto3S3Error`` - ``ConfigurationError`` for the profile /
-        credential / region family - never the raw botocore error
-        (docs/exceptions.md section 1).
+        default build raises the translated ``Boto3S3Error`` -
+        ``ConfigurationError`` for unresolvable credentials / region, its
+        ``InvalidConfigError`` refinement for a set-but-unusable
+        ``AWS_PROFILE`` - never the raw botocore error (docs/exceptions.md
+        section 1).
         """
         if self._client is None:
             # Deferred: only the default-client fallback needs boto3, and

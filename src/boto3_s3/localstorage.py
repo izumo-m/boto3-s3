@@ -547,8 +547,11 @@ class LocalStorage(Storage):
         """
         # Anchor on the construction-time absolutized path like scan /
         # get_fileinfo, so a later chdir cannot move where a relative
-        # location's keys resolve.
-        target = os.path.join(self._abspath, to_native_path(key))
+        # location's keys resolve. key="" is the location itself (the
+        # get_fileinfo convention) - os.path.join(x, "") would append a
+        # trailing separator and, on "wb", makedirs a directory at the
+        # target file's own path before the open fails.
+        target = self._abspath if not key else os.path.join(self._abspath, to_native_path(key))
         try:
             if mode == "rb":
                 return cast("BinaryIO", open(target, "rb"))

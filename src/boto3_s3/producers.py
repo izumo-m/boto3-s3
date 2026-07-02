@@ -308,6 +308,12 @@ def s3_source_items(
         infos = head_single(
             src_storage, transfer_type=transfer_type, options=options, operation=operation
         )
+        if item_filter is not None:
+            # aws applies --exclude/--include to the single-object routes too
+            # (its filter pipeline stage runs regardless of dir_op); the
+            # recursive branch filters inside the scan above. An excluded mv
+            # source must not transfer - and must not be deleted.
+            infos = (info for info in infos if item_filter(info))
 
     for info in infos:
         if transfer_type is TransferType.DOWNLOAD:
@@ -715,6 +721,11 @@ def open_download_items(
             options=options,
             operation=operation,
         )
+        if item_filter is not None:
+            # Mirror the built-in download route: aws filters the
+            # single-object case too (the recursive branch filters inside
+            # the scan above).
+            infos = (info for info in infos if item_filter(info))
     for info in infos:
         item = open_download_item(
             plan,

@@ -21,6 +21,7 @@ from boto3_s3 import (
     ConfigurationError,
     FileInfo,
     FileKind,
+    InvalidConfigError,
     LocalStorage,
     NotFoundError,
     S3FileInfo,
@@ -436,17 +437,34 @@ class TestScanErrorMapping:
     ) -> None:
         # A lazily-built default client whose construction fails - e.g.
         # AWS_PROFILE naming a missing profile - surfaces as the documented
-        # ConfigurationError (docs/exceptions.md section 3), not the raw
-        # botocore error.
+        # InvalidConfigError refinement (a set-but-unusable configuration,
+        # docs/exceptions.md section 3), not the raw botocore error.
         import boto3
 
         def boom(*args: Any, **kwargs: Any) -> Any:
             raise ProfileNotFound(profile="missing-profile")
 
         monkeypatch.setattr(boto3, "client", boom)
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             list(S3Storage("s3://bucket/prefix/").scan())
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    def test_unresolvable_credentials_stay_plain_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NoCredentials/NoRegion keep the PLAIN ConfigurationError - the CLI
+        # maps that to aws's dedicated rc 253, while the InvalidConfigError
+        # refinement maps to the general 255 (docs/exceptions.md section 3).
+        import boto3
+        from botocore.exceptions import NoCredentialsError
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise NoCredentialsError()
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(ConfigurationError) as exc_info:
+            list(S3Storage("s3://bucket/prefix/").scan())
+        assert type(exc_info.value) is ConfigurationError
 
     @pytest.mark.parametrize(
         ("status", "category"),

@@ -239,6 +239,23 @@ class TestDownloadMove:
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
+    def test_filtered_single_source_is_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
+        # aws filters the single-object routes too: an excluded mv source
+        # must not transfer - and, crucially, must not be deleted.
+        from boto3_s3 import GlobFilter
+        from tests.utils.recorder import make_recording_client
+
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([_head_response()])
+        S3().mv(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.txt"),
+            filter=drop,
+            transfer_config=_SYNC,
+        )
+        assert _ops(calls) == ["HeadObject"]
+        assert not (tmp_path / "out.txt").exists()
+
     def test_recursive_skips_markers_without_deleting_them(self, tmp_path: Path) -> None:
         # Folder markers never transfer (aws-cli filegenerator), so a move
         # never deletes them either - `aws s3 mv --recursive` leaves `dl/m/`

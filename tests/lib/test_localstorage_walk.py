@@ -338,6 +338,20 @@ class TestLocalStorageIO:
         with pytest.raises(NotFoundError):
             LocalStorage(tmp_path).open("missing.bin", "rb")
 
+    def test_open_empty_key_is_the_location_itself(self, tmp_path: Path) -> None:
+        # key="" is the location itself (the get_fileinfo convention):
+        # os.path.join(x, "") would append a trailing separator, making the
+        # read fail ENOTDIR and the write makedirs a directory at the target
+        # file's own path.
+        target = tmp_path / "single.bin"
+        storage = LocalStorage(str(target))
+        with storage.open("", "wb") as handle:
+            handle.write(b"payload")
+        assert target.read_bytes() == b"payload"
+        assert not target.is_dir()
+        with storage.open("", "rb") as handle:
+            assert handle.read() == b"payload"
+
     def test_open_relative_path_is_chdir_stable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -211,9 +211,11 @@ class IOStorage(Storage):
         """Return the stdio token ``"-"`` (:meth:`Storage.as_text`, display-only).
 
         A stream has no location, so this token is for display / error messages
-        only - never round-tripped. A stream side never reaches the planner
-        (``transferplan``): ``cp`` routes it to the stream path up front,
-        before any transfer plan is built.
+        only - never round-tripped. ``cp`` diverts a stream to its own path
+        before any plan is built, but ``mv`` with a stream *destination* does
+        ride ``transferplan.plan_transfer``: the stream folds into the custom
+        (``s3open``) arm, where the default ``Storage.format`` reads this
+        token (``"-"`` has no trailing ``/``, so a single move keeps its key).
         """
         return "-"
 

@@ -297,6 +297,33 @@ class TestFilters:
         )
         assert [call.params["Key"] for call in calls] == ["t/large.txt"]
 
+    def test_single_s3_source_is_filtered_too(self, tmp_path: Path) -> None:
+        # aws applies --exclude/--include on the single-object routes as well
+        # (its filter stage runs regardless of dir_op): the source is still
+        # resolved (HeadObject, like aws's file generator) but an excluded
+        # object transfers nothing - no GetObject, no local file, rc 0.
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([_head_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/pre/k.txt", client=client),
+            str(tmp_path / "k.txt"),
+            filter=drop,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["HeadObject"]
+        assert results == []
+        assert not (tmp_path / "k.txt").exists()
+
+    def test_single_upload_is_filtered_too(self, tmp_path: Path) -> None:
+        src = tmp_path / "k.txt"
+        src.write_bytes(b"x")
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([])
+        S3().cp(str(src), S3Storage("s3://b/k.txt", client=client), filter=drop)
+        assert calls == []
+
 
 class TestDownloadRoute:
     def test_single_download_heads_then_gets(self, tmp_path: Path) -> None:

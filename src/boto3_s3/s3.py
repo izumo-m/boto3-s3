@@ -490,9 +490,10 @@ class S3:
         default session) with ``endpoint_url`` / ``config`` applied. Override to
         change credentials, reuse a cached client, or return a test double; reuse
         one explicitly via ``S3Storage(url, client=s3.client())``. A failed build
-        (e.g. an unresolvable ``AWS_PROFILE``) raises the translated
-        ``Boto3S3Error`` - ``ConfigurationError`` for the profile / credential /
-        region family - never the raw botocore error (docs/exceptions.md
+        raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
+        unresolvable credentials / region, its ``InvalidConfigError``
+        refinement for a set-but-unusable ``AWS_PROFILE`` or partial
+        credentials - never the raw botocore error (docs/exceptions.md
         section 1).
         """
         # operation=None: no subcommand is in scope at build time.

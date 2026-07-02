@@ -348,6 +348,23 @@ class TestOpenDownloadRoute:
         assert _ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"a.txt": b"payload"}
 
+    def test_single_download_is_filtered_too(self) -> None:
+        # The open route mirrors the built-in one: aws filters the
+        # single-object case as well - the excluded object is headed but
+        # never fetched, and the backend is never opened.
+        from boto3_s3 import GlobFilter
+
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/out.bin")
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([_head_response()])
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
+        )
+        assert _ops(calls) == ["HeadObject"]
+        assert store == {}
+        assert dest.opens == []
+
     def test_recursive_download_writes_each_relative_key(self) -> None:
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
