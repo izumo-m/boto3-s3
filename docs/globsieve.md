@@ -5,6 +5,21 @@ standard library). It provides the same semantics as aws-cli's
 `--exclude` / `--include` - **evaluate the patterns in sequence; the last one
 that matches wins, and a key that matches none is included**.
 
+**Public surface**: the module's `__all__` is the contract, reached by
+submodule path (`from boto3_s3 import globsieve` / `from boto3_s3.globsieve
+import ...`); only `GlobFilter` / `GlobPattern` are additionally re-exported at
+the package root. Because the module is this self-contained, the whole engine
+is public - the entry points (`compile`, `GlobFilter`, `GlobPattern`,
+`PatternKind`, the `Matcher` / `SetMatcher` protocols), every matcher class
+`compile` picks from (the section 2 tables), and the two building-block
+helpers: `compile_set_matcher(patterns)` (the shape-specialized `SetMatcher`
+that `IncludeOnly` / `ExcludeOnly` / `Sequential` consume; an empty list yields
+a never-matching one) and `is_anchored(pattern)` (the root-anchored/relative
+split of section 1). Kept internal: the shape predicates behind
+`compile_set_matcher`'s partitioning (`_is_literal` / `_is_pure_suffix` /
+`_is_pure_prefix`) - implementation detail of the specialization, not part of
+the semantics.
+
 ## 1. API
 
 ```python

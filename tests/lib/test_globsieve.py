@@ -258,6 +258,71 @@ class TestCompileSetSpecialization:
         assert isinstance(m.set_matcher, UnionRegex)
 
 
+# ----- public surface --------------------------------------------------------
+
+
+class TestPublicSurface:
+    def test_all_resolves_and_is_public(self) -> None:
+        # The module is a documented submodule-path building block
+        # (docs/globsieve.md): __all__ is its public contract.
+        for name in globsieve.__all__:
+            assert not name.startswith("_"), name
+            assert hasattr(globsieve, name), name
+
+    def test_all_matches_the_documented_surface(self) -> None:
+        # Pin the exact surface: a symbol added to (or dropped from) the
+        # module must be a deliberate __all__ / docs decision.
+        assert set(globsieve.__all__) == {
+            "AlwaysExclude",
+            "AlwaysInclude",
+            "Anchored",
+            "CompositeSet",
+            "ExcludeOnly",
+            "GlobFilter",
+            "GlobPattern",
+            "IncludeOnly",
+            "LiteralSet",
+            "Matcher",
+            "PatternKind",
+            "PrefixSet",
+            "Sequential",
+            "SetMatcher",
+            "SuffixSet",
+            "UnionRegex",
+            "compile",
+            "compile_set_matcher",
+            "is_anchored",
+        }
+
+
+class TestIsAnchored:
+    def test_absolute_pattern_is_anchored(self) -> None:
+        assert globsieve.is_anchored("/data/secret/*") is True
+
+    def test_relative_patterns_are_not(self) -> None:
+        assert globsieve.is_anchored("data/*") is False
+        assert globsieve.is_anchored("*.txt") is False
+
+
+class TestCompileSetMatcher:
+    def test_uniform_shapes_pick_the_dedicated_matcher(self) -> None:
+        assert isinstance(globsieve.compile_set_matcher(["a.txt", "b.txt"]), LiteralSet)
+        assert isinstance(globsieve.compile_set_matcher(["*.txt"]), SuffixSet)
+        assert isinstance(globsieve.compile_set_matcher(["logs/*"]), PrefixSet)
+        assert isinstance(globsieve.compile_set_matcher(["a*b"]), UnionRegex)
+
+    def test_mixed_shapes_fold_into_composite(self) -> None:
+        sm = globsieve.compile_set_matcher(["*.txt", "logs/*"])
+        assert isinstance(sm, CompositeSet)
+        assert sm.matches("a.txt") and sm.matches("logs/x")
+        assert not sm.matches("a.log")
+
+    def test_empty_list_never_matches(self) -> None:
+        sm = globsieve.compile_set_matcher([])
+        assert sm.matches("anything") is False
+        assert sm.matches("") is False
+
+
 # ----- semantic equivalence: specialized vs. naive Sequential --------------
 
 

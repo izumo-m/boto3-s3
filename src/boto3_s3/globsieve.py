@@ -37,6 +37,15 @@ aws-cli joins each pattern onto the source / destination root; this is what
 makes the same filter prune the two ``sync`` sides per-side (a source-rooted
 absolute pattern matches the local source's full path but not the S3
 destination's anchorless key). See :class:`Anchored`.
+
+This module is a self-contained, stdlib-only building block: everything in
+``__all__`` is public and reached by submodule path (``boto3_s3.globsieve``,
+as above); :class:`GlobFilter` / :class:`GlobPattern` are additionally
+re-exported at the package root. The matcher classes are public so a custom
+tool can assemble its own decision pipeline from the same parts ``compile``
+picks from; :func:`compile_set_matcher` builds the shape-specialized
+:class:`SetMatcher` those classes consume, and :func:`is_anchored` exposes
+the anchored/relative split.
 """
 
 from __future__ import annotations
@@ -70,6 +79,8 @@ __all__ = [
     "SuffixSet",
     "UnionRegex",
     "compile",
+    "compile_set_matcher",
+    "is_anchored",
 ]
 
 # ----- pattern definition --------------------------------------------------
@@ -107,7 +118,7 @@ class GlobPattern:
 # ----- pattern classification ----------------------------------------------
 
 
-def _is_anchored(pattern: str) -> bool:
+def is_anchored(pattern: str) -> bool:
     """Whether a pattern is root-anchored (absolute) rather than root-relative.
 
     aws-cli joins every pattern onto the operation root with ``os.path.join``,
@@ -376,11 +387,11 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
     if not pats:
         return AlwaysInclude()
 
-    if any(_is_anchored(p.pattern) for p in pats):
+    if any(is_anchored(p.pattern) for p in pats):
         return Anchored(
             (p.kind, True, p.pattern)
-            if _is_anchored(p.pattern)
-            else (p.kind, False, _compile_one_set(p.pattern))
+            if is_anchored(p.pattern)
+            else (p.kind, False, compile_set_matcher((p.pattern,)))
             for p in pats
         )
 
@@ -394,18 +405,18 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
         return AlwaysExclude()
 
     if is_catch_all_exclude and all(p.kind is PatternKind.INCLUDE for p in rest):
-        return IncludeOnly(_compile_set_matcher([p.pattern for p in rest]))
+        return IncludeOnly(compile_set_matcher([p.pattern for p in rest]))
 
     if is_catch_all_include and all(p.kind is PatternKind.EXCLUDE for p in rest):
-        return ExcludeOnly(_compile_set_matcher([p.pattern for p in rest]))
+        return ExcludeOnly(compile_set_matcher([p.pattern for p in rest]))
 
     if all(p.kind is PatternKind.EXCLUDE for p in pats):
-        return ExcludeOnly(_compile_set_matcher([p.pattern for p in pats]))
+        return ExcludeOnly(compile_set_matcher([p.pattern for p in pats]))
 
-    return Sequential((p.kind, _compile_one_set(p.pattern)) for p in pats)
+    return Sequential((p.kind, compile_set_matcher((p.pattern,))) for p in pats)
 
 
-def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
+def compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
     """Pick the fastest :class:`SetMatcher` for a pattern list.
 
     Patterns are partitioned by shape (literal / ``*X`` suffix / ``X*``
@@ -415,7 +426,11 @@ def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
     case for a real exclude list (``dir/*`` directory excludes alongside a
     ``*.ext`` suffix and a couple of literals) - is folded into a
     :class:`CompositeSet` that ORs one matcher per present shape, which is
-    faster than collapsing everything into one regex.
+    faster than collapsing everything into one regex. An empty list yields
+    a matcher that never matches. This is the companion of the public
+    decision classes: it builds the :class:`SetMatcher` that
+    :class:`IncludeOnly` / :class:`ExcludeOnly` / :class:`Sequential`
+    consume.
     """
     literals: list[str] = []
     suffixes: list[str] = []
@@ -443,17 +458,6 @@ def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
             return PrefixSet(prefixes)
         return UnionRegex(general)
     return CompositeSet(literals, suffixes, prefixes, general)
-
-
-def _compile_one_set(pattern: str) -> SetMatcher:
-    """Specialize one pattern (used inside :class:`Sequential`)."""
-    if _is_literal(pattern):
-        return LiteralSet((pattern,))
-    if _is_pure_suffix(pattern):
-        return SuffixSet((pattern[1:],))
-    if _is_pure_prefix(pattern):
-        return PrefixSet((pattern[:-1],))
-    return UnionRegex((pattern,))
 
 
 # ----- shape predicates ----------------------------------------------------
