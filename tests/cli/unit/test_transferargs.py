@@ -1,10 +1,13 @@
-"""CLI-layer ``--no-overwrite`` gate: ``transferargs.validate_no_overwrite_supported``.
+"""CLI-layer shared transfer-argument pieces (``transferargs``).
 
-The upload/copy parallel of the streaming rejection - on a botocore without S3
+The ``--no-overwrite`` gate (``validate_no_overwrite_supported``): the
+upload/copy parallel of the streaming rejection - on a botocore without S3
 conditional writes it must reject ``--no-overwrite`` with a ``ValidationError``
 (rc 252) for ``locals3`` / ``s3s3`` and stay out of the way for the routes that
 never send ``IfNoneMatch`` (``s3local`` download, and ``sync``, which pops the
-flag before transfer).
+flag before transfer). Plus ``identify_type`` (aws-cli's
+``FileFormat.identify_type``: string classification is the CLI's job) and the
+``file://`` paramfile resolution.
 """
 
 from __future__ import annotations
@@ -46,6 +49,19 @@ def test_skips_when_flag_absent() -> None:
 def test_allows_upload_when_supported() -> None:
     client = model_only_client({"PutObject"})
     transferargs.validate_no_overwrite_supported(True, "locals3", client, operation="cp")
+
+
+class TestIdentifyType:
+    def test_s3_scheme(self) -> None:
+        assert transferargs.identify_type("s3://bucket/key") == "s3"
+
+    def test_bare_bucket_is_local(self) -> None:
+        # Only the literal scheme marks S3 (aws identify_type); a bare
+        # "bucket/key" is a local path for cp purposes.
+        assert transferargs.identify_type("bucket/key") == "local"
+
+    def test_scheme_is_case_sensitive(self) -> None:
+        assert transferargs.identify_type("S3://bucket") == "local"
 
 
 class TestParamfile:

@@ -5,9 +5,9 @@
 validation/translation steps the three commands run in the same order.
 This module loads only once its command is determined (stage 2 of the lazy
 dispatch, docs/imports.md), so top-level imports may reach
-``botocore.exceptions`` (via ``fileformat`` / ``S3Storage``); the ``boto3`` /
-``s3transfer`` client stack stays deferred into the functions that build a
-client or an engine.
+``botocore.exceptions`` (via ``S3Storage``); the ``boto3`` / ``s3transfer``
+client stack stays deferred into the functions that build a client or an
+engine.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from boto3_s3 import (
     TransferOptions,
     ValidationError,
 )
-from boto3_s3.fileformat import classify
 from boto3_s3_cli import filters, shorthand, usage
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
@@ -175,6 +174,16 @@ def add_transfer_arguments(
     )
 
 
+def identify_type(path: str) -> str:
+    """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows.
+
+    aws-cli's ``FileFormat.identify_type``, verbatim: string classification is
+    the CLI layer's job (the library planner receives resolved ``Storage``
+    objects and never re-parses a path).
+    """
+    return "s3" if path.startswith("s3://") else "local"
+
+
 class TransferPaths(NamedTuple):
     """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
 
@@ -200,8 +209,8 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     page_size = parse_integer_option(args.page_size, operation=operation)
     progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
     src, dest = args.paths
-    src_type = classify(src)
-    dest_type = classify(dest)
+    src_type = identify_type(src)
+    dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
     return TransferPaths(
@@ -586,6 +595,7 @@ __all__ = [
     "build_transfer_options",
     "classify_paths",
     "finish_transfer",
+    "identify_type",
     "is_s3express_path",
     "resolve_case_conflict",
     "resolve_locations",

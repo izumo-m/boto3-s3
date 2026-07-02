@@ -129,9 +129,10 @@ def strip_scheme_normalized(path: str) -> str:
     aws-cli's ``_normalize_s3_trailing_slash`` runs on *every* path: a bucket-only
     path with no trailing slash (``s3://bucket``, including a keyless
     access-point ARN) reads as the bucket root ``s3://bucket/``. A bare
-    ``s3://`` (service root) stays empty. The transfer planner
-    (:func:`boto3_s3.fileformat.plan_transfer`) applies it to each S3 side;
-    :meth:`S3Storage.normalize_s3_uri` is the scheme-keeping public form.
+    ``s3://`` (service root) stays empty. :meth:`S3Storage.normalize_s3_uri` is
+    the scheme-keeping public form; the transfer planner needs no string pass -
+    :meth:`S3Storage.format` derives the same normalized root from the held
+    ``bucket`` / ``key``.
     """
     rest = path[len(_S3_SCHEME) :]
     _bucket, key = S3Storage.split_bucket_key(rest)
@@ -434,6 +435,29 @@ class S3Storage(Storage):
         if self._key:
             return f"s3://{self._bucket}/{self._key}"
         return f"s3://{self._bucket}"
+
+    @override
+    def format(self, *, dir_op: bool) -> tuple[str, bool]:
+        """Format this S3 side; return ``(root, use_src_name)`` (:meth:`Storage.format`).
+
+        aws-cli's ``FileFormat.s3_format``, computed from the held
+        :attr:`bucket` / :attr:`key` instead of a re-parsed URI string: the
+        scheme-less ``bucket/key`` root falls straight out of the join, and so
+        does the keyless-bucket normalization (aws-cli's
+        ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
+        root ``bucket/``) - only the bare service root ``s3://`` stays empty.
+        A ``dir_op`` root is ``/``-terminated and takes the source's name;
+        otherwise only an explicit trailing ``/`` does.
+        """
+        if not self._bucket and not self._key:
+            path = ""  # the bare service root, not the "/"-rooted join
+        else:
+            path = f"{self._bucket}/{self._key}"
+        if dir_op:
+            if not path.endswith("/"):
+                path += "/"
+            return path, True
+        return path, path.endswith("/")
 
     @override
     def validate(self) -> None:

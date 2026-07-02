@@ -63,6 +63,20 @@ declared capabilities promise:
   none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
   response.
 
+Two more members come with working defaults a custom backend normally keeps:
+
+- **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
+  only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
+  `FileInfo.key` / `compare_key` contract is `/`-separated.
+- **`format(*, dir_op) -> (root, use_src_name)`** — how this side enters a
+  transfer plan (the per-side half of aws-cli's `FileFormat.format`, resolved
+  polymorphically; `S3Storage` / `LocalStorage` override it with aws's
+  `s3_format` / `local_format` on their own held state). The default is the
+  open-route rule: the root is `""` — a custom backend encapsulates its own
+  location and its `open` / `delete` receive the scan-root-relative
+  `compare_key` unprefixed — and `use_src_name` follows the S3 convention
+  (`dir_op` or a trailing `/` on `as_text()`).
+
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
 

@@ -208,6 +208,9 @@ class LocalStorage(Storage):
     """
 
     scheme: ClassVar[str] = "local"
+    #: Local roots and keys are host-native (:meth:`format` returns ``os.sep``
+    #: forms), unlike every other backend's ``/`` space.
+    sep: ClassVar[str] = os.sep
     #: The local filesystem supports every transfer operation: byte I/O both
     #: ways, single-entry stat, a sorted walk (so ``SORTED_SCAN``), and delete.
     capabilities: ClassVar[StorageCapability] = (
@@ -253,11 +256,30 @@ class LocalStorage(Storage):
     def as_text(self) -> str:
         """Return the path as given (:meth:`Storage.as_text`).
 
-        The raw constructor form, verbatim - the trailing-separator rule the
-        transfer planner (:mod:`boto3_s3.fileformat`) applies reads this
-        unmodified token.
+        The raw constructor form, verbatim - the trailing-separator rule of
+        :meth:`format` reads this unmodified token.
         """
         return self._path
+
+    @override
+    def format(self, *, dir_op: bool) -> tuple[str, bool]:
+        """Format this local side; return ``(root, use_src_name)`` (:meth:`Storage.format`).
+
+        aws-cli's ``FileFormat.local_format`` on the held state: the root is
+        the construction-time :attr:`_abspath` (the same anchor ``scan`` walks
+        from, so the plan and the walk agree even if the process chdir'd
+        since), and the trailing-separator rule reads the *raw* constructor
+        form (``abspath`` strips it). An existing directory, a ``dir_op``, or
+        a user-typed trailing ``os.sep`` all mean directory semantics - the
+        root gains a trailing ``os.sep`` and the destination side would take
+        the source's name.
+        """
+        full_path = self._abspath
+        if (os.path.exists(full_path) and os.path.isdir(full_path)) or dir_op:
+            return full_path + os.sep, True
+        if self._path.endswith(os.sep):
+            return full_path + os.sep, True
+        return full_path, False
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:

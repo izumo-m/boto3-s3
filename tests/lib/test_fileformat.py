@@ -18,13 +18,7 @@ from typing_extensions import override
 
 from boto3_s3 import LocalStorage, S3Storage, Storage, fileformat
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.fileformat import (
-    classify,
-    dest_for,
-    item_paths,
-    local_format,
-    s3_format,
-)
+from boto3_s3.fileformat import dest_for, item_paths
 from boto3_s3.types import FileInfo, ScanOptions
 
 # The S3 string grammar lives on S3Storage (A6); alias the names so the
@@ -39,16 +33,17 @@ _OUTPOST_ARN = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567/a
 
 
 def _storage(arg: str) -> S3Storage | LocalStorage:
-    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by
-    ``classify`` on the raw path - exactly how the CLI builds its endpoints."""
-    return S3Storage(arg) if classify(arg) == "s3" else LocalStorage(arg)
+    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by the
+    ``s3://`` marker on the raw path - exactly how the CLI builds its endpoints
+    (its ``identify_type``)."""
+    return S3Storage(arg) if arg.startswith("s3://") else LocalStorage(arg)
 
 
 def plan_transfer(
     src: str, dest: str, *, recursive: bool, operation: str = "cp"
 ) -> fileformat.TransferPlan:
-    """Test wrapper: build each endpoint Storage from its raw path (classify-chosen)
-    and call the real formatter, so the call sites below stay path-focused.
+    """Test wrapper: build each endpoint Storage from its raw path and call the
+    real formatter, so the call sites below stay path-focused.
     """
     return fileformat.plan_transfer(
         _storage(src), _storage(dest), recursive=recursive, operation=operation
@@ -92,19 +87,6 @@ class _FakeOpen(Storage):
         return self._token
 
 
-class TestClassify:
-    def test_s3_scheme(self) -> None:
-        assert classify("s3://bucket/key") == "s3"
-
-    def test_bare_bucket_is_local(self) -> None:
-        # Only the literal scheme marks S3 (aws identify_type); a bare
-        # "bucket/key" is a local path for cp purposes.
-        assert classify("bucket/key") == "local"
-
-    def test_scheme_is_case_sensitive(self) -> None:
-        assert classify("S3://bucket") == "local"
-
-
 class TestSplitBucketKey:
     def test_plain_forms(self) -> None:
         assert split_bucket_key("b") == ("b", "")
@@ -122,45 +104,92 @@ class TestSplitBucketKey:
 
 
 class TestLocalFormat:
+    """``LocalStorage.format`` - aws-cli's ``FileFormat.local_format`` on the
+    held state (the construction-time abspath; the raw form for the
+    trailing-separator rule)."""
+
     def test_existing_directory_takes_src_name(self, tmp_path: Path) -> None:
-        assert local_format(str(tmp_path), dir_op=False) == (str(tmp_path) + os.sep, True)
+        assert LocalStorage(str(tmp_path)).format(dir_op=False) == (str(tmp_path) + os.sep, True)
 
     def test_existing_file_keeps_given_name(self, tmp_path: Path) -> None:
         target = tmp_path / "a.txt"
         target.write_bytes(b"x")
-        assert local_format(str(target), dir_op=False) == (str(target), False)
+        assert LocalStorage(str(target)).format(dir_op=False) == (str(target), False)
 
     def test_dir_op_forces_directory_semantics(self, tmp_path: Path) -> None:
         missing = tmp_path / "new"
-        assert local_format(str(missing), dir_op=True) == (str(missing) + os.sep, True)
+        assert LocalStorage(str(missing)).format(dir_op=True) == (str(missing) + os.sep, True)
 
     def test_trailing_separator_on_missing_path(self, tmp_path: Path) -> None:
         missing = tmp_path / "new"
-        assert local_format(str(missing) + os.sep, dir_op=False) == (str(missing) + os.sep, True)
+        storage = LocalStorage(str(missing) + os.sep)
+        assert storage.format(dir_op=False) == (str(missing) + os.sep, True)
 
     def test_missing_plain_path_keeps_given_name(self, tmp_path: Path) -> None:
         missing = tmp_path / "renamed.bin"
-        assert local_format(str(missing), dir_op=False) == (str(missing), False)
+        assert LocalStorage(str(missing)).format(dir_op=False) == (str(missing), False)
 
     def test_relative_path_is_absolutized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        assert local_format("sub/f.txt", dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
+        storage = LocalStorage("sub/f.txt")
+        assert storage.format(dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
+
+    def test_root_is_anchored_at_construction_not_format_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The plan root and the scan walk must agree: both anchor at the
+        # construction-time cwd (the held _abspath), so a later chdir cannot
+        # split them apart.
+        monkeypatch.chdir(tmp_path)
+        storage = LocalStorage("sub/f.txt")
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        assert storage.format(dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
 
 
 class TestS3Format:
+    """``S3Storage.format`` - aws-cli's ``FileFormat.s3_format`` from the held
+    bucket/key (the keyless normalization falls out of the join)."""
+
     def test_dir_op_appends_slash(self) -> None:
-        assert s3_format("b/pre", dir_op=True) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre").format(dir_op=True) == ("b/pre/", True)
 
     def test_dir_op_keeps_existing_slash(self) -> None:
-        assert s3_format("b/pre/", dir_op=True) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre/").format(dir_op=True) == ("b/pre/", True)
 
     def test_single_with_trailing_slash_takes_src_name(self) -> None:
-        assert s3_format("b/pre/", dir_op=False) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre/").format(dir_op=False) == ("b/pre/", True)
 
     def test_single_plain_keeps_given_name(self) -> None:
-        assert s3_format("b/pre/key", dir_op=False) == ("b/pre/key", False)
+        assert S3Storage("s3://b/pre/key").format(dir_op=False) == ("b/pre/key", False)
+
+    def test_keyless_bucket_normalizes_to_bucket_root(self) -> None:
+        # aws-cli's _normalize_s3_trailing_slash: "s3://bucket" reads as
+        # "bucket/" even without dir_op, so the dest takes the source's name.
+        assert S3Storage("s3://bucket").format(dir_op=False) == ("bucket/", True)
+
+    def test_bare_service_root_stays_empty(self) -> None:
+        assert S3Storage("s3://").format(dir_op=False) == ("", False)
+
+
+class TestFormatDefaults:
+    """The ``Storage`` base: the open-route rule and the ``sep`` attribute."""
+
+    def test_custom_backend_roots_at_empty(self) -> None:
+        # The default format is the open-route rule: root "" (entries are
+        # addressed by their relative compare_key), use_src_name from
+        # dir_op / a trailing "/" on the token (s3_format parity).
+        assert _FakeOpen("mem://x").format(dir_op=False) == ("", False)
+        assert _FakeOpen("mem://x/").format(dir_op=False) == ("", True)
+        assert _FakeOpen("mem://x").format(dir_op=True) == ("", True)
+
+    def test_sep_is_native_only_for_local(self) -> None:
+        assert LocalStorage(".").sep == os.sep
+        assert S3Storage("s3://b").sep == "/"
+        assert _FakeOpen().sep == "/"
 
 
 class TestPlanTransfer:
