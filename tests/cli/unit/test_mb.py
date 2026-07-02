@@ -91,7 +91,11 @@ class TestUsageErrors:
     def test_no_scheme_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["mb", "bucket"], ctx=_ctx(None))
         assert rc == 252
-        assert "Invalid argument type" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "<S3Uri>\nError: Invalid argument type" in err
+        # aws's MbCommand raises the bare form - only rm's CommandParameters
+        # path gets the "usage: aws s3 <cmd> ..." prefix (measured, 2.35.5).
+        assert "usage:" not in err
 
     def test_bare_bucket_key_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["mb", "bucket/key"], ctx=_ctx(None))

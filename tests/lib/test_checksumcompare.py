@@ -345,6 +345,34 @@ class TestComposite:
         assert _upload_filter(client)(pair) is False
         assert len(client.calls) == 2  # the second page was fetched
 
+    def test_local_tail_beyond_the_parts_sum_differs(self, tmp_path: Path) -> None:
+        # A local file that starts as the multipart object and was appended to
+        # afterwards: the per-part digests never see the tail, so the composite
+        # values would collide - the comparison must still say "differs", even
+        # with the size gate opted out (check_size=False).
+        p = _write(tmp_path, _DATA + b"appended tail")
+        value = _composite_golden(_DATA, _PARTS, "crc32c")
+        client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=_local(_key(p), size=len(_DATA) + 13),
+            dest=_s3(size=len(_DATA)),
+        )
+        assert _upload_filter(client, check_size=False)(pair) is True
+
+    def test_local_truncation_differs(self, tmp_path: Path) -> None:
+        # The short direction: the final part hashes short -> a different
+        # composite -> differs (pinned so both directions stay covered).
+        p = _write(tmp_path, _DATA[:-8])
+        value = _composite_golden(_DATA, _PARTS, "crc32c")
+        client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=_local(_key(p), size=len(_DATA) - 8),
+            dest=_s3(size=len(_DATA)),
+        )
+        assert _upload_filter(client, check_size=False)(pair) is True
+
 
 # -- s3 -> s3 (COPY) -----------------------------------------------------------
 

@@ -11,8 +11,24 @@ _TWO_PATH_FORMS = "<LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>
 
 
 def single_uri_usage(command: str) -> str:
-    """aws's usage error for a single-``<S3Uri>`` command (rm / mb / rb) - rc 252."""
+    """aws's usage error for ``rm``'s single ``<S3Uri>`` - rc 252.
+
+    Only the ``CommandParameters`` path (rm, and the transfer family via
+    :func:`two_path_usage`) prepends the ``usage:`` line; ``mb`` / ``rb``
+    raise the bare form (:func:`bare_single_uri_usage`) - measured against
+    aws 2.35.5.
+    """
     return f"usage: boto3-s3 {command} <S3Uri>\nError: Invalid argument type"
+
+
+def bare_single_uri_usage() -> str:
+    """aws's ``mb`` / ``rb`` path rejection: no ``usage:`` prefix - rc 252.
+
+    aws-cli's ``MbCommand`` / ``RbCommand`` raise
+    ``ParamValidationError("<S3Uri>\\nError: Invalid argument type")`` directly,
+    without the ``CommandParameters`` usage line rm gets.
+    """
+    return "<S3Uri>\nError: Invalid argument type"
 
 
 def two_path_usage(command: str) -> str:

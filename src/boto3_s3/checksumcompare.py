@@ -162,6 +162,8 @@ class ChecksumComparison(ContentComparison):
             return True
         path = to_native_path(local.key)
         if remote_checksum.part_sizes is not None:
+            # None = the local file outruns the parts sum (an appended tail):
+            # definitely different content, whatever the part digests say.
             local_value = _composite_b64(
                 path, remote_checksum.algorithm, remote_checksum.part_sizes
             )
@@ -307,13 +309,17 @@ def _whole_b64(path: str, algorithm: str) -> str:
     return base64.b64encode(hasher.digest()).decode("ascii")
 
 
-def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> str:
+def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> str | None:
     """The base64 ``COMPOSITE`` checksum + ``"-N"`` at the exact part boundaries.
 
     ``base64(ALGO(concat of each part's raw ALGO digest)) + "-<n>"`` - the
     checksum-of-checksums S3 forms for a multipart upload, with the part split
     taken from GetObjectAttributes' ``ObjectParts`` (so it is exact, not guessed).
-    A file shorter than the parts sum hashes short and so reads as differing.
+    Both length mismatches read as differing: a file shorter than the parts sum
+    hashes short (a truncated final part), and a file *longer* than it returns
+    ``None`` - the remote object is exactly the parts sum long, so an appended
+    local tail means different content even though the per-part digests (which
+    never see the tail) would collide.
     """
     combined = bytearray()
     with open(path, "rb") as fh:
@@ -328,6 +334,8 @@ def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> st
                 part.update(block)
                 remaining -= len(block)
             combined += part.digest()
+        if fh.read(1):
+            return None
     top = _new_hasher(algorithm)
     assert top is not None
     top.update(bytes(combined))

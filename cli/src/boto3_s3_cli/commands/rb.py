@@ -56,7 +56,7 @@ class RbCommand(Command):
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
-            raise ValidationError(usage.single_uri_usage("rb"), operation="rb")
+            raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
 
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
         # non-raising construction); for "s3:///k" validate lands on 252 too, just

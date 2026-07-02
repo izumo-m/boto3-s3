@@ -52,7 +52,7 @@ class MbCommand(Command):
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
-            raise ValidationError(usage.single_uri_usage("mb"), operation="mb")
+            raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
 
         bucket_part, _, _key_part = target[len("s3://") :].partition("/")
         if not bucket_part:
