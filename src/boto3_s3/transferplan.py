@@ -70,8 +70,6 @@ class TransferPlan:
     dest: Storage
     src_root: str
     dest_root: str
-    src_sep: str
-    dest_sep: str
 
 
 def _paths_type(src: Storage, dest: Storage, *, operation: str) -> PathsType:
@@ -125,9 +123,9 @@ def plan_transfer(
     The pairing is validated and its route named by :func:`_paths_type`; each
     side then formats *itself* - the polymorphic
     :meth:`~boto3_s3.storage.Storage.format` (aws-cli's per-type
-    ``local_format`` / ``s3_format``, computed from the endpoint's held state) -
-    and carries its own separator (``Storage.sep``). ``recursive`` is aws-cli's
-    ``dir_op``.
+    ``local_format`` / ``s3_format``, computed from the endpoint's held state).
+    Each side's separator stays readable as ``plan.src.sep`` /
+    ``plan.dest.sep``. ``recursive`` is aws-cli's ``dir_op``.
     """
     paths_type = _paths_type(src, dest, operation=operation)
     src_root, _ = src.format(dir_op=recursive)
@@ -143,8 +141,6 @@ def plan_transfer(
         dest=dest,
         src_root=src_root,
         dest_root=dest_root,
-        src_sep=src.sep,
-        dest_sep=dest.sep,
     )
 
 
@@ -158,7 +154,7 @@ def dest_for(plan: TransferPlan, compare_key: str) -> str:
     feeds this directly, so a transfer needs no re-derivation from the full key.
     """
     if plan.use_src_name:
-        return plan.dest_root + compare_key.replace("/", plan.dest_sep)
+        return plan.dest_root + compare_key.replace("/", plan.dest.sep)
     return plan.dest_root
 
 
@@ -177,8 +173,8 @@ def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     if plan.dir_op:
         rel_path = src_path[len(plan.src_root) :]
     else:
-        rel_path = src_path.split(plan.src_sep)[-1]
-    compare_key = rel_path.replace(plan.src_sep, "/")
+        rel_path = src_path.split(plan.src.sep)[-1]
+    compare_key = rel_path.replace(plan.src.sep, "/")
     return dest_for(plan, compare_key), compare_key
 
 

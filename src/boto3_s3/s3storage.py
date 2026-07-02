@@ -123,24 +123,6 @@ _S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
 )
 
 
-def strip_scheme_normalized(path: str) -> str:
-    """Scheme-less form with the keyless-bucket normalization applied.
-
-    aws-cli's ``_normalize_s3_trailing_slash`` runs on *every* path: a bucket-only
-    path with no trailing slash (``s3://bucket``, including a keyless
-    access-point ARN) reads as the bucket root ``s3://bucket/``. A bare
-    ``s3://`` (service root) stays empty. :meth:`S3Storage.normalize_s3_uri` is
-    the scheme-keeping public form; the transfer planner needs no string pass -
-    :meth:`S3Storage.format` derives the same normalized root from the held
-    ``bucket`` / ``key``.
-    """
-    rest = path[len(_S3_SCHEME) :]
-    _bucket, key = S3Storage.split_bucket_key(rest)
-    if not key and rest and not rest.endswith("/"):
-        return rest + "/"
-    return rest
-
-
 def _parse_s3_url(url: str) -> tuple[str, str]:
     """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
 
@@ -357,10 +339,19 @@ class S3Storage(Storage):
     def normalize_s3_uri(path: str) -> str:
         """The keyless-bucket normalization with the scheme kept.
 
-        ``s3://bucket`` reads as ``s3://bucket/`` - the form aws validates and
-        prints (``mv``'s same-path error shows the normalized URI).
+        aws-cli's ``_normalize_s3_trailing_slash``: a bucket-only URI with no
+        trailing slash (``s3://bucket``, including a keyless access-point ARN)
+        reads as the bucket root ``s3://bucket/`` - the form aws validates and
+        prints (``mv``'s same-path error shows the normalized URI). A bare
+        ``s3://`` (service root) stays as is. The transfer planner needs no
+        string pass: :meth:`format` derives the same normalized root from the
+        held ``bucket`` / ``key``.
         """
-        return _S3_SCHEME + strip_scheme_normalized(path)
+        rest = path[len(_S3_SCHEME) :]
+        _bucket, key = S3Storage.split_bucket_key(rest)
+        if not key and rest and not rest.endswith("/"):
+            return _S3_SCHEME + rest + "/"
+        return _S3_SCHEME + rest
 
     @staticmethod
     def same_path(src: str, dest: str) -> bool:

@@ -206,7 +206,7 @@ class TestPlanTransfer:
         assert (plan.paths_type, plan.dir_op) == ("locals3", False)
         assert (plan.dest_root, plan.use_src_name) == ("bucket/", True)
         assert plan.src_root == str(src)
-        assert (plan.src_sep, plan.dest_sep) == (os.sep, "/")
+        assert (plan.src.sep, plan.dest.sep) == (os.sep, "/")
 
     def test_upload_single_rename(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
@@ -249,7 +249,7 @@ class TestPlanTransferOpenRoute:
         plan = transferplan.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
         # the custom side roots at "" and is addressed by relative compare_key
-        assert (plan.src_root, plan.src_sep) == ("", "/")
+        assert (plan.src_root, plan.src.sep) == ("", "/")
         # use_src_name comes from the s3 dest (dir_op -> adopts the source name)
         assert plan.use_src_name is True
         assert dest_for(plan, "sub/f.txt") == "b/dest/sub/f.txt"
@@ -258,7 +258,7 @@ class TestPlanTransferOpenRoute:
         plan = transferplan.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
         assert plan.paths_type == "s3open"
         # the custom dest roots at "" so dest_for hands the relative key to open()
-        assert (plan.dest_root, plan.dest_sep) == ("", "/")
+        assert (plan.dest_root, plan.dest.sep) == ("", "/")
         assert plan.use_src_name is True
         assert dest_for(plan, "sub/f.txt") == "sub/f.txt"
 
