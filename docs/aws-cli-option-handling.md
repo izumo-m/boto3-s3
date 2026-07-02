@@ -209,3 +209,20 @@ and warning messages, progress lines, `--help` - may differ in
 wording, ordering, or exact content between the two tools and between
 `boto3-s3-cli` releases. Parity is defined on S3 object state, return
 values, and error conditions, not on console formatting.
+
+Two deliberate output-pipeline deviations sit under this umbrella
+(`progress.py`; the rendering thread itself mirrors aws-cli's
+`ResultProcessor`):
+
+- **Bounded printer queue.** aws-cli feeds its printer thread through an
+  unbounded queue: transfers are never slowed by console output, but a
+  stalled consumer (say, `sync` piped into a pager that is never advanced)
+  grows the result backlog in memory without limit. `boto3-s3-cli` bounds the
+  queue (10,000 records): a consumer that falls that far behind
+  back-pressures the transfer - the workers block on the queue - instead of
+  growing memory. Result lines are never dropped either way.
+- **Progress repaint floor.** aws-cli renders every progress record (one per
+  transferred chunk). `boto3-s3-cli` floors repaints at 0.1 s (or
+  `--progress-frequency` when higher), so repaint records enter the queue at
+  a chunk-independent rate. Display cadence only; the painted numbers are
+  exact snapshots.

@@ -5,10 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Transfer result/progress rendering moved off the worker threads onto a
+  dedicated printer thread (aws-cli's `ResultProcessor` shape): console I/O
+  no longer throttles transfers. Deliberate deviation: the printer queue is
+  bounded (10,000 records), so a long-stalled output consumer (e.g. `sync`
+  piped into a stopped pager) back-pressures the run instead of growing
+  memory without limit - aws-cli's queue is unbounded.
 - Progress repaints now have a 0.1 s floor when `--progress-frequency` is 0
-  (the default): repaints run inline on the transfer worker threads, so
-  unthrottled console I/O could serialize them and cap throughput on a slow
-  terminal or pipe.
+  (the default), keeping repaint records chunk-independent (display cadence
+  only; aws repaints per chunk).
 - Fix `--metadata` shorthand to accept an empty key like `aws` (`=bar` parses
   to `{"": "bar"}` and the transfer proceeds; it wrongly exited 252), and align
   the leading-comma error with aws's `Expected: '='` wording.

@@ -510,10 +510,14 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, anything run-killing as one ``fatal error:`` line. A
-    clean run exits 2 when only warnings accumulated, else 0.
+    clean run exits 2 when only warnings accumulated, else 0. The printer's
+    rendering thread runs for exactly the ``run()`` span - the ``with``
+    drains it on every path, so all queued lines are written (and precede a
+    ``fatal error:`` line) before the exit code is derived.
     """
     try:
-        run()
+        with printer:
+            run()
     except BatchError:
         # Per-item failure lines were already streamed by the printer.
         return 1
