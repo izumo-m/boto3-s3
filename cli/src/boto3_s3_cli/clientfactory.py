@@ -73,6 +73,45 @@ def resolve_profile(args: argparse.Namespace) -> str | None:
     return None
 
 
+def validate_endpoint_url(args: argparse.Namespace) -> None:
+    """Reject a schemeless ``--endpoint-url`` with aws's wording (rc 252).
+
+    aws-cli validates the value at parse time - before the integer coercions,
+    the session profile, and every path validation - so this runs first in
+    the commands whose later checks could otherwise mask it (measured against
+    aws 2.35.5: ``--page-size abc --endpoint-url badurl`` is the endpoint's
+    252, not the conversion's 255). Also called inside the client builders,
+    where botocore would otherwise raise a bare ``ValueError``.
+    """
+    endpoint_url: str | None = args.endpoint_url
+    if endpoint_url is not None and not urlparse(endpoint_url).scheme:
+        raise ValidationError(
+            f'Bad value for --endpoint-url "{endpoint_url}": scheme is '
+            "missing.  Must be of the form http://<hostname>/ or https://<hostname>/"
+        )
+
+
+def validate_profile(args: argparse.Namespace) -> None:
+    """Resolve the session profile the way aws does at startup (rc 255 on failure).
+
+    aws binds ``--profile`` / the profile env chain into its session before
+    any command validation runs, so a bad profile fails during the startup
+    config reads (ProfileNotFound -> its general handler, rc 255) ahead of
+    every post-parse usage error (252) - while an unresolvable *region* does
+    NOT fail here (aws defers it to request time). Mirror the ordering by
+    forcing one scoped-config read on a session bound to the resolved
+    profile; the boto3 / s3transfer client stack stays unloaded (import
+    contract, docs/imports.md).
+    """
+    import botocore.session
+    from botocore.exceptions import BotoCoreError
+
+    try:
+        botocore.session.Session(profile=resolve_profile(args)).get_scoped_config()
+    except BotoCoreError as exc:
+        raise InvalidConfigError(str(exc)) from exc
+
+
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
     """The region to build the client in, via aws-cli's region chain.
 
@@ -195,15 +234,11 @@ def build_client(args: argparse.Namespace) -> S3Client:
 
     _pin_python_sigv4_signers()
 
-    # aws-cli validates --endpoint-url at parse time: a value with no scheme is a
-    # usage error (rc 252). Without this, botocore raises a bare ValueError at
-    # client creation, which would escape as an uncaught traceback.
-    endpoint_url: str | None = args.endpoint_url
-    if endpoint_url is not None and not urlparse(endpoint_url).scheme:
-        raise ValidationError(
-            f'Bad value for --endpoint-url "{endpoint_url}": scheme is '
-            "missing.  Must be of the form http://<hostname>/ or https://<hostname>/"
-        )
+    # The transfer family already validated this up front (parse-time order);
+    # re-checked here for the commands that build their client first (mb/rb)
+    # and for direct callers - botocore would otherwise raise a bare
+    # ValueError at client creation.
+    validate_endpoint_url(args)
 
     verify: bool | str | None
     if args.no_verify_ssl:

@@ -66,20 +66,10 @@ class SyncCommand(Command):
             # Missing local source: aws's bare RuntimeError -> rc 255
             # (NotFoundError without a ClientError cause maps the same).
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
-        if dest_type == "local" and not os.path.exists(dest):
-            # aws creates the s3local destination during validation (before run),
-            # so an OSError here is its pre-pipeline rc 255 - not the transfer
-            # pipeline's rc 1. Pre-creating it outside finish_transfer's catch
-            # makes a creation failure surface with the validation exit code (the
-            # library S3.sync still ensures the dir for direct callers; this
-            # pre-check makes it a no-op there). Every translate_os_error
-            # category maps to that same rc 255.
-            try:
-                os.makedirs(dest)
-            except OSError as exc:
-                from boto3_s3.localstorage import translate_os_error
-
-                raise translate_os_error(exc, operation="sync", key=None) from exc
+        if dest_type == "local":
+            # aws creates the s3local destination during validation (before
+            # run): a creation failure is the pre-pipeline rc 255.
+            transferargs.create_local_dest_dir(dest, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
         if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
             # aws-cli's _validate_not_s3express_bucket_for_sync: directory-bucket

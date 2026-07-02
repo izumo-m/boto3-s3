@@ -8,6 +8,7 @@ client, so the parse -> dispatch -> error -> exit-code wiring is covered.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -211,3 +212,81 @@ class TestValidationOrder:
         # even with a missing source (the boundary on the other side).
         rc = cli.main(["cp", self._MISSING, "s3://bucket/key", "--checksum-mode", "ENABLED"])
         assert rc == 252
+
+
+class TestParseToValidationOrder:
+    """The head order aws applies before its path validations (measured
+    against the pinned aws 2.35.5; docs/cli.md section 6): the
+    ``--endpoint-url`` scheme check (252) -> the integer coercions (255) ->
+    paramfile / shorthand / blob value resolution (252) -> the session
+    profile resolution (255) -> the path/usage checks. Each test pins one
+    combined-error pair whose exit code that order decides."""
+
+    _BOGUS = "boto3_s3_no_such_profile_for_order_tests"
+    _MISSING = "/nonexistent_src_for_head_order_test.txt"
+
+    def test_bad_profile_beats_the_local_local_usage_error(self) -> None:
+        assert cli.main(["cp", "a", "b", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_rm_path_usage(self) -> None:
+        assert cli.main(["rm", "./missing-local", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_mv_same_path(self) -> None:
+        assert cli.main(["mv", "s3://b/x", "s3://b/x", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_stream_recursive(self) -> None:
+        rc = cli.main(["cp", "-", "s3://b/k", "--recursive", "--profile", self._BOGUS])
+        assert rc == 255
+
+    def test_bad_metadata_beats_missing_source(self) -> None:
+        assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "bad,,=="]) == 252
+
+    def test_bad_endpoint_beats_missing_source(self) -> None:
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_bad_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["rm", "s3://b/k", "--page-size", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_bad_blob_paramfile_beats_missing_source(self) -> None:
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--sse-c", "AES256", "--sse-c-key", "fileb:///no/x"]
+        )
+        assert rc == 252
+
+    def test_local_local_stays_252_in_a_regionless_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's client construction cannot fail on a missing region (its
+        # bundled botocore defers region resolution to request time), so the
+        # usage error must keep winning in a regionless env - this guards
+        # against ever hoisting the client build above the validations.
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+        assert cli.main(["cp", "a", "b"]) == 252
+
+
+class TestRecursiveDestDirCreation:
+    """aws pre-creates the s3local dir_op destination during validation
+    (its ``_validate_path_args``), so a creation failure is rc 255 - not the
+    pipeline's rc 1. sync always did this; cp/mv --recursive share it now."""
+
+    @pytest.fixture()
+    def readonly_dir(self, tmp_path: Any) -> Any:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root creates anything")
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        yield ro
+        ro.chmod(0o755)
+
+    def test_cp_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
+        rc = cli.main(["cp", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+        assert rc == 255
+
+    def test_mv_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
+        rc = cli.main(["mv", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+        assert rc == 255

@@ -26,7 +26,7 @@ from boto3_s3 import (
     TransferOptions,
     ValidationError,
 )
-from boto3_s3_cli import filters, shorthand, usage
+from boto3_s3_cli import clientfactory, filters, shorthand, usage
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
@@ -66,18 +66,17 @@ _STORAGE_CLASS_CHOICES = [
 # resolution. The choices-validated options (acl / storage_class / sse / ... )
 # can't carry a ``file://`` value (argparse rejects it as an invalid choice
 # before paramfile would run), and grants is a list; ``metadata`` is resolved
-# separately before its shorthand parse.
-_PARAMFILE_TEXT_OPTIONS = frozenset(
-    {
-        "website_redirect",
-        "content_type",
-        "cache_control",
-        "content_disposition",
-        "content_encoding",
-        "content_language",
-        "expires",
-        "sse_kms_key_id",
-    }
+# separately before its shorthand parse. Ordered (a tuple) so the first
+# failing paramfile is deterministic.
+_PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
+    "website_redirect",
+    "content_type",
+    "cache_control",
+    "content_disposition",
+    "content_encoding",
+    "content_language",
+    "expires",
+    "sse_kms_key_id",
 )
 
 # aws-cli's _raise_if_paths_type_incorrect_for_param's usage rendering.
@@ -184,6 +183,40 @@ def identify_type(path: str) -> str:
     return "s3" if path.startswith("s3://") else "local"
 
 
+def resolve_parse_time_values(args: argparse.Namespace, *, operation: str) -> None:
+    """Resolve the values aws resolves at parse time, in place (rc 252 on failure).
+
+    aws loads ``file://`` / ``fileb://`` paramfiles and parses map-option
+    shorthand during argument parsing - before the session profile binds and
+    before any path validation - so a bad value here beats a missing source
+    or a bad profile (both 255; measured against aws 2.35.5). Resolution
+    happens exactly once: the free-string options' text paramfiles,
+    ``--metadata`` (paramfile first, then the shorthand parse -> a dict), and
+    the SSE-C key blobs -> their bytes/str form.
+    :func:`build_transfer_options` consumes the resolved values verbatim.
+    """
+    for option in _PARAMFILE_TEXT_OPTIONS:
+        value = getattr(args, option, None)
+        if value is not None:
+            resolved = resolve_text_paramfile(
+                value, f"--{option.replace('_', '-')}", operation=operation
+            )
+            setattr(args, option, resolved)
+    if args.metadata is not None:
+        # file:// resolves before the shorthand parse (aws unpacks the
+        # paramfile, then parses the loaded text as the map value).
+        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
+        args.metadata = shorthand.parse_map_option(
+            metadata_value, name="--metadata", operation=operation
+        )
+    if args.sse_c_key is not None:
+        args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+    if args.sse_c_copy_source_key is not None:
+        args.sse_c_copy_source_key = blob_value(
+            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
+        )
+
+
 class TransferPaths(NamedTuple):
     """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
 
@@ -197,17 +230,25 @@ class TransferPaths(NamedTuple):
 
 
 def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths:
-    """The shared ``run()`` head: integer coercions, classification, the pair gate.
+    """The shared ``run()`` head, in aws's parse-to-validation order.
 
-    The order is exit-code-load-bearing and identical across cp/mv/sync: the
-    two integer coercions (a non-integer -> rc 255, aws's bare ``int()``)
-    precede classification, and the local-local pair (rc 252, aws's two-path
-    usage error) precedes every later per-command check. Only this shared,
-    order-stable prefix lives here - the stream / checksum / SSE-C checks that
-    follow differ in relative order per command and stay with each command.
+    The order is exit-code-load-bearing, identical across cp/mv/sync, and
+    measured against aws 2.35.5 on the combined-error cases: the
+    ``--endpoint-url`` scheme check (252, aws validates the value at parse
+    time - it even beats the conversions' 255) -> the two integer coercions
+    (255, aws's bare ``int()``) -> paramfile / shorthand / blob value
+    resolution (252, aws's parse-time handlers) -> the session profile
+    resolution (255: aws binds the profile at startup, so a bad ``--profile``
+    beats every post-parse usage error) -> the local-local pair gate (252).
+    Only this shared, order-stable prefix lives here - the stream / checksum /
+    SSE-C checks that follow differ in relative order per command and stay
+    with each command.
     """
+    clientfactory.validate_endpoint_url(args)
     page_size = parse_integer_option(args.page_size, operation=operation)
     progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
+    resolve_parse_time_values(args, operation=operation)
+    clientfactory.validate_profile(args)
     src, dest = args.paths
     src_type = identify_type(src)
     dest_type = identify_type(dest)
@@ -216,6 +257,27 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     return TransferPaths(
         page_size, progress_frequency, src, dest, src_type, dest_type, src_type + dest_type
     )
+
+
+def create_local_dest_dir(dest: str, *, operation: str) -> None:
+    """Pre-create the ``s3local`` destination directory (aws's ``_validate_path_args``).
+
+    aws creates the destination during validation whenever the operation is a
+    ``dir_op`` (``cp``/``mv`` ``--recursive`` and every ``sync``) - before the
+    pipeline - so a creation failure is its pre-pipeline rc 255, not the
+    pipeline's rc 1. Pre-creating it outside ``finish_transfer``'s catch keeps
+    that shape (the library still ensures the dir for direct callers; this
+    makes it a no-op there). The bare ``exists`` test then bare ``makedirs``
+    mirror aws exactly; every ``translate_os_error`` category maps to the
+    same rc 255.
+    """
+    if not os.path.exists(dest):
+        try:
+            os.makedirs(dest)
+        except OSError as exc:
+            from boto3_s3.localstorage import translate_os_error
+
+            raise translate_os_error(exc, operation=operation, key=None) from exc
 
 
 def validate_checksum_paths_type(
@@ -371,25 +433,17 @@ def build_transfer_options(
         ("checksum_algorithm", args.checksum_algorithm),
     ):
         if value is not None:
-            if option in _PARAMFILE_TEXT_OPTIONS:
-                # aws applies file:// (text) paramfile resolution to every arg.
-                value = resolve_text_paramfile(
-                    value, f"--{option.replace('_', '-')}", operation=operation
-                )
+            # Paramfiles and shorthand are already resolved in place -
+            # :func:`resolve_parse_time_values` runs at the head of every
+            # cp/mv/sync (aws resolves them at parse time), so the values
+            # here are consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
     if args.metadata is not None:
-        # file:// resolves before the shorthand parse (aws unpacks the paramfile,
-        # then parses the loaded text as the map value).
-        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
-        options["metadata"] = shorthand.parse_map_option(
-            metadata_value, name="--metadata", operation=operation
-        )
+        options["metadata"] = args.metadata
     if args.sse_c_key is not None:
-        options["sse_c_key"] = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+        options["sse_c_key"] = args.sse_c_key
     if args.sse_c_copy_source_key is not None:
-        options["sse_c_copy_source_key"] = blob_value(
-            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
-        )
+        options["sse_c_copy_source_key"] = args.sse_c_copy_source_key
     if args.force_glacier_transfer:
         options["force_glacier_transfer"] = True
     if args.ignore_glacier_warnings:

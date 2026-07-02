@@ -15,7 +15,7 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import filters, output, usage
+from boto3_s3_cli import clientfactory, filters, output, usage
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -85,12 +85,15 @@ class RmCommand(Command):
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
-        # First, like aws's parse-time conversion: a non-integer exits 255
-        # before the path checks and before any client (or the SDK) is touched.
+        # The aws parse-to-validation order (measured, docs/cli.md section 6):
+        # the --endpoint-url scheme check (252) beats the integer coercion
+        # (255), which beats the session profile resolution (255), which
+        # beats the path usage check below (252).
+        clientfactory.validate_endpoint_url(args)
         page_size = parse_integer_option(args.page_size, operation="rm")
+        clientfactory.validate_profile(args)
         # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
+        # entry (whose chain reaches botocore).
         from boto3_s3 import S3, S3Storage
 
         target: str = args.paths

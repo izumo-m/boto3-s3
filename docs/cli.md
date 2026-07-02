@@ -251,7 +251,10 @@ is not guaranteed):
 ### 5.2 `rm`
 
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
-non-`s3://` path is rc 252 ("Invalid argument type"). The target has 3 forms
+non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
+head order of section 5.7 (`--endpoint-url` scheme 252 -> `--page-size`
+conversion 255 -> session profile 255, so `rm badpath --profile <bad>` is the
+profile's 255, like aws). The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
 
@@ -459,15 +462,26 @@ but this is allowed because the charter stipulates that awscrt-dependent feature
 are subject to it only when awscrt is present (overview.md section 3, transfer.md section 9).
 Signing stays pure-Python via the pin of section 4.
 
-The validation order of `run()` (corresponding to aws's stages): integer
-conversion (255) -> route type / streaming constraints (252) -> **checksum path
+The validation order of `run()` (corresponding to aws's stages; the
+combined-error cases are measured against the pinned aws 2.35.5):
+**`--endpoint-url` scheme (252**, aws validates the value at parse time - it
+even beats the conversions' 255) -> integer conversion (255) -> **paramfile /
+`--metadata` shorthand / blob resolution (252**, aws's parse-time handlers,
+so a bad value beats the missing source *and* a bad profile) -> **session
+profile resolution (255**, aws binds the profile at startup, so a bad
+`--profile` beats every post-parse usage error; an unresolvable *region*
+does NOT fail here - aws defers it to request time) -> route type / streaming
+constraints (252) -> **checksum path
 type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
 ...` 252 - shared with mv) -> **a nonexistent single local
 src (255, before the client factory**, equivalent to aws's bare RuntimeError.
 `-` is excluded. aws-cli `_validate_path_args` checks this right after the
-checksum pairing and *before* SSE-C, so the 255 wins when both fail) -> the SSE-C pair / `--case-conflict` Express branch / `--metadata`
-parsing / blob (252) -> client creation (253) -> `S3().cp(...)`.
+checksum pairing and *before* SSE-C, so the 255 wins when both fail) -> **the
+s3local `--recursive` destination-directory pre-create (255** on an OSError -
+the dir_op half of the same `_validate_path_args`; sync shares it,
+unconditionally) -> the SSE-C pair / `--case-conflict` Express branch (252)
+-> client creation (253) -> `S3().cp(...)`.
 **S3().cp is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."

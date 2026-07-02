@@ -80,6 +80,10 @@ class MvCommand(Command):
             # before SSE-C (rc 252), so when both fail that order decides the exit
             # code. NotFoundError without a ClientError cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
+        if args.recursive and paths_type == "s3local":
+            # The dir_op half of aws's _validate_path_args: the s3local
+            # destination is created during validation (pre-pipeline rc 255).
+            transferargs.create_local_dest_dir(dest, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(args, case_conflict, operation="mv")

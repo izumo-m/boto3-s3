@@ -28,19 +28,21 @@ class CpCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Copy and return an ``aws s3 cp``-style exit code.
 
-        Exit-code shape (docs/cli.md section 6): pre-pipeline errors keep
-        their class - usage errors 252 (path types, SSE-C pairing, the
-        checksum/path-format pairing, streaming with ``--recursive`` or
-        ``--no-overwrite``, ``--no-overwrite`` on a botocore without S3
-        conditional writes, ``--metadata`` parsing, blob decoding, the S3
-        Express case-conflict rejection), the bare integer conversion and
-        the missing local source 255, client construction 253 - while
-        everything raised by the transfer pipeline is rc 1: per-item
-        failures stream ``<kind> failed:`` lines, anything that kills the
-        run (a listing error, the single-source 404, a bad ``--grants``
-        shape, a non-integer ``--expected-size``, a missing stdin) prints
-        one ``fatal error:`` line, and a warnings-only run exits 2. The
-        boundary is the ``S3().cp`` call.
+        Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
+        keep their class, in aws's measured head order - the
+        ``--endpoint-url`` scheme, ``--metadata`` parsing, paramfile / blob
+        loads, path types, SSE-C pairing, the checksum/path-format pairing,
+        streaming with ``--recursive`` or ``--no-overwrite``, and the S3
+        Express case-conflict rejection are 252; the bare integer
+        conversion, the session profile resolution, the missing local
+        source, and the ``--recursive`` destination-directory pre-create
+        are 255; client creation (unresolvable credentials/region) is
+        253 - while everything raised by the transfer pipeline is rc 1:
+        per-item failures stream ``<kind> failed:`` lines, anything that
+        kills the run (a listing error, the single-source 404, a bad
+        ``--grants`` shape, a non-integer ``--expected-size``, a missing
+        stdin) prints one ``fatal error:`` line, and a warnings-only run
+        exits 2. The boundary is the ``S3().cp`` call.
         """
         head = transferargs.classify_paths(args, operation="cp")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -69,6 +71,11 @@ class CpCommand(Command):
             # code; '-' is a stream, not a path. NotFoundError without a
             # ClientError cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
+        if args.recursive and paths_type == "s3local":
+            # The dir_op half of aws's _validate_path_args: the s3local
+            # destination is created during validation, so a creation
+            # failure is aws's pre-pipeline rc 255, not the pipeline's rc 1.
+            transferargs.create_local_dest_dir(dest, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
