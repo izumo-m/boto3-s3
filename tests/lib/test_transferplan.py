@@ -292,6 +292,52 @@ class TestPlanTransferOpenRoute:
             transferplan.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
 
 
+_ENDPOINTS: dict[str, Callable[[], Storage]] = {
+    "s3": lambda: S3Storage("s3://b/k"),
+    "local": lambda: LocalStorage("f.txt"),
+    "open": _FakeOpen,
+}
+
+
+class TestPathsType:
+    """``_paths_type``: the full 3x3 endpoint-pair matrix in one place - the
+    five aws routes name their ``PathsType``, the four impossible pairings
+    raise. The class patterns are ``isinstance``, so a built-in subclass keeps
+    its parent's route."""
+
+    @pytest.mark.parametrize(
+        ("src", "dest", "expected"),
+        [
+            ("local", "s3", "locals3"),
+            ("s3", "local", "s3local"),
+            ("s3", "s3", "s3s3"),
+            ("open", "s3", "opens3"),
+            ("s3", "open", "s3open"),
+        ],
+    )
+    def test_valid_pairs(self, src: str, dest: str, expected: str) -> None:
+        pair = transferplan._paths_type(_ENDPOINTS[src](), _ENDPOINTS[dest](), operation="cp")
+        assert pair == expected
+
+    @pytest.mark.parametrize(
+        ("src", "dest"),
+        [("local", "local"), ("open", "local"), ("local", "open"), ("open", "open")],
+    )
+    def test_impossible_pairs_are_rejected(self, src: str, dest: str) -> None:
+        with pytest.raises(ValidationError):
+            transferplan._paths_type(_ENDPOINTS[src](), _ENDPOINTS[dest](), operation="cp")
+
+    def test_builtin_subclasses_keep_their_parents_route(self) -> None:
+        class _MyS3(S3Storage):
+            pass
+
+        class _MyLocal(LocalStorage):
+            pass
+
+        pair = transferplan._paths_type(_MyLocal("f.txt"), _MyS3("s3://b/k"), operation="cp")
+        assert pair == "locals3"
+
+
 class TestItemPaths:
     def test_recursive_upload_slices_the_source_root(self, tmp_path: Path) -> None:
         plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)

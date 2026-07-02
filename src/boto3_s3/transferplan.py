@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from boto3_s3.storage import Storage
 
 PathsType = Literal["locals3", "s3local", "s3s3", "opens3", "s3open"]
-_PathKind = Literal["s3", "local", "open"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -75,25 +74,47 @@ class TransferPlan:
     dest_sep: str
 
 
-def _endpoint_kind(storage: Storage) -> _PathKind:
-    """The transfer kind from a resolved endpoint's concrete type (the object layer).
+def _paths_type(src: Storage, dest: Storage, *, operation: str) -> PathsType:
+    """Validate the endpoint pairing and name its route (the plan's ``paths_type``).
 
-    ``isinstance`` against the built-in pair, subclasses included - not the
-    ``scheme`` string: the s3 route reaches into ``S3Storage``'s
-    ``get_client``/``bucket``/``key`` and the local route into
-    ``LocalStorage``'s ``path``, so only the concrete classes can take them
-    (a ``Storage`` merely *claiming* ``scheme == "s3"`` could not). Any other
-    ``Storage`` is a custom backend, routed as ``"open"`` - its bytes move
-    through ``Storage.open`` while the paired side (always s3) rides
-    ``s3transfer``. A stdio stream never reaches here (``cp`` diverts it to
-    the stream path up front), so it folds into ``"open"`` harmlessly; an
-    unsupported pairing is rejected by :func:`plan_transfer`, not here.
+    One structural match over the pair's concrete types (class patterns test
+    ``isinstance``, subclasses included - not the ``scheme`` string: the s3
+    route reaches into ``S3Storage``'s ``get_client``/``bucket``/``key`` and
+    the local route into ``LocalStorage``'s ``path``, so only the concrete
+    classes can take them). Any other ``Storage`` is a custom backend routed
+    through ``Storage.open`` (``opens3`` / ``s3open``), which must pair with
+    s3 - ``open`` to ``local``, ``open`` to ``open`` and ``local`` to ``local``
+    have no ``aws s3`` route and are rejected (the CLI layer phrases the
+    strict aws message itself). A stdio stream never reaches the built-in
+    cases (``cp`` diverts it to the stream path up front), so it folds into
+    the custom arm harmlessly.
     """
-    if isinstance(storage, S3Storage):
-        return "s3"
-    if isinstance(storage, LocalStorage):
-        return "local"
-    return "open"
+    match src, dest:
+        case S3Storage(), S3Storage():
+            return "s3s3"
+        case LocalStorage(), S3Storage():
+            return "locals3"
+        case S3Storage(), LocalStorage():
+            return "s3local"
+        case LocalStorage(), LocalStorage():
+            raise ValidationError(
+                f"{operation} requires at least one s3:// path (local to local is not supported)",
+                operation=operation,
+            )
+        # Below here one side is a custom (open-routed) backend: its bytes move
+        # through ``Storage.open`` while the other side rides ``s3transfer``,
+        # so it can only pair with s3 - never local, another custom backend,
+        # or a stream.
+        case _, S3Storage():
+            return "opens3"
+        case S3Storage(), _:
+            return "s3open"
+        case _:
+            raise ValidationError(
+                f"{operation}: a custom-backend path transfers only with an s3:// path "
+                "(not local, another custom backend, or a stream)",
+                operation=operation,
+            )
 
 
 def plan_transfer(
@@ -101,50 +122,19 @@ def plan_transfer(
 ) -> TransferPlan:
     """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat.format``).
 
-    Each side formats *itself* - the polymorphic
+    The pairing is validated and its route named by :func:`_paths_type`; each
+    side then formats *itself* - the polymorphic
     :meth:`~boto3_s3.storage.Storage.format` (aws-cli's per-type
     ``local_format`` / ``s3_format``, computed from the endpoint's held state) -
-    and carries its own separator (``Storage.sep``). The *route* is read from
-    each endpoint's concrete type (:func:`_endpoint_kind`): ``S3Storage`` /
-    ``LocalStorage`` are the built-in pair; any other ``Storage``
-    is a custom backend routed through ``Storage.open`` (``opens3`` / ``s3open``),
-    which must pair with s3 - ``open`` to ``local``, ``open`` to ``open`` and
-    ``local`` to ``local`` have no ``aws s3`` route and are rejected (the CLI layer
-    phrases the strict aws message itself). ``recursive`` is aws-cli's ``dir_op``.
+    and carries its own separator (``Storage.sep``). ``recursive`` is aws-cli's
+    ``dir_op``.
     """
-    src_kind = _endpoint_kind(src)
-    dest_kind = _endpoint_kind(dest)
-    # A custom ``open`` side moves its bytes through ``Storage.open`` while the
-    # other side rides ``s3transfer``, so it can only pair with s3 - never local,
-    # another custom backend, or a stream.
-    if "open" in (src_kind, dest_kind) and {src_kind, dest_kind} != {"open", "s3"}:
-        raise ValidationError(
-            f"{operation}: a custom-backend path transfers only with an s3:// path "
-            "(not local, another custom backend, or a stream)",
-            operation=operation,
-        )
-    if src_kind == "local" and dest_kind == "local":
-        raise ValidationError(
-            f"{operation} requires at least one s3:// path (local to local is not supported)",
-            operation=operation,
-        )
-
+    paths_type = _paths_type(src, dest, operation=operation)
     src_root, _ = src.format(dir_op=recursive)
     # use_src_name is a destination-side property: whether the dest adopts the
     # source's name (aws-cli reads the same tuple slot of the dest side only).
     dest_root, use_src_name = dest.format(dir_op=recursive)
 
-    paths_type: PathsType
-    if src_kind == "open":
-        paths_type = "opens3"
-    elif dest_kind == "open":
-        paths_type = "s3open"
-    elif src_kind == "local":
-        paths_type = "locals3"
-    elif dest_kind == "local":
-        paths_type = "s3local"
-    else:
-        paths_type = "s3s3"
     return TransferPlan(
         paths_type=paths_type,
         dir_op=recursive,

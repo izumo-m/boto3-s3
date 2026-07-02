@@ -37,11 +37,11 @@ declared capabilities promise:
 - **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
   `"s3"` / `"local"` (a display/classification label; result rendering uses
   it). Transfer *routing* does not read it: the planner
-  (`transferplan._endpoint_kind`) routes by concrete type — `isinstance` against
-  `S3Storage` / `LocalStorage`, subclasses included — because the built-in
-  routes reach into those classes' own API (`get_client`/`bucket`/`key`,
-  `path`); every other `Storage` takes the `open` route regardless of its
-  `scheme` string.
+  (`transferplan._paths_type`) routes by concrete type — a structural match
+  (`isinstance`) against `S3Storage` / `LocalStorage`, subclasses included —
+  because the built-in routes reach into those classes' own API
+  (`get_client`/`bucket`/`key`, `path`); every other `Storage` takes the
+  `open` route regardless of its `scheme` string.
 - **`capabilities: ClassVar[StorageCapability]`** — the flag set the backend
   actually supports (section 3).
 - **`as_text() -> str`** (and `str(storage)`) — how this side renders in results

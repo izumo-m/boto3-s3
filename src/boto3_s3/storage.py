@@ -134,8 +134,8 @@ class Storage(abc.ABC):
     #: rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
     #: other value is a non-built-in backend (a custom one, or a stdio stream).
     #: Transfer *routing* does not read it: the planner routes by concrete type
-    #: (``isinstance`` in ``transferplan._endpoint_kind``). Each concrete Storage
-    #: sets its own token.
+    #: (the structural match in ``transferplan._paths_type``). Each concrete
+    #: Storage sets its own token.
     scheme: ClassVar[str]
 
     #: The separator of this backend's path space, as it appears in formatted
