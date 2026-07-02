@@ -10,14 +10,11 @@ import sys
 # on the parse path; S3 / S3Storage reach botocore and are imported in run()
 # instead (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3.naming import classify, normalize_s3_uri, same_key, same_path
+from boto3_s3.naming import normalize_s3_uri, same_key, same_path
 from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
-from boto3_s3_cli import filters, usage
+from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
-from boto3_s3_cli.progress import TransferPrinter
-
-_USAGE = usage.two_path_usage("mv")
+from boto3_s3_cli.commands.base import Command, Context
 
 _VALIDATE_ENV_VAR = "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS"
 
@@ -58,13 +55,10 @@ class MvCommand(Command):
         all before any S3 client exists. Resolution failures keep their
         class: an unresolvable path 252, a failing s3control/sts call 254.
         """
-        page_size = parse_integer_option(args.page_size, operation="mv")
-        progress_frequency = parse_integer_option(args.progress_frequency, operation="mv")
-        src, dest = args.paths
-        src_type = classify(src)
-        dest_type = classify(dest)
-        if src_type == "local" and dest_type == "local":
-            raise ValidationError(_USAGE, operation="mv")
+        head = transferargs.classify_paths(args, operation="mv")
+        page_size, progress_frequency = head.page_size, head.progress_frequency
+        src, dest = head.src, head.dest
+        src_type, dest_type = head.src_type, head.dest_type
         if src == "-" or dest == "-":
             # aws-cli's _validate_streaming_paths: only cp streams, and its
             # wording names cp even from mv.
@@ -72,7 +66,7 @@ class MvCommand(Command):
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="mv",
             )
-        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         if paths_type == "s3s3":
             self._validate_same_paths(args, ctx, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
@@ -104,13 +98,7 @@ class MvCommand(Command):
 
         item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
-        printer = TransferPrinter(
-            quiet=args.quiet,
-            only_show_errors=args.only_show_errors,
-            progress=args.progress,
-            frequency=progress_frequency,
-            multiline=args.progress_multiline,
-        )
+        printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:
             S3().mv(

@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 # Pure-Python names only (exceptions / types modules) - safe on the parse path.
 from boto3_s3 import (
@@ -24,16 +24,20 @@ from boto3_s3 import (
     TransferOptions,
     ValidationError,
 )
-from boto3_s3.naming import split_bucket_key
-from boto3_s3_cli import filters, shorthand
-from boto3_s3_cli.commands.base import add_page_size_argument, add_request_payer_argument
+from boto3_s3.naming import classify, split_bucket_key
+from boto3_s3_cli import filters, shorthand, usage
+from boto3_s3_cli.commands.base import (
+    add_page_size_argument,
+    add_request_payer_argument,
+    parse_integer_option,
+)
+from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from boto3_s3 import LocalStorage, S3Storage
     from boto3_s3_cli.commands.base import Context
-    from boto3_s3_cli.progress import TransferPrinter
 
 # aws-cli choice lists (subcommands.py ACL / STORAGE_CLASS).
 _ACL_CHOICES = [
@@ -166,6 +170,40 @@ def add_transfer_arguments(
             "XXHASH3",
             "XXHASH128",
         ],
+    )
+
+
+class TransferPaths(NamedTuple):
+    """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
+
+    page_size: int
+    progress_frequency: int
+    src: str
+    dest: str
+    src_type: str
+    dest_type: str
+    paths_type: str  # "locals3" | "s3local" | "s3s3" on the CLI surface
+
+
+def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths:
+    """The shared ``run()`` head: integer coercions, classification, the pair gate.
+
+    The order is exit-code-load-bearing and identical across cp/mv/sync: the
+    two integer coercions (a non-integer -> rc 255, aws's bare ``int()``)
+    precede classification, and the local-local pair (rc 252, aws's two-path
+    usage error) precedes every later per-command check. Only this shared,
+    order-stable prefix lives here - the stream / checksum / SSE-C checks that
+    follow differ in relative order per command and stay with each command.
+    """
+    page_size = parse_integer_option(args.page_size, operation=operation)
+    progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
+    src, dest = args.paths
+    src_type = classify(src)
+    dest_type = classify(dest)
+    if src_type == "local" and dest_type == "local":
+        raise ValidationError(usage.two_path_usage(operation), operation=operation)
+    return TransferPaths(
+        page_size, progress_frequency, src, dest, src_type, dest_type, src_type + dest_type
     )
 
 
@@ -497,6 +535,24 @@ def resolve_transfer_config(args: argparse.Namespace, ctx: Context, *, paths_typ
     return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)
 
 
+def build_printer(
+    args: argparse.Namespace, progress_frequency: int, *, only_show_errors: bool = False
+) -> TransferPrinter:
+    """The shared :class:`TransferPrinter` wiring.
+
+    ``only_show_errors`` ORs into the flag for cp's stream rule (a streaming
+    download owns stdout for the object bytes, so aws forces the errors-only
+    printer); mv/sync pass nothing.
+    """
+    return TransferPrinter(
+        quiet=args.quiet,
+        only_show_errors=args.only_show_errors or only_show_errors,
+        progress=args.progress,
+        frequency=progress_frequency,
+        multiline=args.progress_multiline,
+    )
+
+
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
     """Run the library call and derive the aws exit code (docs/cli.md section 6).
 
@@ -521,9 +577,12 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
 
 
 __all__ = [
+    "TransferPaths",
     "add_transfer_arguments",
     "blob_value",
+    "build_printer",
     "build_transfer_options",
+    "classify_paths",
     "finish_transfer",
     "is_s3express_path",
     "resolve_case_conflict",

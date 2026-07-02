@@ -9,13 +9,10 @@ import os
 # parse path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, StdioStorage, ValidationError
-from boto3_s3.naming import classify, item_paths, plan_transfer
-from boto3_s3_cli import filters, usage
+from boto3_s3.naming import item_paths, plan_transfer
+from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
-from boto3_s3_cli.progress import TransferPrinter
-
-_USAGE = usage.two_path_usage("cp")
+from boto3_s3_cli.commands.base import Command, Context
 
 
 class CpCommand(Command):
@@ -45,13 +42,10 @@ class CpCommand(Command):
         one ``fatal error:`` line, and a warnings-only run exits 2. The
         boundary is the ``S3().cp`` call.
         """
-        page_size = parse_integer_option(args.page_size, operation="cp")
-        progress_frequency = parse_integer_option(args.progress_frequency, operation="cp")
-        src, dest = args.paths
-        src_type = classify(src)
-        dest_type = classify(dest)
-        if src_type == "local" and dest_type == "local":
-            raise ValidationError(_USAGE, operation="cp")
+        head = transferargs.classify_paths(args, operation="cp")
+        page_size, progress_frequency = head.page_size, head.progress_frequency
+        src, dest = head.src, head.dest
+        src_type, dest_type = head.src_type, head.dest_type
         is_stream = src == "-" or dest == "-"
         if is_stream:
             # aws-cli's _validate_streaming_paths: cp-only, never recursive, and
@@ -66,7 +60,7 @@ class CpCommand(Command):
                     "--no-overwrite parameter is not supported for streaming downloads",
                     operation="cp",
                 )
-        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
         if src_type == "local" and src != "-" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
@@ -121,15 +115,9 @@ class CpCommand(Command):
         if not is_stream:
             item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
-        printer = TransferPrinter(
-            quiet=args.quiet,
-            # Streams force the errors-only printer (aws-cli is_stream rule):
-            # a streaming download owns stdout for the object bytes.
-            only_show_errors=args.only_show_errors or is_stream,
-            progress=args.progress,
-            frequency=progress_frequency,
-            multiline=args.progress_multiline,
-        )
+        # Streams force the errors-only printer (aws-cli is_stream rule):
+        # a streaming download owns stdout for the object bytes.
+        printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)
 
         def run_cp() -> None:
             # Both conversions fail in-pipeline like aws: --expected-size is

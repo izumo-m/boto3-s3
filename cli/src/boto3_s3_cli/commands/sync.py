@@ -10,13 +10,9 @@ import os
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
-from boto3_s3.naming import classify
-from boto3_s3_cli import filters, usage
+from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
-from boto3_s3_cli.progress import TransferPrinter
-
-_USAGE = usage.two_path_usage("sync")
+from boto3_s3_cli.commands.base import Command, Context
 
 
 class SyncCommand(Command):
@@ -48,13 +44,10 @@ class SyncCommand(Command):
         ``--exclude`` / ``--include`` patterns compile once against the source
         root and apply to both sides (sync.md section 1).
         """
-        page_size = parse_integer_option(args.page_size, operation="sync")
-        progress_frequency = parse_integer_option(args.progress_frequency, operation="sync")
-        src, dest = args.paths
-        src_type = classify(src)
-        dest_type = classify(dest)
-        if src_type == "local" and dest_type == "local":
-            raise ValidationError(_USAGE, operation="sync")
+        head = transferargs.classify_paths(args, operation="sync")
+        page_size, progress_frequency = head.page_size, head.progress_frequency
+        src, dest = head.src, head.dest
+        src_type, dest_type = head.src_type, head.dest_type
         if src == "-" or dest == "-":
             # aws-cli's _validate_streaming_paths: only cp streams, and its
             # wording names cp even from sync.
@@ -62,7 +55,7 @@ class SyncCommand(Command):
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="sync",
             )
-        paths_type = src_type + dest_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
         # aws-cli's _validate_path_args (one function) does BOTH the missing-source
         # check and the s3local dest-dir creation, and runs entirely BEFORE
@@ -111,13 +104,7 @@ class SyncCommand(Command):
         # the source and destination per-side (globsieve.Anchored).
         item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
-        printer = TransferPrinter(
-            quiet=args.quiet,
-            only_show_errors=args.only_show_errors,
-            progress=args.progress,
-            frequency=progress_frequency,
-            multiline=args.progress_multiline,
-        )
+        printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:
             S3().sync(
