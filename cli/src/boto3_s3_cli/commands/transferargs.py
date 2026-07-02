@@ -183,16 +183,20 @@ def identify_type(path: str) -> str:
     return "s3" if path.startswith("s3://") else "local"
 
 
-def resolve_parse_time_values(args: argparse.Namespace, *, operation: str) -> None:
-    """Resolve the values aws resolves at parse time, in place (rc 252 on failure).
+def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> None:
+    """Resolve the direct-option paramfiles the way aws does at parse time (252).
 
-    aws loads ``file://`` / ``fileb://`` paramfiles and parses map-option
-    shorthand during argument parsing - before the session profile binds and
-    before any path validation - so a bad value here beats a missing source
-    or a bad profile (both 255; measured against aws 2.35.5). Resolution
-    happens exactly once: the free-string options' text paramfiles,
-    ``--metadata`` (paramfile first, then the shorthand parse -> a dict), and
-    the SSE-C key blobs -> their bytes/str form.
+    aws expands ``file://`` / ``fileb://`` references on plain option values
+    during argument parsing - before its bare ``int()`` coercions, the
+    session profile, and every path validation - so a bad reference here
+    beats a non-integer ``--page-size`` (255), a missing source (255), and a
+    bad profile (255; all measured against aws 2.35.5). Covered in place:
+    the free-string options' text paramfiles, the SSE-C key blobs, and the
+    string-typed integer options (``--page-size`` / ``--progress-frequency``
+    / cp's ``--expected-size``), whose loaded text feeds the later
+    coercions. ``--metadata`` is NOT here: its value (paramfile and
+    shorthand alike) resolves after the coercions
+    (:func:`resolve_metadata_option`; measured, the int 255 wins).
     :func:`build_transfer_options` consumes the resolved values verbatim.
     """
     for option in _PARAMFILE_TEXT_OPTIONS:
@@ -202,18 +206,35 @@ def resolve_parse_time_values(args: argparse.Namespace, *, operation: str) -> No
                 value, f"--{option.replace('_', '-')}", operation=operation
             )
             setattr(args, option, resolved)
-    if args.metadata is not None:
-        # file:// resolves before the shorthand parse (aws unpacks the
-        # paramfile, then parses the loaded text as the map value).
-        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
-        args.metadata = shorthand.parse_map_option(
-            metadata_value, name="--metadata", operation=operation
-        )
+    for option in ("page_size", "progress_frequency", "expected_size"):
+        value = getattr(args, option, None)
+        if isinstance(value, str):
+            setattr(
+                args,
+                option,
+                resolve_text_paramfile(value, f"--{option.replace('_', '-')}", operation=operation),
+            )
     if args.sse_c_key is not None:
         args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
     if args.sse_c_copy_source_key is not None:
         args.sse_c_copy_source_key = blob_value(
             args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
+        )
+
+
+def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
+    """Resolve ``--metadata`` in place: paramfile, then the shorthand parse (252).
+
+    Ordered *after* the integer coercions - unlike the direct-option
+    paramfiles above - because aws handles the map option's value with its
+    shorthand machinery (measured: ``--metadata file:///no/x --page-size
+    abc`` is the coercion's 255, while a direct option's bad paramfile wins
+    with 252).
+    """
+    if args.metadata is not None:
+        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
+        args.metadata = shorthand.parse_map_option(
+            metadata_value, name="--metadata", operation=operation
         )
 
 
@@ -235,9 +256,10 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     The order is exit-code-load-bearing, identical across cp/mv/sync, and
     measured against aws 2.35.5 on the combined-error cases: the
     ``--endpoint-url`` scheme check (252, aws validates the value at parse
-    time - it even beats the conversions' 255) -> the two integer coercions
-    (255, aws's bare ``int()``) -> paramfile / shorthand / blob value
-    resolution (252, aws's parse-time handlers) -> the session profile
+    time) -> the direct-option paramfile / blob loads (252, aws's parse-time
+    expansion - it beats the coercions' 255) -> the two integer coercions
+    (255, aws's bare ``int()``) -> the ``--metadata`` resolution (252,
+    paramfile + shorthand, which the coercions beat) -> the session profile
     resolution (255: aws binds the profile at startup, so a bad ``--profile``
     beats every post-parse usage error) -> the local-local pair gate (252).
     Only this shared, order-stable prefix lives here - the stream / checksum /
@@ -245,9 +267,10 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     with each command.
     """
     clientfactory.validate_endpoint_url(args)
+    resolve_paramfile_values(args, operation=operation)
     page_size = parse_integer_option(args.page_size, operation=operation)
     progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
-    resolve_parse_time_values(args, operation=operation)
+    resolve_metadata_option(args, operation=operation)
     clientfactory.validate_profile(args)
     src, dest = args.paths
     src_type = identify_type(src)
@@ -604,11 +627,14 @@ __all__ = [
     "build_printer",
     "build_transfer_options",
     "classify_paths",
+    "create_local_dest_dir",
     "finish_transfer",
     "identify_type",
     "is_s3express_path",
     "resolve_case_conflict",
     "resolve_locations",
+    "resolve_metadata_option",
+    "resolve_paramfile_values",
     "resolve_transfer_config",
     "validate_checksum_paths_type",
     "validate_sse_c_pairing",

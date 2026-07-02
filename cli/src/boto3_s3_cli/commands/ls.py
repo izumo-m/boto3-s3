@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import output
+from boto3_s3_cli import clientfactory, output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
+    expand_option_paramfile,
     parse_integer_option,
 )
 
@@ -36,8 +37,11 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # First, like aws's parse-time conversion: a non-integer exits 255
-        # before any client (or the SDK) is touched.
+        # aws's parse-time order (measured, docs/cli.md section 6): the
+        # --endpoint-url scheme check (252) and the --page-size paramfile
+        # expansion (252) both precede the bare int() coercion (255).
+        clientfactory.validate_endpoint_url(args)
+        expand_option_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay

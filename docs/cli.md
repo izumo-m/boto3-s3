@@ -52,7 +52,8 @@ solidified design is added here.
 | `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
 | `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_filter`: compile a globsieve matcher and wrap it so a relative pattern matches `FileInfo.compare_key` and an absolute one `FileInfo.key`. No root needed - the anchor comes from each entry's key at match time, so the one filter prunes sync's two sides per-side) |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
-| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form) |
+| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator; a non-string `fileb://` value is rejected at parse like aws's schema validation) |
+| `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
@@ -112,7 +113,7 @@ These implement the policy in
   library via `S3Storage(url, client=...)` (the library does not rebuild the
   connection settings).
 - **`build_client`'s alignment with aws v2**: `build_client`
-  absorbs five differences between stock botocore and the botocore bundled with
+  absorbs six differences between stock botocore and the botocore bundled with
   aws v2.
   1. **region resolution** - aws v2 resolves the region as `--region` >
      `AWS_REGION` > `AWS_DEFAULT_REGION` > the profile's config `region` > the EC2
@@ -165,6 +166,13 @@ These implement the policy in
      library (`S3.client`'s `boto3.client` fallback) stays boto3/botocore-faithful
      and keeps stock order on purpose - the same library=boto3 / CLI=aws split as
      [`crt.md`](./crt.md).
+  6. **retry defaults** - aws v2's bundled botocore hard-codes
+     `retry_mode='standard'` / `max_attempts=3` as its session defaults, where
+     stock botocore defaults to `legacy` with 5 total attempts - a visible
+     difference under throttling. `_retry_defaults` fills the aws values in
+     only when neither the env (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`,
+     present-wins - an empty value is fatal like aws, rc 255) nor the
+     profile config supplies one; both client builders apply it.
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
   / `--no-cli-pager` / `--color` / `--cli-error-format` / `--no-cli-auto-prompt`.
   They are accepted (the `choices` are validated) and have no effect on behavior.
@@ -253,8 +261,10 @@ is not guaranteed):
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
 non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
 head order of section 5.7 (`--endpoint-url` scheme 252 -> `--page-size`
-conversion 255 -> session profile 255, so `rm badpath --profile <bad>` is the
-profile's 255, like aws). The target has 3 forms
+paramfile expansion 252 -> its conversion 255 -> session profile 255, so
+`rm badpath --profile <bad>` is the profile's 255, like aws; `ls` and
+`presign` share the endpoint/paramfile/conversion prefix for their integer
+options). The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
 
@@ -464,10 +474,12 @@ Signing stays pure-Python via the pin of section 4.
 
 The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws 2.35.5):
-**`--endpoint-url` scheme (252**, aws validates the value at parse time - it
-even beats the conversions' 255) -> integer conversion (255) -> **paramfile /
-`--metadata` shorthand / blob resolution (252**, aws's parse-time handlers,
-so a bad value beats the missing source *and* a bad profile) -> **session
+**`--endpoint-url` scheme (252**, aws validates the value at parse time) ->
+**direct-option paramfile / blob loads (252**, aws's parse-time expansion -
+covering even the string-typed integer options, so `--page-size file:///no/x`
+is 252, and beating the conversions' 255) -> integer conversion (255) ->
+**`--metadata` resolution (252**, paramfile + shorthand + the string-only
+value check; the one value family the conversions beat) -> **session
 profile resolution (255**, aws binds the profile at startup, so a bad
 `--profile` beats every post-parse usage error; an unresolvable *region*
 does NOT fail here - aws defers it to request time) -> route type / streaming
@@ -603,9 +615,11 @@ strategy-derived `--delete` / `--size-only` / `--exact-timestamps`): **`--recurs
 and `--expected-size` are not declared** (`Unknown options` 252 - sync is always
 recursive and has no streaming form). `add_transfer_arguments(include_recursive=False)`.
 
-**Validation order** (before the client factory = SDK not loaded):
+**Validation order** (the shared section 5.7 head first - endpoint scheme,
+paramfile loads, the coercions, `--metadata`, the session profile - then,
+before the client factory):
 
-1. Integer-option conversion (255)
+1. Integer-option conversion (255; part of the shared head above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
    <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>` + `Error: Invalid argument
    type`)

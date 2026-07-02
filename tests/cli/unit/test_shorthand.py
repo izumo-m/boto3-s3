@@ -69,10 +69,14 @@ class TestAtEqualsParamfile:
         ref.write_text("loaded")
         assert _parse(f"a@=file://{ref}") == {"a": "loaded"}
 
-    def test_fileb_prefix_loads_bytes(self, tmp_path: Path) -> None:
+    def test_fileb_prefix_is_rejected_as_a_non_string_value(self, tmp_path: Path) -> None:
+        # aws schema-validates the shorthand result at parse time: a map value
+        # must be a string, so a fileb:// bytes load is its pre-pipeline
+        # ParamValidation (rc 252, measured) - never a transfer.
         ref = tmp_path / "val.bin"
         ref.write_bytes(b"\x00\x01")
-        assert _parse(f"a@=fileb://{ref}") == {"a": b"\x00\x01"}
+        with pytest.raises(ValidationError, match="Invalid type for parameter a"):
+            _parse(f"a@=fileb://{ref}")
 
     def test_missing_paramfile_is_a_usage_error(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError) as excinfo:

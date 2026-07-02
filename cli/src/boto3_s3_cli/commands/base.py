@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # Pure-Python name (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
 from boto3_s3 import InvalidValueError
+from boto3_s3_cli import paramfile
 from boto3_s3_cli.clientfactory import build_client, build_service_client
 
 if TYPE_CHECKING:
@@ -86,6 +87,24 @@ def parse_integer_option(value: object, *, operation: str) -> int:
         # InvalidValueError: main() maps it to 255 (aws's general handler),
         # not ValidationError's 252, and str(exc) mirrors aws's message.
         raise InvalidValueError(str(exc), operation=operation) from exc
+
+
+def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
+    """aws's parse-time ``file://`` expansion for a plain option value (252).
+
+    aws expands paramfile references on every plain option during argument
+    parsing - even the string-typed integer options - so a bad reference is
+    its ParamValidation 252 *before* the bare ``int()`` coercion's 255
+    (measured: ``--page-size file:///no/x`` exits 252). Runs in place; a
+    value without the prefix (or a non-string, e.g. an integer default) is
+    untouched.
+    """
+    value = getattr(args, option, None)
+    if isinstance(value, str) and value.startswith("file://"):
+        loaded = paramfile.read_text_paramfile(
+            value, name=f"--{option.replace('_', '-')}", operation=operation
+        )
+        setattr(args, option, loaded)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:

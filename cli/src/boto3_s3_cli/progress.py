@@ -111,10 +111,14 @@ class _ProgressSnapshot:
 
 
 def _render_path(path: str | None) -> str:
-    """aws's path rendering: S3 sides verbatim, local sides cwd-relative."""
+    """aws's path rendering: S3 sides verbatim, local sides cwd-relative.
+
+    The stream endpoint token ``-`` is also verbatim (aws prints
+    ``upload: - to s3://...``); relativizing it would render ``<cwd>/-``.
+    """
     if path is None:
         return ""
-    if path.startswith("s3://"):
+    if path.startswith("s3://") or path == "-":
         return path
     return LocalStorage.relative_path(path)
 

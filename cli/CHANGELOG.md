@@ -5,6 +5,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Exit-code parity: the pre-pipeline validation order now matches `aws s3`'s
+  measured parse-to-validation order (endpoint scheme -> paramfile loads ->
+  integer coercions -> `--metadata` -> session profile -> path checks), so
+  combined-error cases exit like aws - e.g. a bad `--profile` is 255 even
+  alongside a usage error, and `cp`/`mv` `--recursive` pre-create the local
+  destination directory (an uncreatable one is 255, not 1).
+- `--metadata` shorthand accepts aws's `key@=file://...` paramfile operator,
+  and paramfile expansion now covers the string-typed integer options
+  (`--page-size` etc.), like aws.
+- Clients now default to aws v2's retry behavior (`standard`, 3 attempts)
+  when the env / profile config is silent; stock botocore's `legacy`/5 differed
+  under throttling.
 - Transfer result/progress rendering moved off the worker threads onto a
   dedicated printer thread (aws-cli's `ResultProcessor` shape): console I/O
   no longer throttles transfers. Deliberate deviation: the printer queue is

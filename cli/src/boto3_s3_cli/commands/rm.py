@@ -21,6 +21,7 @@ from boto3_s3_cli.commands.base import (
     Context,
     add_page_size_argument,
     add_request_payer_argument,
+    expand_option_paramfile,
     parse_integer_option,
 )
 
@@ -86,10 +87,12 @@ class RmCommand(Command):
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
         # The aws parse-to-validation order (measured, docs/cli.md section 6):
-        # the --endpoint-url scheme check (252) beats the integer coercion
-        # (255), which beats the session profile resolution (255), which
-        # beats the path usage check below (252).
+        # the --endpoint-url scheme check (252) and the --page-size paramfile
+        # expansion (252) beat the integer coercion (255), which beats the
+        # session profile resolution (255), which beats the path usage check
+        # below (252).
         clientfactory.validate_endpoint_url(args)
+        expand_option_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         clientfactory.validate_profile(args)
         # Deferred: dispatch is the first point that needs the library's S3

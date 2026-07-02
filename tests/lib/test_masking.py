@@ -85,6 +85,36 @@ class TestMaskTextNotation:
         assert "X-Amz-Security-Token=***" in out
         assert "X-Amz-Expires=60" in out
 
+    def test_sso_bearer_token_dict_repr_header(self) -> None:
+        # botocore's `sso GetRoleCredentials` request carries the bearer token
+        # in the x-amz-sso_bearer_token header, logged at DEBUG - the secret
+        # that mints role credentials for every account the user can access.
+        token = "aoal-verylongssobearertokenvalue123456"
+        out = m.mask_text(f"{{'x-amz-sso_bearer_token': '{token}', 'Host': 'portal.sso'}}")
+        assert token not in out
+        assert "'x-amz-sso_bearer_token': '***" in out
+        assert "'Host': 'portal.sso'" in out
+
+    def test_sso_bearer_token_plain_header_form(self) -> None:
+        token = "aoal-verylongssobearertokenvalue123456"
+        out = m.mask_text(f"x-amz-sso_bearer_token:{token}")
+        assert token not in out
+        assert out.startswith("x-amz-sso_bearer_token:***")
+
+    def test_sso_oidc_token_response_body(self) -> None:
+        # botocore.parsers logs the CreateToken / RegisterClient response
+        # bodies at DEBUG ('Response body:'): accessToken / refreshToken /
+        # idToken / clientSecret are bearer-grade secrets.
+        body = (
+            '{"accessToken": "aoat-access123", "refreshToken": "aort-refresh456", '
+            '"idToken": "aoid-id789", "clientSecret": "secret-abc", "expiresIn": 3600}'
+        )
+        out = m.mask_text(body)
+        for secret in ("aoat-access123", "aort-refresh456", "aoid-id789", "secret-abc"):
+            assert secret not in out
+        assert '"accessToken": "***' in out
+        assert '"expiresIn": 3600' in out
+
     def test_session_token_dict_repr_header(self) -> None:
         out = m.mask_text(f"{{'X-Amz-Security-Token': '{SESSION_TOKEN}', 'Host': 'b.s3'}}")
         assert SESSION_TOKEN not in out

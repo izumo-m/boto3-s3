@@ -50,25 +50,36 @@ class _ShorthandParseError(ValueError):
     """Internal: a shorthand value could not be parsed (wrapped into ValidationError)."""
 
 
-def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str | bytes]:
+def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]:
     """Parse ``k1=v1,k2=v2`` shorthand or a JSON object into a string map.
 
     Raises ``ValidationError`` (aws rc 252) with an ``Error parsing parameter
     '<name>'`` message on malformed input, mirroring aws's parser error class
     and wording closely enough for the stderr token contract. A ``bytes``
-    value can only come from the ``@=`` operator's ``fileb://`` load; like
-    aws, it rides through to botocore's own parameter rejection (rc 1, not a
-    usage error).
+    value (only reachable via the ``@=`` operator's ``fileb://`` load) is
+    rejected here too: aws schema-validates the shorthand result at parse
+    time - a map value must be a string - so ``a@=fileb://...`` is its
+    pre-pipeline ParamValidation (rc 252, measured), never a transfer.
     """
     text = value.strip()
     if text.startswith("{"):
-        return dict(_parse_json_map(value, name=name, operation=operation))
+        return _parse_json_map(value, name=name, operation=operation)
     try:
-        return _Parser(value, name=name, operation=operation).parse()
+        parsed = _Parser(value, name=name, operation=operation).parse()
     except _ShorthandParseError as exc:
         raise ValidationError(
             f"Error parsing parameter '{name}': {exc}", operation=operation
         ) from exc
+    result: dict[str, str] = {}
+    for key, val in parsed.items():
+        if isinstance(val, bytes):
+            raise ValidationError(
+                f"Error parsing parameter '{name}': Invalid type for parameter {key}, "
+                f"value: {val!r}, valid types: <class 'str'>",
+                operation=operation,
+            )
+        result[key] = val
+    return result
 
 
 def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:

@@ -255,6 +255,50 @@ class TestParseToValidationOrder:
         )
         assert rc == 252
 
+    def test_direct_paramfile_beats_the_integer_coercion(self) -> None:
+        # aws expands file:// on plain options at parse time, BEFORE its bare
+        # int(): --content-type's bad paramfile (252) wins over --page-size
+        # abc (255). Measured.
+        rc = cli.main(
+            [
+                "cp",
+                self._MISSING,
+                "s3://b/k",
+                "--content-type",
+                "file:///no/x",
+                "--page-size",
+                "abc",
+            ]
+        )
+        assert rc == 252
+
+    def test_metadata_resolution_loses_to_the_integer_coercion(self) -> None:
+        # The map option is the exception: its value (paramfile and shorthand
+        # alike) resolves AFTER the coercions - aws exits the int's 255 here.
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--metadata", "file:///no/x", "--page-size", "abc"]
+        )
+        assert rc == 255
+
+    def test_ls_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["ls", "s3://b", "--page-size", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_presign_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["presign", "s3://b/k", "--expires-in", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_page_size_paramfile_reference_is_expanded(self) -> None:
+        # aws paramfile-expands even the string-typed integer options: a bad
+        # file:// reference on --page-size is its 252, not the int()'s 255.
+        assert cli.main(["ls", "s3://b", "--page-size", "file:///no/x"]) == 252
+
+    def test_metadata_fileb_shorthand_value_is_a_usage_error(self) -> None:
+        # a@=fileb://... loads bytes; aws rejects the non-string map value at
+        # parse time (252) - it must not reach the transfer (rc 1).
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "a@=fileb:///no/x"])
+        assert rc == 252  # the missing paramfile itself is also a 252
+
     def test_local_local_stays_252_in_a_regionless_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

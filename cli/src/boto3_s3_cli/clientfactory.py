@@ -314,7 +314,16 @@ def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
     maps it the same).
     """
     scoped = botocore_session.get_scoped_config()
-    mode = os.environ.get("AWS_RETRY_MODE") or scoped.get("retry_mode") or "standard"
-    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS") or scoped.get("max_attempts")
+    # Present-wins reads, like the profile/region env chains: aws treats a
+    # present-but-empty AWS_RETRY_MODE / AWS_MAX_ATTEMPTS as a fatal value
+    # (rc 255), never as "unset" - the empty string flows through and fails
+    # at client construction here too (mode via botocore's retry-config
+    # validation, attempts via the int cast below).
+    mode = os.environ.get("AWS_RETRY_MODE")
+    if mode is None:
+        mode = scoped.get("retry_mode", "standard")
+    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
+    if attempts_raw is None:
+        attempts_raw = scoped.get("max_attempts")
     attempts = 3 if attempts_raw is None else int(attempts_raw)
     return {"mode": mode, "total_max_attempts": attempts}

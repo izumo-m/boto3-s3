@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: `cp` / `mv` now apply `filter=` to a single S3 source too (an excluded
+  object is neither transferred nor - the `mv` hazard - deleted), matching the
+  recursive and `rm` paths.
+- Masking now also covers the SSO bearer token (`x-amz-sso_bearer_token`) and
+  the sso-oidc token bodies (`accessToken` / `refreshToken` / `idToken` /
+  `clientSecret`) that botocore logs at DEBUG on the SSO auth path.
 - Masking now also covers the SSE-C customer key in its boto3 parameter form
   (`'SSECustomerKey': ...` / `'CopySourceSSECustomerKey': ...`): s3transfer
   logs each task's kwargs at DEBUG with the raw key, which the wire-header

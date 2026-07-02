@@ -56,6 +56,13 @@ class TestResultLines:
             )
         assert capsys.readouterr().out == "upload: ./a.txt to s3://b/k\n"
 
+    def test_stream_token_renders_verbatim(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The stream endpoint token "-" is not a local path: aws prints
+        # `upload: - to s3://...`, never a cwd-relative `<cwd>/-`.
+        with TransferPrinter() as printer:
+            printer.on_result(_result(OpOutcome.SUCCEEDED, src="-", dest="s3://b/k"))
+        assert capsys.readouterr().out == "upload: - to s3://b/k\n"
+
     def test_dryrun_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
         with TransferPrinter() as printer:
             printer.on_result(_result(OpOutcome.DRYRUN, transfer_type=TransferType.COPY))

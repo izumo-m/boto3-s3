@@ -102,7 +102,12 @@ the SSE-C keys. `boto3-s3-cli` matches this: `fileb://` (bytes) is accepted on
 the two SSE-C key args, and `file://` (text) on those plus the free-string
 transfer options (`--content-type`, `--website-redirect`, `--cache-control`,
 `--content-disposition`, `--content-encoding`, `--content-language`, `--expires`,
-`--sse-kms-key-id`) and `--metadata` (resolved before its shorthand parse). The
+`--sse-kms-key-id`), the string-typed integer options (`--page-size` /
+`--progress-frequency` / `--expected-size` / `--expires-in`, expanded before
+their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
+before its shorthand parse; the shorthand also accepts aws's `key@=file://...`
+operator, and rejects a `fileb://` bytes value at parse like aws's schema
+validation). The
 choices-validated options (`--acl`, `--storage-class`, `--sse`, ...) cannot carry
 a `file://` value - argparse rejects it as an invalid choice first - matching the
 practical aws result. A load failure (missing file, or a binary file via the

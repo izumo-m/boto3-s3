@@ -46,6 +46,22 @@ class TestBuildClient:
         client = clientfactory.build_client(_parse([]))
         assert client.meta.config.retries == {"mode": "legacy", "total_max_attempts": 7}
 
+    def test_empty_retry_env_is_present_and_fatal_like_aws(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Present-wins, like the profile/region chains: aws treats an empty
+        # AWS_MAX_ATTEMPTS / AWS_RETRY_MODE as a fatal value (rc 255), never
+        # as unset. int("") -> ValueError (main's backstop maps it to 255);
+        # an empty mode fails botocore's retry-config validation at client
+        # creation -> InvalidConfigError (255).
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "")
+        with pytest.raises(ValueError, match="invalid literal"):
+            clientfactory.build_client(_parse([]))
+        monkeypatch.delenv("AWS_MAX_ATTEMPTS")
+        monkeypatch.setenv("AWS_RETRY_MODE", "")
+        with pytest.raises(InvalidConfigError):
+            clientfactory.build_client(_parse([]))
+
     def test_aws_region_env_honored_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws v2 resolves AWS_REGION ahead of AWS_DEFAULT_REGION; stock
         # botocore only knows AWS_DEFAULT_REGION (which the test fixture pins
