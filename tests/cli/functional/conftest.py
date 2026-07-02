@@ -21,7 +21,7 @@ FUNCTIONAL_BUCKET = "golden-replay-bucket"
 def moto_s3() -> Iterator[Any]:
     """A moto-backed S3 client with ``FUNCTIONAL_BUCKET`` already created.
 
-    The CLI under test builds its own client via ``globals.build_client``;
+    The CLI under test builds its own client via ``clientfactory.build_client``;
     ``mock_aws`` patches botocore process-wide, so that client (and the
     prefetch worker thread inside ``Storage.scan``) hits the same in-memory
     backend as this seeding client. Credentials/region come from the root

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # Pure-Python name (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error
-from boto3_s3_cli.globals import build_client, build_service_client
+from boto3_s3_cli.clientfactory import build_client, build_service_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,11 +36,11 @@ class Context:
     """Runtime dependencies ``main()`` hands to the dispatched :class:`Command`.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals (default: :func:`boto3_s3_cli.globals.build_client`).
+    connection/auth globals (default: :func:`boto3_s3_cli.clientfactory.build_client`).
     Tests inject a factory returning a fake client.
     ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
     path validation needs (default:
-    :func:`boto3_s3_cli.globals.build_service_client`). ``transfer_config``
+    :func:`boto3_s3_cli.clientfactory.build_service_client`). ``transfer_config``
     overrides the transfer engine's defaults (aws-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.

@@ -44,7 +44,8 @@ solidified design is added here.
 | module | role |
 |---|---|
 | `cli.py` | Builds the top parser, dispatches, wires `--debug`, maps exceptions to exit codes. `_COMMANDS` is the registry of subcommand classes |
-| `globals.py` | Common option definitions (the parent) + `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
+| `globalargs.py` | Common option definitions (the parent; SDK-free, the parse-path half - the aws-cli `globalargs.py` counterpart) |
+| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
@@ -71,9 +72,9 @@ dependencies through a `Context`.
   `ListCommand._run_main` holds `self._total_objects` and the like).
 - `Context` is the container for the runtime dependencies that `main()` resolves.
   Currently these are `client_factory` (`argparse.Namespace -> S3Client`, default
-  `globals.build_client`), `service_client_factory`
+  `clientfactory.build_client`), `service_client_factory`
   (`(service, args, *, region=None) -> client`, default
-  `globals.build_service_client` - the injection point where mv's
+  `clientfactory.build_service_client` - the injection point where mv's
   `--validate-same-s3-paths` creates the s3control / sts clients, section 5.8), and
   `transfer_config` (`TransferConfig | None`. Overrides the transfer engine's
   defaults - tests inject `use_threads=False` to make the multipart call order

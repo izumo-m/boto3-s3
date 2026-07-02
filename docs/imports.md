@@ -76,7 +76,7 @@ to overview.md's "performance equal to or better").
   versions are read from distribution metadata (`importlib.metadata.version`); the
   package itself is not imported.
 - The `--help` choices / help text are written as a **static mirror of aws-cli's
-  static tables** (the same approach as `globals.py`'s `_OUTPUT_CHOICES`,
+  static tables** (the same approach as `globalargs.py`'s `_OUTPUT_CHOICES`,
   which mirrors `cli.json`; the `aws s3` side likewise keeps all choices as static
   literals in aws-cli's `awscli/customizations/s3/subcommands.py`). They are
   not derived dynamically from botocore's service model - since aws-cli itself is

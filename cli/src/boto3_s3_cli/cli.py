@@ -10,7 +10,7 @@ import os
 import sys
 
 from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
-from boto3_s3_cli import globals as common
+from boto3_s3_cli import globalargs
 from boto3_s3_cli.commands.base import Command, Context
 from boto3_s3_cli.commands.cp import CpCommand
 from boto3_s3_cli.commands.ls import LsCommand
@@ -78,9 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
-    common.add_common_arguments(parser)
+    globalargs.add_common_arguments(parser)
     shared = argparse.ArgumentParser(add_help=False)
-    common.add_common_arguments(shared, suppress_defaults=True)
+    globalargs.add_common_arguments(shared, suppress_defaults=True)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
     for command_cls in _COMMANDS:
         command_cls().configure(

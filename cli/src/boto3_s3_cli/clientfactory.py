@@ -1,171 +1,29 @@
-"""Common (global) options shared by every ``boto3-s3`` subcommand.
+"""Build boto3 clients from the parsed connection / auth globals.
 
-These mirror ``aws s3``'s connection / auth and presentation globals.
-:func:`add_common_arguments` registers them on the top-level parser and on each
-subparser, so a global may sit before or after the subcommand
-(``boto3-s3 --profile foo ls s3://b`` and ``boto3-s3 ls s3://b --profile foo``,
-matching ``aws s3``). :func:`build_client` turns the
-connection / auth ones into the boto3 S3 client the library consumes
-(``docs/aws-cli-option-handling.md`` section 5). The presentation globals are
-accepted and ignored (section 2); ``--cli-auto-prompt`` launches the interactive
-prompt, resolved from raw argv by the dispatcher before parsing (section 3).
+The execution half of the global-option surface :mod:`~boto3_s3_cli.globalargs`
+registers: :func:`build_client` turns the connection / auth values into the
+boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
+section 5), and :func:`build_service_client` builds the non-S3 clients ``mv``'s
+path validation needs (section 5.8). Everything here reaches the AWS SDK, so
+the imports are deferred into the builders - a command pays them only once it
+actually needs a client (import contract, docs/imports.md).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 # Pure-Python names (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
+from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
     from botocore.session import Session as BotocoreSession
     from mypy_boto3_s3 import S3Client
-
-# Mirrored from aws-cli (awscli/data/cli.json) so an invalid value
-# still errors the same way before the flag is ignored (option-handling section 2).
-_OUTPUT_CHOICES = ["json", "text", "table", "yaml", "yaml-stream", "off"]
-_COLOR_CHOICES = ["on", "off", "auto"]
-_CLI_ERROR_FORMAT_CHOICES = ["legacy", "json", "yaml", "text", "table", "enhanced"]
-_BINARY_FORMAT_CHOICES = ["base64", "raw-in-base64-out"]
-
-
-def _pkg_version_or_unknown(pkg: str) -> str:
-    """Return *pkg*'s installed version, or ``"unknown"`` if it isn't installed.
-
-    ``importlib.metadata.version`` raises ``PackageNotFoundError`` for a
-    distribution missing from the environment (an unbuilt checkout, or a missing
-    optional dependency). ``--version`` must never crash, so emit a placeholder.
-    """
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        return version(pkg)
-    except PackageNotFoundError:
-        return "unknown"
-
-
-def _version_string() -> str:
-    """Build the ``--version`` line in aws-cli v2 User-Agent style.
-
-    Mirrors ``aws --version``'s token shape: both
-    boto3-s3 distributions, both AWS SDK halves (``boto3`` / ``botocore`` - their
-    patch versions can drift inside boto3's botocore range pin), then the Python
-    and OS ``boto3-s3`` runs on. The two distributions are versioned
-    independently, so each token is resolved on its own.
-
-    Only called when ``--version`` fires: the metadata lookups cost ~20ms to
-    import, which every other invocation must not pay (import contract,
-    docs/imports.md). The boto3/botocore tokens come from distribution
-    metadata, not from importing the packages.
-    """
-    import platform
-
-    return (
-        f"boto3-s3-cli/{_pkg_version_or_unknown('boto3-s3-cli')} "
-        f"boto3-s3/{_pkg_version_or_unknown('boto3-s3')} "
-        f"boto3/{_pkg_version_or_unknown('boto3')} "
-        f"botocore/{_pkg_version_or_unknown('botocore')} "
-        f"Python/{platform.python_version()} "
-        f"{platform.system()}/{platform.release()}"
-    )
-
-
-class _VersionAction(argparse.Action):
-    """``--version`` action: print one unwrapped line on stdout, then exit 0.
-
-    The stock ``argparse`` version action runs the text through the help
-    formatter, which wraps to terminal width and splits the User-Agent line at
-    awkward points. ``aws --version`` emits a single line; mirroring that keeps
-    the output copy-pasteable into bug reports. The line is rendered here, at
-    fire time, rather than taken as a parser-build kwarg - see
-    :func:`_version_string` for why it must not run on every invocation.
-    """
-
-    def __init__(
-        self,
-        option_strings: Sequence[str],
-        dest: str = argparse.SUPPRESS,
-        default: str = argparse.SUPPRESS,
-        help: str | None = None,
-    ) -> None:
-        super().__init__(
-            option_strings=list(option_strings),
-            dest=dest,
-            default=default,
-            nargs=0,
-            help=help,
-        )
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
-    ) -> None:
-        sys.stdout.write(_version_string() + "\n")
-        parser.exit()
-
-
-def add_common_arguments(
-    parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
-) -> None:
-    """Register the connection/auth (effective) and presentation (ignored) globals.
-
-    Added to BOTH the top-level parser (with real defaults) and each subparser
-    (``suppress_defaults=True``). Suppressing the subparser-side defaults stops an
-    unspecified flag from clobbering a value parsed *before* the subcommand, so a
-    global may sit on either side - ``boto3-s3 --profile foo ls s3://b`` and
-    ``boto3-s3 ls s3://b --profile foo`` both work (matching aws-cli).
-    """
-    flag = argparse.SUPPRESS if suppress_defaults else False
-    value = argparse.SUPPRESS if suppress_defaults else None
-
-    conn = parser.add_argument_group("connection / auth")
-    conn.add_argument("--profile", metavar="NAME", default=value)
-    conn.add_argument("--region", metavar="REGION", default=value)
-    conn.add_argument("--endpoint-url", metavar="URL", default=value)
-    conn.add_argument("--no-verify-ssl", action="store_true", default=flag)
-    conn.add_argument("--ca-bundle", metavar="PATH", default=value)
-    conn.add_argument("--no-sign-request", action="store_true", default=flag)
-    # Not argparse type=int on purpose: aws coerces these in a post-parse session
-    # handler (globalargs._resolve_timeout), so a non-integer value raises there
-    # and exits 255 - not the parse-time 252 a type=int would give. build_client
-    # coerces and maps a bad value to rc 255 (matching aws and --page-size).
-    conn.add_argument("--cli-read-timeout", metavar="SECONDS", default=value)
-    conn.add_argument("--cli-connect-timeout", metavar="SECONDS", default=value)
-    conn.add_argument("--debug", action="store_true", default=flag)
-
-    ignored = parser.add_argument_group("recognized but ignored")
-    ignored.add_argument("--output", choices=_OUTPUT_CHOICES, default=value)
-    ignored.add_argument("--query", default=value)
-    ignored.add_argument("--no-paginate", action="store_true", default=flag)
-    ignored.add_argument("--no-cli-pager", action="store_true", default=flag)
-    ignored.add_argument("--color", choices=_COLOR_CHOICES, default=value)
-    ignored.add_argument("--cli-error-format", choices=_CLI_ERROR_FORMAT_CHOICES, default=value)
-    ignored.add_argument("--no-cli-auto-prompt", action="store_true", default=flag)
-    # Recognized for parity; consumed by no command - aws s3's own blob
-    # argument (cp --sse-c-key) ignores it too (verbatim pass-through with
-    # fileb:// file loading; option-handling section 2).
-    ignored.add_argument("--cli-binary-format", choices=_BINARY_FORMAT_CHOICES, default=value)
-
-    # Prints the multi-component version line and exits 0; works before or after
-    # the subcommand. Custom action keeps it to one unwrapped line and defers
-    # building it until the flag actually fires (see above).
-    parser.add_argument("--version", action=_VersionAction)
-
-    # Opt-in interactive UI (section 3, the "autoprompt" extra); the dispatcher
-    # resolves it from raw argv before parsing.
-    parser.add_argument(
-        "--cli-auto-prompt", action="store_true", default=flag, help=argparse.SUPPRESS
-    )
 
 
 def _pin_python_sigv4_signers() -> None:
@@ -196,29 +54,20 @@ def _pin_python_sigv4_signers() -> None:
     )
 
 
-# aws-cli resolves the active profile as --profile > AWS_PROFILE >
-# AWS_DEFAULT_PROFILE > default: its bundled botocore lists the env vars as
-# ['AWS_PROFILE', 'AWS_DEFAULT_PROFILE'], whereas stock botocore reverses them to
-# ['AWS_DEFAULT_PROFILE', 'AWS_PROFILE'] - a long-standing divergence (botocore
-# #1725). A bare boto3.Session(profile_name=None) would inherit stock order, so
-# the two CLIs would pick *different* profiles when both env vars are set.
-_PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
-
-
 def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
-    ``--profile`` > the first env var of :data:`_PROFILE_ENV_VARS` that is
-    *present* > ``None`` (boto3 then falls back to the ``default`` profile).
-    Mirrors aws-cli's "first present env var wins" exactly, an empty value
-    included (``AWS_PROFILE=`` selects the empty profile -> ProfileNotFound, like
-    aws), so that `aws s3` parity holds even when both env vars are set. Only the
-    CLI layer corrects this; the library (boto3.client fallback) stays
-    boto3/botocore-faithful and keeps stock order on purpose.
+    ``--profile`` > the first env var of :data:`~boto3_s3_cli.globalargs.PROFILE_ENV_VARS`
+    that is *present* > ``None`` (boto3 then falls back to the ``default``
+    profile). Mirrors aws-cli's "first present env var wins" exactly, an empty
+    value included (``AWS_PROFILE=`` selects the empty profile ->
+    ProfileNotFound, like aws), so that `aws s3` parity holds even when both env
+    vars are set. Only the CLI layer corrects this; the library (boto3.client
+    fallback) stays boto3/botocore-faithful and keeps stock order on purpose.
     """
     if args.profile is not None:
         return args.profile
-    for name in _PROFILE_ENV_VARS:
+    for name in PROFILE_ENV_VARS:
         if name in os.environ:
             return os.environ[name]
     return None
@@ -373,9 +222,9 @@ def build_client(args: argparse.Namespace) -> S3Client:
     }
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED
-    # The timeouts arrive as raw strings (see add_common_arguments) and are
-    # coerced here, aws-cli-style: int() with a 0 -> None ("no timeout") sentinel,
-    # a bad value mapped to rc 255 rather than a parse-time rc 252.
+    # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
+    # and are coerced here, aws-cli-style: int() with a 0 -> None ("no timeout")
+    # sentinel, a bad value mapped to rc 255 rather than a parse-time rc 252.
     if args.cli_read_timeout is not None:
         overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
     if args.cli_connect_timeout is not None:

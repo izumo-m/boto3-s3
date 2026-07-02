@@ -263,8 +263,8 @@ def load_scoped_s3_config(args: argparse.Namespace) -> dict[str, Any]:
     The scoped config honors ``--profile``, ``AWS_CONFIG_FILE`` and botocore's
     nested ``s3 =`` INI syntax. The profile is resolved through aws-cli's
     precedence (``--profile`` > ``AWS_PROFILE`` > ``AWS_DEFAULT_PROFILE`` -
-    :func:`boto3_s3_cli.globals.resolve_profile`), the same as the client this
-    transfer uses (:func:`~boto3_s3_cli.globals.build_client`): a bare
+    :func:`boto3_s3_cli.clientfactory.resolve_profile`), the same as the client this
+    transfer uses (:func:`~boto3_s3_cli.clientfactory.build_client`): a bare
     ``boto3.Session(profile_name=None)`` would inherit stock botocore's reversed
     env order, so the ``[s3]`` section could be read from a *different* profile
     than the client when both env vars are set (botocore #1725). Deferred boto3
@@ -273,7 +273,7 @@ def load_scoped_s3_config(args: argparse.Namespace) -> dict[str, Any]:
     """
     import boto3
 
-    from boto3_s3_cli.globals import resolve_profile
+    from boto3_s3_cli.clientfactory import resolve_profile
 
     session = boto3.Session(profile_name=resolve_profile(args))
     scoped: Any = session._session.get_scoped_config()  # pyright: ignore[reportPrivateUsage] # aws-cli reads the same botocore session surface
