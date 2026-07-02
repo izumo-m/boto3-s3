@@ -180,11 +180,12 @@ chain = aws-cli `clidriver.py`'s `resolve_auto_prompt_mode` +
 
 First, `main` rejects `--cli-auto-prompt` and `--no-cli-auto-prompt` together
 with 252 (mutual exclusion, aws's wording) before mode resolution runs (in
-`cli.main`, ahead of the `_resolve_auto_prompt_mode` call).
-`_resolve_auto_prompt_mode` itself returns only a mode string
-(`on` / `on-partial` / `off`), never an rc.
+`cli.main`, ahead of the `autoprompt.resolve.resolve_auto_prompt_mode` call).
+The resolution itself lives in `autoprompt/resolve.py` (SDK- and
+prompt_toolkit-free, so the pre-parse path stays import-clean) and returns only
+a mode string (`on` / `on-partial` / `off`), never an rc.
 
-The precedence in `_resolve_auto_prompt_mode` (the first one decided wins):
+The precedence in `resolve_auto_prompt_mode` (the first one decided wins):
 
 1. If any of `--help` / `-h` / `--version` is present -> **off** (display
    help/version).
