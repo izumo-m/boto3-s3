@@ -250,6 +250,19 @@ binary exists and that the bucket is reachable and **empty** (refusing to run
 against a populated bucket); each test cleans up exactly the keys it seeded,
 and the `bucket` fixture asserts emptiness before and after every test.
 
+**Payload-size budget** (the suite must stay cheap against real AWS): a
+scenario uses the smallest payload that exercises its behavior - byte-scale
+literals almost everywhere; the deliberate exceptions are the multipart
+scenarios at **9 MiB** (just past the 8 MiB threshold; cp/mv/crt, ~7
+scenarios) and `ls`'s 1 MiB human-readable probe. A full run therefore moves
+on the order of **a few hundred MiB total** (each scenario seeds and runs
+per CLI side, so a 9 MiB scenario moves up to ~36 MiB), with transient
+storage peaking around ~20 MiB - far under the 1 GiB comfort line. The
+ceiling is **10 GiB per full run**: a new scenario that needs an MB-scale
+payload keeps it at the smallest size that triggers the behavior and states
+why in the scenario table; anything approaching GB-scale needs an explicit
+design discussion first.
+
 The suites isolate in both directions: the root `tests/conftest.py` forces
 fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
 everything except e2e, which overrides that fixture with a no-op; test
