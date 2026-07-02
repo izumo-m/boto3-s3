@@ -95,6 +95,33 @@ class TestUploadRoute:
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_oversize_upload_warns_but_still_attempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's _warn_if_too_large: an over-48.8-TiB source warns (the rc-2
+        # family) but is still attempted, so S3's own EntityTooLarge stays
+        # visible. A real 48.8 TiB file cannot be materialized, so the
+        # threshold constant is lowered; the message renders the separate
+        # _MAX_UPLOAD_SIZE_TEXT constant, so aws's wording is asserted intact.
+        monkeypatch.setattr("boto3_s3.s3._MAX_UPLOAD_SIZE", 1)
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"xx")  # 2 bytes > the patched limit
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(src),
+            S3Storage("s3://bucket/up/", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["PutObject"]  # warned, never skipped
+        outcomes = [r.outcome for r in results]
+        assert outcomes.count(OpOutcome.WARNED) == 1
+        assert outcomes.count(OpOutcome.SUCCEEDED) == 1
+        warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
+        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
+        assert "big.bin" in str(warned.error)
+
     def test_result_carries_listing_entry_and_storages(self, tmp_path: Path) -> None:
         # The completion surfaces the source FileInfo and both side Storages so an
         # app can act on the result directly; cp never lists the destination, so
@@ -279,6 +306,25 @@ class TestDownloadRoute:
         assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt", "ChecksumMode": "ENABLED"}
         assert dest.read_bytes() == b"payload"
         assert os.stat(dest).st_mtime == _MTIME.timestamp()
+
+    def test_head_omits_checksum_mode_below_the_knob_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ChecksumMode=ENABLED injection is gated on the client resolving
+        # response_checksum_validation to "when_supported"; a floor botocore
+        # predates the knob entirely and the getattr guard reads that as None
+        # - patched here, since the current botocore always carries the
+        # attribute. The HEAD must go out without ChecksumMode (the
+        # era-appropriate wire shape, docs/overview.md section 2), not raise.
+        client, calls = make_recording_client([_head_response(), _get_response()])
+        monkeypatch.setattr(client.meta.config, "response_checksum_validation", None)
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.bin"),
+            transfer_config=_SYNC,
+        )
+        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt"}
 
     def test_missing_single_source_uses_the_rewritten_404_message(self, tmp_path: Path) -> None:
         client, _ = make_recording_client([_client_error("404", 404, "HeadObject")])
