@@ -1031,6 +1031,22 @@ class TestCrtSubscriberCompat:
         _ProvideETag("abc").on_queued(future)  # must not raise
 
 
+class TestPublicSurface:
+    def test_all_matches_the_documented_surface(self) -> None:
+        # The module is a documented submodule-path surface (docs/transfer.md):
+        # the engine pair plus the --no-overwrite SDK-floor probe (section 7).
+        # A symbol added or dropped must be a deliberate __all__ / docs decision.
+        from boto3_s3 import transfer
+
+        assert set(transfer.__all__) == {
+            "TransferItem",
+            "Transferrer",
+            "conditional_write_unsupported_reason",
+        }
+        for name in transfer.__all__:
+            assert hasattr(transfer, name), name
+
+
 class TestConditionalWriteSupport:
     """The --no-overwrite (IfNoneMatch) old-botocore gate, library side.
 

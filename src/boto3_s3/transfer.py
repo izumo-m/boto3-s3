@@ -1370,4 +1370,4 @@ class _SetTags:
             pass
 
 
-__all__ = ["TransferItem", "Transferrer"]
+__all__ = ["TransferItem", "Transferrer", "conditional_write_unsupported_reason"]
