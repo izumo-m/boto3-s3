@@ -1,10 +1,11 @@
 """Auto-prompt (``--cli-auto-prompt``) support: an interactive prompt with
 ``aws s3``-faithful completion, active only when ``prompt_toolkit`` is installed.
 
-This package is imported lazily - only once ``--cli-auto-prompt`` actually fires
-on an install that has the ``autoprompt`` extra (``prompt_toolkit``). Nothing
-here is touched on the ``--help`` / ``--version`` / usage / normal-dispatch
-paths (import contract, ``docs/imports.md``).
+The dispatcher touches only :mod:`resolve` (the SDK-free, prompt_toolkit-free
+mode resolution) before parsing; everything else is imported lazily - only once
+``--cli-auto-prompt`` actually fires on an install that has the ``autoprompt``
+extra (``prompt_toolkit``). The ``--help`` / ``--version`` / usage /
+normal-dispatch paths stay SDK-free (import contract, ``docs/imports.md``).
 
 The completion engine (:mod:`model`, :mod:`parser`, :mod:`completers`) is a
 port of aws-cli's ``awscli/autocomplete/`` scoped to the ``boto3-s3`` command
