@@ -103,7 +103,7 @@ class TestUploadRoute:
         # visible. A real 48.8 TiB file cannot be materialized, so the
         # threshold constant is lowered; the message renders the separate
         # _MAX_UPLOAD_SIZE_TEXT constant, so aws's wording is asserted intact.
-        monkeypatch.setattr("boto3_s3.s3._MAX_UPLOAD_SIZE", 1)
+        monkeypatch.setattr("boto3_s3.producers._MAX_UPLOAD_SIZE", 1)
         src = tmp_path / "big.bin"
         src.write_bytes(b"xx")  # 2 bytes > the patched limit
         client, calls = make_recording_client([{}])
