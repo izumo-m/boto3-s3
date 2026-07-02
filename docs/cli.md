@@ -56,6 +56,18 @@ solidified design is added here.
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
+**Library consumption contract**: the CLI reaches `boto3_s3` only through its
+public surfaces - the package root's lazy re-export (`boto3_s3.__all__`) and
+the documented submodule surfaces (each module's `__all__`: the `fileformat`
+planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
+`globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
+core, `awsclicompare`, `crtsupport`). What the in-repo CLI needs, an external
+compatible-tool author needs too (overview.md's mission), so a CLI dependency
+is met by *publishing* the symbol, never by importing a private one. Enforced
+by `tests/cli/unit/test_library_surface.py`, which walks every `boto3_s3`
+import (and module-alias attribute access) in the CLI sources against those
+`__all__` contracts.
+
 ### 3.1 The subcommand interface (`Command`) and dependency injection (`Context`)
 
 For testability (eliminating monkeypatch) and to prepare for a growing number of

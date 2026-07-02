@@ -65,7 +65,7 @@ from boto3_s3.exceptions import InvalidConfigError
 if TYPE_CHECKING:
     import boto3
 
-__all__ = ["AwsConfig", "ConfigSection"]
+__all__ = ["SIZE_SUFFIX", "AwsConfig", "ConfigSection", "split_size_suffix"]
 
 # aws-cli's human_readable_to_int suffix table (1024-based: "MB" == "MiB").
 # Reading a value written for `aws s3` must yield the same byte count. This is
