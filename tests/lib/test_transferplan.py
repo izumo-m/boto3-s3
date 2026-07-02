@@ -464,6 +464,12 @@ class TestMvSamePathGuards:
         expected = same_path(normalize_s3_uri(src), normalize_s3_uri(dest))
         assert S3Storage(src).same_path_as(S3Storage(dest)) is expected
 
+    @pytest.mark.parametrize("uri", (*_URIS, "s3://"))
+    def test_normalized_uri_is_equivalent_to_the_string_form(self, uri: str) -> None:
+        # The instance form derives the keyless-normalized URI from the held
+        # state; it must render exactly what the string pass produces.
+        assert S3Storage(uri).normalized_uri() == normalize_s3_uri(uri)
+
     def test_same_path_as_direct_shapes(self) -> None:
         # The three aws shapes, plus the bucket gate, on held state.
         assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b/k"))

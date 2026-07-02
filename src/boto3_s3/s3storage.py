@@ -348,15 +348,15 @@ class S3Storage(Storage):
 
     @staticmethod
     def normalize_s3_uri(path: str) -> str:
-        """The keyless-bucket normalization with the scheme kept.
+        """The keyless-bucket normalization with the scheme kept (string form).
 
         aws-cli's ``_normalize_s3_trailing_slash``: a bucket-only URI with no
         trailing slash (``s3://bucket``, including a keyless access-point ARN)
         reads as the bucket root ``s3://bucket/`` - the form aws validates and
-        prints (``mv``'s same-path error shows the normalized URI). A bare
-        ``s3://`` (service root) stays as is. The transfer planner needs no
-        string pass: :meth:`format` derives the same normalized root from the
-        held ``bucket`` / ``key``.
+        prints. A bare ``s3://`` (service root) stays as is. For raw strings
+        only (the CLI's pre-resolve inputs and ``S3PathResolver`` outputs);
+        with an ``S3Storage`` at hand, :meth:`normalized_uri` derives the same
+        form from the held state, and :meth:`format` the scheme-less root.
         """
         rest = path[len(_S3_SCHEME) :]
         _bucket, key = S3Storage.split_bucket_key(rest)
@@ -394,6 +394,20 @@ class S3Storage(Storage):
         _, src_key = S3Storage.split_bucket_key(S3Storage.strip_scheme(src))
         _, dest_key = S3Storage.split_bucket_key(S3Storage.strip_scheme(dest))
         return S3Storage.same_path(f"/{src_key}", f"/{dest_key}")
+
+    def normalized_uri(self) -> str:
+        """The keyless-normalized ``s3://`` URI, from the held state.
+
+        The instance form of :meth:`normalize_s3_uri` (aws-cli's
+        ``_normalize_s3_trailing_slash``), derived from ``bucket`` / ``key``
+        with no string round-trip: a keyless bucket reads as the bucket root
+        ``s3://bucket/`` (the join supplies the slash), a bare service root
+        stays ``s3://``. The form aws validates and prints - ``mv``'s
+        same-path error shows it.
+        """
+        if not self._bucket and not self._key:
+            return _S3_SCHEME
+        return f"{_S3_SCHEME}{self._bucket}/{self._key}"
 
     def same_path_as(self, dest: S3Storage) -> bool:
         """Whether ``mv self dest`` would move an object onto itself (held state).

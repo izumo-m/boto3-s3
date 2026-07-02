@@ -1058,10 +1058,9 @@ class S3:
             if src_storage.same_path_as(dest_storage):
                 # aws words the error with the keyless-normalized URIs
                 # (`mv s3://b/k s3://b` reports `s3://b/`).
-                src_text = S3Storage.normalize_s3_uri(src_storage.as_text())
-                dest_text = S3Storage.normalize_s3_uri(dest_storage.as_text())
                 raise ValidationError(
-                    f"Cannot mv a file onto itself: {src_text} - {dest_text}",
+                    f"Cannot mv a file onto itself: {src_storage.normalized_uri()} "
+                    f"- {dest_storage.normalized_uri()}",
                     operation="mv",
                 )
         self._run_transfer(
