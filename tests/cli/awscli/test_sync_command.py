@@ -18,8 +18,9 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
 
 Not ported, with reasons:
 
-- ``TestSyncWithCRTClient`` (5 tests): the CRT transfer engine is charter
-  exception 2 (docs/overview.md section 3); CRT work is tracked in task #34.
+- ``TestSyncWithCRTClient`` (5 tests): the CRT data plane bypasses the botocore
+  client, so the recording client cannot drive it; CRT parity is enforced by
+  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
 - ``TestSyncSourceRegion``: a different aws-cli harness
   (``BaseS3CLIRunnerTest``, endpoint-level assertions); the
   ``--source-region`` client wiring is covered by the cp/mv unit tier
@@ -447,7 +448,7 @@ class TestSyncCommand:
     def test_absolute_exclude_does_not_protect_the_destination_from_delete(
         self, tmp_path: Path
     ) -> None:
-        # #85: an absolute --exclude anchors at the local source, so it hides the
+        # An absolute --exclude anchors at the local source, so it hides the
         # source's keep/a.txt but NOT the anchorless S3 destination key. The dest
         # key is therefore a dest-only orphan and --delete removes it - matching
         # aws-cli, which roots the pattern per side (src_rootdir vs dst_rootdir).

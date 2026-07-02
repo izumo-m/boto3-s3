@@ -22,8 +22,9 @@ Adaptation rules (on top of the cp port's - see its module docstring):
 
 Not ported, with reasons:
 
-- ``TestMvWithCRTClient`` (3 tests): the CRT transfer engine is charter
-  exception 2 (docs/overview.md section 3); CRT work is tracked in task #34.
+- ``TestMvWithCRTClient`` (3 tests): the CRT data plane bypasses the botocore
+  client, so the recording client cannot drive it; CRT parity is enforced by
+  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
 - ``TestMvRecursiveCaseConflict.test_warn_with_case_conflicts_in_s3`` is a
   aws-cli ``pass`` (their threaded get/delete order is nondeterministic);
   ported here as a real test - the injected NonThreadedExecutor makes the

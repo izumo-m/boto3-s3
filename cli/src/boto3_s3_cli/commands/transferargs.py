@@ -1,11 +1,11 @@
-"""The argument surface and run-pipeline pieces ``cp`` and ``mv`` share.
+"""The argument surface and run-pipeline pieces ``cp`` / ``mv`` / ``sync`` share.
 
 ``aws s3`` declares one ``TRANSFER_ARGS`` list plus per-command extras
 (aws-cli's ``subcommands.py``); this module is that shared list and the
-validation/translation steps both commands run in the same order. Everything
-here is SDK-free at import time (import contract, docs/imports.md) - the one
-deferred ``boto3_s3`` import sits inside :func:`resolve_locations`, past
-every usage error.
+validation/translation steps the three commands run in the same order.
+Everything here is SDK-free at import time (import contract, docs/imports.md) -
+the ``boto3_s3`` imports that reach the SDK are deferred into the functions
+that need them, past every usage error.
 """
 
 from __future__ import annotations
@@ -452,8 +452,8 @@ def resolve_locations(
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # Construction is permissive (non-raising); validate the strict aws-cli
-        # forms here - the same point construction used to reject them, so a usage
-        # error (rc 252) still precedes the transfer pipeline.
+        # forms here so a usage error (rc 252) still precedes the transfer
+        # pipeline.
         storage = S3Storage(arg, client=client_for)
         storage.validate()
         return storage

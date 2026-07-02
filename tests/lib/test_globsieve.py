@@ -373,8 +373,8 @@ class TestAnchored:
         assert m.included("keep/a", "/other/keep/a") is True  # different root -> visible
 
     def test_one_pattern_prunes_two_sides_independently(self) -> None:
-        # The #85 scenario: --exclude '/data/src/keep/*' excludes the local source
-        # but not the anchorless S3 destination, so --delete still removes it.
+        # --exclude '/data/src/keep/*' excludes the local source but not the
+        # anchorless S3 destination, so --delete still removes it.
         m = globsieve.compile([GlobPattern.exclude("/data/src/keep/*")])
         assert m.included("keep/a", "/data/src/keep/a") is False  # source (local) excluded
         assert m.included("keep/a", "dst/keep/a") is True  # dest (s3 key) visible
