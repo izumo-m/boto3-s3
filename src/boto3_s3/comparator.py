@@ -24,6 +24,11 @@ copy or delete. This module is layer two's material:
   behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
   selects for ``compare=None``. The direction is read from
   ``pair.transfer_type``.
+- :class:`ContentComparison` is the shared template of the content
+  strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
+  skeleton every content comparison runs before its leaf digest work - the
+  guards, the ``check_size`` safeguard, and the direction dispatch - lives
+  here once, so the two strategies cannot drift apart on it.
 - :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
   the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
   (a copy strategy is *chosen*, not composed).
@@ -36,9 +41,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import ClassVar, TypeVar
 
-from boto3_s3.types import FileInfo, TransferType
+from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
 
 _T = TypeVar("_T")
 
@@ -196,6 +201,79 @@ def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exa
     if transfer_type is TransferType.DOWNLOAD:
         return delta == 0 if exact else delta <= 0
     return delta >= 0
+
+
+READ_CHUNK = 1024 * 1024
+"""The content strategies' streaming read granularity; bounds memory."""
+
+
+class ContentComparison:
+    """The shared skeleton of the content ``compare=`` strategies (``True`` = copy).
+
+    Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
+    with their leaf digest work. What lives here is everything the two must
+    agree on - the missing-source guard, the source-only always-copy, the
+    ``check_size`` size-mismatch decision, and the ``transfer_type`` dispatch
+    onto the two hooks - so the strategies cannot silently drift apart on the
+    decision shape.
+    """
+
+    __slots__ = ()
+
+    #: The guard-message name ("etag comparison" / "checksum comparison").
+    _strategy_name: ClassVar[str]
+
+    # Storage is the subclass's (each declares its own slot).
+    check_size: bool
+
+    def __call__(self, pair: SyncPair) -> bool:
+        src, dest = pair.src, pair.dest
+        if src is None:
+            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
+        if dest is None:
+            return True
+        if (
+            self.check_size
+            and src.size is not None
+            and dest.size is not None
+            and src.size != dest.size
+        ):
+            # Differing sizes mean differing content - copy without trusting the
+            # stored digest (MD5 / a fixed-width CRC can collide; the size is
+            # independent evidence) and without reading the local file.
+            return True
+        transfer_type = pair.transfer_type
+        if transfer_type is TransferType.COPY:
+            return self._copy_differs(src, dest)
+        if transfer_type is TransferType.UPLOAD:
+            local, remote = src, dest
+        elif transfer_type is TransferType.DOWNLOAD:
+            local, remote = dest, src
+        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
+            raise ValueError(
+                f"{self._strategy_name} cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
+            )
+        if not isinstance(local, LocalFileInfo):
+            raise ValueError(
+                f"{self._strategy_name}: no local side for pair {pair.key!r} "
+                f"(transfer_type={transfer_type.value})"
+            )
+        return self._local_remote_differ(local, remote, transfer_type)
+
+    def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
+        """s3-to-s3: whether the two S3 sides' stored digests disagree."""
+        raise NotImplementedError
+
+    def _local_remote_differ(
+        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    ) -> bool:
+        """Upload/download: whether the local content differs from the S3 side.
+
+        ``transfer_type`` tells which endpoint the remote entry belongs to
+        (UPLOAD -> the destination, DOWNLOAD -> the source) for a strategy
+        that must reach that endpoint's client.
+        """
+        raise NotImplementedError
 
 
 def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:

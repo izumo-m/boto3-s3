@@ -60,16 +60,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from boto3_s3.comparator import SyncPair
+from boto3_s3.comparator import READ_CHUNK, ContentComparison
 from boto3_s3.localstorage import to_native_path
 from boto3_s3.types import LocalFileInfo, TransferType
 
 if TYPE_CHECKING:
     from boto3_s3.s3 import S3
     from boto3_s3.storage import Location
-
-_READ_CHUNK = 1024 * 1024
-"""Streaming read granularity; bounds memory regardless of file size."""
+    from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
 # at most one; the first present key wins (priority is irrelevant - only one is set).
@@ -88,7 +86,7 @@ _POLY_CRC64NVME = 0x9A6C9329AC4BC9B5  # CRC-64/NVME, reflected
 _LITTLE = sys.byteorder == "little"
 
 
-class ChecksumComparison:
+class ChecksumComparison(ContentComparison):
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's
@@ -123,6 +121,8 @@ class ChecksumComparison:
 
     __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
 
+    _strategy_name = "checksum comparison"
+
     check_size: bool
     pure_max_size: int | None
     # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries
@@ -149,55 +149,34 @@ class ChecksumComparison:
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
-    def __call__(self, pair: SyncPair) -> bool:
-        src, dest = pair.src, pair.dest
-        if src is None:
-            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dest is None:
+    def _local_remote_differ(
+        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    ) -> bool:
+        # The remote entry belongs to the endpoint the direction names; its
+        # storage carries the client/bucket GetObjectAttributes needs.
+        storage = self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
+        remote_checksum = self._remote_checksum(storage, remote.key)
+        if remote_checksum is None:
             return True
-        if (
-            self.check_size
-            and src.size is not None
-            and dest.size is not None
-            and src.size != dest.size
-        ):
-            return True
-        transfer_type = pair.transfer_type
-        if transfer_type is TransferType.COPY:
-            return self._copy_differs(src.key, dest.key)
-        if transfer_type is TransferType.UPLOAD:
-            local, remote_key, storage = src, dest.key, self._dest_storage
-        elif transfer_type is TransferType.DOWNLOAD:
-            local, remote_key, storage = dest, src.key, self._src_storage
-        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
-            raise ValueError(
-                f"checksum comparison cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
-            )
-        if not isinstance(local, LocalFileInfo):
-            raise ValueError(
-                f"checksum comparison: no local side for pair {pair.key!r} "
-                f"(transfer_type={transfer_type.value})"
-            )
-        remote = self._remote_checksum(storage, remote_key)
-        if remote is None:
-            return True
-        if not _can_compute(remote.algorithm, local.size, self.pure_max_size):
+        if not _can_compute(remote_checksum.algorithm, local.size, self.pure_max_size):
             return True
         path = to_native_path(local.key)
-        if remote.part_sizes is not None:
-            local_value = _composite_b64(path, remote.algorithm, remote.part_sizes)
+        if remote_checksum.part_sizes is not None:
+            local_value = _composite_b64(
+                path, remote_checksum.algorithm, remote_checksum.part_sizes
+            )
         else:
-            local_value = _whole_b64(path, remote.algorithm)
-        return local_value != remote.value
+            local_value = _whole_b64(path, remote_checksum.algorithm)
+        return local_value != remote_checksum.value
 
-    def _copy_differs(self, src_key: str, dest_key: str) -> bool:
+    def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: compare the two objects' stored checksums (no bytes read).
 
         The stored value strings are compared directly, so the COMPOSITE part
         sizes are not needed (``need_parts=False`` skips that pagination).
         """
-        a = self._remote_checksum(self._src_storage, src_key, need_parts=False)
-        b = self._remote_checksum(self._dest_storage, dest_key, need_parts=False)
+        a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
+        b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
         if a is None or b is None or a.algorithm != b.algorithm:
             return True
         return a.value != b.value
@@ -323,7 +302,7 @@ def _whole_b64(path: str, algorithm: str) -> str:
     hasher = _new_hasher(algorithm)
     assert hasher is not None  # callers gate on _can_compute
     with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(_READ_CHUNK), b""):
+        for block in iter(lambda: fh.read(READ_CHUNK), b""):
             hasher.update(block)
     return base64.b64encode(hasher.digest()).decode("ascii")
 
@@ -343,7 +322,7 @@ def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> st
             assert part is not None
             remaining = size
             while remaining > 0:
-                block = fh.read(min(_READ_CHUNK, remaining))
+                block = fh.read(min(READ_CHUNK, remaining))
                 if not block:
                     break
                 part.update(block)
