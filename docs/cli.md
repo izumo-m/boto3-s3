@@ -43,7 +43,7 @@ solidified design is added here.
 
 | module | role |
 |---|---|
-| `cli.py` | Builds the top parser, dispatches, wires `--debug`, maps exceptions to exit codes. `_COMMANDS` is the registry of subcommand classes |
+| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape, docs/imports.md section 2 item 4): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
 | `globalargs.py` | Common option definitions (the parent; SDK-free, the parse-path half - the aws-cli `globalargs.py` counterpart) |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
@@ -64,7 +64,7 @@ dependencies through a `Context`.
 
 - `Command` is an ABC (the `name` / `help` ClassVars, `configure(parser)`,
   `run(args, ctx) -> int`). Adding a subcommand requires only one subclass plus
-  its registration in `cli._COMMANDS`; no other wiring code is needed.
+  its registration in `cli._COMMAND_TABLE` (module path, class name, help line); no other wiring code is needed.
 - Instances are **created anew** (per-run) at parser-build time and at dispatch
   time respectively. `run()` may keep its in-flight state (transfer counters,
   progress, etc.) in instance attributes, so calling `main()` multiple times in a

@@ -1,11 +1,12 @@
-"""Import contract: CLI paths that end before dispatch load no heavy module.
+"""Import contract: no SDK - and no command module - until the subcommand is known.
 
-``--help`` / ``--version`` / usage errors must not pay for boto3 - importing
-it drags in botocore and s3transfer (~100ms) via boto3's ``compat`` module. Nor
-may they import ``prompt_toolkit``: the auto-prompt port is reached only when
-``--cli-auto-prompt`` actually fires (``docs/autoprompt.md``). The SDK loads
-exactly once a subcommand builds its client (``build_client`` / ``run()``);
-policy in ``docs/imports.md``.
+The dispatch is two-stage (docs/imports.md section 2 item 4): stage 1 reads
+the globals and the subcommand name off the static command table, so the
+top-level ``--help`` / ``--version`` and the stage-1 usage errors complete
+SDK-free *and* command-module-free. Once the subcommand is determined its
+module loads and may reach ``botocore.exceptions``, but the ``boto3`` /
+``s3transfer`` client stack (and ``prompt_toolkit``) must still stay out of
+the subcommand help / usage paths - the client loads only in ``build_client``.
 
 Each case runs ``main()`` in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -25,6 +26,23 @@ _PRELUDE = """
 
     def assert_no_heavy_imports():
         roots = ("boto3", "botocore", "s3transfer", "prompt_toolkit")
+        loaded = sorted(m for m in sys.modules if m.partition(".")[0] in roots)
+        assert not loaded, loaded
+
+    def assert_no_command_modules():
+        # commands/base.py (the Command/Context infrastructure) is part of the
+        # dispatcher core and SDK-free; the guarantee is that no per-command
+        # module loads before the subcommand is determined.
+        infra = {"boto3_s3_cli.commands", "boto3_s3_cli.commands.base"}
+        loaded = sorted(
+            m
+            for m in sys.modules
+            if m.startswith("boto3_s3_cli.commands") and m not in infra
+        )
+        assert not loaded, loaded
+
+    def assert_no_client_stack():
+        roots = ("boto3", "s3transfer", "prompt_toolkit")
         loaded = sorted(m for m in sys.modules if m.partition(".")[0] in roots)
         assert not loaded, loaded
 """
@@ -47,17 +65,19 @@ def _run_fresh(code: str) -> str:
 
 
 class TestCliImportContract:
-    def test_top_level_help_is_sdk_free(self) -> None:
+    def test_top_level_help_is_sdk_and_command_free(self) -> None:
         _run_fresh(
             """
             assert main(["--help"]) == 0
             assert_no_heavy_imports()
+            assert_no_command_modules()
             """
         )
 
-    def test_subcommand_help_is_sdk_free(self) -> None:
-        # Exercises every registered configure() (full subparser build) plus
-        # the rm filter/output module chain.
+    def test_subcommand_help_loads_no_client_stack(self) -> None:
+        # Post-determination: each command's module (its configure()) loads,
+        # and its top-level imports may reach botocore.exceptions - but the
+        # boto3/s3transfer client stack must not load for --help.
         _run_fresh(
             """
             assert main(["cp", "--help"]) == 0
@@ -69,29 +89,41 @@ class TestCliImportContract:
             assert main(["presign", "--help"]) == 0
             assert main(["sync", "--help"]) == 0
             assert main(["website", "--help"]) == 0
-            assert_no_heavy_imports()
+            assert_no_client_stack()
             """
         )
 
-    def test_version_is_sdk_free(self) -> None:
+    def test_version_is_sdk_and_command_free(self) -> None:
         # The boto3/botocore tokens must come from distribution metadata, not
         # from importing the packages.
         out = _run_fresh(
             """
             assert main(["--version"]) == 0
             assert_no_heavy_imports()
+            assert_no_command_modules()
             """
         )
         assert "boto3-s3-cli/" in out
         assert "botocore/" in out
 
-    def test_usage_errors_are_sdk_free(self) -> None:
+    def test_stage1_usage_errors_are_sdk_and_command_free(self) -> None:
         _run_fresh(
             """
-            assert main(["no-such-command"]) == 252      # argparse invalid choice
-            assert main(["ls", "--no-such-option"]) == 252  # "Unknown options" path
-            assert main([]) == 252                       # missing subcommand
+            assert main(["no-such-command"]) == 252         # argparse invalid choice
+            assert main([]) == 252                          # missing subcommand
+            assert main(["--no-such-option", "ls"]) == 252  # unknown option pre-command
             assert_no_heavy_imports()
+            assert_no_command_modules()
+            """
+        )
+
+    def test_subcommand_usage_error_loads_no_client_stack(self) -> None:
+        # The unknown option sits after the subcommand, so its module loads
+        # (stage 2) - still no client stack for a usage error.
+        _run_fresh(
+            """
+            assert main(["ls", "--no-such-option"]) == 252  # "Unknown options" path
+            assert_no_client_stack()
             """
         )
 

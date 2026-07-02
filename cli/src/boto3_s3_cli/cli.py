@@ -4,23 +4,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import io
 import logging
 import sys
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
 from boto3_s3_cli import globalargs
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
-from boto3_s3_cli.commands.cp import CpCommand
-from boto3_s3_cli.commands.ls import LsCommand
-from boto3_s3_cli.commands.mb import MbCommand
-from boto3_s3_cli.commands.mv import MvCommand
-from boto3_s3_cli.commands.presign import PresignCommand
-from boto3_s3_cli.commands.rb import RbCommand
-from boto3_s3_cli.commands.rm import RmCommand
-from boto3_s3_cli.commands.sync import SyncCommand
-from boto3_s3_cli.commands.website import WebsiteCommand
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
@@ -37,39 +31,169 @@ _CONFIGURATION_ERROR_RC = 253
 _CLIENT_ERROR_RC = 254
 _GENERAL_ERROR_RC = 255
 
-# Every wired subcommand. Registering the class here is the only wiring step; a
-# fresh instance is created per parser build and per dispatch (commands/base.py).
-_COMMANDS: tuple[type[Command], ...] = (
-    CpCommand,
-    LsCommand,
-    MbCommand,
-    MvCommand,
-    PresignCommand,
-    RbCommand,
-    RmCommand,
-    SyncCommand,
-    WebsiteCommand,
-)
+# Every wired subcommand: name -> (defining module, class name, one-line help).
+# Registering here is the only wiring step. The table is the single source for
+# stage 1 of the dispatch (names + help lines, rendered WITHOUT importing any
+# command module - the lazy-dispatch contract, docs/imports.md) and for stage 2
+# (only the matched module is imported). The help text is duplicated from each
+# class's `help` ClassVar on purpose - stage 1 must render `--help` without the
+# class - and test_command_table.py pins the two against drift.
+_COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
+    "cp": (
+        "boto3_s3_cli.commands.cp",
+        "CpCommand",
+        "Copy a local file or S3 object to another location locally or in S3.",
+    ),
+    "ls": (
+        "boto3_s3_cli.commands.ls",
+        "LsCommand",
+        "List S3 objects and common prefixes under a prefix or all S3 buckets.",
+    ),
+    "mb": ("boto3_s3_cli.commands.mb", "MbCommand", "Create an S3 bucket."),
+    "mv": (
+        "boto3_s3_cli.commands.mv",
+        "MvCommand",
+        "Move a local file or S3 object to another location locally or in S3.",
+    ),
+    "presign": (
+        "boto3_s3_cli.commands.presign",
+        "PresignCommand",
+        "Generate a pre-signed URL for an Amazon S3 object.",
+    ),
+    "rb": (
+        "boto3_s3_cli.commands.rb",
+        "RbCommand",
+        "Delete an empty S3 bucket (--force deletes its objects first).",
+    ),
+    "rm": (
+        "boto3_s3_cli.commands.rm",
+        "RmCommand",
+        "Delete an S3 object, or objects under a prefix (--recursive).",
+    ),
+    "sync": ("boto3_s3_cli.commands.sync", "SyncCommand", "Syncs directories and S3 prefixes."),
+    "website": (
+        "boto3_s3_cli.commands.website",
+        "WebsiteCommand",
+        "Set the website configuration for a bucket.",
+    ),
+}
+
+# The stage-1 namespace slot that carries everything after the subcommand
+# token, verbatim, into stage 2's real parse.
+_REST_DEST = "stage2_argv"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level ``boto3-s3`` parser with one subparser per subcommand.
+if TYPE_CHECKING:
+    # Generic only in typeshed; at runtime the class is not subscriptable.
+    _SubParsersActionBase = argparse._SubParsersAction[argparse.ArgumentParser]  # pyright: ignore[reportPrivateUsage]
+else:
+    _SubParsersActionBase = argparse._SubParsersAction
 
-    Globals are registered on the top-level parser (real defaults) and again on a
-    shared parent for the subparsers (suppressed defaults), so they work before or
-    after the subcommand without the subcommand clobbering them.
+
+class _Stage1CommandAction(_SubParsersActionBase):
+    """Match the subcommand and capture its remainder verbatim (stage 1).
+
+    The stock subparsers action hands the remainder to the named sub parser to
+    parse; stage 1 must not interpret it at all - an option there belongs to
+    the real command parser stage 2 builds, while an unknown option *before*
+    the subcommand must stay a top-level extra (aws rejects it at the top
+    level; ``argparse.REMAINDER`` cannot do this - it refuses to start on an
+    option-like token). Overriding only ``__call__`` keeps everything else the
+    parent provides: the PARSER-nargs greedy match, the invalid-choice /
+    missing-command errors (the parser raises them before the action runs),
+    and the ``--help`` listing ``add_parser`` feeds.
+    """
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        assert isinstance(values, list)  # nargs=PARSER always yields a list
+        setattr(namespace, self.dest, str(values[0]))
+        setattr(namespace, _REST_DEST, [str(v) for v in values[1:]])
+
+
+def _load_command(name: str) -> type[Command]:
+    """Import the matched subcommand's module and return its class (stage 2)."""
+    module_name, class_name, _help = _COMMAND_TABLE[name]
+    return cast("type[Command]", getattr(importlib.import_module(module_name), class_name))
+
+
+def _shared_globals_parent() -> argparse.ArgumentParser:
+    """The suppressed-defaults globals parent every subcommand parser takes.
+
+    Suppressing the defaults stops an unspecified flag from clobbering a value
+    parsed *before* the subcommand, so a global may sit on either side -
+    ``boto3-s3 --profile foo ls s3://b`` and ``boto3-s3 ls s3://b --profile
+    foo`` both work (matching aws-cli).
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    globalargs.add_common_arguments(shared, suppress_defaults=True)
+    return shared
+
+
+def _build_stage1_parser() -> argparse.ArgumentParser:
+    """The pre-determination parser: globals + the subcommand names and help lines.
+
+    No command module is imported here. The stub entries carry only the
+    table's name/help, so top-level ``--help`` / ``--version`` and the stage-1
+    usage errors (missing subcommand, invalid choice - argparse's wording,
+    remapped to 252) render exactly as the full tree renders them while the
+    path stays SDK- and command-module-free. The stubs are never parsed:
+    :class:`_Stage1CommandAction` records the matched name and the verbatim
+    remainder for stage 2 instead.
     """
     parser = argparse.ArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
     globalargs.add_common_arguments(parser)
-    shared = argparse.ArgumentParser(add_help=False)
-    globalargs.add_common_arguments(shared, suppress_defaults=True)
+    subparsers = parser.add_subparsers(
+        dest="command", metavar="<command>", required=True, action=_Stage1CommandAction
+    )
+    for name, (_module, _cls, help_text) in _COMMAND_TABLE.items():
+        subparsers.add_parser(name, help=help_text, add_help=False)
+    return parser
+
+
+def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParser:
+    """The determined subcommand's real parser (stage 2).
+
+    ``prog`` / ``description`` match what ``add_parser`` produces under the
+    full tree, so ``boto3-s3 <cmd> --help`` and the subcommand's usage errors
+    render identically to the pre-split output.
+    """
+    parser = argparse.ArgumentParser(
+        prog=f"boto3-s3 {name}",
+        description=type(command).help,
+        parents=[_shared_globals_parent()],
+    )
+    command.configure(parser)
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the complete parser: every subcommand's full argument surface.
+
+    The normal dispatch no longer calls this (stage 1 + stage 2 above); it
+    remains the single source of truth the auto-prompt completion model
+    derives from (autoprompt/model.py), which needs every command's options at
+    once - so it imports all the command modules, a cost only the interactive
+    prompt pays.
+    """
+    parser = argparse.ArgumentParser(
+        prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
+    )
+    globalargs.add_common_arguments(parser)
+    shared = _shared_globals_parent()
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
-    for command_cls in _COMMANDS:
+    for name in _COMMAND_TABLE:
+        command_cls = _load_command(name)
         command_cls().configure(
             subparsers.add_parser(
-                command_cls.name,
+                name,
                 parents=[shared],
                 help=command_cls.help,
                 description=command_cls.help,
@@ -224,7 +348,16 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
 
 
 def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bool = False) -> int:
-    """Parse ``argv`` with argparse and run the matched subcommand.
+    """Parse ``argv`` in two stages and run the matched subcommand.
+
+    Stage 1 reads the globals and the subcommand name off the stub tree - no
+    command module is imported, so ``--help`` / ``--version`` and the
+    stage-1 usage errors stay SDK-free (import contract, docs/imports.md).
+    Stage 2 imports just the matched command's module, builds its real parser,
+    and parses the stub-captured remainder into the stage-1 namespace (the
+    suppressed-defaults parent keeps pre-subcommand globals intact). Once the
+    subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
+    command table.
 
     ``suppress_usage_errors`` silences the usage-error output (argparse's usage
     block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
@@ -232,25 +365,45 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
     errorhandler.py:250, injected on the on-partial path at clidriver.py:281).
     argparse writes its own message inside ``parse_*``, so the
-    parse (and only the parse - it is instant, no live output to lose) is wrapped
-    to discard it; the command itself still runs with stderr live.
+    parses (and only the parses - they are instant, no live output to lose) are
+    wrapped to discard it; the command itself still runs with stderr live.
     """
-    parser = build_parser()
+    silencer = (
+        contextlib.redirect_stderr(io.StringIO())
+        if suppress_usage_errors
+        else contextlib.nullcontext()
+    )
     try:
-        if suppress_usage_errors:
-            with contextlib.redirect_stderr(io.StringIO()):
-                args, extras = parser.parse_known_args(argv)
-        else:
-            args, extras = parser.parse_known_args(argv)
+        with silencer:
+            args, extras = _build_stage1_parser().parse_known_args(argv)
     except SystemExit as exc:
         # argparse already wrote its message (--help/--version exit 0; usage
         # errors such as an invalid choice exit 2 -> remap per the charter).
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     if extras:
-        # aws-cli wording (UnknownArgumentError, defined in awscli/arguments.py and
-        # raised with "Unknown options: %s" in awscli/clidriver.py), prefixed like
-        # aws's error handler (errorformat.py "<prog>: [ERROR]: <msg>"). Exercised
-        # by the ported test_errors_out_with_extra_arguments.
+        # Unknown options *before* the subcommand: rejected at the top level
+        # like aws, never handed to a command parser that may define the same
+        # flag. aws-cli wording (UnknownArgumentError, "Unknown options: %s" in
+        # awscli/clidriver.py), prefixed like aws's error handler
+        # (errorformat.py "<prog>: [ERROR]: <msg>").
+        if not suppress_usage_errors:
+            sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {', '.join(extras)}\n")
+        return _PARAM_VALIDATION_ERROR_RC
+
+    rest: list[str] = getattr(args, _REST_DEST, None) or []
+    if hasattr(args, _REST_DEST):
+        delattr(args, _REST_DEST)
+    command = _load_command(args.command)()
+    try:
+        with silencer:
+            args, extras = _build_command_parser(args.command, command).parse_known_args(
+                rest, namespace=args
+            )
+    except SystemExit as exc:
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
+    if extras:
+        # aws-cli wording again - exercised by the ported
+        # test_errors_out_with_extra_arguments.
         if not suppress_usage_errors:
             sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {', '.join(extras)}\n")
         return _PARAM_VALIDATION_ERROR_RC
@@ -258,11 +411,8 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     if getattr(args, "debug", False):
         _enable_debug_logging()
 
-    # args.command is one of the registered subparser names (required=True), so
-    # the match always exists; build_parser() and dispatch share _COMMANDS as the
-    # single source of truth, dispensing with a parallel by-name index.
     try:
-        return next(cls for cls in _COMMANDS if cls.name == args.command)().run(args, ctx)
+        return command.run(args, ctx)
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):

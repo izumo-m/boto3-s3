@@ -2,7 +2,7 @@
 
 ``Command`` formalizes the contract ``cli.py`` dispatches through - argument
 registration plus execution - so wiring a new subcommand is one subclass plus
-one entry in ``cli._COMMANDS``. ``Context`` is the injection point for the
+one entry in ``cli._COMMAND_TABLE``. ``Context`` is the injection point for the
 dependencies ``main()`` resolves at runtime; tests hand it fakes instead of
 monkeypatching module attributes.
 """
