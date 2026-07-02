@@ -26,6 +26,7 @@ import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from boto3_s3 import Boto3S3Error, ConfigurationError
+from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
 
 if TYPE_CHECKING:
     from boto3_s3 import TransferConfig
@@ -83,36 +84,26 @@ DEFAULTS: dict[str, Any] = {
     "direct_io": None,
 }
 
-_SIZE_SUFFIX = {
-    "kb": 1024,
-    "mb": 1024**2,
-    "gb": 1024**3,
-    "tb": 1024**4,
-    "kib": 1024,
-    "mib": 1024**2,
-    "gib": 1024**3,
-    "tib": 1024**4,
-}
-
 
 def human_readable_to_int(value: str) -> int:
     """Convert a human readable size (``"10MB"``) to bytes (aws-cli port).
 
+    A verbatim port under aws-cli's own function name (overview.md section 3,
+    symbol-name traceability), aws's boundary behavior included; the suffix
+    table and split rule are shared with the library
+    (``boto3_s3.awsconfig.SIZE_SUFFIX`` / ``split_size_suffix``), whose
+    ``_parse_size`` is deliberately hardened where this stays aws-faithful.
     Without a recognized suffix the value must be an integer string; the
     failure wording is aws-cli's (it reaches the user via rc 255).
     """
-    value = value.lower()
-    if value[-2:] == "ib":
-        suffix = value[-3:].lower()
-    else:
-        suffix = value[-2:].lower()
-    has_size_identifier = len(value) >= 2 and suffix in _SIZE_SUFFIX
+    value, suffix = split_size_suffix(value)
+    has_size_identifier = len(value) >= 2 and suffix in SIZE_SUFFIX
     if not has_size_identifier:
         try:
             return int(value)
         except ValueError:
             raise Boto3S3Error(f"Invalid size value: {value}") from None
-    return int(value[: -len(suffix)]) * _SIZE_SUFFIX[suffix]
+    return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
 
 
 class RuntimeConfig:

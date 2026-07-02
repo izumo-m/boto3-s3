@@ -68,8 +68,13 @@ if TYPE_CHECKING:
 __all__ = ["AwsConfig", "ConfigSection"]
 
 # aws-cli's human_readable_to_int suffix table (1024-based: "MB" == "MiB").
-# Reading a value written for `aws s3` must yield the same byte count.
-_SIZE_SUFFIX = {
+# Reading a value written for `aws s3` must yield the same byte count. This is
+# the ONE home of the table and the suffix rule: the CLI's aws-verbatim
+# human_readable_to_int (boto3_s3_cli.runtimeconfig) shares them, while each
+# consumer keeps its own boundary guard and error wording - the library's
+# _parse_size below is deliberately hardened where the CLI port stays
+# aws-faithful (bare-"mb" edge included).
+SIZE_SUFFIX = {
     "kb": 1024,
     "mb": 1024**2,
     "gb": 1024**3,
@@ -79,6 +84,20 @@ _SIZE_SUFFIX = {
     "gib": 1024**3,
     "tib": 1024**4,
 }
+
+
+def split_size_suffix(value: str) -> tuple[str, str]:
+    """Lowercase *value* and split off the candidate size suffix.
+
+    Returns ``(lowered, suffix)``: the suffix is the trailing three characters
+    for an ``ib`` spelling (``"mib"``), else the trailing two (``"mb"``). No
+    validation happens here - each caller checks the suffix against
+    :data:`SIZE_SUFFIX` under its own boundary guard.
+    """
+    lowered = value.lower()
+    suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
+    return lowered, suffix
+
 
 # Sentinel for "key absent" - distinct from a present value (which is always a
 # string, or a Mapping for a subsection), so `_lookup` never confuses a real
@@ -361,11 +380,10 @@ def _parse_size(value: str, key: str) -> int:
     1024-based, matching aws-cli's ``human_readable_to_int`` (``MB`` == ``MiB``).
     A bare integer string passes through; anything else raises.
     """
-    lowered = value.lower()
-    suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
-    if len(lowered) > len(suffix) and suffix in _SIZE_SUFFIX:
+    lowered, suffix = split_size_suffix(value)
+    if len(lowered) > len(suffix) and suffix in SIZE_SUFFIX:
         try:
-            return int(lowered[: -len(suffix)]) * _SIZE_SUFFIX[suffix]
+            return int(lowered[: -len(suffix)]) * SIZE_SUFFIX[suffix]
         except ValueError:
             raise ConfigurationError(_not_a(key, value, "a size")) from None
     try:
