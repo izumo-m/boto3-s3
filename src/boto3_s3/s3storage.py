@@ -430,7 +430,7 @@ class S3Storage(Storage):
         input, so a keyless location normalizes to a slashless ``s3://bucket``
         (and the bare service root to ``s3://``) - exactly the token a raw
         ``s3://bucket`` argument carries into the transfer planner
-        (:mod:`boto3_s3.fileformat`).
+        (:mod:`boto3_s3.transferplan`).
         """
         if self._key:
             return f"s3://{self._bucket}/{self._key}"

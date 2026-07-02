@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
 from typing_extensions import Unpack
 
-from boto3_s3 import fileformat, producers
+from boto3_s3 import producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     Comparator,
@@ -229,7 +229,7 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
 
 
 def _classify_transfer_route(
-    plan: fileformat.TransferPlan, *, operation: str
+    plan: transferplan.TransferPlan, *, operation: str
 ) -> tuple[TransferType, S3Storage, S3Storage | None, str]:
     """Map a plan's route onto the engine wiring cp/mv and sync share.
 
@@ -633,7 +633,7 @@ class S3:
         shapes - what an existing-directory or trailing-slash destination
         means, which side's name wins, where ``--exclude`` / ``--include``
         patterns root - reproduce aws-cli's ``FileFormat`` rules
-        (:mod:`boto3_s3.fileformat`); ``recursive`` is the aws-cli ``dir_op``.
+        (:mod:`boto3_s3.transferplan`); ``recursive`` is the aws-cli ``dir_op``.
         Bytes move through :class:`boto3_s3.transfer.Transferrer`
         (s3transfer; multipart per ``transfer_config``, defaults matching
         aws). Per-item parity behaviors carried over: local walk warnings
@@ -755,7 +755,7 @@ class S3:
         """
         src_storage.validate()
         dest_storage.validate()
-        plan = fileformat.plan_transfer(
+        plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=recursive, operation=operation
         )
 
@@ -1169,7 +1169,9 @@ class S3:
         dest_storage = self.resolve(dest)
         src_storage.validate()
         dest_storage.validate()
-        plan = fileformat.plan_transfer(src_storage, dest_storage, recursive=True, operation="sync")
+        plan = transferplan.plan_transfer(
+            src_storage, dest_storage, recursive=True, operation="sync"
+        )
 
         transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
             plan, operation="sync"

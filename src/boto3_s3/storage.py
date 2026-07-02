@@ -134,7 +134,7 @@ class Storage(abc.ABC):
     #: rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
     #: other value is a non-built-in backend (a custom one, or a stdio stream).
     #: Transfer *routing* does not read it: the planner routes by concrete type
-    #: (``isinstance`` in ``fileformat._endpoint_kind``). Each concrete Storage
+    #: (``isinstance`` in ``transferplan._endpoint_kind``). Each concrete Storage
     #: sets its own token.
     scheme: ClassVar[str]
 
@@ -278,7 +278,7 @@ class Storage(abc.ABC):
         The inverse of :meth:`S3.resolve`: an ``S3Storage`` yields
         ``s3://bucket/key`` (a keyless location stays slashless, ``s3://bucket``),
         a ``LocalStorage`` its path as given, so ``S3.resolve(s.as_text())``
-        round-trips a locatable Storage. This is the form ``fileformat.plan_transfer``
+        round-trips a locatable Storage. This is the form ``transferplan.plan_transfer``
         consumes and ``aws s3`` displays. A stream endpoint has no location, so
         its token (``"-"``) is display-only - not round-trippable.
         """
@@ -294,7 +294,7 @@ class Storage(abc.ABC):
         polymorphically: ``S3Storage`` overrides with ``FileFormat.s3_format``,
         ``LocalStorage`` with ``FileFormat.local_format``, each reading its own
         held state. ``root`` is what item keys are resolved against
-        (``fileformat.dest_for`` prefixes it to a ``compare_key`` on the side
+        (``transferplan.dest_for`` prefixes it to a ``compare_key`` on the side
         that adopts the source's name); ``use_src_name`` - read from the
         *destination* side - is whether it does.
 

@@ -1,7 +1,7 @@
 """The transfer planner: what a cp/mv/sync pair of paths means (aws-cli ``fileformat.py``).
 
 The aws-cli pipeline that decides a path pair's shape is ported here - this
-file plays aws-cli's ``fileformat.py``:
+file plays aws-cli's ``fileformat.py``, holding the plan it produces:
 
 - ``FileFormat.format``                  -> :func:`plan_transfer`. The per-side
   halves (``FileFormat.local_format`` / ``s3_format``, and aws-cli's

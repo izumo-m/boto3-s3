@@ -11,8 +11,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 
 | module | role |
 |---|---|
-| `fileformat.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
-| `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `fileformat` / the backends |
+| `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
+| `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` / the backends |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path). Its recursive walk `LocalStorage.walk_local` is a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules), split into overridable protected methods (`_walk` / `_should_ignore` / `_stat_info` / ...) so a subclass can extend the traversal; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
@@ -194,7 +194,7 @@ The caller's stream is never closed by `IOStorage`.
 - **The key is verbatim**: the key of the S3-side `S3Storage` is used as-is.
   aws's naming where "in the form where the dest takes the source name
   (`s3://bucket` / `s3://bucket/pre/`) the literal `-` becomes the basename"
-  (`pre/-`) is **derived by the CLI layer with fileformat.py before being passed in**
+  (`pre/-`) is **derived by the CLI layer with transferplan.py before being passed in**
   (the library is permissive; the quirk is owned by the CLI).
 - **upload**: hands s3transfer the fileobj from `IOStorage.open(key, "rb")` (the
   open ignores the key - a single endpoint). No ContentType guess (there is no
@@ -401,7 +401,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
 A custom `Storage` (any `scheme` other than `"s3"` / `"local"`) transfers as one
-side of `cp` / `mv` / `sync`, the other side always S3. `fileformat.plan_transfer`
+side of `cp` / `mv` / `sync`, the other side always S3. `transferplan.plan_transfer`
 classifies the pair from the two `scheme`s into `opens3` (custom source -> S3, an
 UPLOAD) or `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_transfer`
 (cp / mv) and `S3.sync` route both. The S3 side rides `s3transfer` as usual; the
@@ -422,7 +422,7 @@ and outside aws parity.
 - **the open key**: `""` is the location itself (a single source / destination),
   a non-empty key an entry beneath it - the same key regime as `delete`. A
   recursive item's key is its `compare_key`; a single item's is `""`. The
-  destination key derives from `fileformat.dest_for` exactly as for the built-in
+  destination key derives from `transferplan.dest_for` exactly as for the built-in
   routes (a `/`-terminated or `dir_op` custom destination adopts the source
   name).
 - **enumeration / single source**: `opens3` enumerates a recursive source

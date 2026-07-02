@@ -98,6 +98,6 @@ class TestCliConsumesOnlyThePublicSurface:
                     if node.module == "boto3_s3" or node.module.startswith("boto3_s3."):
                         seen_modules.add(node.module)
         assert "boto3_s3" in seen_modules
-        assert "boto3_s3.fileformat" in seen_modules  # cp.py: plan_transfer/item_paths
+        assert "boto3_s3.transferplan" in seen_modules  # cp.py: plan_transfer/item_paths
         assert "boto3_s3.globsieve" in seen_modules  # filters.py: Matcher/PatternKind
         assert "boto3_s3.transfer" in seen_modules  # transferargs.py: the floor probe

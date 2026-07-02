@@ -1,4 +1,4 @@
-"""``boto3_s3.fileformat``: the transfer planner behind cp/mv/sync.
+"""``boto3_s3.transferplan``: the transfer planner behind cp/mv/sync.
 
 Pins the aws-cli parity contracts (aws-cli ``fileformat.py`` +
 ``find_dest_path_comp_key``): how a path pair resolves to roots and
@@ -16,9 +16,9 @@ from typing import BinaryIO, Literal
 import pytest
 from typing_extensions import override
 
-from boto3_s3 import LocalStorage, S3Storage, Storage, fileformat
+from boto3_s3 import LocalStorage, S3Storage, Storage, transferplan
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.fileformat import dest_for, item_paths
+from boto3_s3.transferplan import dest_for, item_paths
 from boto3_s3.types import FileInfo, ScanOptions
 
 # The S3 string grammar lives on S3Storage (A6); alias the names so the
@@ -41,11 +41,11 @@ def _storage(arg: str) -> S3Storage | LocalStorage:
 
 def plan_transfer(
     src: str, dest: str, *, recursive: bool, operation: str = "cp"
-) -> fileformat.TransferPlan:
+) -> transferplan.TransferPlan:
     """Test wrapper: build each endpoint Storage from its raw path and call the
     real formatter, so the call sites below stay path-focused.
     """
-    return fileformat.plan_transfer(
+    return transferplan.plan_transfer(
         _storage(src), _storage(dest), recursive=recursive, operation=operation
     )
 
@@ -246,7 +246,7 @@ class TestPlanTransferOpenRoute:
     relative compare_key is handed straight to the custom side's open()."""
 
     def test_custom_source_to_s3_is_opens3(self) -> None:
-        plan = fileformat.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
+        plan = transferplan.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
         # the custom side roots at "" and is addressed by relative compare_key
         assert (plan.src_root, plan.src_sep) == ("", "/")
@@ -255,7 +255,7 @@ class TestPlanTransferOpenRoute:
         assert dest_for(plan, "sub/f.txt") == "b/dest/sub/f.txt"
 
     def test_s3_to_custom_dest_is_s3open(self) -> None:
-        plan = fileformat.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
+        plan = transferplan.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
         assert plan.paths_type == "s3open"
         # the custom dest roots at "" so dest_for hands the relative key to open()
         assert (plan.dest_root, plan.dest_sep) == ("", "/")
@@ -265,7 +265,7 @@ class TestPlanTransferOpenRoute:
     def test_custom_dest_single_rename_targets_the_location_itself(self) -> None:
         # non-dir_op, no trailing "/" -> use_src_name False -> dest_for returns ""
         # ("" is the custom Storage's own location, per the Storage.open key rule)
-        plan = fileformat.plan_transfer(
+        plan = transferplan.plan_transfer(
             S3Storage("s3://b/key"), _FakeOpen("mem://one"), recursive=False
         )
         assert (plan.paths_type, plan.use_src_name) == ("s3open", False)
@@ -273,7 +273,7 @@ class TestPlanTransferOpenRoute:
 
     def test_custom_dest_trailing_slash_adopts_src_name(self) -> None:
         # a trailing "/" in the custom token means directory semantics (s3_format parity)
-        plan = fileformat.plan_transfer(
+        plan = transferplan.plan_transfer(
             S3Storage("s3://b/key"), _FakeOpen("mem://dir/"), recursive=False
         )
         assert plan.use_src_name is True
@@ -281,15 +281,15 @@ class TestPlanTransferOpenRoute:
 
     def test_custom_to_local_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError):
-            fileformat.plan_transfer(_FakeOpen(), LocalStorage(str(tmp_path)), recursive=False)
+            transferplan.plan_transfer(_FakeOpen(), LocalStorage(str(tmp_path)), recursive=False)
 
     def test_local_to_custom_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError):
-            fileformat.plan_transfer(LocalStorage(str(tmp_path)), _FakeOpen(), recursive=False)
+            transferplan.plan_transfer(LocalStorage(str(tmp_path)), _FakeOpen(), recursive=False)
 
     def test_custom_to_custom_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            fileformat.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
+            transferplan.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
 
 
 class TestItemPaths:

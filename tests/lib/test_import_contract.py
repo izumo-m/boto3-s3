@@ -114,13 +114,13 @@ class TestLibraryImportContract:
         )
 
     def test_transfer_planner_stops_at_exception_translation(self) -> None:
-        # The planner (fileformat) sits above the backends and routes by
+        # The planner (transferplan) sits above the backends and routes by
         # isinstance against S3Storage, so importing it reaches
         # botocore.exceptions (the S3Storage allowance, contract item 3) -
         # and nothing beyond it.
         _run_fresh(
             """
-            import boto3_s3.fileformat
+            import boto3_s3.transferplan
 
             def allowed(m):
                 return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))

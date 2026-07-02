@@ -1,7 +1,7 @@
 """The per-info transfer producers and gates cp / mv / sync share.
 
 The "producer" half of the transfer design (docs/transfer.md): turn a
-:class:`~boto3_s3.fileformat.TransferPlan` plus listing entries into
+:class:`~boto3_s3.transferplan.TransferPlan` plus listing entries into
 :class:`~boto3_s3.transfer.TransferItem` objects, running the aws-cli item
 gates on
 the way - the case-conflict gate, the glacier gate, the parent-reference and
@@ -12,7 +12,7 @@ orchestrator (:mod:`boto3_s3.s3`) calls them as ``producers.upload_items(...)``
 and the producer/orchestrator boundary is physical, not just conceptual.
 
 Kept out of :mod:`boto3_s3.transfer` on purpose: the engine module is
-deliberately blind to ``fileformat`` / the storage backends, while the
+deliberately blind to ``transferplan`` / the storage backends, while the
 producers need all of them. Like the planner, importing this module reaches
 ``botocore.exceptions`` through the backends (import contract item 3).
 """
@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from boto3_s3 import fileformat, requestparams
+from boto3_s3 import requestparams, transferplan
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
@@ -205,7 +205,7 @@ class CaseConflictGate:
 
 
 def upload_items(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     *,
     dest_bucket: str,
     transferrer: Transferrer,
@@ -245,7 +245,7 @@ def upload_items(
 
 
 def upload_item_from_info(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
     dest_bucket: str,
@@ -254,7 +254,7 @@ def upload_item_from_info(
     """One upload item from a walk entry (the oversize warning included)."""
     native = to_native_path(info.key)
     compare_key = _ckey(info)
-    dest = fileformat.dest_for(plan, compare_key)
+    dest = transferplan.dest_for(plan, compare_key)
     if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
         # aws-cli's _warn_if_too_large: warn (rendered relative) but
         # still attempt, so S3's own EntityTooLarge stays visible.
@@ -277,7 +277,7 @@ def upload_item_from_info(
 
 
 def s3_source_items(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     src_storage: S3Storage,
     *,
     transfer_type: TransferType,
@@ -333,7 +333,7 @@ def s3_source_items(
 
 
 def download_item_from_info(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
     src_bucket: str,
@@ -345,7 +345,7 @@ def download_item_from_info(
     consumed it (the gate emits its own warn/skip/notice record)."""
     src_path = f"{src_bucket}/{info.key}"
     compare_key = _ckey(info)
-    dest = fileformat.dest_for(plan, compare_key)
+    dest = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_path}"
     is_s3_info = isinstance(info, S3FileInfo)
     item = TransferItem(
@@ -393,7 +393,7 @@ def download_item_from_info(
 
 
 def copy_item_from_info(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
     src_bucket: str,
@@ -405,7 +405,7 @@ def copy_item_from_info(
     glacier gate consumed it."""
     src_path = f"{src_bucket}/{info.key}"
     compare_key = _ckey(info)
-    dest = fileformat.dest_for(plan, compare_key)
+    dest = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_path}"
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
@@ -511,7 +511,7 @@ def head_single(
         ) from exc
     etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
-    # matching fileformat.item_paths' single-item branch.
+    # matching transferplan.item_paths' single-item branch.
     yield S3FileInfo(
         key=key,
         size=head.get("ContentLength"),
@@ -524,7 +524,7 @@ def head_single(
 
 
 def require_open_capabilities(
-    plan: fileformat.TransferPlan, *, recursive: bool, is_move: bool, operation: str
+    plan: transferplan.TransferPlan, *, recursive: bool, is_move: bool, operation: str
 ) -> None:
     """Reject an open-route custom side that lacks a contract method.
 
@@ -553,7 +553,7 @@ def require_open_capabilities(
 
 
 def require_open_sync_capabilities(
-    plan: fileformat.TransferPlan, *, delete: bool, operation: str
+    plan: transferplan.TransferPlan, *, delete: bool, operation: str
 ) -> None:
     """Reject an open-route custom side that cannot back a ``sync``.
 
@@ -592,7 +592,7 @@ def _reject_missing_capabilities(
 
 
 def open_upload_items(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     *,
     dest_bucket: str,
     transferrer: Transferrer,
@@ -643,7 +643,7 @@ def open_upload_items(
 
 
 def open_upload_item(
-    plan: fileformat.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
+    plan: transferplan.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
 ) -> TransferItem:
     """One upload item reading the custom source through ``Storage.open``.
 
@@ -652,7 +652,7 @@ def open_upload_item(
     """
     compare_key = _ckey(info)
     open_key = compare_key if plan.dir_op else ""
-    dest = fileformat.dest_for(plan, compare_key)
+    dest = transferplan.dest_for(plan, compare_key)
     return TransferItem(
         compare_key=compare_key,
         size=info.size,
@@ -672,7 +672,7 @@ def open_upload_item(
 
 
 def open_download_items(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     src_storage: S3Storage,
     *,
     transferrer: Transferrer,
@@ -729,7 +729,7 @@ def open_download_items(
 
 
 def open_download_item(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
     src_bucket: str,
@@ -744,7 +744,7 @@ def open_download_item(
     never submitted), so a dry run never opens the backend for writing.
     """
     compare_key = _ckey(info)
-    open_key = fileformat.dest_for(plan, compare_key)
+    open_key = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_bucket}/{info.key}"
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
@@ -772,7 +772,7 @@ def open_download_item(
 
 
 def cp_case_gate(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     *,
     recursive: bool,
     options: TransferOptions,
@@ -865,7 +865,7 @@ def sync_entries(
 
 
 def sync_transfer_item(
-    plan: fileformat.TransferPlan,
+    plan: transferplan.TransferPlan,
     pair: SyncPair,
     *,
     transfer_type: TransferType,

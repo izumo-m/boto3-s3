@@ -58,7 +58,7 @@ solidified design is added here.
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
 public surfaces - the package root's lazy re-export (`boto3_s3.__all__`) and
-the documented submodule surfaces (each module's `__all__`: the `fileformat`
+the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`). What the in-repo CLI needs, an external
@@ -394,7 +394,7 @@ Equivalent to `aws s3 cp <src> <dest>` (aws-cli `CpCommand`; transfer family =
 `s3://` prefix (upload / download / s3->s3 copy. local->local is a usage error
 252). Path shapes - the meaning of an existing dir / a trailing-separator dest,
 which of the two names to adopt, the bucket-root normalization of a keyless
-`s3://bucket`, the filter root - are derived by `boto3_s3.fileformat` (a port of aws's
+`s3://bucket`, the filter root - are derived by `boto3_s3.transferplan` (a port of aws's
 `FileFormat`), shared between the CLI and the library.
 
 **The declaration surface is the full aws-cli ARG_TABLE**:
@@ -416,7 +416,7 @@ swaps the region + discards `--endpoint-url` = aws-cli `ClientFactory`)
 `sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In
 the form where the dest adopts the source name, the literal `-` becomes the
 basename, per aws's naming (`cp - s3://b/pre/` -> key `pre/-`); this is derived in
-fileformat.py before `S3Storage` is assembled. A run involving a stream **forces the
+transferplan.py before `S3Storage` is assembled. A run involving a stream **forces the
 errors-only printer** (as in aws - it does not mix success lines or progress into
 the raw bytes of a download). Combining `--recursive` is 252 (`Streaming
 currently is only compatible with non-recursive cp commands`); stdout download +

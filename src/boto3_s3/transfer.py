@@ -120,7 +120,7 @@ _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 class TransferItem:
     """One unit of work handed to :meth:`Transferrer.submit`.
 
-    ``compare_key`` is the item's operation-relative name (``fileformat.item_paths``)
+    ``compare_key`` is the item's operation-relative name (``transferplan.item_paths``)
     - the identity under which results and progress are reported. The
     per-route fields are populated by the orchestrator: ``src_path`` /
     ``dest_path`` are native local paths; bucket/key pairs are S3 sides.
