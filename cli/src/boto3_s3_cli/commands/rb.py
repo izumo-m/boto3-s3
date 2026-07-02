@@ -8,7 +8,7 @@ import sys
 # Pure-Python names only on the parse path (import contract, docs/imports.md);
 # rm.py's module top level is itself SDK-free, so RmCommand is safe here.
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3_cli import output
+from boto3_s3_cli import output, usage
 from boto3_s3_cli.commands.base import Command, Context
 from boto3_s3_cli.commands.rm import RmCommand
 
@@ -56,9 +56,7 @@ class RbCommand(Command):
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
-            raise ValidationError(
-                "usage: boto3-s3 rb <S3Uri>\nError: Invalid argument type", operation="rb"
-            )
+            raise ValidationError(usage.single_uri_usage("rb"), operation="rb")
 
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
         # non-raising construction); for "s3:///k" validate lands on 252 too, just

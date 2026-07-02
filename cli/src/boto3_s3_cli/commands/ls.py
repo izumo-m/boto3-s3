@@ -6,7 +6,13 @@ import argparse
 import sys
 
 from boto3_s3_cli import output
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    add_page_size_argument,
+    add_request_payer_argument,
+    parse_integer_option,
+)
 
 
 class LsCommand(Command):
@@ -19,15 +25,8 @@ class LsCommand(Command):
         """Add the ``ls``-specific arguments to its subparser."""
         parser.add_argument("paths", nargs="?", default="s3://", metavar="<S3Uri>")
         parser.add_argument("--recursive", action="store_true")
-        # Not range-validated: aws-cli passes any int through and lets the
-        # server decide (0 lists nothing -> rc 1; negative -> InvalidArgument
-        # -> rc 254). The exit-code charter requires matching both. No
-        # type=int: a non-integer must exit 255 like aws's bare int()
-        # conversion, not argparse's 252 (parse_integer_option, commands/base.py).
-        parser.add_argument("--page-size", default=1000)
-        parser.add_argument(
-            "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
-        )
+        add_page_size_argument(parser)
+        add_request_payer_argument(parser)
         parser.add_argument("--human-readable", action="store_true")
         parser.add_argument("--summarize", action="store_true")
         # Bucket-listing filters (ListBuckets Prefix / BucketRegion); accepted but

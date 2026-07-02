@@ -88,6 +88,25 @@ def parse_integer_option(value: object, *, operation: str) -> int:
         raise Boto3S3Error(str(exc), operation=operation) from exc
 
 
+def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
+    """Register ``--page-size`` (shared by ls / rm and the transfer family).
+
+    Not range-validated: aws-cli passes any int through and lets the server
+    decide (0 lists nothing -> rc 1; negative -> InvalidArgument -> rc 254),
+    and the exit-code charter requires matching both. No ``type=int``: a
+    non-integer must exit 255 like aws's bare ``int()`` conversion, not
+    argparse's 252 (:func:`parse_integer_option` converts at ``run()`` start).
+    """
+    parser.add_argument("--page-size", default=1000)
+
+
+def add_request_payer_argument(parser: argparse.ArgumentParser) -> None:
+    """Register ``--request-payer`` (optional value; ``requester`` is the only one)."""
+    parser.add_argument(
+        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
+    )
+
+
 class Command(ABC):
     """One ``aws s3`` subcommand: argument registration plus execution.
 

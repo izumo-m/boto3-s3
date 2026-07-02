@@ -10,15 +10,12 @@ import os
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, StdioStorage, ValidationError
 from boto3_s3.naming import classify, item_paths, plan_transfer
-from boto3_s3_cli import filters
+from boto3_s3_cli import filters, usage
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
 from boto3_s3_cli.progress import TransferPrinter
 
-_USAGE = (
-    "usage: boto3-s3 cp <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
-    "Error: Invalid argument type"
-)
+_USAGE = usage.two_path_usage("cp")
 
 
 class CpCommand(Command):

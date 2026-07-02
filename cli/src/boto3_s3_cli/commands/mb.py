@@ -8,7 +8,7 @@ import sys
 # Pure-Python names only on the parse path (import contract, docs/imports.md);
 # S3 / S3Storage reach botocore and are imported in run() instead.
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3_cli import output
+from boto3_s3_cli import output, usage
 from boto3_s3_cli.commands.base import Command, Context
 
 
@@ -52,9 +52,7 @@ class MbCommand(Command):
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
-            raise ValidationError(
-                "usage: boto3-s3 mb <S3Uri>\nError: Invalid argument type", operation="mb"
-            )
+            raise ValidationError(usage.single_uri_usage("mb"), operation="mb")
 
         bucket_part, _, _key_part = target[len("s3://") :].partition("/")
         if not bucket_part:
@@ -62,9 +60,7 @@ class MbCommand(Command):
             # validation fails inside mb's local catch -> rc 1. S3Storage.validate()
             # would reject "s3:///k" as a ValidationError (252-shaped), so handle
             # the form before construction to keep this path at rc 1 (same as rm).
-            # botocore's ParamValidationError str is "Parameter validation
-            # failed:\n<report>" (colon + newline), matching aws's wording.
-            message = 'Parameter validation failed:\nInvalid bucket name ""'
+            message = usage.invalid_bucket_name_message()
             sys.stderr.write(output.format_make_bucket_failed(target, message) + "\n")
             return 1
         if bucket_part.endswith("--x-s3"):

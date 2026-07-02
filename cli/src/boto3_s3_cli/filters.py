@@ -66,6 +66,16 @@ class AppendFilterAction(argparse.Action):
         setattr(namespace, self.dest, items)
 
 
+def add_filter_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the ``--exclude`` / ``--include`` pair (rm / cp / mv / sync).
+
+    One shared ordered ``filters`` dest: the interleaved order carries
+    aws-cli's last-match-wins semantics (this module's docstring).
+    """
+    parser.add_argument("--exclude", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+    parser.add_argument("--include", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+
+
 def _as_file_filter(matcher: Matcher) -> FileFilter:
     """Wrap a compiled matcher as the ``FileFilter`` the operations consume.
 

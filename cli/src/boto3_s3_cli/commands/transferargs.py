@@ -26,6 +26,7 @@ from boto3_s3 import (
 )
 from boto3_s3.naming import split_bucket_key
 from boto3_s3_cli import filters, shorthand
+from boto3_s3_cli.commands.base import add_page_size_argument, add_request_payer_argument
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -98,14 +99,7 @@ def add_transfer_arguments(
     parser.add_argument("--quiet", action="store_true")
     if include_recursive:
         parser.add_argument("--recursive", action="store_true")
-    # One shared ordered dest: the interleaved --exclude/--include order
-    # carries aws-cli's last-match-wins semantics (cli filters module).
-    parser.add_argument(
-        "--exclude", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-    )
-    parser.add_argument(
-        "--include", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-    )
+    filters.add_filter_arguments(parser)
     parser.add_argument("--acl", choices=_ACL_CHOICES)
     parser.add_argument(
         "--follow-symlinks", action="store_true", dest="follow_symlinks", default=True
@@ -136,12 +130,10 @@ def add_transfer_arguments(
     # like aws's bare int(), not argparse's 252).
     parser.add_argument("--progress-frequency", default=0)
     parser.add_argument("--progress-multiline", action="store_true")
-    parser.add_argument("--page-size", default=1000)
+    add_page_size_argument(parser)
     parser.add_argument("--ignore-glacier-warnings", action="store_true")
     parser.add_argument("--force-glacier-transfer", action="store_true")
-    parser.add_argument(
-        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
-    )
+    add_request_payer_argument(parser)
     parser.add_argument("--metadata")
     parser.add_argument(
         "--copy-props", choices=["none", "metadata-directive", "default"], default="default"
