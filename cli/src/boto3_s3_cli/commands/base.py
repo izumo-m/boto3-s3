@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # Pure-Python name (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error
+from boto3_s3 import InvalidValueError
 from boto3_s3_cli.clientfactory import build_client, build_service_client
 
 if TYPE_CHECKING:
@@ -83,9 +83,9 @@ def parse_integer_option(value: object, *, operation: str) -> int:
     try:
         return int(str(value))
     except ValueError as exc:
-        # Base category: main() maps it to 255 (not Validation/Configuration,
-        # no ClientError cause), and str(exc) mirrors aws's message.
-        raise Boto3S3Error(str(exc), operation=operation) from exc
+        # InvalidValueError: main() maps it to 255 (aws's general handler),
+        # not ValidationError's 252, and str(exc) mirrors aws's message.
+        raise InvalidValueError(str(exc), operation=operation) from exc
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:

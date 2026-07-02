@@ -1,12 +1,12 @@
 """``S3.cp``: route dispatch, naming, gates, and aggregation (recording client).
 
 Behavioral parity pins (aws-cli refs in the implementation): the pre-batch
-missing-source error uses aws's wording
-and the *base* category (their bare RuntimeError -> rc 255), the single S3
-source resolves via HeadObject whose 404 is rewritten to ``Key "..." does
-not exist`` (in-pipeline -> rc 1), folder markers and parent-directory
-escapes are dropped from downloads, the glacier gate warns/skips/forces, and
-item failures aggregate into ``BatchError``.
+missing-source error uses aws's wording as a ``NotFoundError`` with no
+``ClientError`` cause (their bare RuntimeError -> rc 255, the general rc this
+shape maps to), the single S3 source resolves via HeadObject whose 404 is
+rewritten to ``Key "..." does not exist`` (in-pipeline -> rc 1), folder
+markers and parent-directory escapes are dropped from downloads, the glacier
+gate warns/skips/forces, and item failures aggregate into ``BatchError``.
 """
 
 from __future__ import annotations
@@ -177,14 +177,15 @@ class TestUploadRoute:
             for r in results
         )
 
-    def test_missing_source_raises_the_base_category_up_front(self, tmp_path: Path) -> None:
+    def test_missing_source_raises_not_found_up_front(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope.txt")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().cp(missing, S3Storage("s3://b/k", client=client))
-        # The aws-cli raises a bare RuntimeError here (rc 255), so the exact
-        # base category matters: NotFoundError would map to a different rc.
-        assert type(excinfo.value) is Boto3S3Error
+        # aws-cli raises a bare RuntimeError here (rc 255); NotFoundError with
+        # no ClientError cause maps to the same general rc (the class must not
+        # be ValidationError / ConfigurationError, whose rc differ).
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
         assert calls == []
 

@@ -8,7 +8,7 @@ import os
 # Pure-Python names only (exceptions / naming / StdioStorage) - safe on the
 # parse path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, StdioStorage, ValidationError
+from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.fileformat import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -66,8 +66,9 @@ class CpCommand(Command):
             # aws-cli's _validate_path_args checks the missing local source (its bare
             # RuntimeError -> rc 255) right after the checksum/path pairing and
             # before SSE-C (rc 252), so when both fail that order decides the exit
-            # code; '-' is a stream, not a path.
-            raise Boto3S3Error(f"The user-provided path {src} does not exist.", operation="cp")
+            # code; '-' is a stream, not a path. NotFoundError without a
+            # ClientError cause maps to the same rc 255.
+            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")

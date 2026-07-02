@@ -34,7 +34,7 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
-from boto3_s3.exceptions import Boto3S3Error
+from boto3_s3.exceptions import ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
@@ -235,7 +235,9 @@ class StdioStorage(IOStorage):
         if mode == "rb":
             stdin = sys.stdin
             if stdin is None:
-                raise Boto3S3Error(
+                # A runtime-state precondition (no stdin in this process), so
+                # ValidationError; raised in-pipeline, rc 1 either way.
+                raise ValidationError(
                     "stdin is required for this operation, but is not available.",
                     operation="cp",
                 )

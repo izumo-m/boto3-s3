@@ -25,7 +25,12 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3 import GlobFilter
-from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError, ValidationError
+from boto3_s3.exceptions import (
+    BatchError,
+    CancelledError,
+    NotFoundError,
+    ValidationError,
+)
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
@@ -256,13 +261,13 @@ class TestOpenUploadRoute:
 
     def test_missing_single_source_raises_does_not_exist(self) -> None:
         # An unresolvable single source (get_fileinfo -> None) raises up front
-        # like a missing local source: the base category (rc 255), not a silent
-        # zero-item run and not NotFoundError (which would map to a different rc).
+        # like a missing local source - NotFoundError with no ClientError cause
+        # (the general rc 255) - not a silent zero-item run.
         src = _MemStorage({}, location="mem://data/gone.txt")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
-        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == "The user-provided path mem://data/gone.txt does not exist."
         assert calls == []
 

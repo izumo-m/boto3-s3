@@ -23,7 +23,7 @@ import os
 from typing import TYPE_CHECKING
 
 from boto3_s3 import fileformat, requestparams
-from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
+from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
 from boto3_s3.storage import Storage, StorageCapability
@@ -195,7 +195,9 @@ class CaseConflictGate:
                 key=item.compare_key,
             )
             return self._admit(item, lowered)
-        raise Boto3S3Error(
+        # A precondition violation (the destination filesystem cannot hold
+        # both names); raised in-pipeline, rc 1 either way.
+        raise ValidationError(
             f"Failed to download {src} -> {dest} because a file whose name "
             "differs only by case either exists or is being downloaded.",
             operation=self._operation,
@@ -612,10 +614,10 @@ def open_upload_items(
     does not ``open`` the source (no side effect on the backend).
 
     A single source the backend cannot resolve (``get_fileinfo`` -> ``None``)
-    raises like a missing local source - the base category, aws's wording
-    (rc 255) - rather than transferring nothing. A recursive source is an
-    enumeration: an empty ``scan`` yields zero items (rc 0), matching an empty
-    S3 prefix listing.
+    raises like a missing local source - ``NotFoundError``, aws's wording
+    (rc 255: no ``ClientError`` cause) - rather than transferring nothing. A
+    recursive source is an enumeration: an empty ``scan`` yields zero items
+    (rc 0), matching an empty S3 prefix listing.
     """
     if plan.dir_op:
         infos: Iterator[FileInfo] = plan.src.scan(
@@ -629,7 +631,7 @@ def open_upload_items(
     else:
         single = plan.src.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=transferrer.warn)
         if single is None:
-            raise Boto3S3Error(
+            raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
                 operation=operation,
             )

@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 # Pure-Python names (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
+from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -152,7 +152,7 @@ def build_service_client(
     except (NoCredentialsError, NoRegionError) as exc:
         raise ConfigurationError(str(exc)) from exc
     except BotoCoreError as exc:
-        raise Boto3S3Error(str(exc)) from exc
+        raise InvalidConfigError(str(exc)) from exc
 
 
 def _coerce_cli_timeout(value: str) -> int | None:
@@ -161,15 +161,15 @@ def _coerce_cli_timeout(value: str) -> int | None:
     aws applies this in a post-parse session handler, so a non-integer value
     raises a bare ``ValueError`` that reaches its general handler (rc 255), not
     the rc 252 of an argparse/usage error - the same path ``--page-size`` already
-    takes. Translate that failure to ``Boto3S3Error`` (-> 255) for parity instead
-    of declaring the argparse arg ``type=int``. The ``0`` -> ``None`` sentinel
-    ("no timeout"; cli.json help) is preserved because ``int("0") or None`` is
-    ``None``, and botocore (via urllib3) rejects a literal ``0`` anyway.
+    takes. Translate that failure to ``InvalidValueError`` (-> 255) for parity
+    instead of declaring the argparse arg ``type=int``. The ``0`` -> ``None``
+    sentinel ("no timeout"; cli.json help) is preserved because ``int("0") or
+    None`` is ``None``, and botocore (via urllib3) rejects a literal ``0`` anyway.
     """
     try:
         return int(value) or None
     except ValueError as exc:
-        raise Boto3S3Error(str(exc)) from exc
+        raise InvalidValueError(str(exc)) from exc
 
 
 def build_client(args: argparse.Namespace) -> S3Client:
@@ -234,8 +234,8 @@ def build_client(args: argparse.Namespace) -> S3Client:
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile, or credential/region resolution failures). Translate them
     # into the library taxonomy so exit_code_for maps them (credential/region ->
-    # ConfigurationError [253], the rest -> 255) instead of letting a raw
-    # botocore exception escape main() as an uncaught traceback (rc 1).
+    # ConfigurationError [253], the rest -> InvalidConfigError [255]) instead of
+    # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
     try:
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
         session = boto3.Session(botocore_session=botocore_session)
@@ -249,7 +249,8 @@ def build_client(args: argparse.Namespace) -> S3Client:
     except (NoCredentialsError, NoRegionError) as exc:
         # aws has dedicated handlers for these two (-> 253); every other botocore
         # error (ProfileNotFound, PartialCredentialsError, ...) falls to its
-        # GeneralExceptionHandler (-> 255) via the BotoCoreError clause below.
+        # GeneralExceptionHandler (-> 255) via the BotoCoreError clause below -
+        # InvalidConfigError, which exit_code_for maps to 255, not 253.
         raise ConfigurationError(str(exc)) from exc
     except BotoCoreError as exc:
-        raise Boto3S3Error(str(exc)) from exc
+        raise InvalidConfigError(str(exc)) from exc

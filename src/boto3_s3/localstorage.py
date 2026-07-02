@@ -176,13 +176,27 @@ class LoopDetector:
         self._ancestors.pop()
 
 
-def _translate_os_error(exc: OSError, *, operation: str, key: str | None) -> Boto3S3Error:
-    """Map an ``OSError`` to the library taxonomy (mirror of ``s3_errors``)."""
+def translate_os_error(
+    exc: OSError,
+    *,
+    operation: str | None,
+    key: str | None,
+    message: str | None = None,
+) -> Boto3S3Error:
+    """Map an ``OSError`` to the library taxonomy (the local mirror of
+    ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
+    permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
+
+    Shared by every local-filesystem failure path (this backend, the engines'
+    ``makedirs``, the CLI's destination pre-creation). ``message`` overrides
+    ``str(exc)`` when the caller carries aws-cli wording of its own.
+    """
+    text = str(exc) if message is None else message
     if isinstance(exc, FileNotFoundError):
-        return NotFoundError(str(exc), operation=operation, key=key)
+        return NotFoundError(text, operation=operation, key=key)
     if isinstance(exc, PermissionError):
-        return AccessDeniedError(str(exc), operation=operation, key=key)
-    return TransportError(str(exc), operation=operation, key=key)
+        return AccessDeniedError(text, operation=operation, key=key)
+    return TransportError(text, operation=operation, key=key)
 
 
 class LocalStorage(Storage):
@@ -445,7 +459,7 @@ class LocalStorage(Storage):
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise _translate_os_error(exc, operation="get_fileinfo", key=None) from exc
+            raise translate_os_error(exc, operation="get_fileinfo", key=None) from exc
         if _is_special_file(path):
             notify(
                 f"Skipping file {path}. File is character special device, "
@@ -521,7 +535,7 @@ class LocalStorage(Storage):
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(target, "wb"))
         except OSError as exc:
-            raise _translate_os_error(exc, operation="open", key=key) from exc
+            raise translate_os_error(exc, operation="open", key=key) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -530,7 +544,7 @@ class LocalStorage(Storage):
         try:
             os.remove(target)
         except OSError as exc:
-            raise _translate_os_error(exc, operation="delete", key=info.key) from exc
+            raise translate_os_error(exc, operation="delete", key=info.key) from exc
 
     @override
     def get_fileinfo(
@@ -571,4 +585,4 @@ def _paged(infos: Iterator[FileInfo]) -> Iterator[list[FileInfo]]:
         yield page
 
 
-__all__ = ["LocalStorage", "LoopDetector", "to_native_path"]
+__all__ = ["LocalStorage", "LoopDetector", "to_native_path", "translate_os_error"]

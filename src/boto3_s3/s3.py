@@ -34,10 +34,11 @@ from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
     CancelledError,
+    NotFoundError,
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
-from boto3_s3.localstorage import LocalStorage, to_native_path
+from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
 from boto3_s3.s3storage import S3Storage, s3_errors, translate_boto_error
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer
@@ -218,10 +219,11 @@ def _run_sync_pairs(
 def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None:
     """aws-cli's ``_validate_path_args`` missing-source check, run up front.
 
-    (Their bare RuntimeError -> rc 255; the base category here maps the same.)
+    (Their bare RuntimeError -> rc 255; ``NotFoundError`` without a
+    ``ClientError`` cause maps the same.)
     """
     if not os.path.exists(storage.path):
-        raise Boto3S3Error(
+        raise NotFoundError(
             f"The user-provided path {storage.path} does not exist.", operation=operation
         )
 
@@ -673,9 +675,9 @@ class S3:
         the first failure as ``__cause__``, warnings alone do not raise (the
         CLI derives exit code 2 from its warned count). Failures *before*
         any item work - an unreadable destination, the missing-source check
-        - raise directly: a missing local source raises the base
-        ``Boto3S3Error`` with aws's wording (their pre-pipeline rc 255
-        shape), not ``NotFoundError``.
+        - raise directly: a missing local source raises ``NotFoundError``
+        with aws's wording (their pre-pipeline rc 255 shape - no
+        ``ClientError`` cause, so the CLI maps it to the general rc).
         """
         if transfer_config is None:
             transfer_config = self._transfer_config
@@ -775,7 +777,7 @@ class S3:
             try:
                 os.makedirs(plan.dest_root, exist_ok=True)
             except OSError as exc:
-                raise Boto3S3Error(str(exc), operation=operation) from exc
+                raise translate_os_error(exc, operation=operation, key=None) from exc
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # The S3 listing source (s3local / s3s3 / s3open); None on the
@@ -1181,7 +1183,7 @@ class S3:
             try:
                 os.makedirs(dest_storage.path)
             except OSError as exc:
-                raise Boto3S3Error(str(exc), operation="sync") from exc
+                raise translate_os_error(exc, operation="sync", key=None) from exc
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the

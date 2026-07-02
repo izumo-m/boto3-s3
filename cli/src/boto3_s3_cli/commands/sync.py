@@ -8,7 +8,7 @@ import os
 # Pure-Python names only (exceptions / naming modules) - safe on the parse
 # path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, ValidationError
+from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -63,19 +63,23 @@ class SyncCommand(Command):
         # below precede the SSE-C / S3 Express 252 checks: when more than one
         # fails, that order decides the exit code.
         if src_type == "local" and not os.path.exists(src):
-            # Missing local source: aws's bare RuntimeError -> rc 255.
-            raise Boto3S3Error(f"The user-provided path {src} does not exist.", operation="sync")
+            # Missing local source: aws's bare RuntimeError -> rc 255
+            # (NotFoundError without a ClientError cause maps the same).
+            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
         if dest_type == "local" and not os.path.exists(dest):
             # aws creates the s3local destination during validation (before run),
             # so an OSError here is its pre-pipeline rc 255 - not the transfer
             # pipeline's rc 1. Pre-creating it outside finish_transfer's catch
             # makes a creation failure surface with the validation exit code (the
             # library S3.sync still ensures the dir for direct callers; this
-            # pre-check makes it a no-op there).
+            # pre-check makes it a no-op there). Every translate_os_error
+            # category maps to that same rc 255.
             try:
                 os.makedirs(dest)
             except OSError as exc:
-                raise Boto3S3Error(str(exc), operation="sync") from exc
+                from boto3_s3.localstorage import translate_os_error
+
+                raise translate_os_error(exc, operation="sync", key=None) from exc
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
         if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
             # aws-cli's _validate_not_s3express_bucket_for_sync: directory-bucket

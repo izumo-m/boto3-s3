@@ -11,7 +11,13 @@ import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
+from boto3_s3 import (
+    Boto3S3Error,
+    ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
+    ValidationError,
+)
 from boto3_s3_cli import globalargs
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
@@ -219,6 +225,10 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     (``boto3_s3.s3storage.s3_errors``) and exit 254 like aws-cli regardless of
     the library category - aws-cli treats every error that reached the server
     as a client error, even ones our taxonomy files under ``ValidationError``.
+    ``InvalidValueError`` / ``InvalidConfigError`` refine their parents back to
+    the general 255: aws routes those failures (a post-parse ``int()``, a bad
+    ``[s3]`` value, an unusable profile) through its general handler, not the
+    dedicated 252 / 253 ones.
     """
     # Deferred so the parse-only paths never load botocore (import contract,
     # docs/imports.md): when a ClientError cause can exist botocore is already
@@ -227,6 +237,11 @@ def exit_code_for(exc: Boto3S3Error) -> int:
 
     if isinstance(exc.__cause__, ClientError):
         return _CLIENT_ERROR_RC
+    # The refining subclasses come first: aws reports a post-parse value
+    # failure or a bad config through its *general* handler (255), even
+    # though the taxonomy files them under Validation / Configuration.
+    if isinstance(exc, (InvalidValueError, InvalidConfigError)):
+        return _GENERAL_ERROR_RC
     if isinstance(exc, ValidationError):
         return _PARAM_VALIDATION_ERROR_RC
     if isinstance(exc, ConfigurationError):

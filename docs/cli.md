@@ -634,13 +634,18 @@ v2's convention (aws-cli's `awscli/constants.py`).
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved, the degradation of `[s3] preferred_transfer_client=crt` x an absent awscrt section 8) | `CONFIGURATION_ERROR_RC` |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a botocore client-construction error such as `ProfileNotFound`, and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4), **a non-integer value of an integer option** (below) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
 The mapping is `cli.exit_code_for`. It prioritizes "**whether the server was
 reached** (whether it derives from `ClientError`)" over the library's exception
 classification: even if the server returns a 400 and the library classifies it as
 `ValidationError`, the exit code is 254 (because aws-cli treats every error after
-reaching the server uniformly as `CLIENT_ERROR_RC`). The **message wording** of a
+reaching the server uniformly as `CLIENT_ERROR_RC`). With no `ClientError` cause,
+the **refining subclasses are checked before their parents**: aws routes a
+post-parse value failure (`InvalidValueError`) or a bad / unusable config
+(`InvalidConfigError`) through its general handler, so both are 255 - not the
+252 / 253 of plain `ValidationError` / `ConfigurationError`
+([`exceptions.md`](./exceptions.md) section 2). The **message wording** of a
 usage error may stay as argparse's, except for an unknown option (`Unknown
 options: ...` = the same shape as aws-cli) - what the charter requires is the exit
 code, and a byte-for-byte match of the console output is not guaranteed.
@@ -677,7 +682,7 @@ outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
 as a traceback - `NoCredentialsError` /
 `NoRegionError` -> `ConfigurationError` = 253 (aws's dedicated handlers); every
-other `BotoCoreError` -> a base `Boto3S3Error` = 255 (aws's
+other `BotoCoreError` -> `InvalidConfigError` = 255 (aws's
 `GeneralExceptionHandler`), including `ProfileNotFound` for a bad `--profile`
 **and `PartialCredentialsError`** (e.g. an access key with no secret) - aws has
 no handler for either, so both are 255, not 253. A schemeless
@@ -697,7 +702,9 @@ options (`--page-size` / `--expires-in` / `--progress-frequency`) with a bare
 Because argparse's `type=int` would turn the same error into
 a usage error (252), it is not used; instead, each `run()` converts at the top via
 `parse_integer_option` in `commands/base.py` (before the client factory = exits
-255 with the SDK still unloaded). **The exception is cp's `--expected-size`**:
+255 with the SDK still unloaded), raising `InvalidValueError` - the class
+`exit_code_for` sends to 255 (the CLI timeouts' `_coerce_cli_timeout` uses the
+same class). **The exception is cp's `--expected-size`**:
 because aws does a bare `int()` at submit time (within the pipeline) and **only on
 the streaming-upload route**, a non-integer there is not 255 but a `fatal error:`
 of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0

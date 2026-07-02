@@ -137,8 +137,8 @@ A verbatim port of `RuntimeConfig` from aws-cli `transferconfig.py`
 `--profile` / nested `s3 =` INI), converts sizes (`8MB`), rates (`100MB/s` /
 `800Kb/s`), and bools, resolves the `default` -> `classic` alias, and validates
 invalid values. The wording for invalid values is byte-for-byte, raised as the
-library's base `Boto3S3Error` (aws-cli's `InvalidConfigError` reaches the general
-handler with rc 255; ours is 255 too). This also closes the existing
+library's `InvalidConfigError` - aws-cli's class of the same name reaches the
+general handler with rc 255; ours maps to 255 too (exceptions.md section 2). This also closes the existing
 gap where classic's `multipart_threshold` and the like did not take effect from
 `~/.aws/config`.
 

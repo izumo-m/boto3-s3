@@ -6,8 +6,9 @@ import argparse
 
 import pytest
 
-from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
+from boto3_s3 import Boto3S3Error, InvalidConfigError, InvalidValueError, ValidationError
 from boto3_s3_cli import clientfactory, globalargs
+from boto3_s3_cli.cli import exit_code_for
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -157,22 +158,22 @@ class TestBuildClient:
         # aws coerces the timeouts in a post-parse handler (int()), so a non-integer
         # value raises there and exits 255 - not the parse-time 252 an argparse
         # type=int would give. The arg must still parse (no type=int rejecting it up
-        # front), and build_client must surface a base Boto3S3Error (-> 255), not a
-        # ValidationError (252) or ConfigurationError (253).
+        # front), and build_client must surface InvalidValueError, whose rc is the
+        # general 255 - not ValidationError's 252 or ConfigurationError's 253.
         args = _parse(["--region", "us-east-1", flag, "abc"])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(InvalidValueError) as excinfo:
             clientfactory.build_client(args)
-        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+        assert exit_code_for(excinfo.value) == 255
 
     def test_unknown_profile_maps_to_a_library_error(self) -> None:
         # A bad --profile raises raw botocore ProfileNotFound; build_client must
-        # translate it (here -> base Boto3S3Error -> rc 255) so it does not
-        # escape as an uncaught traceback.
-        with pytest.raises(Boto3S3Error) as excinfo:
+        # translate it (-> InvalidConfigError, rc 255: aws's general handler, not
+        # the 253 pair) so it does not escape as an uncaught traceback.
+        with pytest.raises(InvalidConfigError) as excinfo:
             clientfactory.build_client(
                 _parse(["--profile", "boto3_s3_definitely_nonexistent_profile"])
             )
-        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+        assert exit_code_for(excinfo.value) == 255
         assert "boto3_s3_definitely_nonexistent_profile" in str(excinfo.value)
 
     def test_aws_profile_env_beats_aws_default_profile(
@@ -211,12 +212,11 @@ class TestBuildClient:
 
     def test_partial_credentials_map_to_255_not_253(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws has no handler for PartialCredentialsError -> GeneralExceptionHandler
-        # (255), unlike NoCredentials/NoRegion (253). build_client must NOT map it
-        # to ConfigurationError (which would be rc 253).
+        # (255), unlike NoCredentials/NoRegion (253). build_client maps it to
+        # InvalidConfigError, whose rc is the general 255, not 253.
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
         monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(InvalidConfigError) as excinfo:
             clientfactory.build_client(_parse(["--region", "us-east-1"]))
-        # base Boto3S3Error (-> 255), explicitly NOT ConfigurationError (-> 253)
-        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+        assert exit_code_for(excinfo.value) == 255

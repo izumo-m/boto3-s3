@@ -272,8 +272,8 @@ dest-existence check for download. We ported the same three faces:
      flight**" or "`os.path.exists(dest)` is true (a case-variant on a
      case-insensitive FS)" -> conflict. `skip` = drop it, `warn` = let it
      through, both display aws-cli's wording as a **NOTICE** (below). `error` =
-     a `Boto3S3Error` (`Failed to download <src> -> <dest> because a file whose
-     name differs only by case either exists or is being downloaded.`), an
+     a `ValidationError` (`Failed to download <src> -> <dest> because a file
+     whose name differs only by case either exists or is being downloaded.`), an
      in-pipeline fatal (CLI rc 1). The in-flight set mirrors aws-cli's
      `CaseConflictCleanupSubscriber`: a key is added when its download is
      admitted and dropped when that download finishes, so a same-case twin is a
@@ -415,9 +415,9 @@ and outside aws parity.
 - **enumeration / single source**: `opens3` enumerates a recursive source
   through `Storage.scan` and resolves a single source through
   `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
-  path <as_text> does not exist.` (the base category, rc 255, like a missing
-  local source); an empty recursive `scan` transfers nothing (rc 0, like an empty
-  S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
+  path <as_text> does not exist.` (`NotFoundError` with no `ClientError` cause,
+  rc 255, like a missing local source); an empty recursive `scan` transfers
+  nothing (rc 0, like an empty S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
   download (recursive `ListObjectsV2` / single `HeadObject`, folder markers
   dropped).
 - **capability gate** (`S3._require_open_capabilities`, before any bytes move):

@@ -24,7 +24,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelCompare, SyncPair
-from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
+from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -344,12 +344,14 @@ class TestSyncUpload:
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
-    def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
+    def test_missing_source_directory_raises_not_found(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().sync(missing, S3Storage("s3://bucket/p", client=client))
-        assert type(excinfo.value) is Boto3S3Error
+        # aws's bare RuntimeError -> rc 255; NotFoundError with no ClientError
+        # cause maps to the same general rc.
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
         assert calls == []
 

@@ -22,13 +22,22 @@ AGGREGATES: list[type[ex.Boto3S3Error]] = [
     ex.BatchError,
 ]
 
+# Refining subclasses: a category narrowed for the CLI's exit-code mapping
+# (aws's general handler cases), still caught as their parent category.
+REFINEMENTS: dict[type[ex.Boto3S3Error], type[ex.Boto3S3Error]] = {
+    ex.InvalidValueError: ex.ValidationError,
+    ex.InvalidConfigError: ex.ConfigurationError,
+}
+
 CATEGORY_NAMES = [
     "Boto3S3Error",
     "AccessDeniedError",
     "NotFoundError",
     "ValidationError",
+    "InvalidValueError",
     "TransportError",
     "ConfigurationError",
+    "InvalidConfigError",
     "CancelledError",
 ]
 
@@ -74,6 +83,27 @@ class TestCategorySubclasses:
         actual = set(ex.Boto3S3Error.__subclasses__())
         expected = set(CATEGORIES) | set(AGGREGATES)
         assert actual == expected
+
+
+class TestRefinementSubclasses:
+    @pytest.mark.parametrize(("refinement", "parent"), REFINEMENTS.items())
+    def test_refinement_inherits_directly_from_its_category(
+        self, refinement: type[ex.Boto3S3Error], parent: type[ex.Boto3S3Error]
+    ) -> None:
+        assert refinement.__bases__ == (parent,)
+
+    @pytest.mark.parametrize(("refinement", "parent"), REFINEMENTS.items())
+    def test_refinement_is_caught_as_its_category(
+        self, refinement: type[ex.Boto3S3Error], parent: type[ex.Boto3S3Error]
+    ) -> None:
+        with pytest.raises(parent):
+            raise refinement("test")
+
+    def test_categories_have_no_other_subclasses(self) -> None:
+        # The refinement set is closed: a new category subclass must be added
+        # here (and to the CLI's exit-code mapping decision) deliberately.
+        actual = {sub for category in CATEGORIES for sub in category.__subclasses__()}
+        assert actual == set(REFINEMENTS)
 
 
 class TestBatchError:
@@ -150,6 +180,6 @@ class TestPublicReExport:
     def test_top_level_identity_matches_module(self, name: str) -> None:
         assert getattr(boto3_s3, name) is getattr(ex, name)
 
-    def test_all_enumerates_seven_types(self) -> None:
+    def test_all_enumerates_the_taxonomy(self) -> None:
         assert set(CATEGORY_NAMES) <= set(boto3_s3.__all__)
         assert set(CATEGORY_NAMES) <= set(ex.__all__)

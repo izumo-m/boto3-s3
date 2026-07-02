@@ -55,7 +55,14 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 from boto3_s3 import requestparams
-from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
+from boto3_s3.exceptions import (
+    AccessDeniedError,
+    Boto3S3Error,
+    CancelledError,
+    ConfigurationError,
+    ValidationError,
+)
+from boto3_s3.localstorage import translate_os_error
 from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
@@ -252,7 +259,7 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     except OSError as exc:
         if exc.errno != errno.EPERM:
             raise
-        raise Boto3S3Error(
+        raise AccessDeniedError(
             "The file was downloaded, but attempting to modify the utime of the file "
             "failed. Is the file owned by another user?"
         ) from exc
@@ -446,7 +453,9 @@ class Transferrer:
                 client, is_copy=transfer_type is TransferType.COPY
             )
             if reason is not None:
-                raise Boto3S3Error(reason, operation=operation)
+                # The environment (SDK floor) lacks the capability, not the
+                # caller's arguments: a ConfigurationError.
+                raise ConfigurationError(reason, operation=operation)
         self._on_progress = on_progress
         self._on_result = on_result
         self._capture_response = capture_response
@@ -1073,7 +1082,12 @@ class _DirectoryCreator:
         except FileExistsError:
             pass
         except OSError as exc:
-            raise Boto3S3Error(f"Could not create directory {directory}: {exc}") from exc
+            raise translate_os_error(
+                exc,
+                operation=None,
+                key=None,
+                message=f"Could not create directory {directory}: {exc}",
+            ) from exc
 
 
 class _DeleteSource:

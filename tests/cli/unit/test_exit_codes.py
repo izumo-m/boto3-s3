@@ -16,6 +16,8 @@ from botocore.exceptions import ClientError
 from boto3_s3 import (
     Boto3S3Error,
     ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -59,6 +61,19 @@ class TestExitCodeFor:
     def test_other_errors_map_to_255(self) -> None:
         assert cli.exit_code_for(TransportError("connection reset")) == 255
         assert cli.exit_code_for(Boto3S3Error("unexpected")) == 255
+
+    def test_refining_subclasses_map_to_255_not_their_parents_rc(self) -> None:
+        # aws routes post-parse value failures and bad config through its
+        # general handler (255); the refining subclasses must NOT inherit
+        # ValidationError's 252 / ConfigurationError's 253.
+        assert cli.exit_code_for(InvalidValueError("invalid literal for int()")) == 255
+        assert cli.exit_code_for(InvalidConfigError("Invalid size value: abc")) == 255
+
+    def test_client_error_cause_wins_over_refining_subclass(self) -> None:
+        # The ClientError-cause branch stays first: an error that reached the
+        # server exits 254 regardless of the taxonomy class.
+        exc = _with_cause(InvalidConfigError("rejected"), _client_error("InvalidRequest", 400))
+        assert cli.exit_code_for(exc) == 254
 
 
 class _RaisingClient:

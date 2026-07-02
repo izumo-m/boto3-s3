@@ -8,8 +8,8 @@ the file-I/O options) and the engine switch itself
 option for it). :class:`RuntimeConfig` is the aws-cli parser verbatim -
 human-readable sizes (``8MB``), rates (``100MB/s`` / ``800Kb/s``), booleans,
 the ``default`` -> ``classic`` alias, and byte-exact error wording - raising
-the library's base ``Boto3S3Error`` where aws-cli's ``InvalidConfigError``
-escapes to its general handler (both exit 255, after every
+the library's ``InvalidConfigError`` (aws-cli's class of the same name)
+where aws-cli's escapes to its general handler (both exit 255, after every
 path/usage validation).
 
 :func:`load_scoped_s3_config` reads the section the way aws-cli's
@@ -25,7 +25,7 @@ import argparse
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from boto3_s3 import Boto3S3Error, ConfigurationError
+from boto3_s3 import ConfigurationError, InvalidConfigError
 from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ def human_readable_to_int(value: str) -> int:
         try:
             return int(value)
         except ValueError:
-            raise Boto3S3Error(f"Invalid size value: {value}") from None
+            raise InvalidConfigError(f"Invalid size value: {value}") from None
     return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
 
 
@@ -171,7 +171,7 @@ class RuntimeConfig:
                 elif self._is_integer_str(value):
                     runtime_config[attr] = int(value)
                 else:
-                    raise Boto3S3Error(
+                    raise InvalidConfigError(
                         f"Invalid rate: {value}. The value must be expressed "
                         "as an integer in terms of bytes per second "
                         "(e.g. 10485760) or a rate in terms of bytes "
@@ -239,10 +239,10 @@ class RuntimeConfig:
                     self._error_invalid_choice(attr, value)
 
     def _error_positive_value(self, name: str, value: Any) -> None:
-        raise Boto3S3Error(f"Value for {name} must be a positive integer: {value}")
+        raise InvalidConfigError(f"Value for {name} must be a positive integer: {value}")
 
     def _error_invalid_choice(self, name: str, value: Any) -> None:
-        raise Boto3S3Error(
+        raise InvalidConfigError(
             f'Invalid value: "{value}" for configuration option: "{name}". '
             f"Supported values are: {', '.join(self.SUPPORTED_CHOICES[name])}"
         )

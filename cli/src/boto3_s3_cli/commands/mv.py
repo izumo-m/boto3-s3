@@ -10,7 +10,7 @@ import sys
 # docs/imports.md), so S3Storage's grammar may sit at top level; the boto3
 # client stack still loads in run() via the client factory.
 from boto3_s3 import (
-    Boto3S3Error,
+    NotFoundError,
     S3PathResolver,
     S3Storage,
     ValidationError,
@@ -78,8 +78,8 @@ class MvCommand(Command):
             # aws-cli's _validate_path_args checks the missing local source (its bare
             # RuntimeError -> rc 255) right after the checksum/path pairing and
             # before SSE-C (rc 252), so when both fail that order decides the exit
-            # code.
-            raise Boto3S3Error(f"The user-provided path {src} does not exist.", operation="mv")
+            # code. NotFoundError without a ClientError cause maps to the same rc 255.
+            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
