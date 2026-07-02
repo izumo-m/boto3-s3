@@ -6,7 +6,7 @@ lines:
 
 - results (stdout): ``upload: ./a.txt to s3://b/k`` with the ``(dryrun)``
   prefix; local sides rendered relative to the cwd at print time
-  (``naming.relative_path``, the aws-cli renderer), S3 sides as ``s3://...``.
+  (``LocalStorage.relative_path``, the aws-cli renderer), S3 sides as ``s3://...``.
 - failures / warnings (stderr): ``upload failed: ... <error>`` /
   ``warning: <body>`` - the bodies arrive aws-cli-worded from the library.
 - progress (stdout): ``Completed 1.2 MiB/9.0 MiB (3.4 MiB/s) with 1 file(s)
@@ -64,7 +64,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
-from boto3_s3.naming import relative_path
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.output import human_readable_size
 
 if TYPE_CHECKING:
@@ -116,7 +116,7 @@ def _render_path(path: str | None) -> str:
         return ""
     if path.startswith("s3://"):
         return path
-    return relative_path(path)
+    return LocalStorage.relative_path(path)
 
 
 class TransferPrinter:

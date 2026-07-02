@@ -6,12 +6,16 @@ import argparse
 import os
 import sys
 
-# Pure-Python names only (exceptions / naming / pathresolver modules) - safe
-# on the parse path; S3 / S3Storage reach botocore and are imported in run()
-# instead (import contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3.naming import normalize_s3_uri, same_key, same_path
-from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
+# Loaded only once mv is determined (stage 2 of the lazy dispatch,
+# docs/imports.md), so S3Storage's grammar may sit at top level; the boto3
+# client stack still loads in run() via the client factory.
+from boto3_s3 import (
+    Boto3S3Error,
+    S3PathResolver,
+    S3Storage,
+    ValidationError,
+    has_underlying_s3_path,
+)
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
@@ -133,12 +137,12 @@ class MvCommand(Command):
         is off but a side looks access-point-shaped, aws's standing warning
         goes to stderr and the move proceeds.
         """
-        norm_src = normalize_s3_uri(src)
-        norm_dest = normalize_s3_uri(dest)
+        norm_src = S3Storage.normalize_s3_uri(src)
+        norm_dest = S3Storage.normalize_s3_uri(dest)
         message = f"Cannot mv a file onto itself: {norm_src} - {norm_dest}"
-        if same_path(norm_src, norm_dest):
+        if S3Storage.same_path(norm_src, norm_dest):
             raise ValidationError(message, operation="mv")
-        if not same_key(norm_src, norm_dest):
+        if not S3Storage.same_key(norm_src, norm_dest):
             return
         enabled = (
             args.validate_same_s3_paths or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true"
@@ -156,7 +160,7 @@ class MvCommand(Command):
             dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)
             for src_path in src_paths:
                 for dest_path in dest_paths:
-                    if same_path(src_path, dest_path):
+                    if S3Storage.same_path(src_path, dest_path):
                         raise ValidationError(message, operation="mv")
         elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
             sys.stderr.write(_VALIDATE_WARNING)

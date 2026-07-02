@@ -41,7 +41,7 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.naming import relative_path
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -188,8 +188,9 @@ class TestSyncCommand:
         assert [(c.operation, c.params) for c in calls] == [
             ("ListObjectsV2", {"Bucket": "bucket", "Prefix": "", **_LIST_BASE}),
         ]
-        assert f"(dryrun) upload: {relative_path(str(full_path))} to s3://bucket/file.txt" in (
-            result.stdout
+        assert (
+            f"(dryrun) upload: {LocalStorage.relative_path(str(full_path))} to s3://bucket/file.txt"
+            in (result.stdout)
         )
 
     def test_glacier_sync_with_force_glacier(self, tmp_path: Path) -> None:

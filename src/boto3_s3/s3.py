@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
 from typing_extensions import Unpack
 
-from boto3_s3 import naming, requestparams
+from boto3_s3 import fileformat, requestparams
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     Comparator,
@@ -315,7 +315,7 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
 
 
 def _classify_transfer_route(
-    plan: naming.TransferPlan, *, operation: str
+    plan: fileformat.TransferPlan, *, operation: str
 ) -> tuple[TransferType, S3Storage, S3Storage | None, str]:
     """Map a plan's route onto the engine wiring cp/mv and sync share.
 
@@ -790,7 +790,7 @@ class S3:
         shapes - what an existing-directory or trailing-slash destination
         means, which side's name wins, where ``--exclude`` / ``--include``
         patterns root - reproduce aws-cli's ``FileFormat`` rules
-        (:mod:`boto3_s3.naming`); ``recursive`` is the aws-cli ``dir_op``.
+        (:mod:`boto3_s3.fileformat`); ``recursive`` is the aws-cli ``dir_op``.
         Bytes move through :class:`boto3_s3.transfer.Transferrer`
         (s3transfer; multipart per ``transfer_config``, defaults matching
         aws). Per-item parity behaviors carried over: local walk warnings
@@ -912,7 +912,7 @@ class S3:
         """
         src_storage.validate()
         dest_storage.validate()
-        plan = naming.plan_transfer(
+        plan = fileformat.plan_transfer(
             src_storage, dest_storage, recursive=recursive, operation=operation
         )
 
@@ -1044,7 +1044,7 @@ class S3:
 
     def _cp_upload_items(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         *,
         dest_bucket: str,
         transferrer: Transferrer,
@@ -1088,7 +1088,7 @@ class S3:
 
     def _upload_item_from_info(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         info: FileInfo,
         *,
         dest_bucket: str,
@@ -1097,12 +1097,12 @@ class S3:
         """One upload item from a walk entry (the oversize warning included)."""
         native = to_native_path(info.key)
         compare_key = _ckey(info)
-        dest = naming.dest_for(plan, compare_key)
+        dest = fileformat.dest_for(plan, compare_key)
         if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
             # aws-cli's _warn_if_too_large: warn (rendered relative) but
             # still attempt, so S3's own EntityTooLarge stays visible.
             transferrer.warn(
-                f"File {naming.relative_path(native)} exceeds s3 upload limit of "
+                f"File {LocalStorage.relative_path(native)} exceeds s3 upload limit of "
                 f"{_MAX_UPLOAD_SIZE_TEXT}.",
                 key=compare_key,
             )
@@ -1120,7 +1120,7 @@ class S3:
 
     def _cp_s3_source_items(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         src_storage: S3Storage,
         *,
         transfer_type: TransferType,
@@ -1176,7 +1176,7 @@ class S3:
 
     def _download_item_from_info(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         info: FileInfo,
         *,
         bucket: str,
@@ -1188,7 +1188,7 @@ class S3:
         consumed it (the gate emits its own warn/skip/notice record)."""
         src_path = f"{bucket}/{info.key}"
         compare_key = _ckey(info)
-        dest = naming.dest_for(plan, compare_key)
+        dest = fileformat.dest_for(plan, compare_key)
         src_display = f"s3://{src_path}"
         is_s3_info = isinstance(info, S3FileInfo)
         item = TransferItem(
@@ -1236,7 +1236,7 @@ class S3:
 
     def _copy_item_from_info(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         info: FileInfo,
         *,
         bucket: str,
@@ -1248,7 +1248,7 @@ class S3:
         glacier gate consumed it."""
         src_path = f"{bucket}/{info.key}"
         compare_key = _ckey(info)
-        dest = naming.dest_for(plan, compare_key)
+        dest = fileformat.dest_for(plan, compare_key)
         src_display = f"s3://{src_path}"
         is_s3_info = isinstance(info, S3FileInfo)
         if _glacier_gate(
@@ -1354,7 +1354,7 @@ class S3:
             ) from exc
         etag = head.get("ETag")
         # A single (non-dir_op) source: the compare key is the key's basename,
-        # matching naming.item_paths' single-item branch.
+        # matching fileformat.item_paths' single-item branch.
         yield S3FileInfo(
             key=key,
             size=head.get("ContentLength"),
@@ -1366,7 +1366,7 @@ class S3:
         )
 
     def _require_open_capabilities(
-        self, plan: naming.TransferPlan, *, recursive: bool, is_move: bool, operation: str
+        self, plan: fileformat.TransferPlan, *, recursive: bool, is_move: bool, operation: str
     ) -> None:
         """Reject an open-route custom side that lacks a contract method.
 
@@ -1394,7 +1394,7 @@ class S3:
         self._reject_missing_capabilities(custom, needed, operation=operation)
 
     def _require_open_sync_capabilities(
-        self, plan: naming.TransferPlan, *, delete: bool, operation: str
+        self, plan: fileformat.TransferPlan, *, delete: bool, operation: str
     ) -> None:
         """Reject an open-route custom side that cannot back a ``sync``.
 
@@ -1432,7 +1432,7 @@ class S3:
 
     def _cp_open_upload_items(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         *,
         dest_bucket: str,
         transferrer: Transferrer,
@@ -1484,7 +1484,7 @@ class S3:
             yield self._open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
 
     def _open_upload_item(
-        self, plan: naming.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
+        self, plan: fileformat.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
     ) -> TransferItem:
         """One upload item reading the custom source through ``Storage.open``.
 
@@ -1493,7 +1493,7 @@ class S3:
         """
         compare_key = _ckey(info)
         open_key = compare_key if plan.dir_op else ""
-        dest = naming.dest_for(plan, compare_key)
+        dest = fileformat.dest_for(plan, compare_key)
         return TransferItem(
             compare_key=compare_key,
             size=info.size,
@@ -1513,7 +1513,7 @@ class S3:
 
     def _cp_open_download_items(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         src_storage: S3Storage,
         *,
         transferrer: Transferrer,
@@ -1565,7 +1565,7 @@ class S3:
 
     def _open_download_item(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         info: FileInfo,
         *,
         bucket: str,
@@ -1580,7 +1580,7 @@ class S3:
         never submitted), so a dry run never opens the backend for writing.
         """
         compare_key = _ckey(info)
-        open_key = naming.dest_for(plan, compare_key)
+        open_key = fileformat.dest_for(plan, compare_key)
         src_display = f"s3://{bucket}/{info.key}"
         is_s3_info = isinstance(info, S3FileInfo)
         if _glacier_gate(
@@ -1707,7 +1707,7 @@ class S3:
 
     def _cp_case_gate(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         *,
         recursive: bool,
         options: TransferOptions,
@@ -1799,9 +1799,9 @@ class S3:
                 operation="mv",
             )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
-            src_text = naming.normalize_s3_uri(src_storage.as_text())
-            dest_text = naming.normalize_s3_uri(dest_storage.as_text())
-            if naming.same_path(src_text, dest_text):
+            src_text = S3Storage.normalize_s3_uri(src_storage.as_text())
+            dest_text = S3Storage.normalize_s3_uri(dest_storage.as_text())
+            if S3Storage.same_path(src_text, dest_text):
                 raise ValidationError(
                     f"Cannot mv a file onto itself: {src_text} - {dest_text}",
                     operation="mv",
@@ -1914,7 +1914,7 @@ class S3:
         dest_storage = self.resolve(dest)
         src_storage.validate()
         dest_storage.validate()
-        plan = naming.plan_transfer(src_storage, dest_storage, recursive=True, operation="sync")
+        plan = fileformat.plan_transfer(src_storage, dest_storage, recursive=True, operation="sync")
 
         transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
             plan, operation="sync"
@@ -2132,7 +2132,7 @@ class S3:
 
     def _sync_transfer_item(
         self,
-        plan: naming.TransferPlan,
+        plan: fileformat.TransferPlan,
         pair: SyncPair,
         *,
         transfer_type: TransferType,

@@ -272,7 +272,7 @@ class Storage(abc.ABC):
         The inverse of :meth:`S3.resolve`: an ``S3Storage`` yields
         ``s3://bucket/key`` (a keyless location stays slashless, ``s3://bucket``),
         a ``LocalStorage`` its path as given, so ``S3.resolve(s.as_text())``
-        round-trips a locatable Storage. This is the form ``naming.plan_transfer``
+        round-trips a locatable Storage. This is the form ``fileformat.plan_transfer``
         consumes and ``aws s3`` displays. A stream endpoint has no location, so
         its token (``"-"``) is display-only - not round-trippable.
         """

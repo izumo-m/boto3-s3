@@ -43,7 +43,6 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.naming import split_bucket_key
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
 
@@ -107,6 +106,39 @@ _S3_OUTPOST_BUCKET_ARN_RE = re.compile(
     r"[a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
 )
 
+_S3_SCHEME = "s3://"
+
+# ARN-shaped bucket parts, ported verbatim from aws-cli's ``find_bucket_key``
+# (aws-cli's awscli/customizations/s3/utils.py). An ARN's resource part
+# may itself contain "/", so these run before the plain first-"/" split; the
+# whole ARN (group "bucket") is what the S3 API takes as ``Bucket``. The
+# *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above) are
+# :meth:`S3Storage.validate`'s concern - the split accepts them whole.
+_S3_ACCESSPOINT_TO_BUCKET_KEY_RE = re.compile(
+    r"^(?P<bucket>arn:(aws).*:s3:[a-z\-0-9]*:[0-9]{12}:accesspoint[:/][^/]+)/?(?P<key>.*)$"
+)
+_S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
+    r"^(?P<bucket>arn:(aws).*:s3-outposts:[a-z\-0-9]+:[0-9]{12}:outpost[/:]"
+    r"[a-zA-Z0-9\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
+)
+
+
+def strip_scheme_normalized(path: str) -> str:
+    """Scheme-less form with the keyless-bucket normalization applied.
+
+    aws-cli's ``_normalize_s3_trailing_slash`` runs on *every* path: a bucket-only
+    path with no trailing slash (``s3://bucket``, including a keyless
+    access-point ARN) reads as the bucket root ``s3://bucket/``. A bare
+    ``s3://`` (service root) stays empty. The transfer planner
+    (:func:`boto3_s3.fileformat.plan_transfer`) applies it to each S3 side;
+    :meth:`S3Storage.normalize_s3_uri` is the scheme-keeping public form.
+    """
+    rest = path[len(_S3_SCHEME) :]
+    _bucket, key = S3Storage.split_bucket_key(rest)
+    if not key and rest and not rest.endswith("/"):
+        return rest + "/"
+    return rest
+
 
 def _parse_s3_url(url: str) -> tuple[str, str]:
     """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
@@ -115,12 +147,13 @@ def _parse_s3_url(url: str) -> tuple[str, str]:
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    ``naming.split_bucket_key``). The strict aws-cli checks - the unsupported S3
-    Object Lambda / Outposts *bucket* ARN forms, and a key with no bucket - are
-    deferred to :meth:`S3Storage.validate`, so construction itself never raises.
+    :meth:`S3Storage.split_bucket_key`). The strict aws-cli checks - the
+    unsupported S3 Object Lambda / Outposts *bucket* ARN forms, and a key with
+    no bucket - are deferred to :meth:`S3Storage.validate`, so construction
+    itself never raises.
     """
     rest = url.partition("://")[2]
-    return split_bucket_key(rest)
+    return S3Storage.split_bucket_key(rest)
 
 
 def _translate_client_error(
@@ -295,6 +328,72 @@ class S3Storage(Storage):
         | StorageCapability.DELETE
     )
 
+    # -- S3 path grammar (aws-cli string rules; no client, no validation) ----
+
+    @staticmethod
+    def split_bucket_key(path: str) -> tuple[str, str]:
+        """Split a scheme-less S3 path into ``(bucket, key)`` (aws ``find_bucket_key``).
+
+        Access-point ARNs (plain and Outposts) are recognized so the ARN - whose
+        name may contain ``/`` - stays whole in ``bucket``. No validation happens
+        here; either part may be empty.
+        """
+        for arn_re in (_S3_ACCESSPOINT_TO_BUCKET_KEY_RE, _S3_OUTPOST_TO_BUCKET_KEY_RE):
+            match = arn_re.match(path)
+            if match is not None:
+                return match.group("bucket"), match.group("key")
+        bucket, _, key = path.partition("/")
+        return bucket, key
+
+    @staticmethod
+    def strip_scheme(path: str) -> str:
+        """Drop a leading ``s3://`` if present (aws-cli's ``split_s3_bucket_key``)."""
+        if path.startswith(_S3_SCHEME):
+            return path[len(_S3_SCHEME) :]
+        return path
+
+    @staticmethod
+    def normalize_s3_uri(path: str) -> str:
+        """The keyless-bucket normalization with the scheme kept.
+
+        ``s3://bucket`` reads as ``s3://bucket/`` - the form aws validates and
+        prints (``mv``'s same-path error shows the normalized URI).
+        """
+        return _S3_SCHEME + strip_scheme_normalized(path)
+
+    @staticmethod
+    def same_path(src: str, dest: str) -> bool:
+        """Whether ``mv src dest`` would move an object onto itself.
+
+        aws-cli's ``CommandParameters._same_path`` on two s3 URIs (the caller
+        guarantees an s3->s3 pair): exact equality, or a ``/``-terminated
+        destination whose ``basename(src)`` join reproduces ``src``. aws-cli
+        runs this for ``--recursive`` too, so ``mv --recursive s3://b/p s3://b/``
+        is rejected even though no key would map onto itself - a faithful
+        false positive (rc 252). ``os.path`` is deliberate:
+        aws-cli's own join/basename semantics are the contract.
+        """
+        if src == dest:
+            return True
+        if dest.endswith("/"):
+            return src == os.path.join(dest, os.path.basename(src))
+        return False
+
+    @staticmethod
+    def same_key(src: str, dest: str) -> bool:
+        """Whether the two s3 URIs name the same *key* (buckets ignored).
+
+        aws-cli's ``CommandParameters._same_key``: the key parts are compared with
+        the :meth:`same_path` rule anchored at ``/`` - so a keyless destination
+        matches any source whose key is its own basename. Gates ``mv``'s
+        resolve-and-validate work and its access-point warning.
+        """
+        _, src_key = S3Storage.split_bucket_key(S3Storage.strip_scheme(src))
+        _, dest_key = S3Storage.split_bucket_key(S3Storage.strip_scheme(dest))
+        return S3Storage.same_path(f"/{src_key}", f"/{dest_key}")
+
+    # -- construction / identity ---------------------------------------------
+
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
         text = os.fspath(url)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
@@ -329,7 +428,8 @@ class S3Storage(Storage):
         Rebuilt from :attr:`bucket` / :attr:`key`, not from the raw constructor
         input, so a keyless location normalizes to a slashless ``s3://bucket``
         (and the bare service root to ``s3://``) - exactly the token a raw
-        ``s3://bucket`` argument carries into ``naming``.
+        ``s3://bucket`` argument carries into the transfer planner
+        (:mod:`boto3_s3.fileformat`).
         """
         if self._key:
             return f"s3://{self._bucket}/{self._key}"

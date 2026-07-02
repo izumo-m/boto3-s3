@@ -60,7 +60,7 @@ from unittest import mock
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.naming import relative_path
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -248,8 +248,9 @@ class TestCPCommand:
         (tmp_path / "foo.txt").write_text("mycontent")
         result, calls = _run_cmd([], ["cp", full_path, "s3://bucket/key.txt", "--dryrun"])
         assert calls == []
-        assert f"(dryrun) upload: {relative_path(full_path)} to s3://bucket/key.txt" in (
-            result.stdout
+        assert (
+            f"(dryrun) upload: {LocalStorage.relative_path(full_path)} to s3://bucket/key.txt"
+            in (result.stdout)
         )
 
     def test_error_on_same_line_as_status(self, tmp_path: Any) -> None:
@@ -260,8 +261,9 @@ class TestCPCommand:
             ["cp", full_path, "s3://bucket-not-exist/key.txt"],
             expected_rc=1,
         )
+        rendered = LocalStorage.relative_path(full_path)
         assert (
-            f"upload failed: {relative_path(full_path)} to s3://bucket-not-exist/key.txt An error"
+            f"upload failed: {rendered} to s3://bucket-not-exist/key.txt An error"
         ) in result.stderr
 
     def test_upload_grants(self, tmp_path: Any) -> None:
@@ -350,8 +352,9 @@ class TestCPCommand:
         assert [(c.operation, c.params) for c in calls] == [
             ("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
         ]
-        assert f"(dryrun) download: s3://bucket/key.txt to {relative_path(target)}" in (
-            result.stdout
+        assert (
+            f"(dryrun) download: s3://bucket/key.txt to {LocalStorage.relative_path(target)}"
+            in (result.stdout)
         )
 
     def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:

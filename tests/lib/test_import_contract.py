@@ -102,15 +102,31 @@ class TestLibraryImportContract:
             """
         )
 
-    def test_transfer_shape_helpers_stay_pure(self) -> None:
-        # The cp path/param rules are pure string logic: the CLI imports them
-        # on its run path and the library's tests exercise them SDK-free.
+    def test_request_params_stay_pure(self) -> None:
+        # The cp param rules are pure string logic: the CLI imports them on
+        # its run path and the library's tests exercise them SDK-free.
         _run_fresh(
             """
-            import boto3_s3.naming
             import boto3_s3.requestparams
 
             assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_transfer_planner_stops_at_exception_translation(self) -> None:
+        # The planner (fileformat) sits above the backends and routes by
+        # isinstance against S3Storage, so importing it reaches
+        # botocore.exceptions (the S3Storage allowance, contract item 3) -
+        # and nothing beyond it.
+        _run_fresh(
+            """
+            import boto3_s3.fileformat
+
+            def allowed(m):
+                return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))
+
+            leaked = [m for m in sdk_modules() if not allowed(m)]
+            assert not leaked, leaked
             """
         )
 

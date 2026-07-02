@@ -382,7 +382,7 @@ Equivalent to `aws s3 cp <src> <dest>` (aws-cli `CpCommand`; transfer family =
 `s3://` prefix (upload / download / s3->s3 copy. local->local is a usage error
 252). Path shapes - the meaning of an existing dir / a trailing-separator dest,
 which of the two names to adopt, the bucket-root normalization of a keyless
-`s3://bucket`, the filter root - are derived by `boto3_s3.naming` (a port of aws's
+`s3://bucket`, the filter root - are derived by `boto3_s3.fileformat` (a port of aws's
 `FileFormat`), shared between the CLI and the library.
 
 **The declaration surface is the full aws-cli ARG_TABLE**:
@@ -404,7 +404,7 @@ swaps the region + discards `--endpoint-url` = aws-cli `ClientFactory`)
 `sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In
 the form where the dest adopts the source name, the literal `-` becomes the
 basename, per aws's naming (`cp - s3://b/pre/` -> key `pre/-`); this is derived in
-naming.py before `S3Storage` is assembled. A run involving a stream **forces the
+fileformat.py before `S3Storage` is assembled. A run involving a stream **forces the
 errors-only printer** (as in aws - it does not mix success lines or progress into
 the raw bytes of a download). Combining `--recursive` is 252 (`Streaming
 currently is only compatible with non-recursive cp commands`); stdout download +
@@ -507,7 +507,7 @@ first).
 **mv-specific validation** (for s3s3, before the client factory = SDK not loaded):
 
 1. **The same-path guard** (always): if the keyless-normalized URI (`s3://b` ->
-   `s3://b/`) matches `naming.same_path` (an exact match, or a `/`-terminated dest
+   `s3://b/`) matches `S3Storage.same_path` (an exact match, or a `/`-terminated dest
    + `basename(src)` concatenation equals src) -> 252 (`Cannot mv a file onto
    itself: <src> - <dest>`, displaying the normalized original URI). **`--recursive`
    is also subject to this** (`mv --recursive s3://b/d s3://b/` is 252 even when no
@@ -516,7 +516,7 @@ first).
 2. **`--validate-same-s3-paths`** (the flag, or when the env
    `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is the **string `true`** - aws-cli
    `ensure_boolean` treats anything other than `'true'` (a lowercased comparison)
-   as false. `=1` is invalid): only when `naming.same_key` (a
+   as false. `=1` is invalid): only when `S3Storage.same_key` (a
    bucket-ignoring key comparison, including the `/`-anchored basename rule) is
    true, both sides are resolved to their real buckets with
    `boto3_s3.pathresolver.S3PathResolver` (access point ARN / alias / outposts

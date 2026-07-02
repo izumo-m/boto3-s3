@@ -211,7 +211,7 @@ class IOStorage(Storage):
         """Return the stdio token ``"-"`` (:meth:`Storage.as_text`, display-only).
 
         A stream has no location, so this token is for display / error messages
-        only - never round-tripped. A stream side never reaches ``naming``: ``cp``
+        only - never round-tripped. A stream side never reaches the planner (``fileformat``): ``cp``
         routes it to the stream path up front, before any transfer plan is built.
         """
         return "-"

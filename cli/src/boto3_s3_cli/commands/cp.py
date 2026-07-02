@@ -9,7 +9,7 @@ import os
 # parse path; S3 / S3Storage reach botocore and are imported in run() instead
 # (import contract, docs/imports.md).
 from boto3_s3 import Boto3S3Error, StdioStorage, ValidationError
-from boto3_s3.naming import item_paths, plan_transfer
+from boto3_s3.fileformat import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context

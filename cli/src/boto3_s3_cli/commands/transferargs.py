@@ -3,9 +3,11 @@
 ``aws s3`` declares one ``TRANSFER_ARGS`` list plus per-command extras
 (aws-cli's ``subcommands.py``); this module is that shared list and the
 validation/translation steps the three commands run in the same order.
-Everything here is SDK-free at import time (import contract, docs/imports.md) -
-the ``boto3_s3`` imports that reach the SDK are deferred into the functions
-that need them, past every usage error.
+This module loads only once its command is determined (stage 2 of the lazy
+dispatch, docs/imports.md), so top-level imports may reach
+``botocore.exceptions`` (via ``fileformat`` / ``S3Storage``); the ``boto3`` /
+``s3transfer`` client stack stays deferred into the functions that build a
+client or an engine.
 """
 
 from __future__ import annotations
@@ -15,16 +17,16 @@ import os
 import sys
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-# Pure-Python names only (exceptions / types modules) - safe on the parse path.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,
     CaseConflictMode,
     CopyPropsMode,
+    S3Storage,
     TransferOptions,
     ValidationError,
 )
-from boto3_s3.naming import classify, split_bucket_key
+from boto3_s3.fileformat import classify
 from boto3_s3_cli import filters, shorthand, usage
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
@@ -36,7 +38,7 @@ from boto3_s3_cli.progress import TransferPrinter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from boto3_s3 import LocalStorage, S3Storage
+    from boto3_s3 import LocalStorage
     from boto3_s3_cli.commands.base import Context
 
 # aws-cli choice lists (subcommands.py ACL / STORAGE_CLASS).
@@ -284,7 +286,7 @@ def is_s3express_path(path: str) -> bool:
     (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix)."""
     if not path.startswith("s3://"):
         return False
-    return split_bucket_key(path[len("s3://") :])[0].endswith("--x-s3")
+    return S3Storage.split_bucket_key(path[len("s3://") :])[0].endswith("--x-s3")
 
 
 def resolve_case_conflict(

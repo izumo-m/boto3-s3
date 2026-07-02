@@ -205,6 +205,23 @@ class LocalStorage(Storage):
         | StorageCapability.DELETE
     )
 
+    @staticmethod
+    def relative_path(filename: str, start: str = os.path.curdir) -> str:
+        """Render a local path relative to ``start`` (aws-cli's ``relative_path``).
+
+        aws-cli splits first and joins the basename back on, so an in-tree
+        path always carries a directory prefix (``./a.txt``, ``../x/a.txt``) -
+        the form aws prints in transfer result lines and warnings. Where no
+        relative path exists (different Windows drives), the absolute path is
+        returned instead of raising.
+        """
+        try:
+            dirname, basename = os.path.split(filename)
+            relative_dir = os.path.relpath(dirname, start)
+            return os.path.join(relative_dir, basename)
+        except ValueError:
+            return os.path.abspath(filename)
+
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
@@ -222,8 +239,9 @@ class LocalStorage(Storage):
     def as_text(self) -> str:
         """Return the path as given (:meth:`Storage.as_text`).
 
-        The raw constructor form, verbatim - the trailing-separator rule that
-        ``naming`` applies reads this unmodified token.
+        The raw constructor form, verbatim - the trailing-separator rule the
+        transfer planner (:mod:`boto3_s3.fileformat`) applies reads this
+        unmodified token.
         """
         return self._path
 
