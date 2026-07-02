@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "cp",
+    "src/a.txt",
+    "s3://<BUCKET>/up/key.txt",
+    "--metadata",
+    ",foo=1"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 252,
+  "remaining_keys": [],
+  "scenario": "cp_upload_metadata_leading_comma",
+  "src_tree": null,
+  "stdout_lines": []
+}

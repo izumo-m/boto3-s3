@@ -249,6 +249,38 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("Metadata",),
     ),
     CpScenario(
+        # aws-cli's shorthand parser has no empty-key guard: "=bar" parses to
+        # {"": "bar"} and the command proceeds (rc 0). Pinned via --dryrun so
+        # the golden stays endpoint-independent - the layer under test is the
+        # option parse, not the empty-metadata-key PutObject semantics.
+        name="cp_upload_metadata_empty_key_dryrun",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            "=bar",
+            "--dryrun",
+        ),
+        local_src=_SRC_SINGLE,
+    ),
+    CpScenario(
+        # An empty key NOT followed by "=" is a shorthand syntax error on
+        # both sides - rc 252 with aws's "Expected: '='" wording, before any
+        # server contact.
+        name="cp_upload_metadata_leading_comma",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            ",foo=1",
+        ),
+        local_src=_SRC_SINGLE,
+        expected_stderr_tokens_ours=("Expected: '=', received: ','",),
+        expected_stderr_tokens_aws=("Expected: '=', received: ','",),
+    ),
+    CpScenario(
         name="cp_upload_cache_control",
         argv=(
             "cp",

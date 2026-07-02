@@ -70,6 +70,36 @@ commands. Committed to git.
 - **Replay** - the functional suite seeds moto with the scenario's exact
   layout, runs the CLI in-process, and compares against the golden.
 
+### Endpoint policy (MinIO goldens, occasional real-AWS verification)
+
+A golden is a **drift detector, not ground truth**: the truth the exit-code
+charter binds to is the pinned aws binary's behavior on the *same endpoint*
+as ours, which the parity tests compare directly and unconditionally. So
+goldens are captured against MinIO (fast, free, resettable state), and the
+suite is re-run occasionally against real AWS (`tests/run_e2e.sh`) using the
+**same pinned aws-cli** (`scripts/install-awscli.sh`) - a golden mismatch
+there then isolates the endpoint variable, never the aws-cli version.
+
+When a real-AWS run diverges from a MinIO-captured golden, absorb the
+difference in this order:
+
+1. **Normalize** (preferred): a mechanical difference (request IDs, ETag
+   values, region strings) is folded into the normalizers so both endpoints
+   produce one canonical form - the golden loses no detection power.
+2. **Accepted alternates**: a semantic difference where both shapes are
+   legitimately aws-correct (e.g. a field only real S3 returns) may be
+   allow-listed per scenario. Any such relaxation **must** come with a direct
+   aws<->boto3-s3 same-run equality check on the relaxed field: comparing
+   both sides against one golden is what transitively guaranteed their
+   parity, and an allow-list breaks that transitivity (aws matching
+   alternate X while ours matches alternate Y must still fail).
+3. **`diff_only`** (last resort): a genuinely endpoint-relative outcome
+   (MinIO accepts what S3 rejects, or vice versa) is not frozen into a
+   golden at all - rc equality between the two CLIs remains asserted, per
+   the charter.
+
+None of these relax the rc comparison between the two CLIs (section 2).
+
 Normalization (`tests/utils/harness.py`): for **ls**
 (`normalize_ls_stdout`), leading timestamps are masked (`<TIMESTAMP>` -
 capture and replay happen at different times/timezones) and the bucket name
