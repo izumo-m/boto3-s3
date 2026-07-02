@@ -25,26 +25,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tests.utils.harness import BUCKET_TOKEN
+from tests.utils.scenario import BaseScenario, resolve_argv
+
+__all__ = ["SCENARIOS", "WebsiteScenario", "resolve_argv"]
 
 
 @dataclass(frozen=True)
-class WebsiteScenario:
+class WebsiteScenario(BaseScenario):
     """One ``website`` invocation (stdout is empty in every outcome)."""
-
-    name: str
-    argv: tuple[str, ...]
-    # False => normalized stdout is not compared (rc still is - charter).
-    compare_stdout: bool = True
-    # True => live aws-vs-ours diff only: no golden written or checked, and
-    # no functional replay (see the module docstring).
-    diff_only: bool = False
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: WebsiteScenario, bucket: str) -> list[str]:
-    """Materialize the argv template against a concrete bucket name."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 SCENARIOS: tuple[WebsiteScenario, ...] = (

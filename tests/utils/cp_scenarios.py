@@ -31,9 +31,18 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tests.utils.harness import BUCKET_TOKEN, seed_bucket
+from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+__all__ = [
+    "SCENARIOS",
+    "CpScenario",
+    "materialize_workdir",
+    "resolve_argv",
+    "seed_remote",
+]
 
 _MB = 1024 * 1024
 
@@ -80,17 +89,16 @@ _SEED_BIG_KWARGS: Mapping[str, Mapping[str, Any]] = {
 
 
 @dataclass(frozen=True)
-class CpScenario:
-    """One ``cp`` invocation against fixed local and remote layouts."""
+class CpScenario(BaseScenario):
+    """One ``cp`` invocation against fixed local and remote layouts.
 
-    name: str
-    argv: tuple[str, ...]
+    ``diff_only`` here marks rc-equality-only scenarios whose outcome is
+    endpoint-relative (no golden).
+    """
+
     local_src: Mapping[str, bytes] = field(default_factory=dict)
     seed: Mapping[str, bytes] = field(default_factory=dict)
     seed_kwargs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
-    compare_stdout: bool = True
-    # rc-equality-only scenarios whose outcome is endpoint-relative (no golden).
-    diff_only: bool = False
     # Golden-record the dest/ tree (downloads; uploads leave it empty anyway).
     capture_tree: bool = False
     # Golden-record HeadObject fields of one probe key.
@@ -106,13 +114,6 @@ class CpScenario:
     local_mtimes: Mapping[str, int] = field(default_factory=dict)
     # Bytes fed to the CLI's stdin (the '-' upload scenarios).
     stdin: bytes | None = None
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: CpScenario, bucket: str) -> list[str]:
-    """The concrete argv for *bucket* (goldens keep the ``<BUCKET>`` token)."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
