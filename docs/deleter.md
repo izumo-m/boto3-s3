@@ -68,7 +68,12 @@ the successful `Deleted[]` entries; each is reconstructed into a per-key
 `DeleteObject`-shaped slot (the entry minus its `Key`, plus the shared
 `RequestCharged`) and attached to that key's `OpResult.extra_info["delete"]`, so
 the caller sees a single-object shape regardless of the batch wire form
-(docs/opresult.md). Failures are still read from `Errors[]` as below.
+(docs/opresult.md). Failures are still read from `Errors[]` as below. One
+limitation: when the same key was submitted more than once in a batch, all of
+that key's `OpResult`s share a single slot (the response's last entry for the
+key wins) - `DeleteObjects` reports per key spelling, so per-submission
+responses (e.g. two distinct delete markers on a versioned bucket) cannot be
+mapped back to submission order.
 
 - **per-key failure** (an `Errors[]` entry): the `Code` is translated into the
   taxonomy. The mapping table is **shared** with the request-level path

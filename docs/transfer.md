@@ -49,7 +49,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   plane bypasses, so `_create_crt_manager` returns `None` (selecting classic)
   whenever the flag is set - logged as a `transfer engine: classic forced by
   capture_response` breadcrumb. A `_ResponseCapture` is then registered on the
-  client before the first submit and removed after the manager shuts down (so no
+  client together with the manager build (`prepare()`, below) and removed after
+  the manager shuts down (so no
   request is emitting during a registration change); its handlers are per-instance
   bound methods, so register / unregister never disturb the application's or
   another run's handlers on a shared client. Being a library-only flag with no
@@ -59,9 +60,15 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   uses the dest client, download uses the src client, and an s3->s3 copy uses the
   dest client + `manager.copy(source_client=src client)` (a settled fact of the
   connection model).
-- The manager is **created lazily on the first `submit()`**: a dryrun or a
-  fully-skipped run does not even import s3transfer (the discipline of
-  [`imports.md`](./imports.md)).
+- The manager is **built by `prepare()`, before enumeration starts** (the
+  orchestrator calls it once, ahead of pulling the first item). Building the
+  manager mutates the client's event registry (the `request-created.s3`
+  handlers, and the capture handlers above), and botocore's events engine has
+  no lock - so the mutation must happen-before the scan prefetch worker starts
+  fetching pages with the same client (aws-cli likewise builds its
+  TransferManager before the file generator starts). A dryrun never calls
+  `prepare()`: no manager is built, and s3transfer is not even imported (the
+  discipline of [`imports.md`](./imports.md)).
 - **Backpressure is delegated to s3transfer**: the bounded semaphore of
   `TransferConfig.max_request_queue_size` (default 1000) blocks the submit
   thread when it is full. This is the same mechanism aws-cli relies on; we keep
@@ -176,6 +183,13 @@ The caller's stream is never closed by `IOStorage`.
   `no_overwrite` (IfNoneMatch). `filter` is silently ignored on a stream (a single
   object has nothing to filter; aws rc 0). `expected_size` applies to an upload
   stream and is ignored elsewhere.
+- **`mv` with a stream**: an `IOStorage` may be the **destination** of a
+  single-object move - the bytes land on the stream, then the S3 source is
+  deleted (section 11) - but never the source (a move deletes its source, which
+  a stream cannot be), and not a recursive one (a stream is a single endpoint);
+  both raise `ValidationError`. The CLI does not expose this permissiveness:
+  `mv` with `-` on either side keeps aws-cli's blanket rejection
+  ([`cli.md`](./cli.md) section 5.8).
 - **The key is verbatim**: the key of the S3-side `S3Storage` is used as-is.
   aws's naming where "in the form where the dest takes the source name
   (`s3://bucket` / `s3://bucket/pre/`) the literal `-` becomes the basename"
