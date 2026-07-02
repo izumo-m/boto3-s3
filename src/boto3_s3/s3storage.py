@@ -395,6 +395,23 @@ class S3Storage(Storage):
         _, dest_key = S3Storage.split_bucket_key(S3Storage.strip_scheme(dest))
         return S3Storage.same_path(f"/{src_key}", f"/{dest_key}")
 
+    def same_path_as(self, dest: S3Storage) -> bool:
+        """Whether ``mv self dest`` would move an object onto itself (held state).
+
+        Equivalent to aws-cli's ``CommandParameters._same_path`` over the two
+        keyless-normalized URIs, computed from the held ``bucket`` / ``key``
+        instead of rebuilt strings: the buckets must match (with equal
+        buckets the URI prefix is inert), and the keys are compared with the
+        :meth:`same_path` rule anchored at ``/`` - the :meth:`same_key`
+        anchoring, which preserves ``os.path.join`` / ``basename``'s host
+        semantics exactly (a keyless side reads as the ``/``-terminated
+        bucket root, and any prefix ending in ``/`` reproduces the full
+        URI's behavior, ntpath's drive-relative reset included).
+        """
+        return self._bucket == dest._bucket and S3Storage.same_path(
+            f"/{self._key}", f"/{dest._key}"
+        )
+
     # -- construction / identity ---------------------------------------------
 
     def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:

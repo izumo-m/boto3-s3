@@ -443,6 +443,35 @@ class TestMvSamePathGuards:
         assert not same_key("s3://b1/d/k.txt", "s3://b2/")
         assert same_key("s3://b1/d/k.txt", "s3://b2/d/")
 
+    # The full URI matrix the string rule covers, for the equivalence pin below.
+    _URIS = (
+        "s3://b/k.txt",
+        "s3://b/d/a.txt",
+        "s3://b/d/",
+        "s3://b/d",
+        "s3://b/",
+        "s3://b",
+        "s3://other/k.txt",
+        "s3://other/d/",
+    )
+
+    @pytest.mark.parametrize("src", _URIS)
+    @pytest.mark.parametrize("dest", _URIS)
+    def test_same_path_as_is_equivalent_to_the_string_rule(self, src: str, dest: str) -> None:
+        # The Storage-level comparison (held bucket/key, '/'-anchored keys)
+        # must decide exactly like aws's string rule over the
+        # keyless-normalized URIs - every pair of the matrix, both ways.
+        expected = same_path(normalize_s3_uri(src), normalize_s3_uri(dest))
+        assert S3Storage(src).same_path_as(S3Storage(dest)) is expected
+
+    def test_same_path_as_direct_shapes(self) -> None:
+        # The three aws shapes, plus the bucket gate, on held state.
+        assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b/k"))
+        assert S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/d/"))
+        assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b"))  # keyless dest
+        assert not S3Storage("s3://b/k").same_path_as(S3Storage("s3://other/k"))
+        assert not S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/other/"))
+
     def test_same_key_splits_access_point_arns_whole(self) -> None:
         assert same_key(f"s3://{_ACCESSPOINT_ARN}/k.txt", "s3://plain-bucket/k.txt")
         assert not same_key(f"s3://{_ACCESSPOINT_ARN}/k.txt", "s3://plain-bucket/other.txt")
