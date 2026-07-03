@@ -112,8 +112,12 @@ of deep inside the run:
 The reading members form a lattice: `SORTED_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTED_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-exact per-route gates are in [`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
+manufacture phantom pairs and, with `--delete`, corrupt the destination.
+**`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
+backend's entries in whatever order `scan` yields them (they never pass
+`ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
+at all. The exact per-route gates are in [`sync.md`](./sync.md) /
+[`transfer.md`](./transfer.md).
 
 ## 4. Example
 
