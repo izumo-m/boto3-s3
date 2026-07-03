@@ -15,12 +15,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import s3transfer.crt as s3transfer_crt
-from botocore import UNSIGNED
-from botocore.exceptions import MissingDependencyException
 
-from boto3_s3 import crtsupport
-from boto3_s3.transferconfig import TransferConfig
+# The floor s3transfer (0.6.2) has no crt module at all (needs >= 0.8.0 +
+# awscrt); the library defers this import, so only the tests skip there.
+s3transfer_crt = pytest.importorskip("s3transfer.crt")
+from botocore import UNSIGNED  # noqa: E402
+from botocore.exceptions import MissingDependencyException  # noqa: E402
+
+from boto3_s3 import crtsupport  # noqa: E402
+from boto3_s3.transferconfig import TransferConfig  # noqa: E402
 
 AWS_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
 

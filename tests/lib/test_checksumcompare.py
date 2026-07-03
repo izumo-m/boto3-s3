@@ -42,8 +42,13 @@ try:
     from awscrt import checksums as _crt
 except ImportError:  # pragma: no cover - exercised only on a no-awscrt host
     _crt = None
+if _crt is not None and not hasattr(_crt, "crc64nvme"):
+    # An old awscrt (the SDK floor's own [crt] pin, 0.16.x) predates crc64nvme;
+    # the library falls back to its pure CRC there (checksumcompare._crc_backend
+    # getattr-guards), but these goldens need the real thing.
+    _crt = None
 
-_needs_crt = pytest.mark.skipif(_crt is None, reason="awscrt not installed")
+_needs_crt = pytest.mark.skipif(_crt is None, reason="awscrt with crc64nvme not installed")
 
 
 def _b64(raw: bytes) -> str:

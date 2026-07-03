@@ -303,8 +303,10 @@ Batch operations stream their per-item outcomes instead of returning a list:
   `OpResult` carries a `transfer_type` (upload / download / copy / move /
   delete) and an `outcome` (succeeded / failed / warned / skipped / dryrun /
   notice). It is called from worker threads, so keep it fast and non-raising.
-- `on_progress(TransferProgress)` — byte-level transfer progress.
-- `cancel_token` — a `CancelToken` whose `cancel()` cooperatively stops the run.
+- `on_progress(TransferProgress)` — byte-level transfer progress
+  (`cp` / `mv` / `sync`; `rm` moves no bytes).
+- `cancel_token` — a `CancelToken` whose `cancel()` cooperatively stops the
+  run (`cp` / `mv` / `sync`).
 - `dryrun=True` — reports every would-be action without any mutating call.
 
 ## Custom backends
@@ -355,9 +357,13 @@ set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
   matched to `aws s3` on each).
 - **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2. A few
   options need a newer SDK and are simply unavailable below it rather than
-  emulated — conditional writes (`no_overwrite`), the `CRC64NVME` checksum, and
-  the `ls` bucket-name / bucket-region filters. CRT features need the `crt`
-  extra. Everything else works at the minimum.
+  emulated — conditional writes (`no_overwrite`), the `CRC64NVME` checksum, the
+  `ls` bucket-name / bucket-region filters, `mb` with `tags=`, and the
+  copy/download source-ETag extras (`OpResult.extra_info`'s `{"ETag": ...}`
+  needs `capture_response=True` on an old s3transfer, and its
+  `CopySourceIfMatch` consistency pin on copies is absent). CRT features need
+  the `crt` extra. Everything else works at the minimum
+  (docs/overview.md section 2 is the authoritative list).
 
 ## In short
 

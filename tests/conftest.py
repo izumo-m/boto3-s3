@@ -143,4 +143,7 @@ def _pin_classic_engine(monkeypatch: pytest.MonkeyPatch) -> None:
         import awscrt.s3
     except ImportError:  # pragma: no cover - awscrt is a dev dependency
         return
-    monkeypatch.setattr(awscrt.s3, "is_optimized_for_system", lambda: False)
+    # raising=False: an old awscrt (< 0.19.x) has no is_optimized_for_system;
+    # the library never calls it there (has_minimum_crt_version gates first),
+    # and erroring the autouse fixture would fail every test at the SDK floor.
+    monkeypatch.setattr(awscrt.s3, "is_optimized_for_system", lambda: False, raising=False)
