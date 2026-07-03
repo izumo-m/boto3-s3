@@ -1,19 +1,18 @@
 {
   "argv": [
     "cp",
-    "src",
-    "s3://<BUCKET>/tree/",
-    "--recursive",
-    "--exclude",
-    "*"
+    "missing.txt",
+    "s3://<BUCKET>/up/k.txt",
+    "--content-type",
+    "file:///no/such/paramfile"
   ],
   "aws_version": "aws-cli/2.35.5 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
   "head_fields": null,
   "local_tree": null,
-  "rc": 0,
+  "rc": 252,
   "remaining_keys": [],
-  "scenario": "cp_upload_exclude_all",
+  "scenario": "cp_paramfile_beats_missing_src",
   "src_tree": null,
   "stdout_lines": []
 }

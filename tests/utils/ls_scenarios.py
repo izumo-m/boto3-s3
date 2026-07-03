@@ -119,6 +119,15 @@ SCENARIOS: tuple[LsScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
+    # Head-order (docs/cli.md 5.7): the --endpoint-url scheme check (252, aws
+    # validates the value at parse time) beats the bare int() coercion (255).
+    LsScenario(
+        "ls_endpoint_beats_page_size",
+        ("ls", f"s3://{BUCKET_TOKEN}/pg/", "--page-size", "abc", "--endpoint-url", "badurl"),
+        _PAGED,
+        expected_stderr_tokens_ours=("scheme is missing",),
+        expected_stderr_tokens_aws=("scheme is missing",),
+    ),
     # Access-point ARN bucket: botocore (driving both tools) injects the AP
     # name as a host prefix onto the endpoint, so against MinIO and real S3
     # alike the request fails - but the *same way* on both sides; a mis-split

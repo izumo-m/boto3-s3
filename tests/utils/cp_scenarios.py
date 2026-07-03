@@ -114,6 +114,9 @@ class CpScenario(BaseScenario):
     local_mtimes: Mapping[str, int] = field(default_factory=dict)
     # Bytes fed to the CLI's stdin (the '-' upload scenarios).
     stdin: bytes | None = None
+    # Directories created with an explicit mode (workdir-relative -> mode),
+    # e.g. a read-only parent for the uncreatable-destination scenario.
+    local_dirs: Mapping[str, int] = field(default_factory=dict)
 
 
 def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
@@ -129,6 +132,10 @@ def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
     now = time.time()
     for rel, offset in scenario.local_mtimes.items():
         os.utime(workdir / rel, (now + offset, now + offset))
+    for rel, mode in scenario.local_dirs.items():
+        target = workdir / rel
+        target.mkdir(parents=True, exist_ok=True)
+        os.chmod(target, mode)
 
 
 def seed_remote(client: Any, bucket: str, scenario: CpScenario) -> None:
@@ -388,6 +395,42 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
+    # -- the measured parse-to-validation head order (docs/cli.md 5.7) -------
+    CpScenario(
+        # A bad --profile (255: aws binds the profile at startup) beats the
+        # local-local usage error (252). No server contact on either side.
+        name="cp_bad_profile_beats_usage",
+        argv=("cp", "src/a.txt", "dest/b.txt", "--profile", "boto3-s3-e2e-no-such-profile"),
+        local_src=_SRC_SINGLE,
+        expected_stderr_tokens_ours=("could not be found",),
+        expected_stderr_tokens_aws=("could not be found",),
+    ),
+    CpScenario(
+        # A direct-option paramfile failure (252, aws's parse-time expansion)
+        # beats the missing local source (255).
+        name="cp_paramfile_beats_missing_src",
+        argv=(
+            "cp",
+            "missing.txt",
+            f"s3://{BUCKET_TOKEN}/up/k.txt",
+            "--content-type",
+            "file:///no/such/paramfile",
+        ),
+        expected_stderr_tokens_ours=("Unable to load paramfile",),
+        expected_stderr_tokens_aws=("Unable to load paramfile",),
+    ),
+    CpScenario(
+        # aws pre-creates the s3local --recursive destination during
+        # validation, so an uncreatable directory is the pre-pipeline rc 255,
+        # not the pipeline's rc 1. diff_only: the outcome depends on the
+        # runner's privileges (root creates anything), so the two CLIs are
+        # compared live only.
+        name="cp_recursive_dest_uncreatable",
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "ro/newdir", "--recursive"),
+        seed=_SEED_SINGLE,
+        local_dirs={"ro": 0o555},
+        diff_only=True,
+    ),
     # -- downloads ----------------------------------------------------------
     CpScenario(
         name="cp_download_single",
@@ -395,6 +438,30 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed=_SEED_SINGLE,
         capture_tree=True,
         mtime_key=("d/a.txt", "dest/out.bin"),
+    ),
+    CpScenario(
+        # aws applies --exclude/--include to a SINGLE-object cp too: the
+        # excluded object never transfers (rc 0, dest stays empty). Guards
+        # the single-source filter lane (producers.py, 2026-07 review).
+        name="cp_download_single_exclude_all",
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/", "--exclude", "*"),
+        seed=_SEED_SINGLE,
+        capture_tree=True,
+    ),
+    CpScenario(
+        # The shorthand @= paramfile operator: the metadata value loads from
+        # file://, proven end to end by the stored object Metadata.
+        name="cp_upload_metadata_at_paramfile",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            "loaded@=file://meta/value.txt",
+        ),
+        local_src={**_SRC_SINGLE, "meta/value.txt": b"from-paramfile"},
+        head_key="up/key.txt",
+        head_fields=("Metadata",),
     ),
     CpScenario(
         name="cp_download_to_existing_dir",

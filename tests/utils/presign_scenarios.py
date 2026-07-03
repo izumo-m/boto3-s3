@@ -127,6 +127,21 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
+    # Head-order (docs/cli.md 5.7): the --endpoint-url scheme check (252)
+    # beats the bare int() coercion (255).
+    PresignScenario(
+        "presign_endpoint_beats_expires",
+        (
+            "presign",
+            f"s3://{BUCKET_TOKEN}/presign/basic.txt",
+            "--expires-in",
+            "abc",
+            "--endpoint-url",
+            "badurl",
+        ),
+        expected_stderr_tokens_ours=("scheme is missing",),
+        expected_stderr_tokens_aws=("scheme is missing",),
+    ),
     # UNSIGNED config -> the plain object URL, no query at all (rc 0).
     PresignScenario(
         "presign_no_sign_request",

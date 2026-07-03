@@ -138,6 +138,16 @@ SCENARIOS: tuple[CpScenario, ...] = (
         mtime_key=("d/a.txt", "dest/out.txt"),
     ),
     CpScenario(
+        # aws filters a SINGLE-object mv too: the excluded source is neither
+        # transferred nor deleted - the bucket end state (golden) proves the
+        # object survived, and dest/ stays empty. Guards the single-source
+        # filter lane (an excluded mv source being deleted was the hazard).
+        name="mv_download_single_exclude_all",
+        argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/", "--exclude", "*"),
+        seed=_SEED_SINGLE,
+        capture_tree=True,
+    ),
+    CpScenario(
         name="mv_download_to_dir",
         argv=("mv", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/"),
         seed=_SEED_SINGLE,

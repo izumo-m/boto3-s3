@@ -1,19 +1,18 @@
 {
   "argv": [
     "cp",
-    "src",
-    "s3://<BUCKET>/tree/",
-    "--recursive",
-    "--exclude",
-    "*"
+    "src/a.txt",
+    "dest/b.txt",
+    "--profile",
+    "boto3-s3-e2e-no-such-profile"
   ],
   "aws_version": "aws-cli/2.35.5 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
   "head_fields": null,
   "local_tree": null,
-  "rc": 0,
+  "rc": 255,
   "remaining_keys": [],
-  "scenario": "cp_upload_exclude_all",
+  "scenario": "cp_bad_profile_beats_usage",
   "src_tree": null,
   "stdout_lines": []
 }
