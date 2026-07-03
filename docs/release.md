@@ -46,7 +46,11 @@ tags on the same merge commit — but pushes them in order, see step 3):
 3. Tag that merge commit and push — **this push is what publishes**. For a
    joint release, publish the **library first and wait for its Actions run to
    finish** (the CLI's install resolves `boto3-s3` from PyPI, so the dependency
-   must exist there before the CLI lands):
+   must exist there before the CLI lands). The workflow enforces this: a CLI
+   release aborts before upload unless the target index already serves a
+   `boto3-s3` version satisfying the CLI's dependency range (a TestPyPI
+   dry run of the CLI therefore also needs the library dry-published there
+   first):
    ```bash
    git tag boto3-s3-vX.Y.Z
    git push origin main boto3-s3-vX.Y.Z
