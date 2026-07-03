@@ -5,9 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-03
+
 - Fix: `cp` / `mv` now apply `filter=` to a single S3 source too (an excluded
   object is neither transferred nor - the `mv` hazard - deleted), matching the
   recursive and `rm` paths.
+- Fix: `ChecksumComparison` now reads a local file longer than a COMPOSITE
+  object's parts sum as differing (the appended tail never reached the
+  per-part digests, so `check_size=False` could judge an updated file
+  unchanged and `sync` would skip it).
 - Masking now also covers the SSO bearer token (`x-amz-sso_bearer_token`) and
   the sso-oidc token bodies (`accessToken` / `refreshToken` / `idToken` /
   `clientSecret`) that botocore logs at DEBUG on the SSO auth path.

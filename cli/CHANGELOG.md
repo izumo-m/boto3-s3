@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-03
+
 - Exit-code parity: the pre-pipeline validation order now matches `aws s3`'s
   measured parse-to-validation order (endpoint scheme -> paramfile loads ->
   integer coercions -> `--metadata` -> session profile -> path checks), so
@@ -29,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `--metadata` shorthand to accept an empty key like `aws` (`=bar` parses
   to `{"": "bar"}` and the transfer proceeds; it wrongly exited 252), and align
   the leading-comma error with aws's `Expected: '='` wording.
+- Fix `mb` / `rb`'s bad-path error to match aws's bare form (no
+  `usage: ... <S3Uri>` prefix - only `rm`'s error carries it).
 - Fix `sync` `--exclude` / `--include` anchoring to match `aws s3`: a
   root-anchored (absolute) pattern now prunes each side against its own full
   path, so a pattern matching only the source no longer wrongly protects the
