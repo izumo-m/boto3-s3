@@ -1,10 +1,12 @@
 """The ``s3transfer``-backed transfer engine: ``TransferItem`` + ``Transferrer``.
 
 One ``Transferrer`` serves one ``cp`` / ``mv`` / ``sync`` run, whose items all
-share a single :class:`OpKind` (a run moves bytes in one direction). It owns
-the ``s3transfer.manager.TransferManager`` - built lazily on the first
-:meth:`Transferrer.submit`, so dry runs and all-skipped runs never instantiate
-it (no thread pools spun up; the ``s3transfer`` module itself is imported
+share a single :class:`TransferType` (a run moves bytes in one direction). It owns
+the ``s3transfer.manager.TransferManager`` - built via :meth:`Transferrer.prepare`
+before a listing-driven run starts enumerating (client-event registration must
+happen-before the scan prefetch worker's traffic on the same client), at the
+first :meth:`Transferrer.submit` for a stream run, and never for a dry run (no
+thread pools spun up; the ``s3transfer`` module itself is imported
 earlier regardless, by ``boto3`` when a client is built) - and bridges
 completions to the library's result model:
 per-item ``OpResult`` records to ``on_result`` (from s3transfer worker
@@ -47,27 +49,36 @@ import logging
 import mimetypes
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 from boto3_s3 import requestparams
-from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
-from boto3_s3.s3storage import translate_boto_error
+from boto3_s3.exceptions import (
+    AccessDeniedError,
+    Boto3S3Error,
+    CancelledError,
+    ConfigurationError,
+    ValidationError,
+)
+from boto3_s3.localstorage import translate_os_error
+from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
     FileInfo,
-    OpKind,
     OpOutcome,
     OpResult,
     ProgressCallback,
     ResultCallback,
     TransferOptions,
     TransferProgress,
+    TransferType,
+    strip_response_metadata,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from datetime import datetime
 
     from boto3.s3.transfer import TransferConfig
@@ -97,6 +108,11 @@ _MAX_TAGGING_HEADER_SIZE = 2 * 1024
 # user_context slot handing an oversized TagSet from on_queued to on_done.
 _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 
+# user_context slot handing mv's source DeleteObject response from _DeleteSource
+# to _Completion for capture_response (extra_info["delete"]); an S3 source delete
+# populates it, a local / custom-backend one returns None and leaves it unset.
+_DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
+
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
 
@@ -104,13 +120,13 @@ _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 class TransferItem:
     """One unit of work handed to :meth:`Transferrer.submit`.
 
-    ``compare_key`` is the item's operation-relative name (``naming.item_paths``)
+    ``compare_key`` is the item's operation-relative name (``transferplan.item_paths``)
     - the identity under which results and progress are reported. The
     per-route fields are populated by the orchestrator: ``src_path`` /
-    ``dst_path`` are native local paths; bucket/key pairs are S3 sides.
+    ``dest_path`` are native local paths; bucket/key pairs are S3 sides.
     ``head`` carries the single-source HeadObject payload so a single-file
     copy never heads the source twice; ``mtime`` is the source LastModified a
-    download stamps onto the local file; ``src_display`` / ``dst_display``
+    download stamps onto the local file; ``src_display`` / ``dest_display``
     are the rendered endpoints reported on ``OpResult``.
     """
 
@@ -119,25 +135,35 @@ class TransferItem:
     src_bucket: str | None = None
     src_key: str | None = None
     src_path: str | None = None
-    # The source listing entry on an upload: mv unlinks the source through its
-    # logical ``/``-key, distinct from ``src_path`` (the path s3transfer reads).
-    # None on non-upload / stream routes.
+    # The source listing entry, set by every listing-driven route (upload,
+    # download, copy, and their open-route variants); ``mv`` unlinks an upload
+    # source through its logical ``/``-key, distinct from ``src_path`` (the path
+    # s3transfer reads). None only on the stream routes, which list nothing.
     src_info: FileInfo | None = None
-    dst_bucket: str | None = None
-    dst_key: str | None = None
-    dst_path: str | None = None
+    # The destination listing entry, set only by ``sync`` (the pair's ``dest``):
+    # the pre-existing object an update overwrites, or None for a new key. cp /
+    # mv never list the destination, so it stays None there.
+    dest_info: FileInfo | None = None
+    dest_bucket: str | None = None
+    dest_key: str | None = None
+    dest_path: str | None = None
     etag: str | None = None
     mtime: datetime | None = None
     head: Mapping[str, Any] | None = None
     src_display: str = ""
-    dst_display: str = ""
+    dest_display: str = ""
     # Streaming sides (cp with stdin/stdout, or any caller-supplied binary
     # stream): a readable object replaces src_path on uploads, a writable one
-    # replaces dst_path on downloads. Streams get no directory creation and
+    # replaces dest_path on downloads. Streams get no directory creation and
     # no mtime stamp, and a download without size+etag lets s3transfer probe
     # the object itself (HeadObject) - exactly the aws stream wire shape.
     src_fileobj: Any = None
-    dst_fileobj: Any = None
+    dest_fileobj: Any = None
+    # A download admitted by the --case-conflict gate carries the callback that
+    # drops its casefolded key from the gate's in-flight set (aws-cli's
+    # CaseConflictCleanupSubscriber wiring); _submit_download fires it on the
+    # transfer's terminal. None unless the gate admitted this item.
+    case_conflict_cleanup: Callable[[], None] | None = None
 
 
 def _is_precondition_failed(exc: BaseException) -> bool:
@@ -233,7 +259,7 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     except OSError as exc:
         if exc.errno != errno.EPERM:
             raise
-        raise Boto3S3Error(
+        raise AccessDeniedError(
             "The file was downloaded, but attempting to modify the utime of the file "
             "failed. Is the file owned by another user?"
         ) from exc
@@ -252,6 +278,108 @@ def _guess_content_type(path: str) -> str | None:
         return None
 
 
+def _extract_etag(response: Mapping[str, Any]) -> str | None:
+    """An object's ETag from a captured write or read response, normalized.
+
+    ``PutObject`` / ``CompleteMultipartUpload`` / ``GetObject`` carry ``ETag`` at
+    the top level; ``CopyObject`` nests it under ``CopyObjectResult``. Collapse
+    both so ``extra_info["ETag"]`` reads the same regardless of which API produced
+    the response.
+    """
+    etag: Any = response.get("ETag")
+    if etag is None:
+        result: Any = response.get("CopyObjectResult")
+        if result is not None:
+            etag = result.get("ETag")
+    return etag
+
+
+class _ResponseCapture:
+    """Capture a transfer's terminal write / read response via botocore events.
+
+    ``capture_response`` opt-in: s3transfer discards the ``PutObject`` /
+    ``CopyObject`` / ``CompleteMultipartUpload`` (write) and ``GetObject`` (read)
+    responses, so the only way to surface them is to observe the client's event
+    stream. A ``before-parameter-build`` handler stashes the call's
+    ``(Bucket, Key)`` in the per-request botocore ``context``; the paired
+    ``after-call`` handler reads the parsed response back out (dropping the
+    streaming ``Body`` and ``ResponseMetadata``) and files it under that key.
+    ``_build_extra_info`` drains it per item. A multipart download issues many
+    ranged ``GetObject`` calls, so the first stored wins and the range-specific
+    fields are dropped, leaving the object-level metadata.
+
+    One instance per operation, registered on the transfer client when the
+    manager is built - before enumeration starts for a listing-driven run
+    (``Transferrer.prepare``), at the first submit for a stream run - and
+    unregistered after the manager shuts down (so no request is emitting on the
+    client during a registration change). The handlers are this
+    instance's bound methods, held once so unregister removes exactly what register
+    added - never colliding with another operation's capture or with a handler the
+    application put on a shared client. The events engine has no lock, so a capture
+    operation needs exclusive use of its client for the operation's span
+    (docs/s3.md).
+    """
+
+    #: The terminal object-writing operations. The intermediate multipart calls
+    #: (CreateMultipartUpload / UploadPart / UploadPartCopy) are deliberately not
+    #: observed - only the response describing the finished object is wanted.
+    _WRITE_OPS = ("PutObject", "CopyObject", "CompleteMultipartUpload")
+    #: The object-reading operation (a download). HeadObject is not observed.
+    _READ_OPS = ("GetObject",)
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        # Bind once so unregister removes the same objects register added.
+        self._stash_handler = self._stash_key
+        self._record_handler = self._record_response
+
+    def _stash_key(self, params: Mapping[str, Any], context: dict[str, Any], **kwargs: Any) -> None:
+        bucket = params.get("Bucket")
+        key = params.get("Key")
+        if bucket is not None and key is not None:
+            context["boto3_s3_capture_key"] = (bucket, key)
+
+    def _record_response(
+        self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        bucket_key = context.get("boto3_s3_capture_key")
+        if bucket_key is None:
+            return
+        # Drop the streaming Body (a download response carries the object bytes)
+        # along with the transport internals.
+        response = strip_response_metadata(parsed, drop_body=True)
+        if "ContentRange" in response:
+            # A ranged (partial) GetObject from a multipart download: the
+            # object-level fields (ETag / VersionId / Metadata / ...) describe the
+            # object, but ContentRange / ContentLength describe one range - drop
+            # them so the slot reads like a whole-object response.
+            response.pop("ContentRange", None)
+            response.pop("ContentLength", None)
+        with self._lock:
+            # First stored wins: a multipart download issues many ranged GETs for
+            # the same key, all carrying the same object-level metadata.
+            self._store.setdefault(bucket_key, response)
+
+    def register(self, client: Any) -> None:
+        events = client.meta.events
+        for op in (*self._WRITE_OPS, *self._READ_OPS):
+            events.register(f"before-parameter-build.s3.{op}", self._stash_handler)
+            events.register(f"after-call.s3.{op}", self._record_handler)
+
+    def unregister(self, client: Any) -> None:
+        events = client.meta.events
+        for op in (*self._WRITE_OPS, *self._READ_OPS):
+            events.unregister(f"before-parameter-build.s3.{op}", self._stash_handler)
+            events.unregister(f"after-call.s3.{op}", self._record_handler)
+
+    def pop(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        if bucket is None or key is None:
+            return None
+        with self._lock:
+            return self._store.pop((bucket, key), None)
+
+
 class Transferrer:
     """Submit transfer items of one kind and aggregate their outcomes.
 
@@ -265,13 +393,16 @@ class Transferrer:
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
     only) serves the CopySource reads - HeadObject, GetObjectTagging, and
-    s3transfer's own size probe. ``source_storage`` is the upload source's own
-    ``Storage`` (a local file or a custom backend), supplied so ``mv`` deletes
-    the source through its ``Storage.delete``; it is ``None`` for download / copy
-    (an S3 source, removed with a DeleteObject) and for a stream upload.
+    s3transfer's own size probe. ``src_storage`` / ``dest_storage`` are the run's
+    two resolved side ``Storage`` objects (``plan.src`` / ``plan.dest``), retained
+    so a completion can resolve or report either endpoint alongside its listing
+    entries. ``src_storage`` doubles as ``mv``'s upload-source delete handle: an
+    upload source - a local file or a custom backend - is removed through its
+    ``Storage.delete``, while a download / copy S3 source is removed with a
+    DeleteObject instead (so the handle is consulted only on the upload route).
 
     ``is_move`` turns the run into ``mv``: every record reports
-    ``OpKind.MOVE`` while ``kind`` keeps routing the bytes (aws-cli
+    ``TransferType.MOVE`` while ``transfer_type`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
     transfer deletes its source - ``Storage.delete`` for an upload (local or
     custom backend), a per-object DeleteObject on the owning side's client
@@ -280,41 +411,56 @@ class Transferrer:
 
     def __init__(
         self,
-        kind: OpKind,
+        transfer_type: TransferType,
         client: S3Client,
         *,
         source_client: S3Client | None = None,
-        source_storage: Storage | None = None,
+        src_storage: Storage | None = None,
+        dest_storage: Storage | None = None,
         transfer_config: TransferConfig | None = None,
         options: TransferOptions | None = None,
         operation: str = "cp",
         is_move: bool = False,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
+        capture_response: bool = False,
     ) -> None:
-        if kind not in (OpKind.UPLOAD, OpKind.DOWNLOAD, OpKind.COPY):
-            raise ValidationError(f"Transferrer does not handle {kind!r}", operation=operation)
-        self._kind = kind
-        self._result_kind = OpKind.MOVE if is_move else kind
+        if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
+            raise ValidationError(
+                f"Transferrer does not handle {transfer_type!r}", operation=operation
+            )
+        self._transfer_type = transfer_type
+        self._result_transfer_type = TransferType.MOVE if is_move else transfer_type
         self._is_move = is_move
         self._client = client
         self._source_client = source_client if source_client is not None else client
-        # The upload source's own Storage (local or custom backend), supplied so
-        # mv deletes the source through its Storage.delete. None for download /
-        # copy (S3 source -> DeleteObject) and for a stream upload.
-        self._source_storage = source_storage
+        # The run's two resolved side Storages (plan.src / plan.dest), retained so
+        # a completion can surface them with the listing entries; _src_storage is
+        # also mv's upload-source delete handle (consulted only on the upload
+        # route - a download / copy S3 source is removed with a DeleteObject).
+        self._src_storage = src_storage
+        self._dest_storage = dest_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
         # Library-side --no-overwrite gate (the CLI rejects earlier with rc 252):
         # only uploads/copies carry IfNoneMatch, and an old botocore lacks it.
-        if self._options.get("no_overwrite") and kind in (OpKind.UPLOAD, OpKind.COPY):
-            reason = conditional_write_unsupported_reason(client, is_copy=kind is OpKind.COPY)
+        if self._options.get("no_overwrite") and transfer_type in (
+            TransferType.UPLOAD,
+            TransferType.COPY,
+        ):
+            reason = conditional_write_unsupported_reason(
+                client, is_copy=transfer_type is TransferType.COPY
+            )
             if reason is not None:
-                raise Boto3S3Error(reason, operation=operation)
+                # The environment (SDK floor) lacks the capability, not the
+                # caller's arguments: a ConfigurationError.
+                raise ConfigurationError(reason, operation=operation)
         self._on_progress = on_progress
         self._on_result = on_result
+        self._capture_response = capture_response
         self._manager: Any = None
+        self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
         self._succeeded = 0
         self._failed = 0
@@ -338,7 +484,17 @@ class Transferrer:
         cancel = exc is not None and (
             isinstance(exc, CancelledError) or not isinstance(exc, Exception)
         )
-        self._manager.shutdown(cancel=cancel)
+        try:
+            self._manager.shutdown(cancel=cancel)
+        finally:
+            if self._capture is not None:
+                # After shutdown every transfer is drained, so no request is
+                # emitting on the client while the capture handlers are removed.
+                # The finally covers shutdown itself raising (s3transfer re-raises
+                # a KeyboardInterrupt arriving during its drain wait): better to
+                # unregister with stragglers in flight than to leave the handlers
+                # feeding _store forever on a longer-lived client.
+                self._capture.unregister(self._client)
 
     # -- rollup (approximate until the with block exits) --------------------
 
@@ -375,10 +531,12 @@ class Transferrer:
             self._warned += 1
         self._emit(
             OpResult(
-                kind=self._result_kind,
+                transfer_type=self._result_transfer_type,
                 key=key,
                 outcome=OpOutcome.WARNED,
                 error=Boto3S3Error(body, operation=self._operation),
+                src_storage=self._src_storage,
+                dest_storage=self._dest_storage,
             )
         )
 
@@ -398,10 +556,12 @@ class Transferrer:
         """
         self._emit(
             OpResult(
-                kind=self._result_kind,
+                transfer_type=self._result_transfer_type,
                 key=key,
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
+                src_storage=self._src_storage,
+                dest_storage=self._dest_storage,
             )
         )
 
@@ -411,6 +571,21 @@ class Transferrer:
 
     # -- submission ----------------------------------------------------------
 
+    def prepare(self) -> None:
+        """Build the manager (and register capture) before enumeration starts.
+
+        Building the manager mutates the client's event registry
+        (``request-created.s3`` handlers; the capture handlers too), and the
+        events engine has no lock - the mutation must happen-before any
+        concurrent traffic on this client. A listing-driven run fetches pages
+        on the scan prefetch worker with this same client while the caller
+        submits, so the orchestrator calls this once, before pulling the first
+        item (aws-cli likewise builds its TransferManager before the file
+        generator starts). A dry run never calls it: no manager is built, so
+        listing traffic races no registration.
+        """
+        self._get_manager()
+
     def submit(self, item: TransferItem) -> None:
         """Queue one transfer (blocks when the manager queue is full).
 
@@ -418,12 +593,32 @@ class Transferrer:
         ``grants`` shape surfaces as an in-flight error like aws (rc 1 via
         the fatal-error path), never as an upfront usage error.
         """
-        if self._kind is OpKind.UPLOAD:
-            self._submit_upload(item)
-        elif self._kind is OpKind.DOWNLOAD:
-            self._submit_download(item)
-        else:
-            self._submit_copy(item)
+        try:
+            if self._transfer_type is TransferType.UPLOAD:
+                self._submit_upload(item)
+            elif self._transfer_type is TransferType.DOWNLOAD:
+                self._submit_download(item)
+            else:
+                self._submit_copy(item)
+        except BaseException:
+            # The producer may have opened the item's stream before handing it
+            # over (the open routes / _cp_stream). A submit that raises before
+            # the manager accepted the work - the grants ValidationError from
+            # param mapping, a manager-build failure - means _CloseFileobj
+            # never runs, so release the handle here (best-effort; mirrors
+            # _CloseFileobj, which also closes on a failed transfer).
+            self._close_item_fileobjs(item)
+            raise
+
+    @staticmethod
+    def _close_item_fileobjs(item: TransferItem) -> None:
+        for fileobj in (item.src_fileobj, item.dest_fileobj):
+            if fileobj is None:
+                continue
+            try:
+                fileobj.close()
+            except Exception:
+                logger.debug("closing a fileobj after a submit error failed", exc_info=True)
 
     def _submit_upload(self, item: TransferItem) -> None:
         # A directory source is handed through to fail like aws-cli ([Errno 21]
@@ -449,8 +644,8 @@ class Transferrer:
         subscribers.append(self._completion(item))
         self._get_manager().upload(
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
-            bucket=item.dst_bucket,
-            key=item.dst_key,
+            bucket=item.dest_bucket,
+            key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -458,17 +653,19 @@ class Transferrer:
     def _submit_download(self, item: TransferItem) -> None:
         extra_args = requestparams.map_get_object_params(self._options)
         subscribers = self._common_subscribers(item)
-        if item.dst_path is not None:
+        if item.dest_path is not None:
             subscribers.append(_DirectoryCreator())
-        if item.dst_fileobj is not None:
-            subscribers.append(_CloseFileobj(item.dst_fileobj))
+        if item.dest_fileobj is not None:
+            subscribers.append(_CloseFileobj(item.dest_fileobj))
+        if item.case_conflict_cleanup is not None:
+            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
         self._get_manager().download(
             bucket=item.src_bucket,
             key=item.src_key,
-            fileobj=item.dst_fileobj if item.dst_fileobj is not None else item.dst_path,
+            fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -483,8 +680,8 @@ class Transferrer:
         subscribers.append(self._completion(item))
         self._get_manager().copy(
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
-            bucket=item.dst_bucket,
-            key=item.dst_key,
+            bucket=item.dest_bucket,
+            key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
             source_client=self._source_client,
@@ -502,7 +699,9 @@ class Transferrer:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(
-                _Progress(self._result_kind, item.compare_key, item.size, self._on_progress)
+                _Progress(
+                    self._result_transfer_type, item.compare_key, item.size, self._on_progress
+                )
             )
         return subscribers
 
@@ -527,16 +726,28 @@ class Transferrer:
         manager's client for downloads, the source-side client for copies - with
         ``RequestPayer`` forwarded like every other request.
         """
-        if self._kind is OpKind.UPLOAD:
-            source_storage = self._source_storage
+        if self._transfer_type is TransferType.UPLOAD:
+            src_storage = self._src_storage
             info = item.src_info
-            assert source_storage is not None and info is not None
-            return _DeleteSource(lambda: source_storage.delete(info))
-        client: Any = self._client if self._kind is OpKind.DOWNLOAD else self._source_client
+            assert src_storage is not None and info is not None
+            return _DeleteSource(lambda: src_storage.delete(info), capture=self._capture_response)
+        client: Any = (
+            self._client if self._transfer_type is TransferType.DOWNLOAD else self._source_client
+        )
         bucket = item.src_bucket
         key = item.src_key
         params = requestparams.map_delete_object_params(self._options)
-        return _DeleteSource(lambda: client.delete_object(Bucket=bucket, Key=key, **params))
+
+        def delete_s3_source() -> Any:
+            # Pre-translate to the taxonomy carrying the *source* bucket/key, as
+            # S3Storage.delete and the upload path's Storage.delete already do.
+            # Otherwise _record_failure re-tags the raw ClientError with the copy
+            # destination (dest_bucket/dest_key), mis-attributing a source-delete
+            # failure to the object that copied fine.
+            with s3_errors(operation=self._operation, bucket=bucket, key=key):
+                return client.delete_object(Bucket=bucket, Key=key, **params)
+
+        return _DeleteSource(delete_s3_source, capture=self._capture_response)
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
         mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
@@ -563,10 +774,12 @@ class Transferrer:
 
     def _get_manager(self) -> Any:
         if self._manager is None:
-            # Built lazily: the TransferManager (and its thread pools) is
-            # created only when bytes actually move, so dryrun and all-skipped
-            # runs never reach here (docs/imports.md). The s3transfer.manager
-            # module itself is already imported (by boto3 at client build).
+            # Built lazily so a dryrun never constructs a manager (no thread
+            # pools, no client-event registration). Listing-driven live runs
+            # build it up front via prepare() - registration must precede the
+            # scan prefetch worker's traffic on this client; a stream run
+            # builds it here at first submit. The s3transfer.manager module
+            # itself is already imported (by boto3 at client build).
             manager = self._create_crt_manager()
             if manager is None:
                 manager = self._create_classic_manager()
@@ -575,6 +788,12 @@ class Transferrer:
             # after any CRT->classic fallback. Lets --debug distinguish a real
             # CRT transfer from a silent classic fallback (docs/testing.md).
             logger.debug("transfer engine: %s", type(manager).__name__)
+            if self._capture_response:
+                # Registered once, before the first submit; drained per item by
+                # _build_extra_info; removed in __exit__ after the manager shuts
+                # down (capture forces the classic engine, so it is always live).
+                self._capture = _ResponseCapture()
+                self._capture.register(self._client)
             self._manager = manager
         return self._manager
 
@@ -585,7 +804,14 @@ class Transferrer:
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
         """
-        if self._kind is OpKind.COPY:
+        if self._transfer_type is TransferType.COPY:
+            return None
+        if self._capture_response:
+            # Response capture rides the botocore client's event stream, which the
+            # CRT data plane bypasses; force the classic engine so the write
+            # response is observable. A deliberate capture_response trade - the
+            # flag is library-only (no aws-cli equivalent), so no parity impact.
+            logger.debug("transfer engine: classic forced by capture_response")
             return None
         preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
         if str(preferred).lower() == "classic":
@@ -610,6 +836,12 @@ class Transferrer:
             from s3transfer.futures import NonThreadedExecutor
 
             executor_cls = NonThreadedExecutor
+        # TransferManager registers handlers on self._client at construction and
+        # leaves them there - shutdown() never removes them. Intentional and
+        # boto3-faithful (boto3's own TransferManager does the same): we do not
+        # restore the client, because it may be shared and unregistering could
+        # disrupt a concurrent transfer. Run parallel operations with one client
+        # per thread (docs/s3.md thread-safety note).
         return TransferManager(self._client, config=config, executor_cls=executor_cls)
 
     @property
@@ -623,32 +855,108 @@ class Transferrer:
         outcome: OpOutcome,
         *,
         bytes_transferred: int = 0,
-        error: BaseException | None = None,
+        error: Boto3S3Error | None = None,
+        extra_info: Mapping[str, Any] | None = None,
     ) -> OpResult:
         return OpResult(
-            kind=self._result_kind,
+            transfer_type=self._result_transfer_type,
             key=item.compare_key,
             outcome=outcome,
             bytes_transferred=bytes_transferred,
             error=error,
             src=item.src_display or None,
-            dest=item.dst_display or None,
+            dest=item.dest_display or None,
+            src_info=item.src_info,
+            dest_info=item.dest_info,
+            src_storage=self._src_storage,
+            dest_storage=self._dest_storage,
+            extra_info=extra_info,
         )
 
     def _emit(self, result: OpResult) -> None:
         if self._on_result is not None:
             self._on_result(result)
 
-    def _record_success(self, item: TransferItem, resolved_size: int | None = None) -> None:
+    def _record_success(
+        self,
+        item: TransferItem,
+        resolved_size: int | None = None,
+        etag: str | None = None,
+        delete_response: dict[str, Any] | None = None,
+    ) -> None:
         # item.size is unset for an unknown-size transfer (a streaming download
         # lets s3transfer probe the object); fall back to the size s3transfer
         # resolved on the future so SUCCEEDED reports the real byte count.
         size = item.size if item.size is not None else resolved_size
+        extra_info = self._build_extra_info(item, etag, delete_response)
         with self._lock:
             self._succeeded += 1
-        self._emit(self._result(item, OpOutcome.SUCCEEDED, bytes_transferred=size or 0))
+        self._emit(
+            self._result(
+                item, OpOutcome.SUCCEEDED, bytes_transferred=size or 0, extra_info=extra_info
+            )
+        )
+
+    def _build_extra_info(
+        self,
+        item: TransferItem,
+        etag: str | None,
+        delete_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Assemble the result's ``extra_info`` from the captured S3 responses.
+
+        Without ``capture_response`` this keeps the historical shape: the ETag as
+        ``{"ETag": ...}`` from ``future.meta.etag`` - the source object's ETag that
+        boto3-s3 hands s3transfer for a copy and a download (the same as the written
+        object's except for a multipart copy); an upload has none, so ``extra_info``
+        is then ``None``. With ``capture_response`` a
+        classic upload / copy also carries the full write response under ``"write"``
+        (``PutObject`` / ``CopyObject`` / ``CompleteMultipartUpload``, minus
+        ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
+        object's own ETag, the one field whose location varies by write API. An
+        ``mv`` whose source is S3 also carries that source's DeleteObject response
+        under ``"delete"`` (captured by ``_DeleteSource``), and a download carries
+        the source's GetObject response (Body-stripped) under ``"read"``.
+        """
+        write, read = self._drain_captured(item)
+        info: dict[str, Any] = {}
+        if write is not None:
+            info["write"] = write
+        if read is not None:
+            info["read"] = read
+        if delete_response is not None:
+            info["delete"] = delete_response
+        # ETag comes from the transferred object's own response when captured
+        # (write for upload/copy, read for download), else the s3transfer etag.
+        captured = write if write is not None else read
+        etag_value = _extract_etag(captured) if captured is not None else etag
+        if etag_value:
+            info["ETag"] = etag_value
+        return info or None
+
+    def _drain_captured(
+        self, item: TransferItem
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Pop the item's captured ``(write, read)`` responses, if any.
+
+        Every terminal outcome must drain: ``after-call`` fires before botocore
+        raises for a >=300 status, so a FAILED / SKIPPED item may have stored a
+        response (possibly an error payload) - and an ``mv`` whose source delete
+        failed has stored its successful write - that would otherwise sit in the
+        store for the rest of the run.
+        """
+        if self._capture is None:
+            return None, None
+        if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
+            return self._capture.pop(item.dest_bucket, item.dest_key), None
+        if self._transfer_type is TransferType.DOWNLOAD:
+            return None, self._capture.pop(item.src_bucket, item.src_key)
+        return None, None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
+        # Failed / skipped items surface no captured response, but the entry
+        # must still leave the store (see _drain_captured).
+        self._drain_captured(item)
         if _is_precondition_failed(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a
@@ -660,8 +968,8 @@ class Transferrer:
         error = translate_boto_error(
             exc,
             operation=self._operation,
-            bucket=item.dst_bucket or item.src_bucket,
-            key=item.dst_key or item.src_key,
+            bucket=item.dest_bucket or item.src_bucket,
+            key=item.dest_key or item.src_key,
         )
         with self._lock:
             self._failed += 1
@@ -678,13 +986,13 @@ class Transferrer:
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
         """
-        if item.mtime is None or item.dst_path is None:
+        if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dst_path, item.mtime.timestamp())
+            _set_file_utime(item.dest_path, item.mtime.timestamp())
         except Exception as exc:
             self.warn(
-                f"Skipping file {item.dst_path}. Successfully Downloaded {item.dst_path} "
+                f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
                 key=item.compare_key,
             )
@@ -734,9 +1042,9 @@ class _Progress:
     """
 
     def __init__(
-        self, kind: OpKind, key: str, size: int | None, callback: ProgressCallback
+        self, transfer_type: TransferType, key: str, size: int | None, callback: ProgressCallback
     ) -> None:
-        self._kind = kind
+        self._transfer_type = transfer_type
         self._key = key
         self._size = size
         self._callback = callback
@@ -746,7 +1054,10 @@ class _Progress:
     def _fire(self, bytes_done: int) -> None:
         self._callback(
             TransferProgress(
-                kind=self._kind, key=self._key, bytes_done=bytes_done, bytes_total=self._size
+                transfer_type=self._transfer_type,
+                key=self._key,
+                bytes_done=bytes_done,
+                bytes_total=self._size,
             )
         )
 
@@ -771,7 +1082,12 @@ class _DirectoryCreator:
         except FileExistsError:
             pass
         except OSError as exc:
-            raise Boto3S3Error(f"Could not create directory {directory}: {exc}") from exc
+            raise translate_os_error(
+                exc,
+                operation=None,
+                key=None,
+                message=f"Could not create directory {directory}: {exc}",
+            ) from exc
 
 
 class _DeleteSource:
@@ -784,8 +1100,9 @@ class _DeleteSource:
     failed`` outcome. A failed transfer leaves the source untouched.
     """
 
-    def __init__(self, delete: Callable[[], None]) -> None:
+    def __init__(self, delete: Callable[[], Any], *, capture: bool = False) -> None:
         self._delete = delete
+        self._capture = capture
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         try:
@@ -793,9 +1110,17 @@ class _DeleteSource:
         except Exception:
             return
         try:
-            self._delete()
+            response = self._delete()
         except Exception as exc:
             future.set_exception(exc)
+            return
+        # mv's S3 source removal returns a DeleteObject response; stash it (minus
+        # ResponseMetadata) for _Completion to surface under extra_info["delete"].
+        # A local source delete returns None (nothing to capture); a custom backend
+        # may return its own Mapping response.
+        if self._capture and isinstance(response, Mapping):
+            captured = cast("Mapping[str, Any]", response)
+            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(captured)
 
 
 class _CloseFileobj:
@@ -831,6 +1156,29 @@ class _CloseFileobj:
             future.set_exception(exc)
 
 
+class _CaseConflictCleanup:
+    """Drop an admitted download's casefolded key from the gate's in-flight set.
+
+    aws-cli's ``CaseConflictCleanupSubscriber``: the ``--case-conflict`` gate adds
+    a key when it admits a download and this removes it on the transfer's terminal
+    (success *or* failure, like ``on_done``), so the set tracks only downloads
+    still in flight. Without it the set keeps every key ever admitted, and a later
+    item whose name differs only by case is wrongly judged to conflict with an
+    already-finished download (skipped, or - in ``error`` mode - a spurious
+    failure) instead of being let through as aws does. Detecting an in-flight twin
+    relies on the submit loop running ahead of completions (a non-blocking,
+    threaded manager - aws runs at ``max_concurrent_requests=1`` and still detects;
+    a fully synchronous NonThreadedExecutor completes each item before the next is
+    judged, so the set would always be empty).
+    """
+
+    def __init__(self, cleanup: Callable[[], None]) -> None:
+        self._cleanup = cleanup
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self._cleanup()
+
+
 class _Completion:
     """Bridge the transfer future's outcome into the rollup and ``on_result``.
 
@@ -846,7 +1194,7 @@ class _Completion:
         self,
         item: TransferItem,
         *,
-        on_success: Callable[[TransferItem, int | None], None],
+        on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
         post_success: Callable[[TransferItem], None] | None = None,
     ) -> None:
@@ -865,8 +1213,15 @@ class _Completion:
             self._post_success(self._item)
         # s3transfer resolves the transfer size on the future (a HeadObject
         # probe for an unknown-size download); pass it so _record_success can
-        # report real bytes when the item carried no size.
-        self._on_success(self._item, getattr(future.meta, "size", None))
+        # report real bytes when the item carried no size. meta.etag carries the
+        # affected object's ETag on a copy / download (None on an upload); the
+        # user_context slot carries mv's source-delete response (capture_response).
+        self._on_success(
+            self._item,
+            getattr(future.meta, "size", None),
+            getattr(future.meta, "etag", None),
+            future.meta.user_context.get(_DELETE_RESPONSE_KEY),
+        )
 
 
 class _ReplaceMetadataDirective:
@@ -1015,4 +1370,4 @@ class _SetTags:
             pass
 
 
-__all__ = ["TransferItem", "Transferrer"]
+__all__ = ["TransferItem", "Transferrer", "conditional_write_unsupported_reason"]

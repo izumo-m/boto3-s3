@@ -3,17 +3,18 @@
 ``mask_text`` and ``SecretMaskingFilter`` redact credential-bearing text;
 ``set_stream_logger`` is the boto3-faithful entry that attaches a stream handler
 (carrying the masking filter, when ``mask_secrets``) so a caller enabling debug
-output never leaks signatures, access keys, session tokens, SSE-C keys,
-STS-response credentials, or proxy credentials. The
+output never leaks signatures, access keys, session tokens, SSO bearer /
+sso-oidc tokens, SSE-C keys, STS-response credentials, or proxy credentials. The
 module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
 - so the CLI can import it on the ``--debug`` path without breaking the import
 contract (docs/imports.md).
 
 The credential leak under ``--debug`` flows through the Python ``logging``
 system (botocore logs the signed ``AWSPreparedRequest`` - Authorization /
-Signature / X-Amz-Security-Token - and parsed response bodies, both at DEBUG),
-so masking lives in a logging filter on the handler, not in an ``http.client``
-patch (the wire dump only
+Signature / X-Amz-Security-Token - and parsed response bodies, and s3transfer
+logs each task's kwargs including ``extra_args`` with the raw ``SSECustomerKey``,
+all at DEBUG), so masking lives in a logging filter on the handler, not in an
+``http.client`` patch (the wire dump only
 appears when ``http.client.debuglevel`` is raised, which this project never
 does).
 
@@ -85,6 +86,26 @@ _SECURITY_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# SSO bearer token (full mask): botocore's ``sso GetRoleCredentials`` request
+# carries it in the ``x-amz-sso_bearer_token`` header, logged at DEBUG in both
+# the request-dict and AWSPreparedRequest-repr forms. The token mints role
+# credentials for every account/role the user can access - the highest-value
+# secret on the SSO auth path. Same key/value shape as the security-token RE.
+_SSO_BEARER_TOKEN_RE = re.compile(
+    rf"(?P<key>x-amz-sso_bearer_token['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
+    re.IGNORECASE,
+)
+
+# sso-oidc token-endpoint bodies (full mask): a token refresh logs the
+# CreateToken response (``accessToken`` / ``refreshToken`` / ``idToken``) and
+# client registration logs ``clientSecret`` (RegisterClient) - each a
+# bearer-grade secret - via botocore.parsers' DEBUG ``Response body:`` line
+# (these services are JSON-only, so no XML twin is needed).
+_SSO_OIDC_BODY_JSON_RE = re.compile(
+    r'(?P<key>"(?:accessToken|refreshToken|idToken|clientSecret)"\s*:\s*")(?P<val>[^"]+)',
+    re.IGNORECASE,
+)
+
 # SSE-C customer key (full mask): the base64 customer key is the symmetric
 # encryption key (a true secret). botocore puts it in the signed request header
 # ``x-amz-server-side-encryption-customer-key`` (and the copy-source variant),
@@ -95,6 +116,19 @@ _SSE_C_KEY_RE = re.compile(
     r"(?P<key>x-amz-(?:copy-source-)?server-side-encryption-customer-key(?!-md5)"
     rf"['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
     re.IGNORECASE,
+)
+
+# The same secret in its boto3 API-parameter form: s3transfer logs every task's
+# kwargs at DEBUG (``s3transfer.tasks`` / ``s3transfer.futures``, e.g.
+# ``PutObjectTask(... 'extra_args': {'SSECustomerKey': '<raw key>', ...})``)
+# *before* botocore's parameter build base64-encodes the key - the one SSE-C
+# surface that is not a wire header. The value may be a str or bytes repr, so
+# the match runs to the unescaped quote that closes the opener (backslash
+# escapes inside a bytes repr are consumed). ``'SSECustomerKeyMD5'`` cannot
+# match: the name must be immediately closed by its quote.
+_SSE_C_PARAM_RE = re.compile(
+    r"(?P<key>['\"](?:CopySource)?SSECustomerKey['\"]\s*:\s*b?(?P<q>['\"]))"
+    r"(?P<val>(?:\\.|(?!(?P=q))[^\\])+)"
 )
 
 # SigV2 (HmacV1) Authorization header ``AWS <access-key-id>:<signature>`` (legacy
@@ -161,7 +195,10 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     ``boto3`` / ``botocore`` / ``s3transfer``.
     """
     text = _SECURITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SSO_BEARER_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SSO_OIDC_BODY_JSON_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_JSON_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
@@ -225,8 +262,8 @@ def set_stream_logger(
     and default format) but, when *mask_secrets* is true (the default),
     attaches a :class:`SecretMaskingFilter` to the handler so the
     credential-bearing records botocore emits at DEBUG (signed request headers,
-    signatures, session tokens, SSE-C keys, STS-response credentials, proxy URLs)
-    are redacted before they reach the
+    signatures, session tokens, SSO bearer / sso-oidc tokens, SSE-C keys,
+    STS-response credentials, proxy URLs) are redacted before they reach the
     stream. ``boto3`` / ``botocore`` warn that their own debug logging leaks
     these verbatim; this is the safe entry point.
 

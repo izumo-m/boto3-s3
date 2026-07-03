@@ -2,7 +2,7 @@
   "argv": [
     "cp",
     "s3://<BUCKET>/d/a.txt",
-    "dst/out.bin",
+    "dest/out.bin",
     "--checksum-mode",
     "ENABLED"
   ],
@@ -18,6 +18,6 @@
   ],
   "scenario": "cp_checksum_mode_download",
   "stdout_lines": [
-    "download: s3://<BUCKET>/d/a.txt to dst/out.bin"
+    "download: s3://<BUCKET>/d/a.txt to dest/out.bin"
   ]
 }

@@ -1,11 +1,13 @@
-"""The argument surface and run-pipeline pieces ``cp`` and ``mv`` share.
+"""The argument surface and run-pipeline pieces ``cp`` / ``mv`` / ``sync`` share.
 
 ``aws s3`` declares one ``TRANSFER_ARGS`` list plus per-command extras
 (aws-cli's ``subcommands.py``); this module is that shared list and the
-validation/translation steps both commands run in the same order. Everything
-here is SDK-free at import time (import contract, docs/imports.md) - the one
-deferred ``boto3_s3`` import sits inside :func:`resolve_locations`, past
-every usage error.
+validation/translation steps the three commands run in the same order.
+This module loads only once its command is determined (stage 2 of the lazy
+dispatch, docs/imports.md), so top-level imports may reach
+``botocore.exceptions`` (via ``S3Storage``); the ``boto3`` / ``s3transfer``
+client stack stays deferred into the functions that build a client or an
+engine.
 """
 
 from __future__ import annotations
@@ -13,26 +15,30 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-# Pure-Python names only (exceptions / types modules) - safe on the parse path.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,
     CaseConflictMode,
     CopyPropsMode,
+    S3Storage,
     TransferOptions,
     ValidationError,
 )
-from boto3_s3.naming import split_bucket_key
-from boto3_s3_cli import filters, shorthand
+from boto3_s3_cli import clientfactory, filters, paramfile, shorthand, usage
+from boto3_s3_cli.commands.base import (
+    add_page_size_argument,
+    add_request_payer_argument,
+    parse_integer_option,
+)
+from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from boto3_s3 import LocalStorage, S3Storage
+    from boto3_s3 import LocalStorage
     from boto3_s3_cli.commands.base import Context
-    from boto3_s3_cli.progress import TransferPrinter
 
 # aws-cli choice lists (subcommands.py ACL / STORAGE_CLASS).
 _ACL_CHOICES = [
@@ -60,18 +66,17 @@ _STORAGE_CLASS_CHOICES = [
 # resolution. The choices-validated options (acl / storage_class / sse / ... )
 # can't carry a ``file://`` value (argparse rejects it as an invalid choice
 # before paramfile would run), and grants is a list; ``metadata`` is resolved
-# separately before its shorthand parse.
-_PARAMFILE_TEXT_OPTIONS = frozenset(
-    {
-        "website_redirect",
-        "content_type",
-        "cache_control",
-        "content_disposition",
-        "content_encoding",
-        "content_language",
-        "expires",
-        "sse_kms_key_id",
-    }
+# separately before its shorthand parse. Ordered (a tuple) so the first
+# failing paramfile is deterministic.
+_PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
+    "website_redirect",
+    "content_type",
+    "cache_control",
+    "content_disposition",
+    "content_encoding",
+    "content_language",
+    "expires",
+    "sse_kms_key_id",
 )
 
 # aws-cli's _raise_if_paths_type_incorrect_for_param's usage rendering.
@@ -98,14 +103,7 @@ def add_transfer_arguments(
     parser.add_argument("--quiet", action="store_true")
     if include_recursive:
         parser.add_argument("--recursive", action="store_true")
-    # One shared ordered dest: the interleaved --exclude/--include order
-    # carries aws-cli's last-match-wins semantics (cli filters module).
-    parser.add_argument(
-        "--exclude", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-    )
-    parser.add_argument(
-        "--include", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-    )
+    filters.add_filter_arguments(parser)
     parser.add_argument("--acl", choices=_ACL_CHOICES)
     parser.add_argument(
         "--follow-symlinks", action="store_true", dest="follow_symlinks", default=True
@@ -136,12 +134,10 @@ def add_transfer_arguments(
     # like aws's bare int(), not argparse's 252).
     parser.add_argument("--progress-frequency", default=0)
     parser.add_argument("--progress-multiline", action="store_true")
-    parser.add_argument("--page-size", default=1000)
+    add_page_size_argument(parser)
     parser.add_argument("--ignore-glacier-warnings", action="store_true")
     parser.add_argument("--force-glacier-transfer", action="store_true")
-    parser.add_argument(
-        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
-    )
+    add_request_payer_argument(parser)
     parser.add_argument("--metadata")
     parser.add_argument(
         "--copy-props", choices=["none", "metadata-directive", "default"], default="default"
@@ -156,6 +152,11 @@ def add_transfer_arguments(
         "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
     )
     parser.add_argument("--checksum-mode", choices=["ENABLED"])
+    # This set matches aws-cli 2.35.5's CHECKSUM_ALGORITHM choices verbatim
+    # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
+    # SHA512 / XXHASH* because that build predates them - a version skew, not a
+    # parity bug: the design tracks the aws-cli source, not whatever `aws`
+    # happens to be on PATH.
     parser.add_argument(
         "--checksum-algorithm",
         choices=[
@@ -170,6 +171,136 @@ def add_transfer_arguments(
             "XXHASH128",
         ],
     )
+
+
+def identify_type(path: str) -> str:
+    """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows.
+
+    aws-cli's ``FileFormat.identify_type``, verbatim: string classification is
+    the CLI layer's job (the library planner receives resolved ``Storage``
+    objects and never re-parses a path).
+    """
+    return "s3" if path.startswith("s3://") else "local"
+
+
+def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> None:
+    """Resolve the direct-option paramfiles the way aws does at parse time (252).
+
+    aws expands ``file://`` / ``fileb://`` references on plain option values
+    during argument parsing - before its bare ``int()`` coercions, the
+    session profile, and every path validation - so a bad reference here
+    beats a non-integer ``--page-size`` (255), a missing source (255), and a
+    bad profile (255; all measured against aws 2.35.5). Covered in place:
+    the free-string options' text paramfiles, the SSE-C key blobs, and the
+    string-typed integer options (``--page-size`` / ``--progress-frequency``
+    / cp's ``--expected-size``), whose loaded text feeds the later
+    coercions. ``--metadata`` is NOT here: its value (paramfile and
+    shorthand alike) resolves after the coercions
+    (:func:`resolve_metadata_option`; measured, the int 255 wins).
+    :func:`build_transfer_options` consumes the resolved values verbatim.
+    """
+    for option in _PARAMFILE_TEXT_OPTIONS:
+        value = getattr(args, option, None)
+        if value is not None:
+            resolved = resolve_text_paramfile(
+                value, f"--{option.replace('_', '-')}", operation=operation
+            )
+            setattr(args, option, resolved)
+    for option in ("page_size", "progress_frequency", "expected_size"):
+        value = getattr(args, option, None)
+        if isinstance(value, str):
+            setattr(
+                args,
+                option,
+                resolve_text_paramfile(value, f"--{option.replace('_', '-')}", operation=operation),
+            )
+    if args.sse_c_key is not None:
+        args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+    if args.sse_c_copy_source_key is not None:
+        args.sse_c_copy_source_key = blob_value(
+            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
+        )
+
+
+def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
+    """Resolve ``--metadata`` in place: paramfile, then the shorthand parse (252).
+
+    Ordered *after* the integer coercions - unlike the direct-option
+    paramfiles above - because aws handles the map option's value with its
+    shorthand machinery (measured: ``--metadata file:///no/x --page-size
+    abc`` is the coercion's 255, while a direct option's bad paramfile wins
+    with 252).
+    """
+    if args.metadata is not None:
+        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
+        args.metadata = shorthand.parse_map_option(
+            metadata_value, name="--metadata", operation=operation
+        )
+
+
+class TransferPaths(NamedTuple):
+    """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
+
+    page_size: int
+    progress_frequency: int
+    src: str
+    dest: str
+    src_type: str
+    dest_type: str
+    paths_type: str  # "locals3" | "s3local" | "s3s3" on the CLI surface
+
+
+def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths:
+    """The shared ``run()`` head, in aws's parse-to-validation order.
+
+    The order is exit-code-load-bearing, identical across cp/mv/sync, and
+    measured against aws 2.35.5 on the combined-error cases: the
+    ``--endpoint-url`` scheme check (252, aws validates the value at parse
+    time) -> the direct-option paramfile / blob loads (252, aws's parse-time
+    expansion - it beats the coercions' 255) -> the two integer coercions
+    (255, aws's bare ``int()``) -> the ``--metadata`` resolution (252,
+    paramfile + shorthand, which the coercions beat) -> the session profile
+    resolution (255: aws binds the profile at startup, so a bad ``--profile``
+    beats every post-parse usage error) -> the local-local pair gate (252).
+    Only this shared, order-stable prefix lives here - the stream / checksum /
+    SSE-C checks that follow differ in relative order per command and stay
+    with each command.
+    """
+    clientfactory.validate_endpoint_url(args)
+    resolve_paramfile_values(args, operation=operation)
+    page_size = parse_integer_option(args.page_size, operation=operation)
+    progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
+    resolve_metadata_option(args, operation=operation)
+    clientfactory.validate_profile(args)
+    src, dest = args.paths
+    src_type = identify_type(src)
+    dest_type = identify_type(dest)
+    if src_type == "local" and dest_type == "local":
+        raise ValidationError(usage.two_path_usage(operation), operation=operation)
+    return TransferPaths(
+        page_size, progress_frequency, src, dest, src_type, dest_type, src_type + dest_type
+    )
+
+
+def create_local_dest_dir(dest: str, *, operation: str) -> None:
+    """Pre-create the ``s3local`` destination directory (aws's ``_validate_path_args``).
+
+    aws creates the destination during validation whenever the operation is a
+    ``dir_op`` (``cp``/``mv`` ``--recursive`` and every ``sync``) - before the
+    pipeline - so a creation failure is its pre-pipeline rc 255, not the
+    pipeline's rc 1. Pre-creating it outside ``finish_transfer``'s catch keeps
+    that shape (the library still ensures the dir for direct callers; this
+    makes it a no-op there). The bare ``exists`` test then bare ``makedirs``
+    mirror aws exactly; every ``translate_os_error`` category maps to the
+    same rc 255.
+    """
+    if not os.path.exists(dest):
+        try:
+            os.makedirs(dest)
+        except OSError as exc:
+            from boto3_s3.localstorage import translate_os_error
+
+            raise translate_os_error(exc, operation=operation, key=None) from exc
 
 
 def validate_checksum_paths_type(
@@ -249,7 +380,7 @@ def is_s3express_path(path: str) -> bool:
     (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix)."""
     if not path.startswith("s3://"):
         return False
-    return split_bucket_key(path[len("s3://") :])[0].endswith("--x-s3")
+    return S3Storage.split_bucket_key(path[len("s3://") :])[0].endswith("--x-s3")
 
 
 def resolve_case_conflict(
@@ -325,25 +456,17 @@ def build_transfer_options(
         ("checksum_algorithm", args.checksum_algorithm),
     ):
         if value is not None:
-            if option in _PARAMFILE_TEXT_OPTIONS:
-                # aws applies file:// (text) paramfile resolution to every arg.
-                value = resolve_text_paramfile(
-                    value, f"--{option.replace('_', '-')}", operation=operation
-                )
+            # Paramfiles and shorthand are already resolved in place -
+            # :func:`resolve_parse_time_values` runs at the head of every
+            # cp/mv/sync (aws resolves them at parse time), so the values
+            # here are consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
     if args.metadata is not None:
-        # file:// resolves before the shorthand parse (aws unpacks the paramfile,
-        # then parses the loaded text as the map value).
-        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
-        options["metadata"] = shorthand.parse_map_option(
-            metadata_value, name="--metadata", operation=operation
-        )
+        options["metadata"] = args.metadata
     if args.sse_c_key is not None:
-        options["sse_c_key"] = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+        options["sse_c_key"] = args.sse_c_key
     if args.sse_c_copy_source_key is not None:
-        options["sse_c_copy_source_key"] = blob_value(
-            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
-        )
+        options["sse_c_copy_source_key"] = args.sse_c_copy_source_key
     if args.force_glacier_transfer:
         options["force_glacier_transfer"] = True
     if args.ignore_glacier_warnings:
@@ -351,51 +474,6 @@ def build_transfer_options(
     if args.no_overwrite:
         options["no_overwrite"] = True
     return options
-
-
-def _read_text_paramfile(original: str, *, name: str, operation: str) -> str:
-    """Load a ``file://`` reference as text (aws paramfile ``mode='r'``).
-
-    Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``
-    (expanduser inner). The encoding honors ``AWS_CLI_FILE_ENCODING`` (aws's
-    ``compat_open`` / ``getpreferredencoding``), falling back to the locale
-    default (``open``'s default when ``encoding`` is ``None``).
-    """
-    path = os.path.expandvars(os.path.expanduser(original[len("file://") :]))
-    encoding = os.environ.get("AWS_CLI_FILE_ENCODING")
-    try:
-        with open(path, encoding=encoding) as handle:
-            return handle.read()
-    except UnicodeDecodeError as exc:
-        # aws wording (paramfile.get_file): the decode-error message names the
-        # EXPANDED path in parentheses; the OSError one names the full original.
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile ({path}), "
-            "text contents could not be decoded.  If this is a binary file, please use "
-            "the fileb:// prefix instead of the file:// prefix.",
-            operation=operation,
-        ) from exc
-    except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
-        ) from exc
-
-
-def _read_binary_paramfile(original: str, *, name: str, operation: str) -> bytes:
-    """Load a ``fileb://`` reference as raw bytes (aws paramfile ``mode='rb'``).
-
-    Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``.
-    """
-    path = os.path.expandvars(os.path.expanduser(original[len("fileb://") :]))
-    try:
-        with open(path, "rb") as handle:
-            return handle.read()
-    except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
-        ) from exc
 
 
 def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
@@ -406,7 +484,7 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     without the prefix passes through verbatim.
     """
     if value.startswith("file://"):
-        return _read_text_paramfile(value, name=name, operation=operation)
+        return paramfile.read_text_paramfile(value, name=name, operation=operation)
     return value
 
 
@@ -420,7 +498,7 @@ def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
     key is *not* a usage error.
     """
     if value.startswith("fileb://"):
-        return _read_binary_paramfile(value, name=name, operation=operation)
+        return paramfile.read_binary_paramfile(value, name=name, operation=operation)
     return resolve_text_paramfile(value, name, operation=operation)
 
 
@@ -429,10 +507,10 @@ def resolve_locations(
     ctx: Context,
     client: Any,
     src: str,
-    dst: str,
+    dest: str,
     *,
     src_type: str,
-    dst_type: str,
+    dest_type: str,
 ) -> tuple[object, object]:
     """Build the library-side location pair for the non-stream routes.
 
@@ -447,32 +525,33 @@ def resolve_locations(
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # Construction is permissive (non-raising); validate the strict aws-cli
-        # forms here - the same point construction used to reject them, so a usage
-        # error (rc 252) still precedes the transfer pipeline.
+        # forms here so a usage error (rc 252) still precedes the transfer
+        # pipeline.
         storage = S3Storage(arg, client=client_for)
         storage.validate()
         return storage
 
     if src_type == "local":
-        return src, _s3(dst, client)
-    if dst_type == "local":
-        return _s3(src, client), dst
+        return src, _s3(dest, client)
+    if dest_type == "local":
+        return _s3(src, client), dest
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))
         source_args.region = args.source_region
         source_args.endpoint_url = None
         source_client = ctx.client_factory(source_args)
-    return _s3(src, source_client), _s3(dst, client)
+    return _s3(src, source_client), _s3(dest, client)
 
 
 def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
-    """The scheme-bearing Storage ``naming.plan_transfer`` reads for cp/mv/sync.
+    """A plan-only endpoint Storage for ``transferplan.plan_transfer``.
 
-    ``plan_transfer`` needs only ``.scheme`` / ``.as_text()``, so the S3 side
-    carries no client here - this is the throwaway used purely to derive the path
-    shapes (``filter_root``, the stdin dest key). The real transfer storages (with
-    a client) are built in :func:`resolve_locations`.
+    The planner routes by concrete type and each side formats itself from its
+    held state (``Storage.format``), so the S3 side carries no client here -
+    this is the throwaway used purely to derive the path shapes (roots, the
+    stdin dest key). The real transfer storages (with a client) are built in
+    :func:`resolve_locations`.
     """
     from boto3_s3 import LocalStorage, S3Storage
 
@@ -500,15 +579,37 @@ def resolve_transfer_config(args: argparse.Namespace, ctx: Context, *, paths_typ
     return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)
 
 
+def build_printer(
+    args: argparse.Namespace, progress_frequency: int, *, only_show_errors: bool = False
+) -> TransferPrinter:
+    """The shared :class:`TransferPrinter` wiring.
+
+    ``only_show_errors`` ORs into the flag for cp's stream rule (a streaming
+    download owns stdout for the object bytes, so aws forces the errors-only
+    printer); mv/sync pass nothing.
+    """
+    return TransferPrinter(
+        quiet=args.quiet,
+        only_show_errors=args.only_show_errors or only_show_errors,
+        progress=args.progress,
+        frequency=progress_frequency,
+        multiline=args.progress_multiline,
+    )
+
+
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
     """Run the library call and derive the aws exit code (docs/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, anything run-killing as one ``fatal error:`` line. A
-    clean run exits 2 when only warnings accumulated, else 0.
+    clean run exits 2 when only warnings accumulated, else 0. The printer's
+    rendering thread runs for exactly the ``run()`` span - the ``with``
+    drains it on every path, so all queued lines are written (and precede a
+    ``fatal error:`` line) before the exit code is derived.
     """
     try:
-        run()
+        with printer:
+            run()
     except BatchError:
         # Per-item failure lines were already streamed by the printer.
         return 1
@@ -520,13 +621,20 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
 
 
 __all__ = [
+    "TransferPaths",
     "add_transfer_arguments",
     "blob_value",
+    "build_printer",
     "build_transfer_options",
+    "classify_paths",
+    "create_local_dest_dir",
     "finish_transfer",
+    "identify_type",
     "is_s3express_path",
     "resolve_case_conflict",
     "resolve_locations",
+    "resolve_metadata_option",
+    "resolve_paramfile_values",
     "resolve_transfer_config",
     "validate_checksum_paths_type",
     "validate_sse_c_pairing",

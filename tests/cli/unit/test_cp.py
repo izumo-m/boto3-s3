@@ -28,6 +28,12 @@ from boto3_s3_cli.commands.base import Context
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
+# The case-conflict gate detects a "two S3 twins" conflict via its in-flight set,
+# which only holds while the first twin's download is still running. That needs a
+# threaded (non-blocking) submit running ahead of completions - aws-cli's own
+# tests use a single worker (max_concurrent_requests = 1). _SYNC completes each
+# twin before the next is judged, emptying the set.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 
 def _client_error(code: str, status: int, operation: str) -> ClientError:
@@ -40,9 +46,11 @@ def _client_error(code: str, status: int, operation: str) -> ClientError:
 
 def _recording_ctx(
     responses: list[dict[str, Any] | Exception],
+    *,
+    transfer_config: TransferConfig = _SYNC,
 ) -> tuple[Context, list[ApiCall]]:
     client, calls = make_recording_client(responses)
-    ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC)
+    ctx = Context(client_factory=lambda _args: client, transfer_config=transfer_config)
     return ctx, calls
 
 
@@ -352,7 +360,7 @@ class TestSourceRegionWiring:
             [
                 "cp",
                 "s3://src-b/k",
-                "s3://dst-b/k2",
+                "s3://dest-b/k2",
                 "--source-region",
                 "eu-west-3",
                 "--region",
@@ -372,7 +380,7 @@ class TestSourceRegionWiring:
 
     def test_without_source_region_one_client_serves_both_sides(self) -> None:
         ctx, namespaces = self._factory_recording_ctx()
-        rc = cli.main(["cp", "s3://src-b/k", "s3://dst-b/k2"], ctx=ctx)
+        rc = cli.main(["cp", "s3://src-b/k", "s3://dest-b/k2"], ctx=ctx)
         assert rc == 0
         assert len(namespaces) == 1
 
@@ -613,7 +621,9 @@ class TestCaseConflict:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        ctx, calls = _recording_ctx([_case_listing(), _get_response()])
+        ctx, calls = _recording_ctx(
+            [_case_listing(), _get_response()], transfer_config=_CASE_CONFLICT_CONFIG
+        )
         rc = cli.main(
             ["cp", "s3://b/cc/", "out", "--recursive", "--case-conflict", "skip"], ctx=ctx
         )
@@ -629,7 +639,9 @@ class TestCaseConflict:
         # aws prints these advisories with a direct uni_print that bypasses
         # the (absent, under --quiet) result printer.
         monkeypatch.chdir(tmp_path)
-        ctx, _ = _recording_ctx([_case_listing(), _get_response()])
+        ctx, _ = _recording_ctx(
+            [_case_listing(), _get_response()], transfer_config=_CASE_CONFLICT_CONFIG
+        )
         rc = cli.main(
             ["cp", "s3://b/cc/", "out", "--recursive", "--case-conflict", "skip", "--quiet"],
             ctx=ctx,
@@ -642,7 +654,9 @@ class TestCaseConflict:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        ctx, _ = _recording_ctx([_case_listing(), _get_response()])
+        ctx, _ = _recording_ctx(
+            [_case_listing(), _get_response()], transfer_config=_CASE_CONFLICT_CONFIG
+        )
         rc = cli.main(
             ["cp", "s3://b/cc/", "out", "--recursive", "--case-conflict", "error"], ctx=ctx
         )

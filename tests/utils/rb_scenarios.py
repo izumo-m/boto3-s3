@@ -17,9 +17,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from tests.utils.harness import BUCKET_TOKEN
+from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+__all__ = ["SCENARIOS", "RbScenario", "resolve_argv"]
 
 _TREE: Mapping[str, int] = {
     "data/a.txt": 3,
@@ -28,27 +31,13 @@ _TREE: Mapping[str, int] = {
 
 
 @dataclass(frozen=True)
-class RbScenario:
+class RbScenario(BaseScenario):
     """One ``rb`` invocation against a fixed sibling-bucket start state."""
 
-    name: str
-    argv: tuple[str, ...]
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
     # Objects put into the pre-created bucket (ignored without pre_create).
     seed: Mapping[str, int] = field(default_factory=dict)
-    # False => normalized stdout is not compared (rc still is - charter).
-    compare_stdout: bool = True
-    # True => live aws-vs-ours diff only: no golden written or checked, and no
-    # functional replay. For moto fidelity gaps (see rm_scenarios).
-    diff_only: bool = False
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: RbScenario, bucket: str) -> list[str]:
-    """Materialize the argv template against a concrete bucket name."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 SCENARIOS: tuple[RbScenario, ...] = (

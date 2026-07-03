@@ -8,9 +8,13 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypedDict
+
+if TYPE_CHECKING:
+    from boto3_s3.exceptions import Boto3S3Error
+    from boto3_s3.storage import Storage
 
 
 class FileKind(enum.Enum):
@@ -38,9 +42,11 @@ class FileInfo:
     local-only notions such as symlinks are attributes of ``LocalFileInfo`` rather
     than distinct types.
 
-    ``key`` is the full, ``/``-separated identifier (object key, prefix, or
-    bucket name; never platform ``os.sep`` - ``LocalFileInfo`` translates it). It
-    doubles as the cross-backend merge/sort key: two ``Storage.scan`` streams
+    ``key`` is the full, ``/``-separated identifier: an S3 object key, prefix, or
+    bucket name, or - for a ``LocalFileInfo`` - the **absolute filesystem path**
+    (``os.sep`` normalized to ``/``; ``to_native_path`` inverts it). It is never
+    a relative path and never platform ``os.sep``. It doubles as the
+    cross-backend merge/sort key: two ``Storage.scan`` streams
     ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
     is relativized to its scan root, so every backend must emit ``/``-separated
     keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
@@ -71,6 +77,10 @@ class FileInfo:
 @dataclass(slots=True, kw_only=True)
 class LocalFileInfo(FileInfo):
     """``FileInfo`` for a local filesystem entry.
+
+    Its ``key`` is the **absolute** path with ``os.sep`` normalized to ``/``
+    (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
+    turns it back into a host path for I/O.
 
     ``entry`` is the same object ``os.scandir()`` yields when the producer had
     one, so callers can reuse its ``stat()`` cache and other methods without
@@ -164,7 +174,7 @@ class ScanOptions:
     on_warning: Callable[[str], None] | None = None
 
 
-class OpKind(enum.Enum):
+class TransferType(enum.Enum):
     """Kind of byte-moving operation a result/progress record describes.
 
     ``MOVE`` is a reporting kind only: an ``mv`` run still routes each item
@@ -222,7 +232,7 @@ class CopyPropsMode(enum.Enum):
 class TransferProgress:
     """Byte-level progress for one in-flight item, passed to ``on_progress``."""
 
-    kind: OpKind
+    transfer_type: TransferType
     key: str
     bytes_done: int
     bytes_total: int | None = None
@@ -230,22 +240,28 @@ class TransferProgress:
 
 @dataclass(slots=True, kw_only=True)
 class OpResult:
-    """Per-item completion record, passed to ``on_result``.
+    """Per-item completion record passed to the ``on_result`` callback.
 
-    ``src`` / ``dest`` are display-oriented endpoints (``s3://bucket/key`` or
-    a native local path) populated by the byte-moving operations so consumers
-    can render aws-style ``upload: {src} to {dest}`` lines without re-deriving
-    the pair; ``rm`` leaves them ``None``. ``key`` stays the operation-relative
-    identifier (the transfer ``compare_key`` / the deleted object key).
+    One record per item, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` from a
+    worker thread (keep the callback fast and non-raising). A single type keyed
+    by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
+    acted on (a transfer's source, or a delete's removed object); the ``dest_*``
+    trio the destination side. The fields, the ``src`` / ``dest`` convention, and
+    which operation populates which field are documented in docs/opresult.md.
     """
 
-    kind: OpKind
+    transfer_type: TransferType
     key: str
     outcome: OpOutcome
     bytes_transferred: int = 0
-    error: BaseException | None = None
+    error: Boto3S3Error | None = None
     src: str | None = None
     dest: str | None = None
+    src_info: FileInfo | None = None
+    dest_info: FileInfo | None = None
+    src_storage: Storage | None = None
+    dest_storage: Storage | None = None
+    extra_info: Mapping[str, Any] | None = None
 
 
 class CancelToken:
@@ -321,6 +337,20 @@ ResultCallback = Callable[[OpResult], None]
 FileFilter = Callable[[FileInfo], bool]
 
 
+def strip_response_metadata(
+    response: Mapping[str, Any], *, drop_body: bool = False
+) -> dict[str, Any]:
+    """A parsed S3 response minus ``ResponseMetadata`` (HTTP transport internals).
+
+    The wire-shape convention for everything surfaced under
+    ``OpResult.extra_info``: response slots carry the operation's parsed fields
+    only. ``drop_body`` additionally removes the streaming ``Body`` a
+    ``GetObject`` response carries (the object bytes, never a metadata field).
+    """
+    dropped = ("Body", "ResponseMetadata") if drop_body else ("ResponseMetadata",)
+    return {k: v for k, v in response.items() if k not in dropped}
+
+
 __all__ = [
     "CancelToken",
     "CaseConflictMode",
@@ -329,7 +359,6 @@ __all__ = [
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
-    "OpKind",
     "OpOutcome",
     "OpResult",
     "ProgressCallback",
@@ -338,4 +367,5 @@ __all__ = [
     "ScanOptions",
     "TransferOptions",
     "TransferProgress",
+    "TransferType",
 ]

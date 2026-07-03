@@ -1,12 +1,12 @@
 """``S3.cp``: route dispatch, naming, gates, and aggregation (recording client).
 
 Behavioral parity pins (aws-cli refs in the implementation): the pre-batch
-missing-source error uses aws's wording
-and the *base* category (their bare RuntimeError -> rc 255), the single S3
-source resolves via HeadObject whose 404 is rewritten to ``Key "..." does
-not exist`` (in-pipeline -> rc 1), folder markers and parent-directory
-escapes are dropped from downloads, the glacier gate warns/skips/forces, and
-item failures aggregate into ``BatchError``.
+missing-source error uses aws's wording as a ``NotFoundError`` with no
+``ClientError`` cause (their bare RuntimeError -> rc 255, the general rc this
+shape maps to), the single S3 source resolves via HeadObject whose 404 is
+rewritten to ``Key "..." does not exist`` (in-pipeline -> rc 1), folder
+markers and parent-directory escapes are dropped from downloads, the glacier
+gate warns/skips/forces, and item failures aggregate into ``BatchError``.
 """
 
 from __future__ import annotations
@@ -44,6 +44,13 @@ from boto3_s3.types import (
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
+# The case-conflict gate detects a "two S3 twins in one listing" conflict via its
+# in-flight set, which only holds while the first twin's download is still
+# running. That needs a non-blocking (threaded) submit so the gate runs ahead of
+# completions - aws-cli's own tests use a single worker (max_concurrent_requests =
+# 1) here. A fully synchronous NonThreadedExecutor (_SYNC) completes each twin
+# before the next is judged, emptying the set, so the conflict is never seen.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 _MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
@@ -88,6 +95,53 @@ class TestUploadRoute:
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_oversize_upload_warns_but_still_attempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's _warn_if_too_large: an over-48.8-TiB source warns (the rc-2
+        # family) but is still attempted, so S3's own EntityTooLarge stays
+        # visible. A real 48.8 TiB file cannot be materialized, so the
+        # threshold constant is lowered; the message renders the separate
+        # _MAX_UPLOAD_SIZE_TEXT constant, so aws's wording is asserted intact.
+        monkeypatch.setattr("boto3_s3.producers._MAX_UPLOAD_SIZE", 1)
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"xx")  # 2 bytes > the patched limit
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(src),
+            S3Storage("s3://bucket/up/", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["PutObject"]  # warned, never skipped
+        outcomes = [r.outcome for r in results]
+        assert outcomes.count(OpOutcome.WARNED) == 1
+        assert outcomes.count(OpOutcome.SUCCEEDED) == 1
+        warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
+        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
+        assert "big.bin" in str(warned.error)
+
+    def test_result_carries_listing_entry_and_storages(self, tmp_path: Path) -> None:
+        # The completion surfaces the source FileInfo and both side Storages so an
+        # app can act on the result directly; cp never lists the destination, so
+        # dest_info stays None.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x" * 7)
+        client, _ = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(src),
+            S3Storage("s3://bucket/up/", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        r = results[0]
+        assert r.src_info is not None and r.src_info.key.endswith("a.txt")
+        assert r.src_storage is not None
+        assert isinstance(r.dest_storage, S3Storage) and r.dest_storage.bucket == "bucket"
+        assert r.dest_info is None
+
     def test_recursive_upload_walks_in_byte_order(self, tmp_path: Path) -> None:
         for name in ("a/inner.txt", "a.txt"):
             target = tmp_path / name
@@ -123,14 +177,15 @@ class TestUploadRoute:
             for r in results
         )
 
-    def test_missing_source_raises_the_base_category_up_front(self, tmp_path: Path) -> None:
+    def test_missing_source_raises_not_found_up_front(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope.txt")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().cp(missing, S3Storage("s3://b/k", client=client))
-        # The aws-cli raises a bare RuntimeError here (rc 255), so the exact
-        # base category matters: NotFoundError would map to a different rc.
-        assert type(excinfo.value) is Boto3S3Error
+        # aws-cli raises a bare RuntimeError here (rc 255); NotFoundError with
+        # no ClientError cause maps to the same general rc (the class must not
+        # be ValidationError / ConfigurationError, whose rc differ).
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
         assert calls == []
 
@@ -242,6 +297,33 @@ class TestFilters:
         )
         assert [call.params["Key"] for call in calls] == ["t/large.txt"]
 
+    def test_single_s3_source_is_filtered_too(self, tmp_path: Path) -> None:
+        # aws applies --exclude/--include on the single-object routes as well
+        # (its filter stage runs regardless of dir_op): the source is still
+        # resolved (HeadObject, like aws's file generator) but an excluded
+        # object transfers nothing - no GetObject, no local file, rc 0.
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([_head_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/pre/k.txt", client=client),
+            str(tmp_path / "k.txt"),
+            filter=drop,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["HeadObject"]
+        assert results == []
+        assert not (tmp_path / "k.txt").exists()
+
+    def test_single_upload_is_filtered_too(self, tmp_path: Path) -> None:
+        src = tmp_path / "k.txt"
+        src.write_bytes(b"x")
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([])
+        S3().cp(str(src), S3Storage("s3://b/k.txt", client=client), filter=drop)
+        assert calls == []
+
 
 class TestDownloadRoute:
     def test_single_download_heads_then_gets(self, tmp_path: Path) -> None:
@@ -249,9 +331,28 @@ class TestDownloadRoute:
         dest = tmp_path / "out.bin"
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
         assert _ops(calls) == ["HeadObject", "GetObject"]
-        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt"}
+        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt", "ChecksumMode": "ENABLED"}
         assert dest.read_bytes() == b"payload"
         assert os.stat(dest).st_mtime == _MTIME.timestamp()
+
+    def test_head_omits_checksum_mode_below_the_knob_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ChecksumMode=ENABLED injection is gated on the client resolving
+        # response_checksum_validation to "when_supported"; a floor botocore
+        # predates the knob entirely and the getattr guard reads that as None
+        # - patched here, since the current botocore always carries the
+        # attribute. The HEAD must go out without ChecksumMode (the
+        # era-appropriate wire shape, docs/overview.md section 2), not raise.
+        client, calls = make_recording_client([_head_response(), _get_response()])
+        monkeypatch.setattr(client.meta.config, "response_checksum_validation", None)
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.bin"),
+            transfer_config=_SYNC,
+        )
+        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt"}
 
     def test_missing_single_source_uses_the_rewritten_404_message(self, tmp_path: Path) -> None:
         client, _ = make_recording_client([_client_error("404", 404, "HeadObject")])
@@ -413,29 +514,29 @@ class TestGlacierGate:
 class TestCopyRoute:
     def test_single_copy_heads_the_source_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([_head_response()])
-        dst_client, dst_calls = make_recording_client([{}])
+        dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
-            S3Storage("s3://dst-b/cp/", client=dst_client),
+            S3Storage("s3://dest-b/cp/", client=dest_client),
             transfer_config=_SYNC,
         )
         assert _ops(src_calls) == ["HeadObject"]
-        assert _ops(dst_calls) == ["CopyObject"]
-        params = dst_calls[0].params
+        assert _ops(dest_calls) == ["CopyObject"]
+        params = dest_calls[0].params
         assert params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.txt"}
-        assert params["Bucket"] == "dst-b"
+        assert params["Bucket"] == "dest-b"
         assert params["Key"] == "cp/a.txt"
 
     def test_copy_options_flow_through(self, tmp_path: Path) -> None:
         src_client, _ = make_recording_client([_head_response()])
-        dst_client, dst_calls = make_recording_client([{}])
+        dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
-            S3Storage("s3://dst-b/cp/", client=dst_client),
+            S3Storage("s3://dest-b/cp/", client=dest_client),
             transfer_config=_SYNC,
             **TransferOptions(metadata={"k": "v"}),
         )
-        params = dst_calls[0].params
+        params = dest_calls[0].params
         assert params["Metadata"] == {"k": "v"}
         assert params["MetadataDirective"] == "REPLACE"
 
@@ -517,6 +618,29 @@ class TestStreamRoutes:
         assert calls == []
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
+    def test_stream_dryrun_never_opens_the_stream(self) -> None:
+        # The open routes already gate open() behind dryrun; the stream route must
+        # match, so a side-effecting custom IOStorage is left untouched on a dry
+        # run (the open is skipped, not merely its bytes left unread).
+        class _SpyIO(IOStorage):
+            def __init__(self, stream: Any) -> None:
+                super().__init__(stream)
+                self.opens: list[str] = []
+
+            def open(self, key: str, mode: Any, *, size: int | None = None) -> Any:
+                self.opens.append(key)
+                return super().open(key, mode, size=size)
+
+        up = _SpyIO(io.BytesIO(b"x"))
+        client, calls = make_recording_client([])
+        S3().cp(up, S3Storage("s3://bucket/k", client=client), dryrun=True)
+        assert calls == [] and up.opens == []
+
+        down = _SpyIO(io.BytesIO())
+        client, calls = make_recording_client([])
+        S3().cp(S3Storage("s3://bucket/k", client=client), down, dryrun=True)
+        assert calls == [] and down.opens == []
+
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
@@ -534,7 +658,7 @@ class TestStreamRoutes:
     def test_stream_download_with_no_overwrite_is_rejected(self) -> None:
         # A streaming download has no existing destination to guard, so
         # no_overwrite is meaningless and rejected (aws-cli rejects it too).
-        # An upload stream keeps no_overwrite (IfNoneMatch), so dst_stream gates it.
+        # An upload stream keeps no_overwrite (IfNoneMatch), so dest_stream gates it.
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().cp(
@@ -599,7 +723,7 @@ class TestCaseConflictGate:
             S3Storage("s3://b/cc/", client=client),
             str(out),
             recursive=True,
-            transfer_config=_SYNC,
+            transfer_config=_CASE_CONFLICT_CONFIG,
             on_result=results.append,
             **TransferOptions(case_conflict=mode),
         )
@@ -634,7 +758,7 @@ class TestCaseConflictGate:
                 S3Storage("s3://b/cc/", client=client),
                 str(out),
                 recursive=True,
-                transfer_config=_SYNC,
+                transfer_config=_CASE_CONFLICT_CONFIG,
                 **TransferOptions(case_conflict=CaseConflictMode.ERROR),
             )
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")

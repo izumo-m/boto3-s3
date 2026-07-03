@@ -87,6 +87,40 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Publishing $package $proj_version to $repository"
 
+      # The CLI wheel depends on the boto3-s3 PyPI package: publishing it
+      # before a satisfying library version is live yields an uninstallable
+      # release. Enforce the docs/release.md ordering before anything uploads.
+      - name: Verify the library dependency is live (CLI releases only)
+        if: steps.target.outputs.package == 'boto3-s3-cli'
+        env:
+          REPOSITORY: ${{ steps.target.outputs.repository }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --python 3.12 --with packaging python - "$REPOSITORY" <<'EOF'
+          import json
+          import sys
+          import tomllib
+          import urllib.request
+
+          from packaging.requirements import Requirement
+          from packaging.version import Version
+
+          with open("cli/pyproject.toml", "rb") as fh:
+              deps = tomllib.load(fh)["project"]["dependencies"]
+          req = next(r for r in map(Requirement, deps) if r.name == "boto3-s3")
+          host = "https://test.pypi.org" if sys.argv[1] == "testpypi" else "https://pypi.org"
+          with urllib.request.urlopen(f"{host}/pypi/boto3-s3/json") as resp:
+              releases = json.load(resp)["releases"]
+          live = [v for v, files in releases.items() if files and not all(f.get("yanked") for f in files)]
+          ok = sorted(req.specifier.filter(live), key=Version)
+          if not ok:
+              sys.exit(
+                  f"no live boto3-s3 on {host} satisfies '{req.specifier}' "
+                  f"(found: {sorted(live, key=Version)}); publish the library first (docs/release.md)"
+              )
+          print(f"boto3-s3 {ok[-1]} on {host} satisfies '{req.specifier}'")
+          EOF
+
       - name: Build
         run: uv build --package "${{ steps.target.outputs.package }}"
 

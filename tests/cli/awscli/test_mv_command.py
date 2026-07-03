@@ -16,14 +16,15 @@ Adaptation rules (on top of the cp port's - see its module docstring):
 - The aws-cli's exact ``aws: [ERROR]: ...`` stderr equality for the
   MRAP-not-found case becomes a message-token assertion (our error prefix
   is ``boto3-s3: [ERROR]:``; the message body is the aws-cli's verbatim).
-- ``ChecksumMode: 'ENABLED'`` on HeadObject expectations is dropped where it
-  is aws's bundled-botocore *default* injection; it stays where the test
-  passes ``--checksum-mode ENABLED`` itself (cp port rule).
+- ``ChecksumMode: 'ENABLED'`` is kept on the single-source HeadObject - we
+  setdefault it like aws's filegenerator when the client resolves
+  ``response_checksum_validation`` to ``when_supported`` (cp port rule).
 
 Not ported, with reasons:
 
-- ``TestMvWithCRTClient`` (3 tests): the CRT transfer engine is charter
-  exception 2 (docs/overview.md section 3); CRT work is tracked in task #34.
+- ``TestMvWithCRTClient`` (3 tests): the CRT data plane bypasses the botocore
+  client, so the recording client cannot drive it; CRT parity is enforced by
+  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
 - ``TestMvRecursiveCaseConflict.test_warn_with_case_conflicts_in_s3`` is a
   aws-cli ``pass`` (their threaded get/delete order is nondeterministic);
   ported here as a real test - the injected NonThreadedExecutor makes the
@@ -47,6 +48,12 @@ from tests.utils.recorder import ApiCall, make_recording_client
 MB = 1024**2
 _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
+# See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
+# conflict only while the first twin is still in flight, which needs a threaded
+# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
+# single worker (max_concurrent_requests = 1) here. One worker keeps mv's
+# per-item get-then-delete order deterministic.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
 _OUTPOST_ARN = (
@@ -59,10 +66,11 @@ def _run_cmd(
     parsed_responses: list[dict[str, Any] | Exception],
     argv: list[str],
     expected_rc: int = 0,
+    transfer_config: TransferConfig = _SYNC_CONFIG,
 ) -> tuple[CliResult, list[ApiCall]]:
     """The port's ``self.run_cmd``: in-process main() with a recording client."""
     client, calls = make_recording_client(parsed_responses)
-    ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC_CONFIG)
+    ctx = Context(client_factory=lambda _args: client, transfer_config=transfer_config)
     result = run_cli_in_process(argv, ctx=ctx)
     assert result.rc == expected_rc, (result.rc, result.stdout, result.stderr, calls)
     return result, calls
@@ -145,22 +153,13 @@ def upload_part_copy_response() -> dict[str, Any]:
     return {"CopyPartResult": {"ETag": '"etag"'}}
 
 
-def _case_insensitive_fs(path: Any) -> bool:
-    probe = path / "CaseProbe.tmp"
-    probe.write_bytes(b"")
-    try:
-        return (path / "caseprobe.tmp").exists()
-    finally:
-        probe.unlink()
-
-
 class TestMvCommand:
     def test_cant_mv_object_onto_itself(self) -> None:
         result, _ = _run_cmd([], ["mv", "s3://bucket/key", "s3://bucket/key"], expected_rc=252)
         assert "Cannot mv a file onto itself" in result.stderr
 
     def test_cant_mv_object_with_implied_name(self) -> None:
-        # The "key" key name is implied in the dst argument.
+        # The "key" key name is implied in the dest argument.
         result, _ = _run_cmd([], ["mv", "s3://bucket/key", "s3://bucket/"], expected_rc=252)
         assert "Cannot mv a file onto itself" in result.stderr
 
@@ -169,7 +168,9 @@ class TestMvCommand:
             [head_object_response()],
             ["mv", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--dryrun"],
         )
-        assert calls == [ApiCall("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})]
+        assert calls == [
+            ApiCall("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
+        ]
         assert "(dryrun) move: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
     def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:
@@ -223,7 +224,12 @@ class TestMvCommand:
         assert calls == [
             ApiCall(
                 "HeadObject",
-                {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             ApiCall(
                 "GetObject",
@@ -245,6 +251,7 @@ class TestMvCommand:
             "Bucket": "sourcebucket",
             "Key": "sourcekey",
             "RequestPayer": "requester",
+            "ChecksumMode": "ENABLED",
         }
         assert calls[1].params["CopySource"] == {"Bucket": "sourcebucket", "Key": "sourcekey"}
         assert calls[1].params["RequestPayer"] == "requester"
@@ -752,19 +759,19 @@ class TestMvRecursiveCaseConflict:
             case_conflict,
         ]
 
-    def test_warn_with_existing_file(self, tmp_path: Any) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.LOWER_KEY).write_text("mycontent")
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response(), {}],
-            self._cmd(tmp_path, "warn"),
+            self._cmd(case_insensitive_workdir, "warn"),
         )
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
     def test_warn_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
-        # A aws-cli `pass` (their threaded get/delete order is flaky); the
-        # NonThreadedExecutor makes ours deterministic: get, delete per item.
+        # A aws-cli `pass` (their threaded get/delete order is flaky); a single
+        # worker (_CASE_CONFLICT_CONFIG) makes ours deterministic - the conflict
+        # is detected (first twin still in flight) and the order is get, delete
+        # per item.
         result, calls = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -774,6 +781,7 @@ class TestMvRecursiveCaseConflict:
                 {},
             ],
             self._cmd(tmp_path, "warn"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Downloading bucket/{self.LOWER_KEY}" in result.stderr
         assert _operations(calls) == [
@@ -792,6 +800,7 @@ class TestMvRecursiveCaseConflict:
                 {},
             ],
             self._cmd(tmp_path, "skip"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Skipping bucket/{self.LOWER_KEY}" in result.stderr
         # The skipped conflict is neither downloaded nor deleted.

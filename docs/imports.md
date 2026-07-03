@@ -30,16 +30,27 @@ to overview.md's "performance equal to or better").
    pulls in). The `boto3` / `s3transfer` / botocore client stack is not imported
    until the moment a default client is actually created (the fallback in
    `S3Storage.get_client`).
-4. The CLI's **pre-dispatch** paths import no SDK module: `--help` / `--version`
-   (argparse short-circuits during the parse) and the parse-time usage errors
-   (invalid choice, unknown option, missing subcommand). Once a subcommand's
-   `run()` is entered the SDK may load - `botocore` on the error path (the
-   `exit_code_for` `ClientError`-cause check) and `boto3` when the command builds
-   its client (`build_client`). `mb` / `rb` build the client up front, before
-   their path checks, to match aws's client-before-path-validation ordering, so
-   even a path usage error there loads `boto3`; this is within the contract
-   (a subcommand is running) and is what the contract test enforces - it pins the
-   SDK-free guarantee to the pre-dispatch paths only (section 6).
+4. The CLI imports no SDK module - and no command module - **until the
+   subcommand is determined**. The dispatch is two-stage (the aws-clidriver
+   lazy-command-table shape): stage 1 parses the globals and the subcommand
+   name off the static table (`cli._COMMAND_TABLE` - names + one-line help,
+   pinned against the classes by a drift test), so the top-level `--help` /
+   `--version` and the stage-1 usage errors (missing subcommand, invalid
+   choice, an unknown option before the subcommand) complete SDK-free and
+   command-module-free. Stage 2 then imports just the matched command module
+   and builds its real parser; from that point the SDK may load - `botocore`
+   on the error path (the `exit_code_for` `ClientError`-cause check), `boto3`
+   when the command builds its client (`build_client`), and a command module's
+   own top-level imports may reach `botocore.exceptions`, so a
+   subcommand-level `--help` or usage error may load it (within the contract;
+   the `boto3` / `s3transfer` client stack must still stay out of those
+   paths). `mb` / `rb` build the client up front, before their path checks, to
+   match aws's client-before-path-validation ordering; this too is within the
+   contract (the subcommand is determined and running). The contract test pins
+   both halves (section 6).
+   Exception: `--cli-auto-prompt` derives its completion model from the full
+   parser (`build_parser()`, which imports every command module) - a cost only
+   the interactive prompt pays (it is charter-exempt anyway).
 
 ## 3. Library implementation
 
@@ -68,15 +79,21 @@ to overview.md's "performance equal to or better").
 
 ## 4. CLI implementation
 
-- **Place imports that reach the SDK inside `build_client` and each
-  `Command.run()`**, not at the module top level where `configure()` runs. Names
-  from the pure-Python `types` / `exceptions` / `globsieve` may stay at top level
-  (e.g., `OpOutcome` in `rm.py` - used by a module-level printer).
+- **The dispatch is a lazy command table** (`cli._COMMAND_TABLE`: subcommand ->
+  defining module, class, one-line help). Stage 1's parser is built from the
+  table alone; only the matched module is imported at stage 2, and the full
+  `build_parser()` (every command's real parser) remains solely as the
+  auto-prompt completion model's single source of truth. Because no command
+  module loads before the subcommand is determined, a command module **may
+  top-import SDK-reaching names** (up to `botocore.exceptions`); the old
+  "imports that reach the SDK go inside `run()`" rule is retired. The
+  `boto3` / `s3transfer` client stack still loads only in `build_client` /
+  on the error path, once a command actually needs it.
 - The `--version` line is assembled when the action fires. The boto3 / botocore
   versions are read from distribution metadata (`importlib.metadata.version`); the
   package itself is not imported.
 - The `--help` choices / help text are written as a **static mirror of aws-cli's
-  static tables** (the same approach as `globals.py`'s `_OUTPUT_CHOICES`,
+  static tables** (the same approach as `globalargs.py`'s `_OUTPUT_CHOICES`,
   which mirrors `cli.json`; the `aws s3` side likewise keeps all choices as static
   literals in aws-cli's `awscli/customizations/s3/subcommands.py`). They are
   not derived dynamically from botocore's service model - since aws-cli itself is
@@ -85,11 +102,12 @@ to overview.md's "performance equal to or better").
 
 ## 5. Discipline for the transfer subcommands (cp / mv / sync)
 
-- Keep `S3` a thin orchestrator, and **have each method import its own engine
-  module inside the method**. Isolate the transfer engine that uses s3transfer /
-  `TransferManager` in a dedicated module (e.g., `boto3_s3/transfer.py`), and do
-  not import it until cp / mv / sync actually run. Do not bring the s3transfer
-  dependency into the rm / ls paths (the deleter and the scan / scan_pages path).
+- Keep `S3` a thin orchestrator, and keep the transfer engine that uses
+  s3transfer / `TransferManager` in a dedicated module (`boto3_s3/transfer.py`)
+  that is **SDK-free at import**: the `s3transfer.manager` import is deferred
+  into the functions that build the manager, which run only when cp / mv / sync
+  actually submit work. Do not bring the s3transfer dependency into the rm / ls
+  paths (the deleter and the scan / scan_pages path).
 - The entry point's boto3 dependency is isolated in `S3.client()`: it imports
   boto3 only when called. Constructing an `S3` (with or without `session` /
   `endpoint_url` / `config`) is therefore SDK-free; boto3 loads when `client()`
@@ -97,8 +115,9 @@ to overview.md's "performance equal to or better").
   `"s3://..."` string into an `S3Storage`.
 - Likewise, `Storage`'s methods (`scan_pages()` / `open()` / `delete()`) defer
   their heavy dependencies until the method is called.
-- When you add a subcommand, add a "its `--help` is SDK-free" case to the contract
-  tests.
+- When you add a subcommand, register it in `cli._COMMAND_TABLE` and add its
+  `--help` case to the contract tests (client-stack-free; the drift test pins
+  the table's help line against the class).
 
 ## 6. Enforcement
 

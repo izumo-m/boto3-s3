@@ -23,9 +23,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from tests.utils.harness import BUCKET_TOKEN
+from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+__all__ = ["SCENARIOS", "RmScenario", "resolve_argv"]
 
 # Object tree with a prefix sibling: "data-sibling.txt" shares the string
 # prefix "data" and pins aws's trailing-slash normalization for recursive
@@ -56,24 +59,10 @@ _PAGED: Mapping[str, int] = {f"pg/k{i:02d}": 1 for i in range(12)}
 
 
 @dataclass(frozen=True)
-class RmScenario:
+class RmScenario(BaseScenario):
     """One ``rm`` invocation against a fixed bucket layout."""
 
-    name: str
-    argv: tuple[str, ...]
     seed: Mapping[str, int] = field(default_factory=dict)
-    # False => normalized stdout is not compared (rc still is - charter).
-    compare_stdout: bool = True
-    # True => live aws-vs-ours diff only: no golden written or checked, and no
-    # functional replay. For moto fidelity gaps (see ls_scenarios).
-    diff_only: bool = False
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: RmScenario, bucket: str) -> list[str]:
-    """Materialize the argv template against a concrete bucket name."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 SCENARIOS: tuple[RmScenario, ...] = (

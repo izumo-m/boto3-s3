@@ -20,6 +20,7 @@ import pytest
 from boto3_s3 import ConfigurationError
 from boto3_s3 import crtsupport as crtsupport
 from boto3_s3_cli import runtimeconfig
+from boto3_s3_cli.cli import exit_code_for
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import run_cli_in_process
@@ -108,6 +109,11 @@ class TestExplicitCrtDegradation:
         with pytest.raises(ConfigurationError) as exc_info:
             runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3")
         assert "boto3-s3-cli[crt]" in str(exc_info.value)
+        # The PLAIN ConfigurationError, not the InvalidConfigError refinement:
+        # this lane is the documented rc 253 (crt.md section 4), and the
+        # subclass would silently remap it to 255.
+        assert type(exc_info.value) is ConfigurationError
+        assert exit_code_for(exc_info.value) == 253
 
     def test_s3s3_with_missing_awscrt_is_classic_not_an_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -128,6 +134,8 @@ class TestExplicitCrtDegradation:
         with pytest.raises(ConfigurationError) as exc_info:
             runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3")
         assert "s3transfer" in str(exc_info.value)
+        assert type(exc_info.value) is ConfigurationError  # rc 253, not the 255 refinement
+        assert exit_code_for(exc_info.value) == 253
 
     def test_auto_with_old_s3transfer_degrades_to_classic(
         self, monkeypatch: pytest.MonkeyPatch

@@ -42,9 +42,9 @@ from __future__ import annotations
 
 import abc
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import Flag, auto
-from typing import BinaryIO, ClassVar, Literal
+from typing import Any, BinaryIO, ClassVar, Literal
 
 from boto3_s3.concurrency import prefetch
 from boto3_s3.types import FileInfo, ScanOptions
@@ -130,13 +130,19 @@ class Storage(abc.ABC):
     ``LocalStorage`` and ``S3Storage``.
     """
 
-    #: Which storage family this is - the object-layer discriminator
-    #: ``naming.plan_transfer`` reads instead of re-parsing a scheme string
-    #: (importing the concrete classes here would be circular). ``"s3"`` and
-    #: ``"local"`` are the built-in transferable pair; any other value is a
-    #: non-built-in backend (a custom one, or a stdio stream). Each concrete
+    #: Which storage family this is - a display/classification label (result
+    #: rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
+    #: other value is a non-built-in backend (a custom one, or a stdio stream).
+    #: Transfer *routing* does not read it: the planner routes by concrete type
+    #: (the structural match in ``transferplan._paths_type``). Each concrete
     #: Storage sets its own token.
     scheme: ClassVar[str]
+
+    #: The separator of this backend's path space, as it appears in formatted
+    #: roots (:meth:`format`) and item keys. ``"/"`` for S3, streams, and custom
+    #: backends (``FileInfo.key`` / ``compare_key`` are ``/``-separated by
+    #: contract); ``LocalStorage`` overrides with the host ``os.sep``.
+    sep: ClassVar[str] = "/"
 
     #: Which transfer operations this Storage *kind* implements
     #: (:class:`StorageCapability`): the structural, class-level contract a
@@ -218,13 +224,18 @@ class Storage(abc.ABC):
         """
 
     @abc.abstractmethod
-    def delete(self, info: FileInfo) -> None:
+    def delete(self, info: FileInfo) -> Mapping[str, Any] | None:
         """Delete the entry ``info`` identifies (``rm`` / ``mv`` source / ``sync --delete``).
 
         ``info`` is a listing entry (from :meth:`scan` / :meth:`get_fileinfo`) or
         one built by hand; the backend locates the object by ``info.key`` in its
         own address space - a local absolute path, an S3 full key, or a custom
         backend's own key.
+
+        May return the backend's delete response - surfaced under
+        ``OpResult.extra_info["delete"]`` when the operation runs with
+        ``capture_response=True`` - or ``None`` when there is none. A local unlink
+        returns ``None``; ``S3Storage`` returns its ``DeleteObject`` response.
         """
 
     @abc.abstractmethod
@@ -267,7 +278,7 @@ class Storage(abc.ABC):
         The inverse of :meth:`S3.resolve`: an ``S3Storage`` yields
         ``s3://bucket/key`` (a keyless location stays slashless, ``s3://bucket``),
         a ``LocalStorage`` its path as given, so ``S3.resolve(s.as_text())``
-        round-trips a locatable Storage. This is the form ``naming.plan_transfer``
+        round-trips a locatable Storage. This is the form ``transferplan.plan_transfer``
         consumes and ``aws s3`` displays. A stream endpoint has no location, so
         its token (``"-"``) is display-only - not round-trippable.
         """
@@ -275,6 +286,27 @@ class Storage(abc.ABC):
     def __str__(self) -> str:
         """Delegate to :meth:`as_text` so ``str(storage)`` is its path-shape token."""
         return self.as_text()
+
+    def format(self, *, dir_op: bool) -> tuple[str, bool]:
+        """Format this side of a transfer; return ``(root, use_src_name)``.
+
+        The per-side half of aws-cli's ``FileFormat.format``, resolved
+        polymorphically: ``S3Storage`` overrides with ``FileFormat.s3_format``,
+        ``LocalStorage`` with ``FileFormat.local_format``, each reading its own
+        held state. ``root`` is what item keys are resolved against
+        (``transferplan.dest_for`` prefixes it to a ``compare_key`` on the side
+        that adopts the source's name); ``use_src_name`` - read from the
+        *destination* side - is whether it does.
+
+        This default is the ``open``-route rule for a custom backend (aws-cli
+        has no counterpart): the root is ``""`` because such a backend
+        encapsulates its own location and addresses entries by their
+        scan-root-relative ``compare_key`` - its ``open`` / ``delete`` receive
+        that relative key unprefixed. ``use_src_name`` mirrors the S3 rule: a
+        ``dir_op`` or an explicit trailing ``/`` on :meth:`as_text` means the
+        destination adopts the source's name.
+        """
+        return "", (dir_op or self.as_text().endswith("/"))
 
     def validate(self) -> None:  # noqa: B027 - deliberate concrete no-op; S3Storage overrides
         """Run any deferred strict validation on this location (no-op by default).

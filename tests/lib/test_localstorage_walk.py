@@ -288,6 +288,18 @@ class TestGetFileinfo:
         assert info.key == str(tmp_path / "sub" / "f.txt").replace(os.sep, "/")
         assert info.compare_key == "f.txt"
 
+    def test_parent_reference_key_resolves_outside_the_location(self, tmp_path: Path) -> None:
+        # No trust boundary in the API (the caller owns both the location and the
+        # key), so a "../" key navigates the parent as an app expects - it is not
+        # confined. This is by design; see LocalStorage.open's docstring.
+        root = tmp_path / "root"
+        root.mkdir()
+        (tmp_path / "sibling.txt").write_bytes(b"x")
+        info = LocalStorage(str(root)).get_fileinfo("../sibling.txt")
+        assert info is not None
+        assert info.size == 1
+        assert info.compare_key == "sibling.txt"
+
 
 class TestLocalStorageScan:
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
@@ -325,6 +337,34 @@ class TestLocalStorageIO:
     def test_open_missing_for_read_raises_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(NotFoundError):
             LocalStorage(tmp_path).open("missing.bin", "rb")
+
+    def test_open_empty_key_is_the_location_itself(self, tmp_path: Path) -> None:
+        # key="" is the location itself (the get_fileinfo convention):
+        # os.path.join(x, "") would append a trailing separator, making the
+        # read fail ENOTDIR and the write makedirs a directory at the target
+        # file's own path.
+        target = tmp_path / "single.bin"
+        storage = LocalStorage(str(target))
+        with storage.open("", "wb") as handle:
+            handle.write(b"payload")
+        assert target.read_bytes() == b"payload"
+        assert not target.is_dir()
+        with storage.open("", "rb") as handle:
+            assert handle.read() == b"payload"
+
+    def test_open_relative_path_is_chdir_stable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # open anchors on the construction-time absolutized path like scan /
+        # get_fileinfo: a later chdir must not move where keys resolve.
+        (tmp_path / "root").mkdir()
+        (tmp_path / "root" / "f.bin").write_bytes(b"payload")
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path)
+        storage = LocalStorage("root")
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        with storage.open("f.bin", "rb") as handle:
+            assert handle.read() == b"payload"
 
     def test_delete(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")

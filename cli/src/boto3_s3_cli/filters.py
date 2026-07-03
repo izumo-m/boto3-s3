@@ -5,11 +5,12 @@ aws-cli evaluates the two options as ONE ordered rule list (its
 last-match-wins semantics, so the interleaved command-line order is
 significant: ``--exclude '*' --include '*.txt'`` keeps only ``.txt`` while
 the reverse keeps nothing. :class:`AppendFilterAction` preserves that order;
-:func:`compile_for_root` resolves the patterns against the operation's root
-the way aws-cli's ``filters.py`` joins them, compiles a
-:mod:`boto3_s3.globsieve` matcher, and wraps it as the ``FileFilter``
-``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume (matching ``info.compare_key``);
-``rm`` reaches it through the :func:`build_filter` convenience.
+:func:`compile_filter` compiles a :mod:`boto3_s3.globsieve` matcher and wraps
+it as the ``FileFilter`` ``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume. The
+matcher needs no root: a relative pattern matches ``info.compare_key`` and a
+root-anchored (absolute) pattern is anchored against ``info.key`` (the full
+path) at match time, which is what lets the one filter prune ``sync``'s two
+sides per-side the way aws-cli's per-root joining does.
 """
 
 from __future__ import annotations
@@ -32,15 +33,17 @@ class _CaseFoldMatcher:
     the path and the pattern; on Windows that lower-cases, so the filter is
     case-insensitive there (overview.md section 3: case sensitivity is matched to
     aws-cli per OS). The library matchers stay byte-exact (the permissive
-    building block); this CLI-layer wrapper folds the key at match time while
-    :func:`compile_for_root` lower-cases the patterns at compile time.
+    building block); this CLI-layer wrapper folds both keys at match time while
+    :func:`compile_filter` lower-cases the patterns at compile time.
     """
 
     def __init__(self, matcher: Matcher) -> None:
         self._matcher = matcher
 
-    def included(self, key: str) -> bool:
-        return self._matcher.included(key.lower())
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
+        return self._matcher.included(
+            compare_key.lower(), full_key.lower() if full_key is not None else None
+        )
 
 
 class AppendFilterAction(argparse.Action):
@@ -63,35 +66,43 @@ class AppendFilterAction(argparse.Action):
         setattr(namespace, self.dest, items)
 
 
+def add_filter_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the ``--exclude`` / ``--include`` pair (rm / cp / mv / sync).
+
+    One shared ordered ``filters`` dest: the interleaved order carries
+    aws-cli's last-match-wins semantics (this module's docstring).
+    """
+    parser.add_argument("--exclude", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+    parser.add_argument("--include", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+
+
 def _as_file_filter(matcher: Matcher) -> FileFilter:
     """Wrap a compiled matcher as the ``FileFilter`` the operations consume.
 
     ``Storage.scan`` stamps ``info.compare_key`` (the root-relative key) on each
-    entry, so the wrapper matches that key. It is always set in a filter context;
-    ``None`` would mean the filter was misapplied, so fail loudly rather than
-    silently matching the full key.
+    entry; the wrapper passes it plus ``info.key`` (the full path, the anchor for
+    an absolute pattern). ``compare_key`` is always set in a filter context;
+    ``None`` would mean the filter was misapplied, so fail loudly.
     """
 
     def keep(info: FileInfo) -> bool:
         key = info.compare_key
         if key is None:
             raise ValueError("filter consulted without a stamped compare_key")
-        return matcher.included(key)
+        return matcher.included(key, info.key)
 
     return keep
 
 
-def compile_for_root(patterns: list[GlobPattern] | None, *, root: str) -> FileFilter | None:
-    """Compile ordered CLI patterns into a ``FileFilter`` rooted at ``root``.
+def compile_filter(patterns: list[GlobPattern] | None) -> FileFilter | None:
+    """Compile ordered CLI ``--exclude`` / ``--include`` patterns into a ``FileFilter``.
 
-    aws-cli joins each pattern onto the source root (``filters.create_filter``)
-    and fnmatches the joined form against the full source path; the library
-    matchers are fed root-relative keys instead, so each pattern is translated
-    to the equivalent relative form - a pattern anchored outside the root can
-    never match and is dropped, exactly like its aws-cli joined form never
-    would. ``rm`` passes :func:`boto3_s3.rm_filter_root`; ``cp`` passes the
-    plan's ``filter_root`` (local roots included - ``translate`` normalizes
-    separators).
+    No root is needed: :mod:`boto3_s3.globsieve` matches a relative pattern
+    against ``info.compare_key`` and a root-anchored (absolute) one against
+    ``info.key`` (joined with the entry's drive / UNC anchor at match time the
+    way aws-cli joins each pattern onto the per-side root). The same filter thus
+    prunes both ``sync`` sides per-side, and ``rm`` / ``cp`` / ``mv`` (single
+    root) need no special casing.
     """
     if not patterns:
         return None
@@ -100,31 +111,7 @@ def compile_for_root(patterns: list[GlobPattern] | None, *, root: str) -> FileFi
     # keys at match time (via _CaseFoldMatcher) to reproduce that; on POSIX
     # os.name != "nt", so matching stays byte-exact.
     fold = os.name == "nt"
-    translated: list[GlobPattern] = []
-    for pattern in patterns:
-        relative = globsieve.translate_pattern_for_root(pattern.pattern, root)
-        if relative is not None:
-            translated.append(GlobPattern(pattern.kind, relative.lower() if fold else relative))
-    matcher = globsieve.compile(translated)
+    if fold:
+        patterns = [GlobPattern(p.kind, p.pattern.lower()) for p in patterns]
+    matcher = globsieve.compile(patterns)
     return _as_file_filter(_CaseFoldMatcher(matcher) if fold else matcher)
-
-
-def build_filter(
-    patterns: list[GlobPattern] | None,
-    *,
-    key: str,
-    recursive: bool,
-) -> FileFilter | None:
-    """Compile ordered CLI patterns into the ``FileFilter`` ``S3.rm`` consumes.
-
-    The bucket segment cancels out of the relativization, so the root here is
-    just :func:`rm_filter_root` of the key (see :func:`compile_for_root`).
-    """
-    if not patterns:
-        return None
-    # Deferred: rm_filter_root lives in boto3_s3.s3, whose import chain
-    # reaches botocore; the parse path needs only the pure globsieve imports
-    # above (import contract, docs/imports.md).
-    from boto3_s3 import rm_filter_root
-
-    return compile_for_root(patterns, root=rm_filter_root(key, recursive=recursive))

@@ -8,15 +8,17 @@ the file-I/O options) and the engine switch itself
 option for it). :class:`RuntimeConfig` is the aws-cli parser verbatim -
 human-readable sizes (``8MB``), rates (``100MB/s`` / ``800Kb/s``), booleans,
 the ``default`` -> ``classic`` alias, and byte-exact error wording - raising
-the library's base ``Boto3S3Error`` where aws-cli's ``InvalidConfigError``
-escapes to its general handler (both exit 255, after every
+the library's ``InvalidConfigError`` (aws-cli's class of the same name)
+where aws-cli's escapes to its general handler (both exit 255, after every
 path/usage validation).
 
 :func:`load_scoped_s3_config` reads the section the way aws-cli's
 ``_get_runtime_config`` does - the profile's scoped config, so nested
 ``s3 =`` INI syntax, ``AWS_CONFIG_FILE`` and ``--profile`` all behave like
-aws. The engine decision tree over the parsed config lives in
-:mod:`boto3_s3_cli.commands.transferargs` (docs/cli.md).
+aws. The engine decision tree over the parsed config is
+:func:`resolve_transfer_client` below (a port of aws-cli
+``TransferManagerFactory._compute_transfer_client_type``; docs/crt.md
+section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ import argparse
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from boto3_s3 import Boto3S3Error, ConfigurationError
+from boto3_s3 import ConfigurationError, InvalidConfigError
+from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
 
 if TYPE_CHECKING:
     from boto3_s3 import TransferConfig
@@ -83,36 +86,26 @@ DEFAULTS: dict[str, Any] = {
     "direct_io": None,
 }
 
-_SIZE_SUFFIX = {
-    "kb": 1024,
-    "mb": 1024**2,
-    "gb": 1024**3,
-    "tb": 1024**4,
-    "kib": 1024,
-    "mib": 1024**2,
-    "gib": 1024**3,
-    "tib": 1024**4,
-}
-
 
 def human_readable_to_int(value: str) -> int:
     """Convert a human readable size (``"10MB"``) to bytes (aws-cli port).
 
+    A verbatim port under aws-cli's own function name (overview.md section 3,
+    symbol-name traceability), aws's boundary behavior included; the suffix
+    table and split rule are shared with the library
+    (``boto3_s3.awsconfig.SIZE_SUFFIX`` / ``split_size_suffix``), whose
+    ``_parse_size`` is deliberately hardened where this stays aws-faithful.
     Without a recognized suffix the value must be an integer string; the
     failure wording is aws-cli's (it reaches the user via rc 255).
     """
-    value = value.lower()
-    if value[-2:] == "ib":
-        suffix = value[-3:].lower()
-    else:
-        suffix = value[-2:].lower()
-    has_size_identifier = len(value) >= 2 and suffix in _SIZE_SUFFIX
+    value, suffix = split_size_suffix(value)
+    has_size_identifier = len(value) >= 2 and suffix in SIZE_SUFFIX
     if not has_size_identifier:
         try:
             return int(value)
         except ValueError:
-            raise Boto3S3Error(f"Invalid size value: {value}") from None
-    return int(value[: -len(suffix)]) * _SIZE_SUFFIX[suffix]
+            raise InvalidConfigError(f"Invalid size value: {value}") from None
+    return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
 
 
 class RuntimeConfig:
@@ -180,7 +173,7 @@ class RuntimeConfig:
                 elif self._is_integer_str(value):
                     runtime_config[attr] = int(value)
                 else:
-                    raise Boto3S3Error(
+                    raise InvalidConfigError(
                         f"Invalid rate: {value}. The value must be expressed "
                         "as an integer in terms of bytes per second "
                         "(e.g. 10485760) or a rate in terms of bytes "
@@ -248,10 +241,10 @@ class RuntimeConfig:
                     self._error_invalid_choice(attr, value)
 
     def _error_positive_value(self, name: str, value: Any) -> None:
-        raise Boto3S3Error(f"Value for {name} must be a positive integer: {value}")
+        raise InvalidConfigError(f"Value for {name} must be a positive integer: {value}")
 
     def _error_invalid_choice(self, name: str, value: Any) -> None:
-        raise Boto3S3Error(
+        raise InvalidConfigError(
             f'Invalid value: "{value}" for configuration option: "{name}". '
             f"Supported values are: {', '.join(self.SUPPORTED_CHOICES[name])}"
         )
@@ -261,13 +254,21 @@ def load_scoped_s3_config(args: argparse.Namespace) -> dict[str, Any]:
     """Read the profile's ``[s3]`` section (aws-cli's ``_get_runtime_config`` read).
 
     The scoped config honors ``--profile``, ``AWS_CONFIG_FILE`` and botocore's
-    nested ``s3 =`` INI syntax. Deferred boto3 import: only commands that
-    reach the transfer pipeline pay it (they are about to build a client
-    through the same session machinery anyway).
+    nested ``s3 =`` INI syntax. The profile is resolved through aws-cli's
+    precedence (``--profile`` > ``AWS_PROFILE`` > ``AWS_DEFAULT_PROFILE`` -
+    :func:`boto3_s3_cli.clientfactory.resolve_profile`), the same as the client this
+    transfer uses (:func:`~boto3_s3_cli.clientfactory.build_client`): a bare
+    ``boto3.Session(profile_name=None)`` would inherit stock botocore's reversed
+    env order, so the ``[s3]`` section could be read from a *different* profile
+    than the client when both env vars are set (botocore #1725). Deferred boto3
+    import: only commands that reach the transfer pipeline pay it (they are about
+    to build a client through the same session machinery anyway).
     """
     import boto3
 
-    session = boto3.Session(profile_name=args.profile)
+    from boto3_s3_cli.clientfactory import resolve_profile
+
+    session = boto3.Session(profile_name=resolve_profile(args))
     scoped: Any = session._session.get_scoped_config()  # pyright: ignore[reportPrivateUsage] # aws-cli reads the same botocore session surface
     return dict(scoped.get("s3", {}))
 

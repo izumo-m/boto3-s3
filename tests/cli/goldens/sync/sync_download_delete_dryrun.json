@@ -2,7 +2,7 @@
   "argv": [
     "sync",
     "s3://<BUCKET>/d",
-    "dst",
+    "dest",
     "--delete",
     "--dryrun"
   ],
@@ -19,7 +19,7 @@
   "scenario": "sync_download_delete_dryrun",
   "src_tree": null,
   "stdout_lines": [
-    "(dryrun) delete: dst/stale.txt",
-    "(dryrun) download: s3://<BUCKET>/d/a.txt to dst/a.txt"
+    "(dryrun) delete: dest/stale.txt",
+    "(dryrun) download: s3://<BUCKET>/d/a.txt to dest/a.txt"
   ]
 }

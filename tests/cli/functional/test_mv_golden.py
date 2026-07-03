@@ -62,7 +62,7 @@ def test_mv_matches_golden(
         side="ours",
         compare_stdout=scenario.compare_stdout,
         remaining_keys=remaining_keys(moto_s3, FUNCTIONAL_BUCKET),
-        local_tree=capture_local_tree(str(tmp_path / "dst")) if scenario.capture_tree else None,
+        local_tree=capture_local_tree(str(tmp_path / "dest")) if scenario.capture_tree else None,
         head_fields=head_fields,
         src_tree=capture_local_tree(str(tmp_path / "src")),
     )

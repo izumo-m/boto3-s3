@@ -1,4 +1,4 @@
-"""Unit tests for boto3_s3_cli.globals (global options -> boto3 client)."""
+"""Unit tests for boto3_s3_cli.clientfactory (global options -> boto3 client)."""
 
 from __future__ import annotations
 
@@ -6,26 +6,61 @@ import argparse
 
 import pytest
 
-from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
-from boto3_s3_cli import globals as common
+from boto3_s3 import Boto3S3Error, InvalidConfigError, InvalidValueError, ValidationError
+from boto3_s3_cli import clientfactory, globalargs
+from boto3_s3_cli.cli import exit_code_for
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    common.add_common_arguments(parser)
+    globalargs.add_common_arguments(parser)
     return parser.parse_args(argv)
 
 
 class TestBuildClient:
     def test_region_and_endpoint_applied(self) -> None:
         args = _parse(["--region", "us-west-2", "--endpoint-url", "http://localhost:9000"])
-        client = common.build_client(args)
+        client = clientfactory.build_client(args)
         assert client.meta.region_name == "us-west-2"
         assert client.meta.endpoint_url == "http://localhost:9000"
 
     def test_defaults_build_an_s3_client(self) -> None:
-        client = common.build_client(_parse([]))
+        client = clientfactory.build_client(_parse([]))
         assert client.meta.service_model.service_name == "s3"
+
+    def test_retry_defaults_match_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws v2's bundled botocore hard-codes retry_mode='standard' /
+        # max_attempts=3 as its defaults (stock botocore: legacy / 5), so
+        # every request retries like aws s3's.
+        monkeypatch.delenv("AWS_RETRY_MODE", raising=False)
+        monkeypatch.delenv("AWS_MAX_ATTEMPTS", raising=False)
+        client = clientfactory.build_client(_parse([]))
+        assert client.meta.config.retries == {"mode": "standard", "total_max_attempts": 3}
+
+    def test_retry_env_overrides_beat_the_aws_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The aws default only fills in; the user's env/config still wins.
+        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
+        client = clientfactory.build_client(_parse([]))
+        assert client.meta.config.retries == {"mode": "legacy", "total_max_attempts": 7}
+
+    def test_empty_retry_env_is_present_and_fatal_like_aws(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Present-wins, like the profile/region chains: aws treats an empty
+        # AWS_MAX_ATTEMPTS / AWS_RETRY_MODE as a fatal value (rc 255), never
+        # as unset. int("") -> ValueError (main's backstop maps it to 255);
+        # an empty mode fails botocore's retry-config validation at client
+        # creation -> InvalidConfigError (255).
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "")
+        with pytest.raises(ValueError, match="invalid literal"):
+            clientfactory.build_client(_parse([]))
+        monkeypatch.delenv("AWS_MAX_ATTEMPTS")
+        monkeypatch.setenv("AWS_RETRY_MODE", "")
+        with pytest.raises(InvalidConfigError):
+            clientfactory.build_client(_parse([]))
 
     def test_aws_region_env_honored_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws v2 resolves AWS_REGION ahead of AWS_DEFAULT_REGION; stock
@@ -33,12 +68,12 @@ class TestBuildClient:
         # to us-east-1), so this passes only through build_client's explicit
         # injection.
         monkeypatch.setenv("AWS_REGION", "eu-west-3")
-        client = common.build_client(_parse([]))
+        client = clientfactory.build_client(_parse([]))
         assert client.meta.region_name == "eu-west-3"
 
     def test_explicit_region_beats_aws_region_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_REGION", "eu-west-3")
-        client = common.build_client(_parse(["--region", "us-west-2"]))
+        client = clientfactory.build_client(_parse(["--region", "us-west-2"]))
         assert client.meta.region_name == "us-west-2"
 
     def test_aws_region_beats_aws_default_region(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,7 +81,7 @@ class TestBuildClient:
         # stock botocore never adopted AWS_REGION, so _resolve_region restores it.
         monkeypatch.setenv("AWS_REGION", "eu-central-1")
         monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-1")
-        client = common.build_client(_parse([]))
+        client = clientfactory.build_client(_parse([]))
         assert client.meta.region_name == "eu-central-1"
 
     def test_empty_aws_region_is_present_wins_like_aws(
@@ -58,7 +93,7 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_REGION", "")
         monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-1")
         with pytest.raises(ValueError, match="Invalid endpoint"):
-            common.build_client(_parse([]))
+            clientfactory.build_client(_parse([]))
 
     def test_imds_region_is_the_final_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws-cli's chain ends in IMDSRegionProvider; with nothing else set the
@@ -77,21 +112,21 @@ class TestBuildClient:
                 return "ap-southeast-2"
 
         monkeypatch.setattr(botocore.utils, "IMDSRegionProvider", _FakeIMDS)
-        client = common.build_client(_parse([]))
+        client = clientfactory.build_client(_parse([]))
         assert client.meta.region_name == "ap-southeast-2"
 
     def test_us_east_1_resolves_regional_endpoint(self) -> None:
         # aws v2 resolves us-east-1 to the regional endpoint, not the legacy
         # global one (aws-cli functional-test expectations); build_client pins
         # the same resolution.
-        client = common.build_client(_parse(["--region", "us-east-1"]))
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
         assert client.meta.endpoint_url == "https://s3.us-east-1.amazonaws.com"
 
     def test_presigned_urls_are_sigv4_even_in_us_east_1(self) -> None:
         # Stock botocore downgrades presigned URLs to SigV2 where the region
         # still accepts it; aws v2's botocore has no SigV2 at all. The pinned
         # s3v4 keeps presign output aws-shaped.
-        client = common.build_client(_parse(["--region", "us-east-1"]))
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
         url = client.generate_presigned_url(
             "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
         )
@@ -106,7 +141,7 @@ class TestBuildClient:
         # table (a no-op re-assert when awscrt is absent).
         from botocore import auth
 
-        client = common.build_client(_parse(["--region", "us-east-1"]))
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
         assert auth.AUTH_TYPE_MAPS["s3v4"] is auth.S3SigV4Auth
         assert auth.AUTH_TYPE_MAPS["s3v4-query"] is auth.S3SigV4QueryAuth
         url = client.generate_presigned_url(
@@ -117,7 +152,7 @@ class TestBuildClient:
     def test_no_sign_request_presigns_to_a_bare_url(self) -> None:
         # --no-sign-request must still override to UNSIGNED: aws emits the
         # plain object URL with no query at all.
-        client = common.build_client(_parse(["--no-sign-request", "--region", "us-east-1"]))
+        client = clientfactory.build_client(_parse(["--no-sign-request", "--region", "us-east-1"]))
         url = client.generate_presigned_url(
             "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
         )
@@ -127,13 +162,15 @@ class TestBuildClient:
         # aws rejects --endpoint-url without a scheme at parse time (rc 252);
         # without this, botocore raises a bare ValueError at client creation.
         with pytest.raises(ValidationError) as excinfo:
-            common.build_client(_parse(["--region", "us-east-1", "--endpoint-url", "example.com"]))
+            clientfactory.build_client(
+                _parse(["--region", "us-east-1", "--endpoint-url", "example.com"])
+            )
         assert 'Bad value for --endpoint-url "example.com": scheme is missing' in str(excinfo.value)
 
     def test_zero_timeout_means_no_timeout(self) -> None:
         # aws maps a 0 timeout to None ("no timeout"); botocore rejects a
         # literal 0 with ValueError, which would otherwise crash client creation.
-        client = common.build_client(
+        client = clientfactory.build_client(
             _parse(
                 ["--region", "us-east-1", "--cli-read-timeout", "0", "--cli-connect-timeout", "0"]
             )
@@ -141,13 +178,36 @@ class TestBuildClient:
         assert client.meta.config.read_timeout is None
         assert client.meta.config.connect_timeout is None
 
+    def test_integer_timeout_is_applied(self) -> None:
+        client = clientfactory.build_client(
+            _parse(
+                ["--region", "us-east-1", "--cli-read-timeout", "5", "--cli-connect-timeout", "7"]
+            )
+        )
+        assert client.meta.config.read_timeout == 5
+        assert client.meta.config.connect_timeout == 7
+
+    @pytest.mark.parametrize("flag", ["--cli-read-timeout", "--cli-connect-timeout"])
+    def test_noninteger_timeout_maps_to_255_not_a_parse_error(self, flag: str) -> None:
+        # aws coerces the timeouts in a post-parse handler (int()), so a non-integer
+        # value raises there and exits 255 - not the parse-time 252 an argparse
+        # type=int would give. The arg must still parse (no type=int rejecting it up
+        # front), and build_client must surface InvalidValueError, whose rc is the
+        # general 255 - not ValidationError's 252 or ConfigurationError's 253.
+        args = _parse(["--region", "us-east-1", flag, "abc"])
+        with pytest.raises(InvalidValueError) as excinfo:
+            clientfactory.build_client(args)
+        assert exit_code_for(excinfo.value) == 255
+
     def test_unknown_profile_maps_to_a_library_error(self) -> None:
         # A bad --profile raises raw botocore ProfileNotFound; build_client must
-        # translate it (here -> base Boto3S3Error -> rc 255) so it does not
-        # escape as an uncaught traceback.
-        with pytest.raises(Boto3S3Error) as excinfo:
-            common.build_client(_parse(["--profile", "boto3_s3_definitely_nonexistent_profile"]))
-        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+        # translate it (-> InvalidConfigError, rc 255: aws's general handler, not
+        # the 253 pair) so it does not escape as an uncaught traceback.
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_client(
+                _parse(["--profile", "boto3_s3_definitely_nonexistent_profile"])
+            )
+        assert exit_code_for(excinfo.value) == 255
         assert "boto3_s3_definitely_nonexistent_profile" in str(excinfo.value)
 
     def test_aws_profile_env_beats_aws_default_profile(
@@ -161,7 +221,7 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_PROFILE", "boto3_s3_from_aws_profile")
         monkeypatch.setenv("AWS_DEFAULT_PROFILE", "boto3_s3_from_default_profile")
         with pytest.raises(Boto3S3Error) as excinfo:
-            common.build_client(_parse([]))
+            clientfactory.build_client(_parse([]))
         assert "boto3_s3_from_aws_profile" in str(excinfo.value)
         assert "boto3_s3_from_default_profile" not in str(excinfo.value)
 
@@ -173,7 +233,7 @@ class TestBuildClient:
         monkeypatch.delenv("AWS_PROFILE", raising=False)
         monkeypatch.setenv("AWS_DEFAULT_PROFILE", "boto3_s3_from_default_profile")
         with pytest.raises(Boto3S3Error) as excinfo:
-            common.build_client(_parse([]))
+            clientfactory.build_client(_parse([]))
         assert "boto3_s3_from_default_profile" in str(excinfo.value)
 
     def test_profile_flag_beats_both_profile_envs(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,17 +241,16 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_PROFILE", "boto3_s3_from_aws_profile")
         monkeypatch.setenv("AWS_DEFAULT_PROFILE", "boto3_s3_from_default_profile")
         with pytest.raises(Boto3S3Error) as excinfo:
-            common.build_client(_parse(["--profile", "boto3_s3_from_flag"]))
+            clientfactory.build_client(_parse(["--profile", "boto3_s3_from_flag"]))
         assert "boto3_s3_from_flag" in str(excinfo.value)
 
     def test_partial_credentials_map_to_255_not_253(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws has no handler for PartialCredentialsError -> GeneralExceptionHandler
-        # (255), unlike NoCredentials/NoRegion (253). build_client must NOT map it
-        # to ConfigurationError (which would be rc 253).
+        # (255), unlike NoCredentials/NoRegion (253). build_client maps it to
+        # InvalidConfigError, whose rc is the general 255, not 253.
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
         monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-        with pytest.raises(Boto3S3Error) as excinfo:
-            common.build_client(_parse(["--region", "us-east-1"]))
-        # base Boto3S3Error (-> 255), explicitly NOT ConfigurationError (-> 253)
-        assert not isinstance(excinfo.value, (ValidationError, ConfigurationError))
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        assert exit_code_for(excinfo.value) == 255

@@ -33,11 +33,11 @@ Resolution rules:
   caller's default (tolerant);
 - a **present** value that does not convert (``get_size("abc")``), or a key that
   points at a whole subsection instead of a value, raises
-  :class:`~boto3_s3.exceptions.ConfigurationError` (a config typo is surfaced,
+  :class:`~boto3_s3.exceptions.InvalidConfigError` (a config typo is surfaced,
   not silently defaulted);
 - the **active profile** is resolved through botocore's ``get_scoped_config``: a
-  ``--profile`` / ``AWS_PROFILE`` that is set but missing surfaces as a
-  ``ConfigurationError`` (botocore's ``ProfileNotFound``, converted at the
+  ``--profile`` / ``AWS_PROFILE`` that is set but missing surfaces as an
+  ``InvalidConfigError`` (botocore's ``ProfileNotFound``, converted at the
   boundary), matching ``aws``.
 
 Like :mod:`~boto3_s3.etagcompare` this is a standalone, opt-in building block:
@@ -60,16 +60,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast, overload
 
-from boto3_s3.exceptions import ConfigurationError
+from boto3_s3.exceptions import InvalidConfigError
 
 if TYPE_CHECKING:
     import boto3
 
-__all__ = ["AwsConfig", "ConfigSection"]
+__all__ = ["SIZE_SUFFIX", "AwsConfig", "ConfigSection", "split_size_suffix"]
 
 # aws-cli's human_readable_to_int suffix table (1024-based: "MB" == "MiB").
-# Reading a value written for `aws s3` must yield the same byte count.
-_SIZE_SUFFIX = {
+# Reading a value written for `aws s3` must yield the same byte count. This is
+# the ONE home of the table and the suffix rule: the CLI's aws-verbatim
+# human_readable_to_int (boto3_s3_cli.runtimeconfig) shares them, while each
+# consumer keeps its own boundary guard and error wording - the library's
+# _parse_size below is deliberately hardened where the CLI port stays
+# aws-faithful (bare-"mb" edge included).
+SIZE_SUFFIX = {
     "kb": 1024,
     "mb": 1024**2,
     "gb": 1024**3,
@@ -79,6 +84,20 @@ _SIZE_SUFFIX = {
     "gib": 1024**3,
     "tib": 1024**4,
 }
+
+
+def split_size_suffix(value: str) -> tuple[str, str]:
+    """Lowercase *value* and split off the candidate size suffix.
+
+    Returns ``(lowered, suffix)``: the suffix is the trailing three characters
+    for an ``ib`` spelling (``"mib"``), else the trailing two (``"mb"``). No
+    validation happens here - each caller checks the suffix against
+    :data:`SIZE_SUFFIX` under its own boundary guard.
+    """
+    lowered = value.lower()
+    suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
+    return lowered, suffix
+
 
 # Sentinel for "key absent" - distinct from a present value (which is always a
 # string, or a Mapping for a subsection), so `_lookup` never confuses a real
@@ -94,7 +113,7 @@ class ConfigSection:
     nested subsection - ``"s3.multipart_chunksize"`` reads ``multipart_chunksize``
     from the section's ``s3`` block. A missing key returns the caller's default;
     a present value that does not convert, or a key naming a whole subsection,
-    raises :class:`~boto3_s3.exceptions.ConfigurationError`. Obtain one from
+    raises :class:`~boto3_s3.exceptions.InvalidConfigError`. Obtain one from
     :class:`AwsConfig` (``cfg.profile(...)`` / ``cfg.services(...)`` / ...).
     """
 
@@ -127,7 +146,7 @@ class ConfigSection:
         try:
             return int(text)
         except ValueError:
-            raise ConfigurationError(_not_a(key, text, "an integer")) from None
+            raise InvalidConfigError(_not_a(key, text, "an integer")) from None
 
     @overload
     def get_size(self, key: str, default: int) -> int: ...
@@ -222,7 +241,7 @@ class AwsConfig:
             try:
                 session = boto3.Session()
             except BotoCoreError as exc:
-                raise ConfigurationError(str(exc)) from exc
+                raise InvalidConfigError(str(exc)) from exc
         # aws-cli reads the same botocore session surface (the scoped/full config
         # lives on the underlying botocore Session, not the boto3 wrapper).
         return cls(session._session)  # pyright: ignore[reportPrivateUsage]
@@ -235,7 +254,7 @@ class AwsConfig:
         ``name=None`` resolves the active profile through botocore's
         ``get_scoped_config`` (``--profile`` / ``AWS_PROFILE``, else
         ``[default]``); a set-but-missing profile raises
-        :class:`~boto3_s3.exceptions.ConfigurationError`. A given ``name`` reads
+        :class:`~boto3_s3.exceptions.InvalidConfigError`. A given ``name`` reads
         ``[profile name]`` (or ``[default]`` for ``"default"``) from the full
         config and is tolerant - an absent profile yields an empty section whose
         getters fall to their defaults.
@@ -314,7 +333,7 @@ class AwsConfig:
         except BotoCoreError as exc:
             # ProfileNotFound / ConfigParseError / ... -> the library taxonomy
             # (exceptions.md: backend errors are converted at the boundary).
-            raise ConfigurationError(str(exc)) from exc
+            raise InvalidConfigError(str(exc)) from exc
 
     def _full_config(self) -> Mapping[str, Any]:
         full = self._full
@@ -324,7 +343,7 @@ class AwsConfig:
             try:
                 full = self._session.full_config
             except BotoCoreError as exc:
-                raise ConfigurationError(str(exc)) from exc
+                raise InvalidConfigError(str(exc)) from exc
             self._full = full
         return full
 
@@ -347,7 +366,7 @@ def _as_section(value: Any) -> Mapping[str, Any]:
 def _require_scalar(value: Any, key: str) -> str:
     """The string at a resolved value; raise if it is a whole subsection."""
     if isinstance(value, Mapping):
-        raise ConfigurationError(f"config key {key!r} refers to a section, not a value")
+        raise InvalidConfigError(f"config key {key!r} refers to a section, not a value")
     return value if isinstance(value, str) else str(value)
 
 
@@ -361,17 +380,16 @@ def _parse_size(value: str, key: str) -> int:
     1024-based, matching aws-cli's ``human_readable_to_int`` (``MB`` == ``MiB``).
     A bare integer string passes through; anything else raises.
     """
-    lowered = value.lower()
-    suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
-    if len(lowered) > len(suffix) and suffix in _SIZE_SUFFIX:
+    lowered, suffix = split_size_suffix(value)
+    if len(lowered) > len(suffix) and suffix in SIZE_SUFFIX:
         try:
-            return int(lowered[: -len(suffix)]) * _SIZE_SUFFIX[suffix]
+            return int(lowered[: -len(suffix)]) * SIZE_SUFFIX[suffix]
         except ValueError:
-            raise ConfigurationError(_not_a(key, value, "a size")) from None
+            raise InvalidConfigError(_not_a(key, value, "a size")) from None
     try:
         return int(lowered)
     except ValueError:
-        raise ConfigurationError(_not_a(key, value, "a size")) from None
+        raise InvalidConfigError(_not_a(key, value, "a size")) from None
 
 
 def _parse_rate(value: str, key: str) -> int:
@@ -388,7 +406,7 @@ def _parse_rate(value: str, key: str) -> int:
     try:
         return int(value)
     except ValueError:
-        raise ConfigurationError(_not_a(key, value, "a rate")) from None
+        raise InvalidConfigError(_not_a(key, value, "a rate")) from None
 
 
 def _rate_magnitude(value: str, key: str) -> int:

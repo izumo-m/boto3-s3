@@ -34,7 +34,7 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
-from boto3_s3.exceptions import Boto3S3Error
+from boto3_s3.exceptions import ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
@@ -152,6 +152,8 @@ class IOStorage(Storage):
 
     Pass it to ``cp`` as a ``Location``: ``cp("s3://b/k", IOStorage(io.BytesIO()))``
     downloads into the stream, ``cp(IOStorage(buf), "s3://b/k")`` uploads from it.
+    ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
+    the bytes land (a stream is never a move *source* - it cannot be deleted).
     A binary stream is used as-is; a text stream is wrapped with ``encoding``
     (default utf-8). The caller's stream is never closed by this class. As a single
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
@@ -209,8 +211,11 @@ class IOStorage(Storage):
         """Return the stdio token ``"-"`` (:meth:`Storage.as_text`, display-only).
 
         A stream has no location, so this token is for display / error messages
-        only - never round-tripped. A stream side never reaches ``naming``: ``cp``
-        routes it to the stream path up front, before any transfer plan is built.
+        only - never round-tripped. ``cp`` diverts a stream to its own path
+        before any plan is built, but ``mv`` with a stream *destination* does
+        ride ``transferplan.plan_transfer``: the stream folds into the custom
+        (``s3open``) arm, where the default ``Storage.format`` reads this
+        token (``"-"`` has no trailing ``/``, so a single move keeps its key).
         """
         return "-"
 
@@ -233,7 +238,9 @@ class StdioStorage(IOStorage):
         if mode == "rb":
             stdin = sys.stdin
             if stdin is None:
-                raise Boto3S3Error(
+                # A runtime-state precondition (no stdin in this process), so
+                # ValidationError; raised in-pipeline, rc 1 either way.
+                raise ValidationError(
                     "stdin is required for this operation, but is not available.",
                     operation="cp",
                 )

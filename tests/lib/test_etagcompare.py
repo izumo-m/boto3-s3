@@ -32,7 +32,7 @@ from boto3_s3.etagcompare import (
     _file_md5_hex,  # pyright: ignore[reportPrivateUsage]
     _multipart_etag_at,  # pyright: ignore[reportPrivateUsage]
 )
-from boto3_s3.types import FileInfo, LocalFileInfo, OpKind, S3FileInfo
+from boto3_s3.types import FileInfo, LocalFileInfo, S3FileInfo, TransferType
 
 _MIB = 1024 * 1024
 
@@ -67,8 +67,10 @@ def _s3(*, etag: str | None = None, size: int | None = None, key: str = "k") -> 
     return S3FileInfo(key=key, etag=etag, size=size)
 
 
-def _pair(kind: OpKind, *, src: FileInfo | None = None, dst: FileInfo | None = None) -> SyncPair:
-    return SyncPair(key="k", kind=kind, src=src, dst=dst)
+def _pair(
+    transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
+) -> SyncPair:
+    return SyncPair(key="k", transfer_type=transfer_type, src=src, dest=dest)
 
 
 def _independent_single(data: bytes) -> str:
@@ -158,68 +160,76 @@ class TestCopyDirectEtag:
     """s3->s3 compares the listings' ETags directly; no bytes read."""
 
     def test_equal_etags_skip(self) -> None:
-        pair = _pair(OpKind.COPY, src=_s3(etag="abc"), dst=_s3(etag="abc"))
+        pair = _pair(TransferType.COPY, src=_s3(etag="abc"), dest=_s3(etag="abc"))
         assert EtagComparison()(pair) is False
 
     def test_differing_etags_copy(self) -> None:
-        pair = _pair(OpKind.COPY, src=_s3(etag="abc"), dst=_s3(etag="xyz"))
+        pair = _pair(TransferType.COPY, src=_s3(etag="abc"), dest=_s3(etag="xyz"))
         assert EtagComparison()(pair) is True
 
     def test_missing_etag_either_side_copies(self) -> None:
-        assert EtagComparison()(_pair(OpKind.COPY, src=_s3(etag=None), dst=_s3(etag="abc"))) is True
-        assert EtagComparison()(_pair(OpKind.COPY, src=_s3(etag="abc"), dst=_s3(etag=None))) is True
+        assert (
+            EtagComparison()(_pair(TransferType.COPY, src=_s3(etag=None), dest=_s3(etag="abc")))
+            is True
+        )
+        assert (
+            EtagComparison()(_pair(TransferType.COPY, src=_s3(etag="abc"), dest=_s3(etag=None)))
+            is True
+        )
 
     def test_non_s3_side_counts_as_differ(self) -> None:
         # A side that is not an S3FileInfo has no comparable etag -> differ.
-        pair = _pair(OpKind.COPY, src=FileInfo(key="k"), dst=_s3(etag="abc"))
+        pair = _pair(TransferType.COPY, src=FileInfo(key="k"), dest=_s3(etag="abc"))
         assert EtagComparison()(pair) is True
 
     def test_reads_no_bytes(self) -> None:
         # Keys point at nothing on disk; the equal-etag skip still holds.
-        pair = _pair(OpKind.COPY, src=_s3(etag="abc", key="nope"), dst=_s3(etag="abc", key="nope"))
+        pair = _pair(
+            TransferType.COPY, src=_s3(etag="abc", key="nope"), dest=_s3(etag="abc", key="nope")
+        )
         assert EtagComparison()(pair) is False
 
     def test_size_collision_guard(self) -> None:
         # Equal etag but different size: check_size forces a copy (MD5 collisions
         # exist), while pure-etag mode trusts the equality and skips.
-        pair = _pair(OpKind.COPY, src=_s3(etag="abc", size=10), dst=_s3(etag="abc", size=20))
+        pair = _pair(TransferType.COPY, src=_s3(etag="abc", size=10), dest=_s3(etag="abc", size=20))
         assert EtagComparison(check_size=True)(pair) is True
         assert EtagComparison(check_size=False)(pair) is False
 
 
 class TestNewAndMissingSides:
-    @pytest.mark.parametrize("kind", list(OpKind))
-    def test_dst_none_always_copies(self, kind: OpKind) -> None:
-        # The dst-None short-circuit precedes the kind switch, so even MOVE /
+    @pytest.mark.parametrize("transfer_type", list(TransferType))
+    def test_dest_none_always_copies(self, transfer_type: TransferType) -> None:
+        # The dest-None short-circuit precedes the kind switch, so even MOVE /
         # DELETE return True here.
-        assert EtagComparison()(_pair(kind, src=_s3(etag="abc"))) is True
+        assert EtagComparison()(_pair(transfer_type, src=_s3(etag="abc"))) is True
 
-    @pytest.mark.parametrize("kind", list(OpKind))
-    def test_src_none_raises(self, kind: OpKind) -> None:
+    @pytest.mark.parametrize("transfer_type", list(TransferType))
+    def test_src_none_raises(self, transfer_type: TransferType) -> None:
         with pytest.raises(ValueError, match="without a source entry"):
-            EtagComparison()(_pair(kind, dst=_s3(etag="abc")))
+            EtagComparison()(_pair(transfer_type, dest=_s3(etag="abc")))
 
 
 class TestUnsupportedKindsAndSides:
     def test_move_kind_raises(self) -> None:
-        pair = _pair(OpKind.MOVE, src=_s3(etag="a", size=10), dst=_s3(etag="b", size=10))
+        pair = _pair(TransferType.MOVE, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
         with pytest.raises(ValueError, match="cannot judge a 'move' pair"):
             EtagComparison()(pair)
 
     def test_delete_kind_raises(self) -> None:
-        pair = _pair(OpKind.DELETE, src=_s3(etag="a", size=10), dst=_s3(etag="b", size=10))
+        pair = _pair(TransferType.DELETE, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
         with pytest.raises(ValueError, match="cannot judge a 'delete' pair"):
             EtagComparison()(pair)
 
     def test_upload_non_local_local_side_raises(self) -> None:
         # UPLOAD: local = src; an S3 src has no local file to hash.
-        pair = _pair(OpKind.UPLOAD, src=_s3(etag="a", size=10), dst=_s3(etag="b", size=10))
+        pair = _pair(TransferType.UPLOAD, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
         with pytest.raises(ValueError, match="no local side"):
             EtagComparison()(pair)
 
     def test_download_non_local_local_side_raises(self) -> None:
-        # DOWNLOAD: local = dst; an S3 dst has no local file to hash.
-        pair = _pair(OpKind.DOWNLOAD, src=_s3(etag="a", size=10), dst=_s3(etag="b", size=10))
+        # DOWNLOAD: local = dest; an S3 dest has no local file to hash.
+        pair = _pair(TransferType.DOWNLOAD, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
         with pytest.raises(ValueError, match="no local side"):
             EtagComparison()(pair)
 
@@ -228,37 +238,37 @@ class TestSinglePartReconstruction:
     def test_upload_matching_md5_skips(self, tmp_path: Path) -> None:
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag=_TEN_SINGLE, size=len(_TEN)),
+            dest=_s3(etag=_TEN_SINGLE, size=len(_TEN)),
         )
         assert EtagComparison()(pair) is False
 
     def test_upload_mismatch_copies(self, tmp_path: Path) -> None:
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag="0" * 32, size=len(_TEN)),
+            dest=_s3(etag="0" * 32, size=len(_TEN)),
         )
         assert EtagComparison()(pair) is True
 
     def test_download_swaps_local_and_remote(self, tmp_path: Path) -> None:
-        # DOWNLOAD: local = dst, remote = src; a matching reconstruction skips.
+        # DOWNLOAD: local = dest, remote = src; a matching reconstruction skips.
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             src=_s3(etag=_TEN_SINGLE, size=len(_TEN)),
-            dst=_local(_key(p), size=len(_TEN)),
+            dest=_local(_key(p), size=len(_TEN)),
         )
         assert EtagComparison()(pair) is False
 
     def test_missing_remote_etag_copies_before_read(self, tmp_path: Path) -> None:
         # No remote etag -> copy, without touching the (nonexistent) local file.
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(tmp_path / "nope"), size=10),
-            dst=_s3(etag=None, size=10),
+            dest=_s3(etag=None, size=10),
         )
         assert EtagComparison()(pair) is True
 
@@ -270,9 +280,9 @@ class TestMultipartReconstruction:
         # file (no >5 MiB write needed).
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag=_TEN_MP10, size=len(_TEN)),
+            dest=_s3(etag=_TEN_MP10, size=len(_TEN)),
         )
         assert EtagComparison()(pair) is False
 
@@ -280,29 +290,29 @@ class TestMultipartReconstruction:
         # The one genuine multi-part __call__ case: 6 MiB at a 5 MiB part -> 2 parts.
         p = _write(tmp_path, _CONTENT_6MIB)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_CONTENT_6MIB)),
-            dst=_s3(etag=_CONTENT_6MIB_MP5, size=len(_CONTENT_6MIB)),
+            dest=_s3(etag=_CONTENT_6MIB_MP5, size=len(_CONTENT_6MIB)),
         )
         assert EtagComparison(part_size=5 * _MIB)(pair) is False
 
     def test_download_multipart_match_skips(self, tmp_path: Path) -> None:
-        # DOWNLOAD swaps local/remote (local = dst): the S3 src etag is compared
-        # against the reconstructed local dst hash.
+        # DOWNLOAD swaps local/remote (local = dest): the S3 src etag is compared
+        # against the reconstructed local dest hash.
         p = _write(tmp_path, _CONTENT_6MIB)
         pair = _pair(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             src=_s3(etag=_CONTENT_6MIB_MP5, size=len(_CONTENT_6MIB)),
-            dst=_local(_key(p), size=len(_CONTENT_6MIB)),
+            dest=_local(_key(p), size=len(_CONTENT_6MIB)),
         )
         assert EtagComparison(part_size=5 * _MIB)(pair) is False
 
     def test_real_multipart_wrong_hash_copies(self, tmp_path: Path) -> None:
         p = _write(tmp_path, _CONTENT_6MIB)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_CONTENT_6MIB)),
-            dst=_s3(etag="0" * 32 + "-2", size=len(_CONTENT_6MIB)),
+            dest=_s3(etag="0" * 32 + "-2", size=len(_CONTENT_6MIB)),
         )
         assert EtagComparison(part_size=5 * _MIB)(pair) is True
 
@@ -311,9 +321,9 @@ class TestMultipartReconstruction:
         p = _write(tmp_path, _CONTENT_6MIB)
         wrong = _CONTENT_6MIB_MP5.split("-")[0] + "-3"
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_CONTENT_6MIB)),
-            dst=_s3(etag=wrong, size=len(_CONTENT_6MIB)),
+            dest=_s3(etag=wrong, size=len(_CONTENT_6MIB)),
         )
         assert EtagComparison(part_size=5 * _MIB)(pair) is True
 
@@ -331,7 +341,7 @@ class TestEmptyFile:
         # matches md5("") and skips. The "-0" multipart trap is never reached.
         p = _write(tmp_path, b"")
         pair = _pair(
-            OpKind.UPLOAD, src=_local(_key(p), size=0), dst=_s3(etag=_EMPTY_SINGLE, size=0)
+            TransferType.UPLOAD, src=_local(_key(p), size=0), dest=_s3(etag=_EMPTY_SINGLE, size=0)
         )
         assert EtagComparison()(pair) is False
 
@@ -347,9 +357,9 @@ class TestOpaqueEtag:
     def test_kms_style_multipart_etag_copies(self, tmp_path: Path) -> None:
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag="ffffffffffffffffffffffffffffffff-7", size=len(_TEN)),
+            dest=_s3(etag="ffffffffffffffffffffffffffffffff-7", size=len(_TEN)),
         )
         assert EtagComparison()(pair) is True
 
@@ -357,9 +367,9 @@ class TestOpaqueEtag:
         # A single-part SSE etag is a 32-hex that is not the plaintext MD5.
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag="deadbeef" * 4, size=len(_TEN)),
+            dest=_s3(etag="deadbeef" * 4, size=len(_TEN)),
         )
         assert EtagComparison()(pair) is True
 
@@ -371,28 +381,28 @@ class TestSizeCheckToggle:
         # check_size on: a size mismatch returns True without opening the file, so
         # a nonexistent local path raises nothing.
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(tmp_path / "nope"), size=10),
-            dst=_s3(etag="abc", size=20),
+            dest=_s3(etag="abc", size=20),
         )
         assert EtagComparison(check_size=True)(pair) is True
 
     def test_download_size_mismatch_short_circuits(self, tmp_path: Path) -> None:
         # The check is uniform across directions: a DOWNLOAD size mismatch also
-        # short-circuits before touching the (nonexistent) local dst.
+        # short-circuits before touching the (nonexistent) local dest.
         pair = _pair(
-            OpKind.DOWNLOAD,
+            TransferType.DOWNLOAD,
             src=_s3(etag=_TEN_SINGLE, size=10),
-            dst=_local(_key(tmp_path / "nope"), size=20),
+            dest=_local(_key(tmp_path / "nope"), size=20),
         )
         assert EtagComparison(check_size=True)(pair) is True
 
     def test_size_check_off_reads_and_raises_on_missing(self, tmp_path: Path) -> None:
         # check_size off: no short-circuit, so the missing file is opened -> OSError.
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(tmp_path / "nope"), size=10),
-            dst=_s3(etag="abc", size=20),
+            dest=_s3(etag="abc", size=20),
         )
         with pytest.raises(OSError):
             EtagComparison(check_size=False)(pair)
@@ -401,9 +411,9 @@ class TestSizeCheckToggle:
         # Same size, different content: the size check passes through to the hash.
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=len(_TEN)),
-            dst=_s3(etag="0" * 32, size=len(_TEN)),
+            dest=_s3(etag="0" * 32, size=len(_TEN)),
         )
         assert EtagComparison(check_size=True)(pair) is True
 
@@ -411,9 +421,9 @@ class TestSizeCheckToggle:
         # A None size on a side disables the pre-check; the hash decides (skip).
         p = _write(tmp_path, _TEN)
         pair = _pair(
-            OpKind.UPLOAD,
+            TransferType.UPLOAD,
             src=_local(_key(p), size=None),
-            dst=_s3(etag=_TEN_SINGLE, size=10),
+            dest=_s3(etag=_TEN_SINGLE, size=10),
         )
         assert EtagComparison(check_size=True)(pair) is False
 

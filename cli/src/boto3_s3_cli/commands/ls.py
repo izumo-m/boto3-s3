@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import output
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
+from boto3_s3_cli import clientfactory, output
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    add_page_size_argument,
+    add_request_payer_argument,
+    expand_option_paramfile,
+    parse_integer_option,
+)
 
 
 class LsCommand(Command):
@@ -19,15 +26,8 @@ class LsCommand(Command):
         """Add the ``ls``-specific arguments to its subparser."""
         parser.add_argument("paths", nargs="?", default="s3://", metavar="<S3Uri>")
         parser.add_argument("--recursive", action="store_true")
-        # Not range-validated: aws-cli passes any int through and lets the
-        # server decide (0 lists nothing -> rc 1; negative -> InvalidArgument
-        # -> rc 254). The exit-code charter requires matching both. No
-        # type=int: a non-integer must exit 255 like aws's bare int()
-        # conversion, not argparse's 252 (parse_integer_option, commands/base.py).
-        parser.add_argument("--page-size", default=1000)
-        parser.add_argument(
-            "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
-        )
+        add_page_size_argument(parser)
+        add_request_payer_argument(parser)
         parser.add_argument("--human-readable", action="store_true")
         parser.add_argument("--summarize", action="store_true")
         # Bucket-listing filters (ListBuckets Prefix / BucketRegion); accepted but
@@ -37,8 +37,11 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # First, like aws's parse-time conversion: a non-integer exits 255
-        # before any client (or the SDK) is touched.
+        # aws's parse-time order (measured, docs/cli.md section 6): the
+        # --endpoint-url scheme check (252) and the --page-size paramfile
+        # expansion (252) both precede the bare int() coercion (255).
+        clientfactory.validate_endpoint_url(args)
+        expand_option_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay

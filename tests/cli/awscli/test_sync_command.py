@@ -18,8 +18,9 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
 
 Not ported, with reasons:
 
-- ``TestSyncWithCRTClient`` (5 tests): the CRT transfer engine is charter
-  exception 2 (docs/overview.md section 3); CRT work is tracked in task #34.
+- ``TestSyncWithCRTClient`` (5 tests): the CRT data plane bypasses the botocore
+  client, so the recording client cannot drive it; CRT parity is enforced by
+  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
 - ``TestSyncSourceRegion``: a different aws-cli harness
   (``BaseS3CLIRunnerTest``, endpoint-level assertions); the
   ``--source-region`` client wiring is covered by the cp/mv unit tier
@@ -40,7 +41,7 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.naming import relative_path
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -48,6 +49,11 @@ from tests.utils.recorder import ApiCall, make_recording_client
 MB = 1024**2
 _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
+# See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
+# conflict only while the first twin is still in flight, so it needs a threaded
+# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
+# single worker (max_concurrent_requests = 1) here.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _LIST_BASE = {"MaxKeys": 1000}
 
@@ -56,10 +62,11 @@ def _run_cmd(
     parsed_responses: list[dict[str, Any] | Exception],
     argv: list[str],
     expected_rc: int = 0,
+    transfer_config: TransferConfig = _SYNC_CONFIG,
 ) -> tuple[CliResult, list[ApiCall]]:
     """The port's ``self.run_cmd``: in-process main() with a recording client."""
     client, calls = make_recording_client(parsed_responses)
-    ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC_CONFIG)
+    ctx = Context(client_factory=lambda _args: client, transfer_config=transfer_config)
     result = run_cli_in_process(argv, ctx=ctx)
     assert result.rc == expected_rc, (result.rc, result.stdout, result.stderr, calls)
     return result, calls
@@ -107,15 +114,6 @@ def create_mpu_response(upload_id: str) -> dict[str, Any]:
 
 def upload_part_copy_response() -> dict[str, Any]:
     return {"CopyPartResult": {"ETag": '"etag"'}}
-
-
-def _case_insensitive_fs(path: Path) -> bool:
-    probe = path / "CaseProbe.tmp"
-    probe.write_bytes(b"")
-    try:
-        return (path / "caseprobe.tmp").exists()
-    finally:
-        probe.unlink()
 
 
 class TestSyncCommand:
@@ -190,8 +188,9 @@ class TestSyncCommand:
         assert [(c.operation, c.params) for c in calls] == [
             ("ListObjectsV2", {"Bucket": "bucket", "Prefix": "", **_LIST_BASE}),
         ]
-        assert f"(dryrun) upload: {relative_path(str(full_path))} to s3://bucket/file.txt" in (
-            result.stdout
+        assert (
+            f"(dryrun) upload: {LocalStorage.relative_path(str(full_path))} to s3://bucket/file.txt"
+            in (result.stdout)
         )
 
     def test_glacier_sync_with_force_glacier(self, tmp_path: Path) -> None:
@@ -447,6 +446,37 @@ class TestSyncCommand:
             ),
         ]
 
+    def test_absolute_exclude_does_not_protect_the_destination_from_delete(
+        self, tmp_path: Path
+    ) -> None:
+        # An absolute --exclude anchors at the local source, so it hides the
+        # source's keep/a.txt but NOT the anchorless S3 destination key. The dest
+        # key is therefore a dest-only orphan and --delete removes it - matching
+        # aws-cli, which roots the pattern per side (src_rootdir vs dst_rootdir).
+        src = tmp_path / "src"
+        (src / "keep").mkdir(parents=True)
+        (src / "keep" / "a.txt").write_text("x")
+        _, calls = _run_cmd(
+            [list_objects_response(["keep/a.txt"]), {}],
+            ["sync", str(src), "s3://bucket", "--delete", "--exclude", f"{src}/keep/*"],
+        )
+        assert _operations(calls) == ["ListObjectsV2", "DeleteObjects"]  # source not uploaded
+        delete = next(c for c in calls if c.operation == "DeleteObjects")
+        assert delete.params["Delete"]["Objects"] == [{"Key": "keep/a.txt"}]
+
+    def test_relative_exclude_protects_the_destination_from_delete(self, tmp_path: Path) -> None:
+        # A relative --exclude matches each side's compare_key, so it hides
+        # keep/a.txt on BOTH sides; the dest is invisible and --delete leaves it
+        # (aws-cli "files excluded by filters are excluded from deletion").
+        src = tmp_path / "src"
+        (src / "keep").mkdir(parents=True)
+        (src / "keep" / "a.txt").write_text("x")
+        _, calls = _run_cmd(
+            [list_objects_response(["keep/a.txt"])],
+            ["sync", str(src), "s3://bucket", "--delete", "--exclude", "keep/*"],
+        )
+        assert _operations(calls) == ["ListObjectsV2"]  # no DeleteObjects
+
     def test_with_accesspoint_arn(self, tmp_path: Path) -> None:
         accesspoint_arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
         _, calls = _run_cmd(
@@ -689,13 +719,11 @@ class TestSyncCaseConflict:
     lower_key = "a.txt"
     upper_key = "A.txt"
 
-    def test_error_with_existing_file(self, tmp_path: Path) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.lower_key).write_text("mycontent")
+    def test_error_with_existing_file(self, case_insensitive_workdir: Path) -> None:
+        (case_insensitive_workdir / self.lower_key).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.upper_key])],
-            ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "error"],
+            ["sync", "s3://bucket", str(case_insensitive_workdir), "--case-conflict", "error"],
             expected_rc=1,
         )
         assert f"Failed to download bucket/{self.upper_key}" in result.stderr
@@ -708,16 +736,15 @@ class TestSyncCaseConflict:
             ],
             ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "error"],
             expected_rc=1,
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"Failed to download bucket/{self.lower_key}" in result.stderr
 
-    def test_warn_with_existing_file(self, tmp_path: Path) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.lower_key).write_text("mycontent")
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Path) -> None:
+        (case_insensitive_workdir / self.lower_key).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.upper_key]), get_object_response()],
-            ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "warn"],
+            ["sync", "s3://bucket", str(case_insensitive_workdir), "--case-conflict", "warn"],
         )
         assert f"warning: Downloading bucket/{self.upper_key}" in result.stderr
 
@@ -729,16 +756,15 @@ class TestSyncCaseConflict:
                 get_object_response(),
             ],
             ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "warn"],
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Downloading bucket/{self.lower_key}" in result.stderr
 
-    def test_skip_with_existing_file(self, tmp_path: Path) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.lower_key).write_text("mycontent")
+    def test_skip_with_existing_file(self, case_insensitive_workdir: Path) -> None:
+        (case_insensitive_workdir / self.lower_key).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.upper_key])],
-            ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "skip"],
+            ["sync", "s3://bucket", str(case_insensitive_workdir), "--case-conflict", "skip"],
         )
         assert f"warning: Skipping bucket/{self.upper_key}" in result.stderr
 
@@ -749,6 +775,7 @@ class TestSyncCaseConflict:
                 get_object_response(),
             ],
             ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "skip"],
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Skipping bucket/{self.lower_key}" in result.stderr
         assert _operations(calls) == ["ListObjectsV2", "GetObject"]

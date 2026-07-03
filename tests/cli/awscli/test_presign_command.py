@@ -53,7 +53,7 @@ def _frozen_clock(remove_tzinfo: bool = True) -> datetime.datetime:
     return FROZEN_DATETIME.replace(tzinfo=datetime.timezone.utc)
 
 
-# build_client's pinned base (globals.py): SigV4 always, us-east-1 regional.
+# build_client's pinned base (clientfactory.py): SigV4 always, us-east-1 regional.
 _BASE_S3: dict[str, Any] = {"us_east_1_regional_endpoint": "regional"}
 _DEFAULT_CONFIG = Config(signature_version="s3v4", s3=_BASE_S3)
 _PATH_STYLE_CONFIG = Config(signature_version="s3v4", s3={**_BASE_S3, "addressing_style": "path"})

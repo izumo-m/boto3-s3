@@ -8,6 +8,7 @@ client, so the parse -> dispatch -> error -> exit-code wiring is covered.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from botocore.exceptions import ClientError
 from boto3_s3 import (
     Boto3S3Error,
     ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -59,6 +62,19 @@ class TestExitCodeFor:
     def test_other_errors_map_to_255(self) -> None:
         assert cli.exit_code_for(TransportError("connection reset")) == 255
         assert cli.exit_code_for(Boto3S3Error("unexpected")) == 255
+
+    def test_refining_subclasses_map_to_255_not_their_parents_rc(self) -> None:
+        # aws routes post-parse value failures and bad config through its
+        # general handler (255); the refining subclasses must NOT inherit
+        # ValidationError's 252 / ConfigurationError's 253.
+        assert cli.exit_code_for(InvalidValueError("invalid literal for int()")) == 255
+        assert cli.exit_code_for(InvalidConfigError("Invalid size value: abc")) == 255
+
+    def test_client_error_cause_wins_over_refining_subclass(self) -> None:
+        # The ClientError-cause branch stays first: an error that reached the
+        # server exits 254 regardless of the taxonomy class.
+        exc = _with_cause(InvalidConfigError("rejected"), _client_error("InvalidRequest", 400))
+        assert cli.exit_code_for(exc) == 254
 
 
 class _RaisingClient:
@@ -196,3 +212,125 @@ class TestValidationOrder:
         # even with a missing source (the boundary on the other side).
         rc = cli.main(["cp", self._MISSING, "s3://bucket/key", "--checksum-mode", "ENABLED"])
         assert rc == 252
+
+
+class TestParseToValidationOrder:
+    """The head order aws applies before its path validations (measured
+    against the pinned aws 2.35.5; docs/cli.md section 6): the
+    ``--endpoint-url`` scheme check (252) -> the integer coercions (255) ->
+    paramfile / shorthand / blob value resolution (252) -> the session
+    profile resolution (255) -> the path/usage checks. Each test pins one
+    combined-error pair whose exit code that order decides."""
+
+    _BOGUS = "boto3_s3_no_such_profile_for_order_tests"
+    _MISSING = "/nonexistent_src_for_head_order_test.txt"
+
+    def test_bad_profile_beats_the_local_local_usage_error(self) -> None:
+        assert cli.main(["cp", "a", "b", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_rm_path_usage(self) -> None:
+        assert cli.main(["rm", "./missing-local", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_mv_same_path(self) -> None:
+        assert cli.main(["mv", "s3://b/x", "s3://b/x", "--profile", self._BOGUS]) == 255
+
+    def test_bad_profile_beats_stream_recursive(self) -> None:
+        rc = cli.main(["cp", "-", "s3://b/k", "--recursive", "--profile", self._BOGUS])
+        assert rc == 255
+
+    def test_bad_metadata_beats_missing_source(self) -> None:
+        assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "bad,,=="]) == 252
+
+    def test_bad_endpoint_beats_missing_source(self) -> None:
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_bad_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["rm", "s3://b/k", "--page-size", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_bad_blob_paramfile_beats_missing_source(self) -> None:
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--sse-c", "AES256", "--sse-c-key", "fileb:///no/x"]
+        )
+        assert rc == 252
+
+    def test_direct_paramfile_beats_the_integer_coercion(self) -> None:
+        # aws expands file:// on plain options at parse time, BEFORE its bare
+        # int(): --content-type's bad paramfile (252) wins over --page-size
+        # abc (255). Measured.
+        rc = cli.main(
+            [
+                "cp",
+                self._MISSING,
+                "s3://b/k",
+                "--content-type",
+                "file:///no/x",
+                "--page-size",
+                "abc",
+            ]
+        )
+        assert rc == 252
+
+    def test_metadata_resolution_loses_to_the_integer_coercion(self) -> None:
+        # The map option is the exception: its value (paramfile and shorthand
+        # alike) resolves AFTER the coercions - aws exits the int's 255 here.
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--metadata", "file:///no/x", "--page-size", "abc"]
+        )
+        assert rc == 255
+
+    def test_ls_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["ls", "s3://b", "--page-size", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_presign_endpoint_beats_the_integer_coercion(self) -> None:
+        rc = cli.main(["presign", "s3://b/k", "--expires-in", "abc", "--endpoint-url", "badurl"])
+        assert rc == 252
+
+    def test_page_size_paramfile_reference_is_expanded(self) -> None:
+        # aws paramfile-expands even the string-typed integer options: a bad
+        # file:// reference on --page-size is its 252, not the int()'s 255.
+        assert cli.main(["ls", "s3://b", "--page-size", "file:///no/x"]) == 252
+
+    def test_metadata_fileb_shorthand_value_is_a_usage_error(self) -> None:
+        # a@=fileb://... loads bytes; aws rejects the non-string map value at
+        # parse time (252) - it must not reach the transfer (rc 1).
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "a@=fileb:///no/x"])
+        assert rc == 252  # the missing paramfile itself is also a 252
+
+    def test_local_local_stays_252_in_a_regionless_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's client construction cannot fail on a missing region (its
+        # bundled botocore defers region resolution to request time), so the
+        # usage error must keep winning in a regionless env - this guards
+        # against ever hoisting the client build above the validations.
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+        assert cli.main(["cp", "a", "b"]) == 252
+
+
+class TestRecursiveDestDirCreation:
+    """aws pre-creates the s3local dir_op destination during validation
+    (its ``_validate_path_args``), so a creation failure is rc 255 - not the
+    pipeline's rc 1. sync always did this; cp/mv --recursive share it now."""
+
+    @pytest.fixture()
+    def readonly_dir(self, tmp_path: Any) -> Any:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root creates anything")
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        yield ro
+        ro.chmod(0o755)
+
+    def test_cp_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
+        rc = cli.main(["cp", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+        assert rc == 255
+
+    def test_mv_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
+        rc = cli.main(["mv", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+        assert rc == 255

@@ -9,7 +9,10 @@ corner cases the naive ``split(",")``/``partition("=")`` got wrong:
 - a duplicate key is rejected (``Second instance of key ...`` -> rc 252), not
   silently last-write-wins,
 - backslash-escaped commas in an unquoted value (``k=a\\,b`` -> ``a,b``),
-- single/double-quoted values that contain commas (``k="a,b"`` -> ``a,b``).
+- single/double-quoted values that contain commas (``k="a,b"`` -> ``a,b``),
+- the ``@=`` paramfile operator (``k@=file://path`` loads the file's text,
+  ``fileb://`` its bytes; a prefix-less value passes through - aws's
+  "file-optional-values").
 
 Error wording is shaped on aws's parser message (``Error parsing parameter
 '<name>'``) closely enough for the stderr token contract; every parse failure
@@ -23,6 +26,7 @@ import re
 import string
 
 from boto3_s3 import ValidationError
+from boto3_s3_cli import paramfile
 
 # Keys are alphanumeric plus ``-_.#/:`` (aws-cli awscli/shorthand.py); any other
 # character terminates the key and is read as a delimiter or a syntax error.
@@ -51,17 +55,31 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
 
     Raises ``ValidationError`` (aws rc 252) with an ``Error parsing parameter
     '<name>'`` message on malformed input, mirroring aws's parser error class
-    and wording closely enough for the stderr token contract.
+    and wording closely enough for the stderr token contract. A ``bytes``
+    value (only reachable via the ``@=`` operator's ``fileb://`` load) is
+    rejected here too: aws schema-validates the shorthand result at parse
+    time - a map value must be a string - so ``a@=fileb://...`` is its
+    pre-pipeline ParamValidation (rc 252, measured), never a transfer.
     """
     text = value.strip()
     if text.startswith("{"):
         return _parse_json_map(value, name=name, operation=operation)
     try:
-        return _Parser(value).parse()
+        parsed = _Parser(value, name=name, operation=operation).parse()
     except _ShorthandParseError as exc:
         raise ValidationError(
             f"Error parsing parameter '{name}': {exc}", operation=operation
         ) from exc
+    result: dict[str, str] = {}
+    for key, val in parsed.items():
+        if isinstance(val, bytes):
+            raise ValidationError(
+                f"Error parsing parameter '{name}': Invalid type for parameter {key}, "
+                f"value: {val!r}, valid types: <class 'str'>",
+                operation=operation,
+            )
+        result[key] = val
+    return result
 
 
 def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
@@ -86,18 +104,20 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
 class _Parser:
     """Recursive-descent flat-map parser mirroring aws-cli's ``ShorthandParser``.
 
-    Scoped to flat scalar maps (the only shape ``--metadata`` uses): the
-    explicit-list ``[...]`` / hash ``{...}`` constructs and the ``@=`` paramfile
-    operator are not handled. The returned dict preserves insertion order, so a
-    caller can keep the user's pair order.
+    Scoped to flat scalar maps plus the ``@=`` paramfile operator (the shapes
+    ``--metadata`` accepts); the explicit-list ``[...]`` / hash ``{...}``
+    constructs are not handled. The returned dict preserves insertion order,
+    so a caller can keep the user's pair order.
     """
 
-    def __init__(self, value: str) -> None:
+    def __init__(self, value: str, *, name: str, operation: str) -> None:
         self._value = value
         self._index = 0
+        self._name = name
+        self._operation = operation
 
-    def parse(self) -> dict[str, str]:
-        params: dict[str, str] = {}
+    def parse(self) -> dict[str, str | bytes]:
+        params: dict[str, str | bytes] = {}
         key, val = self._keyval()
         params[key] = val
         last_index = self._index
@@ -114,15 +134,28 @@ class _Parser:
             last_index = self._index
         return params
 
-    def _keyval(self) -> tuple[str, str]:
+    def _keyval(self) -> tuple[str, str | bytes]:
+        # No empty-key guard - aws-cli's _keyval has none: with the cursor on
+        # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
+        # proceeds, rc 0), and anything else fails _expect with aws's
+        # "Expected: '='" wording (rc 252 either way).
         key = self._key()
-        if not key:
-            raise _ShorthandParseError(
-                f"Expected: '<key>', received: '{self._current_for_msg()}' for input:\n"
-                f"{self._error_marker(self._index)}"
-            )
+        # aws grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
+        # '@' opts the value into paramfile resolution; aws probes it with the
+        # same try/expect shape (whitespace consumed either way).
+        resolve_paramfiles = False
+        try:
+            self._expect("@", consume_whitespace=True)
+            resolve_paramfiles = True
+        except _ShorthandParseError:
+            pass
         self._expect("=", consume_whitespace=True)
-        return key, self._scalar_value()
+        value = self._scalar_value()
+        if resolve_paramfiles:
+            loaded = paramfile.get_paramfile(value, name=self._name, operation=self._operation)
+            if loaded is not None:
+                return key, loaded
+        return key, value
 
     def _key(self) -> str:
         start = self._index
@@ -183,9 +216,6 @@ class _Parser:
     def _consume_whitespace(self) -> None:
         while not self._at_eof() and self._value[self._index] in string.whitespace:
             self._index += 1
-
-    def _current_for_msg(self) -> str:
-        return self._value[self._index] if self._index < len(self._value) else "EOF"
 
     def _at_eof(self) -> bool:
         return self._index >= len(self._value)

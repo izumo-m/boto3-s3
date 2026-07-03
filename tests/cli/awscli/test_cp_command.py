@@ -15,8 +15,10 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   ``'CRC32'`` on upload-path operations (PutObject / CreateMultipartUpload /
   UploadPart): both engines inject a default integrity checksum - aws via its
   bundled botocore, ours via pip s3transfer - they just pick different
-  algorithms. ``ChecksumMode: 'ENABLED'`` on HeadObject is dropped (the
-  checksum option surface is stage 2, docs/cli.md section 5.7).
+  algorithms. ``ChecksumMode: 'ENABLED'`` on the single-source HeadObject is
+  kept verbatim: like aws's filegenerator we setdefault it when the client
+  resolves ``response_checksum_validation`` to ``when_supported`` (the botocore
+  default), so the recorded HEAD matches aws.
 - ``LastModified`` strings become ``datetime`` objects and string
   ``ContentLength``/sizes become ints (no output parser runs, recorder rule).
 - ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
@@ -28,7 +30,10 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   aws-cli's ``BufferedBytesIO`` onto ``sys.stdin``.
 - The case-conflict ``*_with_existing_file`` variants keep the aws-cli's
   skip-on-case-sensitive-filesystem guard (``os.path.exists`` cannot see a
-  case variant on Linux), expressed as a runtime probe of the test tmpdir.
+  case variant on Linux), via the ``case_insensitive_workdir`` fixture
+  (tests/conftest.py): it runs them on a case-insensitive dir from
+  ``BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`` (or a natively case-insensitive
+  tmp dir on macOS / Windows) and skips otherwise.
 
 Not ported, with reasons:
 
@@ -55,7 +60,7 @@ from unittest import mock
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.naming import relative_path
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -63,6 +68,13 @@ from tests.utils.recorder import ApiCall, make_recording_client
 MB = 1024**2
 _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
+# The case-conflict "two S3 twins in one listing" tests detect the conflict via
+# the gate's in-flight set, which only holds while the first twin's download is
+# still running. That needs a non-blocking (threaded) submit so the gate runs
+# ahead of completions - aws-cli's own functional tests use a single worker
+# (max_concurrent_requests = 1) for exactly this. NonThreadedExecutor would
+# complete each twin before the next is judged, emptying the set.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 SOURCE_BUCKET = "source-bucket"
 SOURCE_KEY = "source-key"
@@ -75,10 +87,11 @@ def _run_cmd(
     parsed_responses: list[dict[str, Any] | Exception],
     argv: list[str],
     expected_rc: int = 0,
+    transfer_config: TransferConfig = _SYNC_CONFIG,
 ) -> tuple[CliResult, list[ApiCall]]:
     """The port's ``self.run_cmd``: in-process main() with a recording client."""
     client, calls = make_recording_client(parsed_responses)
-    ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC_CONFIG)
+    ctx = Context(client_factory=lambda _args: client, transfer_config=transfer_config)
     result = run_cli_in_process(argv, ctx=ctx)
     assert result.rc == expected_rc, (result.rc, result.stdout, result.stderr, calls)
     return result, calls
@@ -235,8 +248,9 @@ class TestCPCommand:
         (tmp_path / "foo.txt").write_text("mycontent")
         result, calls = _run_cmd([], ["cp", full_path, "s3://bucket/key.txt", "--dryrun"])
         assert calls == []
-        assert f"(dryrun) upload: {relative_path(full_path)} to s3://bucket/key.txt" in (
-            result.stdout
+        assert (
+            f"(dryrun) upload: {LocalStorage.relative_path(full_path)} to s3://bucket/key.txt"
+            in (result.stdout)
         )
 
     def test_error_on_same_line_as_status(self, tmp_path: Any) -> None:
@@ -247,8 +261,9 @@ class TestCPCommand:
             ["cp", full_path, "s3://bucket-not-exist/key.txt"],
             expected_rc=1,
         )
+        rendered = LocalStorage.relative_path(full_path)
         assert (
-            f"upload failed: {relative_path(full_path)} to s3://bucket-not-exist/key.txt An error"
+            f"upload failed: {rendered} to s3://bucket-not-exist/key.txt An error"
         ) in result.stderr
 
     def test_upload_grants(self, tmp_path: Any) -> None:
@@ -335,10 +350,11 @@ class TestCPCommand:
             [head_object_response()], ["cp", "s3://bucket/key.txt", target, "--dryrun"]
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})
+            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
         ]
-        assert f"(dryrun) download: s3://bucket/key.txt to {relative_path(target)}" in (
-            result.stdout
+        assert (
+            f"(dryrun) download: s3://bucket/key.txt to {LocalStorage.relative_path(target)}"
+            in (result.stdout)
         )
 
     def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:
@@ -357,7 +373,7 @@ class TestCPCommand:
             ["cp", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--dryrun"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt"})
+            ("HeadObject", {"Bucket": "bucket", "Key": "key.txt", "ChecksumMode": "ENABLED"})
         ]
         assert "(dryrun) copy: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
@@ -771,7 +787,15 @@ class TestCpCommandWithRequesterPayer:
             ["cp", "s3://mybucket/mykey", str(tmp_path), "--request-payer"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
+            (
+                "HeadObject",
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
+            ),
             ("GetObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
         ]
 
@@ -785,7 +809,15 @@ class TestCpCommandWithRequesterPayer:
             ["cp", "s3://mybucket/mykey", str(tmp_path), "--request-payer"],
         )
         assert [(c.operation, c.params) for c in calls] == [
-            ("HeadObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
+            (
+                "HeadObject",
+                {
+                    "Bucket": "mybucket",
+                    "Key": "mykey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
+            ),
             (
                 "GetObject",
                 {
@@ -834,7 +866,12 @@ class TestCpCommandWithRequesterPayer:
         assert [(c.operation, c.params) for c in calls] == [
             (
                 "HeadObject",
-                {"Bucket": "sourcebucket", "Key": "sourcekey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "sourcebucket",
+                    "Key": "sourcekey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             (
                 "CopyObject",
@@ -878,7 +915,12 @@ class TestCpCommandWithRequesterPayer:
         assert [(c.operation, c.params) for c in calls] == [
             (
                 "HeadObject",
-                {"Bucket": "sourcebucket", "Key": "sourcekey", "RequestPayer": "requester"},
+                {
+                    "Bucket": "sourcebucket",
+                    "Key": "sourcekey",
+                    "RequestPayer": "requester",
+                    "ChecksumMode": "ENABLED",
+                },
             ),
             (
                 "CreateMultipartUpload",
@@ -1343,15 +1385,6 @@ class TestCopyPropsDefaultCpCommand:
         )
 
 
-def _case_insensitive_fs(path: Any) -> bool:
-    probe = path / "CaseProbe.tmp"
-    probe.write_bytes(b"")
-    try:
-        return (path / "caseprobe.tmp").exists()
-    finally:
-        probe.unlink()
-
-
 class _StdinShim:
     def __init__(self, payload: bytes) -> None:
         self.buffer = io.BytesIO(payload)
@@ -1726,32 +1759,31 @@ class TestCpRecursiveCaseConflict:
         # Expect success (not error mode) and no warnings (not warn or skip).
         assert not result.stderr
 
-    def test_error_with_existing_file(self, tmp_path: Any) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.LOWER_KEY).write_text("mycontent")
+    def test_error_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY])],
-            self._cmd(tmp_path, "error"),
+            self._cmd(case_insensitive_workdir, "error"),
             expected_rc=1,
         )
         assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+        # The first (admitted) key still downloads; only the conflicting
+        # second key trips the error gate - so one GetObject is scripted.
         result, _ = _run_cmd(
-            [list_objects_response([self.UPPER_KEY, self.LOWER_KEY])],
+            [list_objects_response([self.UPPER_KEY, self.LOWER_KEY]), get_object_response()],
             self._cmd(tmp_path, "error"),
             expected_rc=1,
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
 
-    def test_warn_with_existing_file(self, tmp_path: Any) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.LOWER_KEY).write_text("mycontent")
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response()],
-            self._cmd(tmp_path, "warn"),
+            self._cmd(case_insensitive_workdir, "warn"),
         )
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
@@ -1763,14 +1795,15 @@ class TestCpRecursiveCaseConflict:
                 get_object_response(),
             ],
             self._cmd(tmp_path, "warn"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Downloading bucket/{self.LOWER_KEY}" in result.stderr
 
-    def test_skip_with_existing_file(self, tmp_path: Any) -> None:
-        if not _case_insensitive_fs(tmp_path):
-            pytest.skip("requires a case-insensitive filesystem (aws-cli skip_if_case_sensitive)")
-        (tmp_path / self.LOWER_KEY).write_text("mycontent")
-        result, _ = _run_cmd([list_objects_response([self.UPPER_KEY])], self._cmd(tmp_path, "skip"))
+    def test_skip_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
+        result, _ = _run_cmd(
+            [list_objects_response([self.UPPER_KEY])], self._cmd(case_insensitive_workdir, "skip")
+        )
         assert f"warning: Skipping bucket/{self.UPPER_KEY}" in result.stderr
 
     def test_skip_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
@@ -1780,6 +1813,7 @@ class TestCpRecursiveCaseConflict:
                 get_object_response(),
             ],
             self._cmd(tmp_path, "skip"),
+            transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"warning: Skipping bucket/{self.LOWER_KEY}" in result.stderr
 

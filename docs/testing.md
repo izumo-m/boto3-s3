@@ -19,6 +19,24 @@ Directory = provenance (awscli port vs own), subdirectory = mechanism
 except e2e (skipped with a reason): any CI would need no Docker, since e2e
 self-skips without `BOTO3_S3_E2E_BUCKET`.
 
+One small group needs a **case-insensitive filesystem**: the `--case-conflict`
+`*_with_existing_file` tests (aws-cli's `skip_if_case_sensitive`), where the
+conflict is seen through `os.path.exists`. They take the `case_insensitive_workdir`
+fixture (tests/conftest.py), which resolves a case-insensitive directory or skips:
+they run as part of the normal suite on macOS / Windows (the tmp dir is already
+case-insensitive) and self-skip on a case-sensitive Linux host. To run them on
+Linux, set **`BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`** to a case-insensitive
+directory - under WSL2 a `/mnt/c/...` path works directly (the Windows drive is
+case-insensitive), no Docker. Where no such path exists,
+`tests/run_case_insensitive_fs.sh` mounts a FAT loopback image in a privileged
+Docker container and points the env var at it (opt-in, like e2e; the default
+`uv run pytest` needs no Docker and self-skips). The "two S3 twins in one listing"
+case-conflict tests instead detect the conflict through the gate's in-flight set
+and run everywhere, but only under a threaded submit (`max_concurrency=1`,
+matching aws's `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
+each twin before the next is judged (docs/transfer.md section "case-conflict
+gate").
+
 ## 2. Exit-code charter enforcement
 
 The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
@@ -51,6 +69,36 @@ commands. Committed to git.
   changes behavior fails visibly.
 - **Replay** - the functional suite seeds moto with the scenario's exact
   layout, runs the CLI in-process, and compares against the golden.
+
+### Endpoint policy (MinIO goldens, occasional real-AWS verification)
+
+A golden is a **drift detector, not ground truth**: the truth the exit-code
+charter binds to is the pinned aws binary's behavior on the *same endpoint*
+as ours, which the parity tests compare directly and unconditionally. So
+goldens are captured against MinIO (fast, free, resettable state), and the
+suite is re-run occasionally against real AWS (`tests/run_e2e.sh`) using the
+**same pinned aws-cli** (`scripts/install-awscli.sh`) - a golden mismatch
+there then isolates the endpoint variable, never the aws-cli version.
+
+When a real-AWS run diverges from a MinIO-captured golden, absorb the
+difference in this order:
+
+1. **Normalize** (preferred): a mechanical difference (request IDs, ETag
+   values, region strings) is folded into the normalizers so both endpoints
+   produce one canonical form - the golden loses no detection power.
+2. **Accepted alternates**: a semantic difference where both shapes are
+   legitimately aws-correct (e.g. a field only real S3 returns) may be
+   allow-listed per scenario. Any such relaxation **must** come with a direct
+   aws<->boto3-s3 same-run equality check on the relaxed field: comparing
+   both sides against one golden is what transitively guaranteed their
+   parity, and an allow-list breaks that transitivity (aws matching
+   alternate X while ours matches alternate Y must still fail).
+3. **`diff_only`** (last resort): a genuinely endpoint-relative outcome
+   (MinIO accepts what S3 rejects, or vice versa) is not frozen into a
+   golden at all - rc equality between the two CLIs remains asserted, per
+   the charter.
+
+None of these relax the rc comparison between the two CLIs (section 2).
 
 Normalization (`tests/utils/harness.py`): for **ls**
 (`normalize_ls_stdout`), leading timestamps are masked (`<TIMESTAMP>` -
@@ -101,7 +149,7 @@ with no isatty gate, so piped stdout carries `Completed ...` segments and
 right-padding), drops those progress statements (time/speed-dependent), and
 **sorts** the remaining result lines (parallel completion order - the rm
 rationale). What sorting and masking relax, the end states pin: goldens
-record `remaining_keys` (bucket), `local_tree` (`dst/` as
+record `remaining_keys` (bucket), `local_tree` (`dest/` as
 `relpath:size:sha256-prefix` entries), and `head_fields` (selected
 HeadObject fields of one probe key - how ContentType/Metadata/StorageClass
 passthrough and the copy-props chain are verified end-to-end). The download
@@ -137,7 +185,7 @@ must never delete the source).
 
 **sync** is cp's model with both end states active at once -
 `remaining_keys` pins the bucket (uploads, copies, S3-side `--delete`) and
-`local_tree` pins `dst/` (downloads, local-side `--delete`); `src_tree` stays
+`local_tree` pins `dest/` (downloads, local-side `--delete`); `src_tree` stays
 `None` (sync never mutates its source, so the inherited field is neither
 captured nor compared). The new scenario knob is
 `CpScenario.local_mtimes`: workdir-relative offsets (+/-1 day) applied with
@@ -176,6 +224,7 @@ string alone cannot prove.
 
 ```
 scripts/compose-up.sh          # idempotent; waits for bucket init
+scripts/install-awscli.sh      # idempotent; aws-cli matching vendor/aws-cli -> .venv/bin
 source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
 uv run pytest                  # full suite including e2e
 scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
@@ -187,10 +236,32 @@ creates both `test-bucket` (manual play) and `boto3-s3-e2e` (e2e suite).
 Only one stack can own ports 9000/9001 - any other stack on those ports
 conflicts; `compose-up.sh` then fails loudly instead of mistaking it for ours.
 
+The e2e diff is only meaningful when the live `aws` matches the version the
+goldens were captured with: the differential compares both CLIs against that
+capture, so an `aws` that adds or drops a flag (e.g. `--no-overwrite`, added
+mid-2.3x) diverges spuriously. `scripts/install-awscli.sh` pins it to the
+vendored `aws-cli` submodule's version - the source the library is ported
+against - by keeping the release zip's self-contained `dist/` and symlinking
+`.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
+matching install is reused rather than re-downloaded).
+
 e2e safety contract: at collection time the suite probes that the `aws`
 binary exists and that the bucket is reachable and **empty** (refusing to run
 against a populated bucket); each test cleans up exactly the keys it seeded,
 and the `bucket` fixture asserts emptiness before and after every test.
+
+**Payload-size budget** (the suite must stay cheap against real AWS): a
+scenario uses the smallest payload that exercises its behavior - byte-scale
+literals almost everywhere; the deliberate exceptions are the multipart
+scenarios at **9 MiB** (just past the 8 MiB threshold; cp/mv/crt, ~7
+scenarios) and `ls`'s 1 MiB human-readable probe. A full run therefore moves
+on the order of **a few hundred MiB total** (each scenario seeds and runs
+per CLI side, so a 9 MiB scenario moves up to ~36 MiB), with transient
+storage peaking around ~20 MiB - far under the 1 GiB comfort line. The
+ceiling is **10 GiB per full run**: a new scenario that needs an MB-scale
+payload keeps it at the smallest size that triggers the behavior and states
+why in the scenario table; anything approaching GB-scale needs an explicit
+design discussion first.
 
 The suites isolate in both directions: the root `tests/conftest.py` forces
 fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
@@ -274,15 +345,17 @@ and skip on default Linux ones.
 ## 6. Import contract
 
 `tests/lib/test_import_contract.py` and `tests/cli/unit/test_import_contract.py`
-pin the lazy-import policy ([`imports.md`](./imports.md)): `import boto3_s3` -
-and the CLI's `--help` / `--version` / usage-error paths - load no
-boto3 / botocore / s3transfer module, and reaching the `S3` entry point may
-load `botocore.exceptions` only. Module-loading cases run in fresh
+pin the lazy-import policy ([`imports.md`](./imports.md)): `import boto3_s3`
+- and the CLI's stage-1 paths (the top-level `--help` / `--version` and the
+pre-dispatch usage errors) - load no boto3 / botocore / s3transfer module;
+reaching the `S3` entry point, a determined subcommand's `--help`, or its
+post-parse usage errors may load botocore, never the boto3 / s3transfer
+client stack. Module-loading cases run in fresh
 interpreters (`python -c` subprocesses) so imports already made by the test
 runner can't mask a regression; a resolve-every-symbol case guards the
 three-way `__all__` / `TYPE_CHECKING` / `_EXPORT_HOMES` mirror in the lazy
 `__init__`. When a subcommand is added, extend the CLI cases (its `--help`
-must stay SDK-free).
+must stay client-stack-free).
 
 ## 7. Known limitations
 

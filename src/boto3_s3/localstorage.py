@@ -13,7 +13,9 @@ warning has no Python-3 equivalent (``os.listdir`` of a ``str`` path always yiel
 ``str``) and is not ported.
 
 The walk is a pipeline of **protected, overridable** ``LocalStorage`` methods -
-:meth:`~LocalStorage._walk` (recursion), :meth:`~LocalStorage._should_ignore` (the
+:meth:`~LocalStorage._walk` (recursion), :meth:`~LocalStorage._sorted_child_names`
+(one directory's vetted names in the aws-cli sort order shared with the
+one-level scan), :meth:`~LocalStorage._should_ignore` (the
 symlink-skip + warning battery), :meth:`~LocalStorage._triggers_warning`,
 :meth:`~LocalStorage._stat_info` (one walk entry's ``LocalFileInfo``), and
 :meth:`~LocalStorage._stat_one` (a single path, for ``get_fileinfo``) - so a
@@ -174,13 +176,27 @@ class LoopDetector:
         self._ancestors.pop()
 
 
-def _translate_os_error(exc: OSError, *, operation: str, key: str | None) -> Boto3S3Error:
-    """Map an ``OSError`` to the library taxonomy (mirror of ``s3_errors``)."""
+def translate_os_error(
+    exc: OSError,
+    *,
+    operation: str | None,
+    key: str | None,
+    message: str | None = None,
+) -> Boto3S3Error:
+    """Map an ``OSError`` to the library taxonomy (the local mirror of
+    ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
+    permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
+
+    Shared by every local-filesystem failure path (this backend, the engines'
+    ``makedirs``, the CLI's destination pre-creation). ``message`` overrides
+    ``str(exc)`` when the caller carries aws-cli wording of its own.
+    """
+    text = str(exc) if message is None else message
     if isinstance(exc, FileNotFoundError):
-        return NotFoundError(str(exc), operation=operation, key=key)
+        return NotFoundError(text, operation=operation, key=key)
     if isinstance(exc, PermissionError):
-        return AccessDeniedError(str(exc), operation=operation, key=key)
-    return TransportError(str(exc), operation=operation, key=key)
+        return AccessDeniedError(text, operation=operation, key=key)
+    return TransportError(text, operation=operation, key=key)
 
 
 class LocalStorage(Storage):
@@ -192,6 +208,9 @@ class LocalStorage(Storage):
     """
 
     scheme: ClassVar[str] = "local"
+    #: Local roots and keys are host-native (:meth:`format` returns ``os.sep``
+    #: forms), unlike every other backend's ``/`` space.
+    sep: ClassVar[str] = os.sep
     #: The local filesystem supports every transfer operation: byte I/O both
     #: ways, single-entry stat, a sorted walk (so ``SORTED_SCAN``), and delete.
     capabilities: ClassVar[StorageCapability] = (
@@ -203,8 +222,31 @@ class LocalStorage(Storage):
         | StorageCapability.DELETE
     )
 
+    @staticmethod
+    def relative_path(filename: str, start: str = os.path.curdir) -> str:
+        """Render a local path relative to ``start`` (aws-cli's ``relative_path``).
+
+        aws-cli splits first and joins the basename back on, so an in-tree
+        path always carries a directory prefix (``./a.txt``, ``../x/a.txt``) -
+        the form aws prints in transfer result lines and warnings. Where no
+        relative path exists (different Windows drives), the absolute path is
+        returned instead of raising.
+        """
+        try:
+            dirname, basename = os.path.split(filename)
+            relative_dir = os.path.relpath(dirname, start)
+            return os.path.join(relative_dir, basename)
+        except ValueError:
+            return os.path.abspath(filename)
+
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = os.fspath(path)
+        # Absolutize once, at construction (against the cwd then): every scan /
+        # get_fileinfo anchors here so ``FileInfo.key`` comes out absolute, and
+        # ``os.path.abspath`` calls ``os.getcwd()`` - too costly to repeat per
+        # entry. Binding the cwd here also keeps a relative path resolving
+        # consistently if the process later chdir's.
+        self._abspath = os.path.abspath(self._path)
 
     @property
     def path(self) -> str:
@@ -214,10 +256,30 @@ class LocalStorage(Storage):
     def as_text(self) -> str:
         """Return the path as given (:meth:`Storage.as_text`).
 
-        The raw constructor form, verbatim - the trailing-separator rule that
-        ``naming`` applies reads this unmodified token.
+        The raw constructor form, verbatim - the trailing-separator rule of
+        :meth:`format` reads this unmodified token.
         """
         return self._path
+
+    @override
+    def format(self, *, dir_op: bool) -> tuple[str, bool]:
+        """Format this local side; return ``(root, use_src_name)`` (:meth:`Storage.format`).
+
+        aws-cli's ``FileFormat.local_format`` on the held state: the root is
+        the construction-time :attr:`_abspath` (the same anchor ``scan`` walks
+        from, so the plan and the walk agree even if the process chdir'd
+        since), and the trailing-separator rule reads the *raw* constructor
+        form (``abspath`` strips it). An existing directory, a ``dir_op``, or
+        a user-typed trailing ``os.sep`` all mean directory semantics - the
+        root gains a trailing ``os.sep`` and the destination side would take
+        the source's name.
+        """
+        full_path = self._abspath
+        if (os.path.exists(full_path) and os.path.isdir(full_path)) or dir_op:
+            return full_path + os.sep, True
+        if self._path.endswith(os.sep):
+            return full_path + os.sep, True
+        return full_path, False
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
@@ -229,7 +291,7 @@ class LocalStorage(Storage):
         guard, and the aws-cli-worded warning channel a transfer needs.
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
-        ends with ``/``), anchored at ``os.path.abspath(self._path)`` so
+        ends with ``/``), anchored at the absolutized path (``self._abspath``) so
         ``FileInfo.key`` is absolute. The S3 listing knobs on ``options``
         (``page_size`` / ``request_payer`` / ...) are ignored here (docs on
         ``ScanOptions``).
@@ -245,7 +307,7 @@ class LocalStorage(Storage):
             return
         yield from _paged(
             self._scan_one_level(
-                os.path.abspath(self._path),
+                self._abspath,
                 follow_symlinks=options.follow_symlinks,
                 on_warning=options.on_warning,
             )
@@ -283,8 +345,8 @@ class LocalStorage(Storage):
         # Anchor at the absolutized path with a trailing separator (aws-cli's
         # local_format(dir_op=True) form): FileInfo.key comes out absolute, and a
         # non-directory root degrades to a "does not exist" warning rather than an
-        # os.listdir error.
-        start = os.path.abspath(self._path) + os.sep
+        # os.listdir error. self._abspath is computed once at construction.
+        start = self._abspath + os.sep
         # No detector unless asked and reachable (a cycle needs a followed
         # symlink); None then costs no per-directory stat.
         detector = LoopDetector(start) if detect_loops and follow_symlinks else None
@@ -308,20 +370,7 @@ class LocalStorage(Storage):
         """The recursive worker behind :meth:`walk_local` (an override seam)."""
         if self._should_ignore(path, follow_symlinks=follow_symlinks, notify=notify):
             return
-        names: list[str] = []
-        for name in os.listdir(path):
-            entry_path = os.path.join(path, name)
-            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
-                continue
-            if os.path.isdir(entry_path):
-                name += os.sep
-            names.append(name)
-        # str sorts by code point, which equals UTF-8 byte order (UTF-8 preserves
-        # code-point order), so this is S3's exact key order, not an approximation.
-        # The os.sep -> "/" fold puts a directory ("foo/") after a sibling file
-        # ("foo.txt"), since "/" (0x2F) > "." (0x2E) - matching aws-cli.
-        names.sort(key=lambda item: item.replace(os.sep, "/"))
-        for name in names:
+        for name in self._sorted_child_names(path, follow_symlinks=follow_symlinks, notify=notify):
             entry_path = os.path.join(path, name)
             if os.path.isdir(entry_path):
                 if detector is not None and detector.is_cycle(entry_path):
@@ -345,6 +394,29 @@ class LocalStorage(Storage):
                 info = self._stat_info(entry_path, notify)
                 if info is not None:
                     yield info
+
+    def _sorted_child_names(
+        self, dir_path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
+    ) -> list[str]:
+        """One directory's vetted child names in aws-cli order (an override seam).
+
+        Entries :meth:`_should_ignore` skips are dropped; a directory name gains
+        a trailing ``os.sep``. str sorts by code point, which equals UTF-8 byte
+        order (UTF-8 preserves code-point order), so this is S3's exact key
+        order, not an approximation. The os.sep -> "/" fold puts a directory
+        ("foo/") after a sibling file ("foo.txt"), since "/" (0x2F) > "." (0x2E)
+        - matching aws-cli.
+        """
+        names: list[str] = []
+        for name in os.listdir(dir_path):
+            entry_path = os.path.join(dir_path, name)
+            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
+                continue
+            if os.path.isdir(entry_path):
+                name += os.sep
+            names.append(name)
+        names.sort(key=lambda item: item.replace(os.sep, "/"))
+        return names
 
     def _should_ignore(
         self, path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
@@ -409,7 +481,7 @@ class LocalStorage(Storage):
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise _translate_os_error(exc, operation="get_fileinfo", key=None) from exc
+            raise translate_os_error(exc, operation="get_fileinfo", key=None) from exc
         if _is_special_file(path):
             notify(
                 f"Skipping file {path}. File is character special device, "
@@ -435,16 +507,7 @@ class LocalStorage(Storage):
             if info is not None:
                 yield info
             return
-        names: list[str] = []
-        for name in os.listdir(root):
-            entry_path = os.path.join(root, name)
-            if self._should_ignore(entry_path, follow_symlinks=follow_symlinks, notify=notify):
-                continue
-            if os.path.isdir(entry_path):
-                name += os.sep
-            names.append(name)
-        names.sort(key=lambda item: item.replace(os.sep, "/"))
-        for name in names:
+        for name in self._sorted_child_names(root, follow_symlinks=follow_symlinks, notify=notify):
             entry_path = os.path.join(root, name)
             # One level down: the entry name itself is the root-relative key
             # (directory names already carry a trailing separator).
@@ -463,12 +526,32 @@ class LocalStorage(Storage):
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Open ``key`` (resolved against :attr:`path`) as a binary stream.
+        """Open ``key`` (resolved against the absolutized :attr:`path`) as a binary stream.
 
-        ``"wb"`` creates missing parent directories first. ``size`` is unused
+        ``"wb"`` creates missing parent directories first and writes **in
+        place** - no temp-file + rename, so an aborted write leaves a partial
+        file (the built-in s3->local download route is atomic-on-failure via
+        s3transfer's temp file instead; this building block keeps the plain
+        open-write contract). ``size`` is unused
         locally. OS errors translate to the library taxonomy.
+
+        ``key`` is joined under the location with ``os.path.join``, so a ``..``
+        or absolute ``key`` resolves outside it (``"../sib"`` -> the parent's
+        ``sib``). That is deliberate, not a hole: this is a building block whose
+        caller owns both the location and the key, so there is no trust boundary
+        to confine - ``..`` should navigate the parent rather than be rejected.
+        The one genuinely untrusted path - a *remote* S3 key steering a recursive
+        download's local target - is guarded separately, where the key arrives
+        from the bucket (``s3.py``'s ``_warn_parent_reference`` port, warn-and-skip
+        for ``aws s3`` parity).
         """
-        target = os.path.join(self._path, to_native_path(key))
+        # Anchor on the construction-time absolutized path like scan /
+        # get_fileinfo, so a later chdir cannot move where a relative
+        # location's keys resolve. key="" is the location itself (the
+        # get_fileinfo convention) - os.path.join(x, "") would append a
+        # trailing separator and, on "wb", makedirs a directory at the
+        # target file's own path before the open fails.
+        target = self._abspath if not key else os.path.join(self._abspath, to_native_path(key))
         try:
             if mode == "rb":
                 return cast("BinaryIO", open(target, "rb"))
@@ -477,7 +560,7 @@ class LocalStorage(Storage):
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(target, "wb"))
         except OSError as exc:
-            raise _translate_os_error(exc, operation="open", key=key) from exc
+            raise translate_os_error(exc, operation="open", key=key) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -486,7 +569,7 @@ class LocalStorage(Storage):
         try:
             os.remove(target)
         except OSError as exc:
-            raise _translate_os_error(exc, operation="delete", key=info.key) from exc
+            raise translate_os_error(exc, operation="delete", key=info.key) from exc
 
     @override
     def get_fileinfo(
@@ -498,13 +581,16 @@ class LocalStorage(Storage):
     ) -> LocalFileInfo | None:
         """Stat a single path (:meth:`Storage.get_fileinfo`).
 
-        Anchored at ``os.path.abspath(self._path)`` (joined with ``key`` for a
-        child), so ``FileInfo.key`` is absolute; ``compare_key`` is its basename.
+        Anchored at the absolutized path (``self._abspath``, joined with ``key``
+        for a child), so ``FileInfo.key`` is absolute; ``compare_key`` is its
+        basename. As with :meth:`open`, ``key`` is joined under the location and
+        a ``..`` / absolute ``key`` deliberately resolves outside it (a building
+        block an app drives, not a confinement boundary - see :meth:`open`).
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
         )
-        target = os.path.abspath(self._path)
+        target = self._abspath
         if key:
             target = os.path.join(target, to_native_path(key))
         info = self._stat_one(target, follow_symlinks=follow_symlinks, notify=notify)
@@ -524,4 +610,4 @@ def _paged(infos: Iterator[FileInfo]) -> Iterator[list[FileInfo]]:
         yield page
 
 
-__all__ = ["LocalStorage", "LoopDetector", "to_native_path"]
+__all__ = ["LocalStorage", "LoopDetector", "to_native_path", "translate_os_error"]

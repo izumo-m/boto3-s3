@@ -2,7 +2,15 @@
 
 
 class Boto3S3Error(Exception):
-    """Root of every exception raised from boto3-s3 public APIs."""
+    """Root of every exception raised from boto3-s3 public APIs.
+
+    Never raised directly for a known failure - every raise site uses one of
+    the subclasses below, so ``except Boto3S3Error`` is the catch-all. Direct
+    instances appear only where no classification exists: the error
+    translators' last-resort fallbacks (``s3storage.translate_boto_error``,
+    the deleter's per-key unknown-code entries) and the message envelope on
+    WARNED / NOTICE ``OpResult`` records.
+    """
 
     def __init__(
         self,
@@ -30,12 +38,44 @@ class ValidationError(Boto3S3Error):
     """Caller-supplied value, precondition, or state coherence is invalid."""
 
 
+class InvalidValueError(ValidationError):
+    """A caller-supplied value fails post-parse conversion or validation.
+
+    aws-cli converts these *after* argument parsing (a bare ``int()`` on a
+    ``cli_type_name: integer`` option, its timeout session handler), so the
+    ``ValueError`` reaches its general exception handler (rc 255) - not the
+    rc-252 usage path a parse-time rejection takes. The CLI's exit-code
+    mapping keys on this subclass to preserve that distinction; library
+    consumers can still catch it as a :class:`ValidationError`.
+    """
+
+
 class TransportError(Boto3S3Error):
     """Network or local I/O failure (connection, timeout, OSError)."""
 
 
 class ConfigurationError(Boto3S3Error):
-    """Required configuration (credentials, profile, endpoint) is missing or unresolvable."""
+    """Required configuration is missing or unresolvable.
+
+    Raised plainly for the failures aws gives dedicated handlers (rc 253):
+    unresolvable credentials / region - and for an environment lacking a
+    required capability (an SDK floor, an absent awscrt). A configuration
+    that is *present but invalid* is the :class:`InvalidConfigError`
+    refinement below.
+    """
+
+
+class InvalidConfigError(ConfigurationError):
+    """A configuration value is present but invalid or unusable.
+
+    The counterpart of aws-cli's ``InvalidConfigError``: a bad ``[s3]``
+    config value, an unusable profile, partial credentials. aws reports
+    these through its general exception handler (rc 255) - unlike the
+    unresolvable credentials / region pair, whose dedicated handlers exit
+    253 (plain :class:`ConfigurationError` here). The CLI's exit-code
+    mapping keys on this subclass to preserve that distinction; library
+    consumers can still catch it as a :class:`ConfigurationError`.
+    """
 
 
 class CancelledError(Boto3S3Error):
@@ -79,6 +119,8 @@ __all__ = [
     "Boto3S3Error",
     "CancelledError",
     "ConfigurationError",
+    "InvalidConfigError",
+    "InvalidValueError",
     "NotFoundError",
     "TransportError",
     "ValidationError",

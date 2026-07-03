@@ -2,7 +2,7 @@
 
 ``Command`` formalizes the contract ``cli.py`` dispatches through - argument
 registration plus execution - so wiring a new subcommand is one subclass plus
-one entry in ``cli._COMMANDS``. ``Context`` is the injection point for the
+one entry in ``cli._COMMAND_TABLE``. ``Context`` is the injection point for the
 dependencies ``main()`` resolves at runtime; tests hand it fakes instead of
 monkeypatching module attributes.
 """
@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # Pure-Python name (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error
-from boto3_s3_cli.globals import build_client, build_service_client
+from boto3_s3 import InvalidValueError
+from boto3_s3_cli import paramfile
+from boto3_s3_cli.clientfactory import build_client, build_service_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,11 +37,11 @@ class Context:
     """Runtime dependencies ``main()`` hands to the dispatched :class:`Command`.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals (default: :func:`boto3_s3_cli.globals.build_client`).
+    connection/auth globals (default: :func:`boto3_s3_cli.clientfactory.build_client`).
     Tests inject a factory returning a fake client.
     ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
     path validation needs (default:
-    :func:`boto3_s3_cli.globals.build_service_client`). ``transfer_config``
+    :func:`boto3_s3_cli.clientfactory.build_service_client`). ``transfer_config``
     overrides the transfer engine's defaults (aws-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
@@ -83,9 +84,46 @@ def parse_integer_option(value: object, *, operation: str) -> int:
     try:
         return int(str(value))
     except ValueError as exc:
-        # Base category: main() maps it to 255 (not Validation/Configuration,
-        # no ClientError cause), and str(exc) mirrors aws's message.
-        raise Boto3S3Error(str(exc), operation=operation) from exc
+        # InvalidValueError: main() maps it to 255 (aws's general handler),
+        # not ValidationError's 252, and str(exc) mirrors aws's message.
+        raise InvalidValueError(str(exc), operation=operation) from exc
+
+
+def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
+    """aws's parse-time ``file://`` expansion for a plain option value (252).
+
+    aws expands paramfile references on every plain option during argument
+    parsing - even the string-typed integer options - so a bad reference is
+    its ParamValidation 252 *before* the bare ``int()`` coercion's 255
+    (measured: ``--page-size file:///no/x`` exits 252). Runs in place; a
+    value without the prefix (or a non-string, e.g. an integer default) is
+    untouched.
+    """
+    value = getattr(args, option, None)
+    if isinstance(value, str) and value.startswith("file://"):
+        loaded = paramfile.read_text_paramfile(
+            value, name=f"--{option.replace('_', '-')}", operation=operation
+        )
+        setattr(args, option, loaded)
+
+
+def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
+    """Register ``--page-size`` (shared by ls / rm and the transfer family).
+
+    Not range-validated: aws-cli passes any int through and lets the server
+    decide (0 lists nothing -> rc 1; negative -> InvalidArgument -> rc 254),
+    and the exit-code charter requires matching both. No ``type=int``: a
+    non-integer must exit 255 like aws's bare ``int()`` conversion, not
+    argparse's 252 (:func:`parse_integer_option` converts at ``run()`` start).
+    """
+    parser.add_argument("--page-size", default=1000)
+
+
+def add_request_payer_argument(parser: argparse.ArgumentParser) -> None:
+    """Register ``--request-payer`` (optional value; ``requester`` is the only one)."""
+    parser.add_argument(
+        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
+    )
 
 
 class Command(ABC):

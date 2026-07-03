@@ -88,28 +88,28 @@ SCENARIOS: tuple[CpScenario, ...] = (
     # -- downloads ----------------------------------------------------------
     CpScenario(
         name="crt_download_single",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/down/a.txt", "dst/a.txt"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/down/a.txt", "dest/a.txt"),
         seed=_SMALL_SEED,
         capture_tree=True,
-        mtime_key=("down/a.txt", "dst/a.txt"),
+        mtime_key=("down/a.txt", "dest/a.txt"),
     ),
     CpScenario(
         name="crt_download_multipart",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/down/big.bin", "dst/big.bin"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/down/big.bin", "dest/big.bin"),
         seed_kwargs=_BIG_SEED_KWARGS,
         capture_tree=True,
-        mtime_key=("down/big.bin", "dst/big.bin"),
+        mtime_key=("down/big.bin", "dest/big.bin"),
     ),
     # -- mv -----------------------------------------------------------------
     CpScenario(
         name="crt_mv_upload",
         argv=("mv", "src/a.txt", f"s3://{BUCKET_TOKEN}/moved/a.txt"),
         local_src=_SMALL_SRC,
-        capture_tree=True,  # the source side is emptied; dst/ stays empty
+        capture_tree=True,  # the source side is emptied; dest/ stays empty
     ),
     CpScenario(
         name="crt_mv_download",
-        argv=("mv", f"s3://{BUCKET_TOKEN}/down/a.txt", "dst/a.txt"),
+        argv=("mv", f"s3://{BUCKET_TOKEN}/down/a.txt", "dest/a.txt"),
         seed=_SMALL_SEED,
         capture_tree=True,
     ),
@@ -121,7 +121,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="crt_sync_download",
-        argv=("sync", f"s3://{BUCKET_TOKEN}/down", "dst"),
+        argv=("sync", f"s3://{BUCKET_TOKEN}/down", "dest"),
         seed=_TREE_SEED,
         capture_tree=True,
     ),

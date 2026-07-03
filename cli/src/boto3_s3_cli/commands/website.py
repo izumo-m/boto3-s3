@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from boto3_s3 import ValidationError
+from boto3_s3_cli import usage
 from boto3_s3_cli.commands.base import Command, Context
 
 
@@ -54,8 +55,7 @@ class WebsiteCommand(Command):
             # through, exactly like aws. The endswith check catches "b//",
             # whose leftover slash S3Storage's split would silently drop.
             raise ValidationError(
-                # botocore's ParamValidationError str uses a colon + newline.
-                f'Parameter validation failed:\nInvalid bucket name "{path}"',
+                usage.invalid_bucket_name_message(path),
                 operation="website",
             )
         S3().website(

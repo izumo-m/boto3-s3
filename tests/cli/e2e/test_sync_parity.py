@@ -2,7 +2,7 @@
 
 The cp parity harness with sync's twist: both end states matter at once -
 ``remaining_keys`` pins the bucket (uploads, copies, S3-side ``--delete``)
-and ``local_tree`` pins ``dst/`` (downloads, local-side ``--delete``).
+and ``local_tree`` pins ``dest/`` (downloads, local-side ``--delete``).
 ``CpScenario.local_mtimes`` makes the time judgments deterministic: local
 files are stamped a day around "now" while the seeds land at ~now, so the
 same skew holds for both sides regardless of run timing. The source tree
@@ -75,7 +75,7 @@ def _run_side(
         result=result,
         lines=normalize_cp_stdout(result.stdout, bucket=bucket),
         remaining=remaining_keys(s3_client, bucket),
-        tree=capture_local_tree(str(workdir / "dst")) if scenario.capture_tree else None,
+        tree=capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None,
         head=head,
     )
     if scenario.mtime_key is not None:

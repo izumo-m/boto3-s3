@@ -4,23 +4,23 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import io
 import logging
-import os
 import sys
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
 
-from boto3_s3 import Boto3S3Error, ConfigurationError, ValidationError
-from boto3_s3_cli import globals as common
+from boto3_s3 import (
+    Boto3S3Error,
+    ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
+    ValidationError,
+)
+from boto3_s3_cli import globalargs
+from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
-from boto3_s3_cli.commands.cp import CpCommand
-from boto3_s3_cli.commands.ls import LsCommand
-from boto3_s3_cli.commands.mb import MbCommand
-from boto3_s3_cli.commands.mv import MvCommand
-from boto3_s3_cli.commands.presign import PresignCommand
-from boto3_s3_cli.commands.rb import RbCommand
-from boto3_s3_cli.commands.rm import RmCommand
-from boto3_s3_cli.commands.sync import SyncCommand
-from boto3_s3_cli.commands.website import WebsiteCommand
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
@@ -37,55 +37,169 @@ _CONFIGURATION_ERROR_RC = 253
 _CLIENT_ERROR_RC = 254
 _GENERAL_ERROR_RC = 255
 
-# --cli-auto-prompt is resolved from the raw argv before argparse runs (like
-# aws-cli's resolve_auto_prompt_mode), so it can fire even without a subcommand
-# (`boto3-s3 --cli-auto-prompt`, which argparse would otherwise reject as a
-# missing command). These flags take no value, so a membership test is exact.
-_AUTO_PROMPT_FLAG = "--cli-auto-prompt"
-_NO_AUTO_PROMPT_FLAG = "--no-cli-auto-prompt"
-# Presence of any of these means "show help/version, don't prompt" (aws-cli's
-# _NO_AUTO_PROMPT_ARGS analog; ours is --help/-h/--version since we have no `help`
-# subcommand).
-_NO_PROMPT_ARGS = ("--help", "-h", "--version")
-# The env var and profile config key aws-cli resolves cli_auto_prompt from
-# (aws-cli clidriver.py _construct_cli_auto_prompt_chain: env > scoped config >
-# 'off'). Read SDK-free so the resolution stays import-clean on usage paths.
-_AUTO_PROMPT_ENV = "AWS_CLI_AUTO_PROMPT"
-_AUTO_PROMPT_CONFIG_KEY = "cli_auto_prompt"
+# Every wired subcommand: name -> (defining module, class name, one-line help).
+# Registering here is the only wiring step. The table is the single source for
+# stage 1 of the dispatch (names + help lines, rendered WITHOUT importing any
+# command module - the lazy-dispatch contract, docs/imports.md) and for stage 2
+# (only the matched module is imported). The help text is duplicated from each
+# class's `help` ClassVar on purpose - stage 1 must render `--help` without the
+# class - and test_command_table.py pins the two against drift.
+_COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
+    "cp": (
+        "boto3_s3_cli.commands.cp",
+        "CpCommand",
+        "Copy a local file or S3 object to another location locally or in S3.",
+    ),
+    "ls": (
+        "boto3_s3_cli.commands.ls",
+        "LsCommand",
+        "List S3 objects and common prefixes under a prefix or all S3 buckets.",
+    ),
+    "mb": ("boto3_s3_cli.commands.mb", "MbCommand", "Create an S3 bucket."),
+    "mv": (
+        "boto3_s3_cli.commands.mv",
+        "MvCommand",
+        "Move a local file or S3 object to another location locally or in S3.",
+    ),
+    "presign": (
+        "boto3_s3_cli.commands.presign",
+        "PresignCommand",
+        "Generate a pre-signed URL for an Amazon S3 object.",
+    ),
+    "rb": (
+        "boto3_s3_cli.commands.rb",
+        "RbCommand",
+        "Delete an empty S3 bucket (--force deletes its objects first).",
+    ),
+    "rm": (
+        "boto3_s3_cli.commands.rm",
+        "RmCommand",
+        "Delete an S3 object, or objects under a prefix (--recursive).",
+    ),
+    "sync": ("boto3_s3_cli.commands.sync", "SyncCommand", "Syncs directories and S3 prefixes."),
+    "website": (
+        "boto3_s3_cli.commands.website",
+        "WebsiteCommand",
+        "Set the website configuration for a bucket.",
+    ),
+}
 
-# Every wired subcommand. Registering the class here is the only wiring step; a
-# fresh instance is created per parser build and per dispatch (commands/base.py).
-_COMMANDS: tuple[type[Command], ...] = (
-    CpCommand,
-    LsCommand,
-    MbCommand,
-    MvCommand,
-    PresignCommand,
-    RbCommand,
-    RmCommand,
-    SyncCommand,
-    WebsiteCommand,
-)
+# The stage-1 namespace slot that carries everything after the subcommand
+# token, verbatim, into stage 2's real parse.
+_REST_DEST = "stage2_argv"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level ``boto3-s3`` parser with one subparser per subcommand.
+if TYPE_CHECKING:
+    # Generic only in typeshed; at runtime the class is not subscriptable.
+    _SubParsersActionBase = argparse._SubParsersAction[argparse.ArgumentParser]  # pyright: ignore[reportPrivateUsage]
+else:
+    _SubParsersActionBase = argparse._SubParsersAction
 
-    Globals are registered on the top-level parser (real defaults) and again on a
-    shared parent for the subparsers (suppressed defaults), so they work before or
-    after the subcommand without the subcommand clobbering them.
+
+class _Stage1CommandAction(_SubParsersActionBase):
+    """Match the subcommand and capture its remainder verbatim (stage 1).
+
+    The stock subparsers action hands the remainder to the named sub parser to
+    parse; stage 1 must not interpret it at all - an option there belongs to
+    the real command parser stage 2 builds, while an unknown option *before*
+    the subcommand must stay a top-level extra (aws rejects it at the top
+    level; ``argparse.REMAINDER`` cannot do this - it refuses to start on an
+    option-like token). Overriding only ``__call__`` keeps everything else the
+    parent provides: the PARSER-nargs greedy match, the invalid-choice /
+    missing-command errors (the parser raises them before the action runs),
+    and the ``--help`` listing ``add_parser`` feeds.
+    """
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        assert isinstance(values, list)  # nargs=PARSER always yields a list
+        setattr(namespace, self.dest, str(values[0]))
+        setattr(namespace, _REST_DEST, [str(v) for v in values[1:]])
+
+
+def _load_command(name: str) -> type[Command]:
+    """Import the matched subcommand's module and return its class (stage 2)."""
+    module_name, class_name, _help = _COMMAND_TABLE[name]
+    return cast("type[Command]", getattr(importlib.import_module(module_name), class_name))
+
+
+def _shared_globals_parent() -> argparse.ArgumentParser:
+    """The suppressed-defaults globals parent every subcommand parser takes.
+
+    Suppressing the defaults stops an unspecified flag from clobbering a value
+    parsed *before* the subcommand, so a global may sit on either side -
+    ``boto3-s3 --profile foo ls s3://b`` and ``boto3-s3 ls s3://b --profile
+    foo`` both work (matching aws-cli).
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    globalargs.add_common_arguments(shared, suppress_defaults=True)
+    return shared
+
+
+def _build_stage1_parser() -> argparse.ArgumentParser:
+    """The pre-determination parser: globals + the subcommand names and help lines.
+
+    No command module is imported here. The stub entries carry only the
+    table's name/help, so top-level ``--help`` / ``--version`` and the stage-1
+    usage errors (missing subcommand, invalid choice - argparse's wording,
+    remapped to 252) render exactly as the full tree renders them while the
+    path stays SDK- and command-module-free. The stubs are never parsed:
+    :class:`_Stage1CommandAction` records the matched name and the verbatim
+    remainder for stage 2 instead.
     """
     parser = argparse.ArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
-    common.add_common_arguments(parser)
-    shared = argparse.ArgumentParser(add_help=False)
-    common.add_common_arguments(shared, suppress_defaults=True)
+    globalargs.add_common_arguments(parser)
+    subparsers = parser.add_subparsers(
+        dest="command", metavar="<command>", required=True, action=_Stage1CommandAction
+    )
+    for name, (_module, _cls, help_text) in _COMMAND_TABLE.items():
+        subparsers.add_parser(name, help=help_text, add_help=False)
+    return parser
+
+
+def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParser:
+    """The determined subcommand's real parser (stage 2).
+
+    ``prog`` / ``description`` match what ``add_parser`` produces under the
+    full tree, so ``boto3-s3 <cmd> --help`` and the subcommand's usage errors
+    render identically to the pre-split output.
+    """
+    parser = argparse.ArgumentParser(
+        prog=f"boto3-s3 {name}",
+        description=type(command).help,
+        parents=[_shared_globals_parent()],
+    )
+    command.configure(parser)
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the complete parser: every subcommand's full argument surface.
+
+    The normal dispatch no longer calls this (stage 1 + stage 2 above); it
+    remains the single source of truth the auto-prompt completion model
+    derives from (autoprompt/model.py), which needs every command's options at
+    once - so it imports all the command modules, a cost only the interactive
+    prompt pays.
+    """
+    parser = argparse.ArgumentParser(
+        prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
+    )
+    globalargs.add_common_arguments(parser)
+    shared = _shared_globals_parent()
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
-    for command_cls in _COMMANDS:
+    for name in _COMMAND_TABLE:
+        command_cls = _load_command(name)
         command_cls().configure(
             subparsers.add_parser(
-                command_cls.name,
+                name,
                 parents=[shared],
                 help=command_cls.help,
                 description=command_cls.help,
@@ -111,6 +225,10 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     (``boto3_s3.s3storage.s3_errors``) and exit 254 like aws-cli regardless of
     the library category - aws-cli treats every error that reached the server
     as a client error, even ones our taxonomy files under ``ValidationError``.
+    ``InvalidValueError`` / ``InvalidConfigError`` refine their parents back to
+    the general 255: aws routes those failures (a post-parse ``int()``, a bad
+    ``[s3]`` value, an unusable profile) through its general handler, not the
+    dedicated 252 / 253 ones.
     """
     # Deferred so the parse-only paths never load botocore (import contract,
     # docs/imports.md): when a ClientError cause can exist botocore is already
@@ -119,6 +237,11 @@ def exit_code_for(exc: Boto3S3Error) -> int:
 
     if isinstance(exc.__cause__, ClientError):
         return _CLIENT_ERROR_RC
+    # The refining subclasses come first: aws reports a post-parse value
+    # failure or a bad config through its *general* handler (255), even
+    # though the taxonomy files them under Validation / Configuration.
+    if isinstance(exc, (InvalidValueError, InvalidConfigError)):
+        return _GENERAL_ERROR_RC
     if isinstance(exc, ValidationError):
         return _PARAM_VALIDATION_ERROR_RC
     if isinstance(exc, ConfigurationError):
@@ -168,15 +291,15 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
-    if _AUTO_PROMPT_FLAG in raw and _NO_AUTO_PROMPT_FLAG in raw:
+    if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         sys.stderr.write(
             "boto3-s3: [ERROR]: Both --cli-auto-prompt and --no-cli-auto-prompt "
             "cannot be specified at the same time.\n"
         )
         return _PARAM_VALIDATION_ERROR_RC
-    mode = _resolve_auto_prompt_mode(raw)
+    mode = resolve.resolve_auto_prompt_mode(raw)
     if mode == "on":
-        return _run_auto_prompt(raw, ctx, explicit=_AUTO_PROMPT_FLAG in raw)
+        return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
         # Run the command as-is; only a usage error (rc 252, which aws-cli and we
         # both raise before any S3 call) falls back to prompting (aws-cli's
@@ -188,69 +311,6 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
             return rc
         return _run_auto_prompt(raw, ctx, explicit=False)
     return _dispatch(raw, ctx)
-
-
-def _resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
-    """Resolve the auto-prompt mode (``on`` / ``on-partial`` / ``off``).
-
-    Mirrors aws-cli's ``resolve_auto_prompt_mode`` (aws-cli's ``clidriver.py``) plus the
-    config chain (``clidriver.py`` ``_construct_cli_auto_prompt_chain``):
-    help/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
-    ``--cli-auto-prompt`` -> on; else ``AWS_CLI_AUTO_PROMPT`` env -> profile
-    ``cli_auto_prompt`` -> ``off``. The value is lowercased and anything other
-    than ``on`` / ``on-partial`` behaves as off (aws's else branch). Read with
-    ``os.environ`` + ``configparser`` only, never the SDK, so usage-error paths
-    stay import-clean (docs/imports.md).
-    """
-    if any(flag in raw_argv for flag in _NO_PROMPT_ARGS):
-        return "off"
-    if _NO_AUTO_PROMPT_FLAG in raw_argv:
-        return "off"
-    if _AUTO_PROMPT_FLAG in raw_argv:
-        return "on"
-    value = os.environ.get(_AUTO_PROMPT_ENV)
-    if value is None:
-        value = _read_scoped_cli_auto_prompt(_active_profile(raw_argv))
-    return value.lower() if value else "off"
-
-
-def _active_profile(raw_argv: list[str]) -> str:
-    """The profile whose config to consult: ``--profile`` > env > ``default``."""
-    for i, arg in enumerate(raw_argv):
-        if arg == "--profile" and i + 1 < len(raw_argv):
-            return raw_argv[i + 1]
-        if arg.startswith("--profile="):
-            return arg.split("=", 1)[1]
-    return os.environ.get("AWS_PROFILE") or os.environ.get("AWS_DEFAULT_PROFILE") or "default"
-
-
-def _read_scoped_cli_auto_prompt(profile: str) -> str | None:
-    """Read ``cli_auto_prompt`` from the active profile in ``~/.aws/config``, SDK-free.
-
-    A lightweight ``configparser`` read of botocore's ``ScopedConfigProvider``
-    source: the config file (``AWS_CONFIG_FILE`` or ``~/.aws/config``), the
-    profile section (``[default]`` or ``[profile <name>]``), the key. Returns
-    ``None`` if absent. Not the full botocore resolution (no abbreviations /
-    nested sections) - enough for this interactive, charter-exempt setting.
-    """
-    import configparser
-
-    path = os.environ.get("AWS_CONFIG_FILE") or os.path.expanduser("~/.aws/config")
-    parser = configparser.RawConfigParser()
-    try:
-        if not parser.read(path):
-            return None
-    except (configparser.Error, UnicodeDecodeError, OSError):
-        # A non-UTF-8 / unreadable config is read as "cli_auto_prompt absent"
-        # (-> off), matching botocore's configloader (which also catches
-        # UnicodeDecodeError); a genuinely broken config still surfaces cleanly
-        # when build_client later loads it, instead of crashing this pre-dispatch
-        # resolution with a traceback (exit-code charter, docs/overview.md section 3).
-        return None
-    section = "default" if profile == "default" else f"profile {profile}"
-    if parser.has_option(section, _AUTO_PROMPT_CONFIG_KEY):
-        return parser.get(section, _AUTO_PROMPT_CONFIG_KEY)
-    return None
 
 
 def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> int:
@@ -282,7 +342,7 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
 
     # Seed the prompt with what was typed, minus the auto-prompt flags (they take
     # no value, so a plain filter is exact).
-    seed = [a for a in raw_argv if a not in (_AUTO_PROMPT_FLAG, _NO_AUTO_PROMPT_FLAG)]
+    seed = [a for a in raw_argv if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)]
     try:
         if prompter is None:
             from boto3_s3_cli.autoprompt.prompt import build_default_prompter
@@ -296,12 +356,23 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
         return _GENERAL_ERROR_RC
     # Re-dispatch without prompting again - strip the flags so a re-typed
     # --cli-auto-prompt can't loop.
-    completed = [a for a in completed if a not in (_AUTO_PROMPT_FLAG, _NO_AUTO_PROMPT_FLAG)]
+    completed = [
+        a for a in completed if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)
+    ]
     return _dispatch(completed, ctx)
 
 
 def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bool = False) -> int:
-    """Parse ``argv`` with argparse and run the matched subcommand.
+    """Parse ``argv`` in two stages and run the matched subcommand.
+
+    Stage 1 reads the globals and the subcommand name off the stub tree - no
+    command module is imported, so ``--help`` / ``--version`` and the
+    stage-1 usage errors stay SDK-free (import contract, docs/imports.md).
+    Stage 2 imports just the matched command's module, builds its real parser,
+    and parses the stub-captured remainder into the stage-1 namespace (the
+    suppressed-defaults parent keeps pre-subcommand globals intact). Once the
+    subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
+    command table.
 
     ``suppress_usage_errors`` silences the usage-error output (argparse's usage
     block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
@@ -309,25 +380,45 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
     errorhandler.py:250, injected on the on-partial path at clidriver.py:281).
     argparse writes its own message inside ``parse_*``, so the
-    parse (and only the parse - it is instant, no live output to lose) is wrapped
-    to discard it; the command itself still runs with stderr live.
+    parses (and only the parses - they are instant, no live output to lose) are
+    wrapped to discard it; the command itself still runs with stderr live.
     """
-    parser = build_parser()
+    silencer = (
+        contextlib.redirect_stderr(io.StringIO())
+        if suppress_usage_errors
+        else contextlib.nullcontext()
+    )
     try:
-        if suppress_usage_errors:
-            with contextlib.redirect_stderr(io.StringIO()):
-                args, extras = parser.parse_known_args(argv)
-        else:
-            args, extras = parser.parse_known_args(argv)
+        with silencer:
+            args, extras = _build_stage1_parser().parse_known_args(argv)
     except SystemExit as exc:
         # argparse already wrote its message (--help/--version exit 0; usage
         # errors such as an invalid choice exit 2 -> remap per the charter).
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     if extras:
-        # aws-cli wording (UnknownArgumentError, defined in awscli/arguments.py and
-        # raised with "Unknown options: %s" in awscli/clidriver.py), prefixed like
-        # aws's error handler (errorformat.py "<prog>: [ERROR]: <msg>"). Exercised
-        # by the ported test_errors_out_with_extra_arguments.
+        # Unknown options *before* the subcommand: rejected at the top level
+        # like aws, never handed to a command parser that may define the same
+        # flag. aws-cli wording (UnknownArgumentError, "Unknown options: %s" in
+        # awscli/clidriver.py), prefixed like aws's error handler
+        # (errorformat.py "<prog>: [ERROR]: <msg>").
+        if not suppress_usage_errors:
+            sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {', '.join(extras)}\n")
+        return _PARAM_VALIDATION_ERROR_RC
+
+    rest: list[str] = getattr(args, _REST_DEST, None) or []
+    if hasattr(args, _REST_DEST):
+        delattr(args, _REST_DEST)
+    command = _load_command(args.command)()
+    try:
+        with silencer:
+            args, extras = _build_command_parser(args.command, command).parse_known_args(
+                rest, namespace=args
+            )
+    except SystemExit as exc:
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
+    if extras:
+        # aws-cli wording again - exercised by the ported
+        # test_errors_out_with_extra_arguments.
         if not suppress_usage_errors:
             sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {', '.join(extras)}\n")
         return _PARAM_VALIDATION_ERROR_RC
@@ -335,11 +426,8 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     if getattr(args, "debug", False):
         _enable_debug_logging()
 
-    # args.command is one of the registered subparser names (required=True), so
-    # the match always exists; build_parser() and dispatch share _COMMANDS as the
-    # single source of truth, dispensing with a parallel by-name index.
     try:
-        return next(cls for cls in _COMMANDS if cls.name == args.command)().run(args, ctx)
+        return command.run(args, ctx)
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):

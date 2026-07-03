@@ -93,7 +93,9 @@ class TestUsageErrors:
     def test_no_scheme_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["rb", "bucket"], ctx=_ctx(None))
         assert rc == 252
-        assert "Invalid argument type" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "<S3Uri>\nError: Invalid argument type" in err
+        assert "usage:" not in err  # rb raises aws's bare form, like mb
 
     def test_client_construction_error_beats_path_usage_error(self) -> None:
         # aws builds the client before the path check; a construction error wins.

@@ -35,8 +35,13 @@ Subclass `Storage`, set two class attributes, and implement the methods the
 declared capabilities promise:
 
 - **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
-  `"s3"` / `"local"` (it is how the engine and result rendering tell the sides
-  apart).
+  `"s3"` / `"local"` (a display/classification label; result rendering uses
+  it). Transfer *routing* does not read it: the planner
+  (`transferplan._paths_type`) routes by concrete type — a structural match
+  (`isinstance`) against `S3Storage` / `LocalStorage`, subclasses included —
+  because the built-in routes reach into those classes' own API
+  (`get_client`/`bucket`/`key`, `path`); every other `Storage` takes the
+  `open` route regardless of its `scheme` string.
 - **`capabilities: ClassVar[StorageCapability]`** — the flag set the backend
   actually supports (section 3).
 - **`as_text() -> str`** (and `str(storage)`) — how this side renders in results
@@ -52,8 +57,25 @@ declared capabilities promise:
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry
   here".
-- **`delete(info) -> None`** — remove the entry `info` identifies, by
-  `info.key`.
+- **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
+  `info.key`. Return the backend's delete response (surfaced under
+  `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
+  none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
+  response.
+
+Two more members come with working defaults a custom backend normally keeps:
+
+- **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
+  only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
+  `FileInfo.key` / `compare_key` contract is `/`-separated.
+- **`format(*, dir_op) -> (root, use_src_name)`** — how this side enters a
+  transfer plan (the per-side half of aws-cli's `FileFormat.format`, resolved
+  polymorphically; `S3Storage` / `LocalStorage` override it with aws's
+  `s3_format` / `local_format` on their own held state). The default is the
+  open-route rule: the root is `""` — a custom backend encapsulates its own
+  location and its `open` / `delete` receive the scan-root-relative
+  `compare_key` unprefixed — and `use_src_name` follows the S3 convention
+  (`dir_op` or a trailing `/` on `as_text()`).
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
@@ -90,8 +112,12 @@ of deep inside the run:
 The reading members form a lattice: `SORTED_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTED_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-exact per-route gates are in [`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
+manufacture phantom pairs and, with `--delete`, corrupt the destination.
+**`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
+backend's entries in whatever order `scan` yields them (they never pass
+`ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
+at all. The exact per-route gates are in [`sync.md`](./sync.md) /
+[`transfer.md`](./transfer.md).
 
 ## 4. Example
 
@@ -149,8 +175,9 @@ S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download
 ## 5. Streams: `IOStorage` and `StdioStorage`
 
 `IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
-as a single `open`-able endpoint, so a stream can be one side of a `cp` / `mv`
-(the other side always S3) without a temp file:
+as a single `open`-able endpoint, so a stream can be one side of a
+non-recursive `cp` - or the destination of a non-recursive `mv` - (the other
+side always S3) without a temp file:
 
 ```python
 import gzip
@@ -193,8 +220,12 @@ The contract:
   land wherever the stream sends them (the `.gz` file, the console), and the
   caller's own `with` / `close` finalizes it.
 - **A single endpoint, not a container.** Only `open` is meaningful; `scan` /
-  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` / `mv`
-  side only — never `ls` / `rm`, and not stream↔stream.
+  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` side or
+  a non-recursive `mv` **destination** only — the move writes the bytes to the
+  stream and then deletes the S3 source. A stream is never a move *source* (a
+  move deletes its source, which a stream cannot be) or a recursive move's
+  destination (`S3.mv` rejects both with `ValidationError`), never `ls` / `rm`,
+  and not stream↔stream.
 
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the

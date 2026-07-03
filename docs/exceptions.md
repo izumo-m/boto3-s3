@@ -15,11 +15,16 @@ redesigned.
 - **Every error from the public API is reported as a `Boto3S3Error`-family
   exception** (success = no exception, error = always an exception; no return
   codes or error-report objects).
-- The hierarchy is **`Boto3S3Error` (root) + 6 categories**. Collapsing
-  everything into a single `botocore`-style `ClientError` is **rejected**
-  (because boto3-s3 spans both the local FS and S3, it preserves a cross-cutting
-  classification in which "an S3 403 and a local `PermissionError` belong to the
-  same category").
+- The hierarchy is **`Boto3S3Error` (root) + 6 categories + 2 refining
+  subclasses**. Collapsing everything into a single `botocore`-style
+  `ClientError` is **rejected** (because boto3-s3 spans both the local FS and
+  S3, it preserves a cross-cutting classification in which "an S3 403 and a
+  local `PermissionError` belong to the same category").
+- **The root is never raised directly for a known failure** - every raise site
+  uses a category (or refining) class, so `except Boto3S3Error` is purely the
+  catch-all. Direct base instances appear only where no classification exists:
+  the error translators' last-resort fallback (section 3) and the message
+  envelope on WARNED / NOTICE `OpResult` records.
 - Backend exceptions (`botocore` / `OSError` / `urllib3`, etc.) are converted at
   the library boundary and the original is preserved on `__cause__` via
   `raise ... from <backend>` (never swallowed).
@@ -29,13 +34,23 @@ redesigned.
 ```
 Boto3S3Error                # root. The supertype of all library errors. Inherits Exception (not BaseException)
 +-- AccessDeniedError       # S3 403 / local PermissionError
-+-- NotFoundError           # S3 404 (NoSuchKey/NoSuchBucket) / local FileNotFoundError
-+-- ValidationError         # invalid argument / precondition / state (an invalid local path also lands here)
++-- NotFoundError           # S3 404 (NoSuchKey/NoSuchBucket) / local FileNotFoundError (e.g. a missing source path)
++-- ValidationError         # invalid argument / precondition / state
+|   `-- InvalidValueError   # refinement: a value failing post-parse conversion (aws's bare int() -> its
+|                           #   general handler, rc 255 - not the rc-252 usage path)
 +-- TransportError          # network / local I/O failure (connection, timeout, OSError)
-+-- ConfigurationError      # credentials / profile / endpoint / region missing or unresolvable
++-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
+|   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
+|                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
 `-- CancelledError          # caller-initiated abort (CancelToken.cancel()).
                             #   Unrelated to the CancelledError of asyncio / concurrent.futures
 ```
+
+The two **refining subclasses** exist for the CLI's exit-code parity: aws
+reports those failures through its *general* exception handler (rc 255), while
+plain `ValidationError` / `ConfigurationError` map to the dedicated 252 / 253.
+`exit_code_for` keys on the subclass before the parent (section 5). Library
+consumers can ignore the distinction and catch the parent category.
 
 Common fields of `Boto3S3Error` (shared across all categories):
 
@@ -65,17 +80,31 @@ class Boto3S3Error(Exception):
 | S3 403 / `AccessDenied` | `AccessDeniedError` |
 | S3 404 / `NoSuchKey` / `NoSuchBucket` / `NoSuchVersion` / `NotFound` | `NotFoundError` |
 | S3 `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` (5xx / throttle) | `TransportError` |
-| local `PermissionError` | `AccessDeniedError` |
-| local `FileNotFoundError` (e.g., missing source) | `NotFoundError` / `ValidationError` (when the input is invalid) |
-| connection failure / timeout / `OSError` (I/O) | `TransportError` |
-| `NoCredentialsError` / `ProfileNotFound` / `NoRegionError` | `ConfigurationError` |
-| `ParamValidationError` / invalid argument | `ValidationError` |
+| local `PermissionError` (incl. the post-download utime EPERM) | `AccessDeniedError` |
+| local `FileNotFoundError` / a missing source path | `NotFoundError` |
+| connection failure / timeout / other `OSError` (I/O, incl. a failed `makedirs`) | `TransportError` |
+| `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
+| `ProfileNotFound` / `PartialCredentialsError` / other config-flavored `BotoCoreError` at client construction | `InvalidConfigError` |
+| an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
+| a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
+| `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
+| an SDK floor missing a capability (`no_overwrite` on an old botocore) | `ConfigurationError` |
 | `CancelToken.cancel()` | `CancelledError` |
+
+Local `OSError`s are converted by one shared translator
+(`localstorage.translate_os_error`, the local mirror of
+`s3storage.translate_boto_error`): `FileNotFoundError` -> `NotFoundError`,
+`PermissionError` -> `AccessDeniedError`, everything else -> `TransportError`.
 
 An S3 `ClientError` code is matched first against `S3_CODE_CATEGORIES`
 (`s3storage.py`); a code not in the table falls back to HTTP-status widening:
 403 -> `AccessDeniedError`, 404 -> `NotFoundError`, 5xx -> `TransportError`,
-other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`.
+other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. That last
+fallback, `translate_boto_error`'s final clause for an exception nothing
+classifies, and the deleter's per-key `Errors[]` translation (whose entries
+carry a bare code with no HTTP status to widen on - an unknown code is the
+base category, deleter.md section 3) are the only places a direct base
+instance is created (section 1).
 
 ## 4. The batch aggregation exception `BatchError`
 
@@ -133,13 +162,15 @@ the `exit_code_for` rules). The values match aws-cli v2
 | Usage error (unknown option / invalid choice; also the `--cli-auto-prompt` rejection) / client-side `ValidationError` | 252 |
 | `ConfigurationError` (credentials / region unresolved; `[s3]` `preferred_transfer_client=crt` x absent awscrt) | 253 |
 | Server error: a `Boto3S3Error` whose `__cause__` is a botocore `ClientError` | 254 |
-| General error (incl. `TransportError`); the rm-stage failure of `rb --force` | 255 |
+| General error (incl. `TransportError`, `NotFoundError` without a `ClientError` cause, and the refining `InvalidValueError` / `InvalidConfigError`); the rm-stage failure of `rb --force` | 255 |
 
 The mapping is `cli.exit_code_for`: it checks `__cause__` first, so any error
 that reached the server (a botocore `ClientError`) is **254** regardless of the
 library category - even one this taxonomy files under `ValidationError`. Only
-when there is no `ClientError` cause does the library category decide
-(`ValidationError` -> 252, `ConfigurationError` -> 253, everything else -> 255).
+when there is no `ClientError` cause does the library category decide - the
+refining subclasses first (`InvalidValueError` / `InvalidConfigError` -> 255,
+aws's general handler), then the parents (`ValidationError` -> 252,
+`ConfigurationError` -> 253), everything else -> 255.
 
 Two families override this with their own catch and so do **not** reach
 `exit_code_for` (cli.md section 5 / section 6):

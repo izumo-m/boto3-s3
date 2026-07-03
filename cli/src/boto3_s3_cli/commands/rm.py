@@ -15,8 +15,15 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import filters, output
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
+from boto3_s3_cli import clientfactory, filters, output, usage
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    add_page_size_argument,
+    add_request_payer_argument,
+    expand_option_paramfile,
+    parse_integer_option,
+)
 
 
 class _DeletePrinter:
@@ -64,23 +71,10 @@ class RmCommand(Command):
         parser.add_argument("--dryrun", action="store_true")
         parser.add_argument("--quiet", action="store_true")
         parser.add_argument("--recursive", action="store_true")
-        parser.add_argument(
-            "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
-        )
+        add_request_payer_argument(parser)
         parser.add_argument("--only-show-errors", action="store_true")
-        # One shared ordered dest: the interleaved --exclude/--include order
-        # carries aws-cli's last-match-wins semantics (cli filters module).
-        parser.add_argument(
-            "--exclude", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-        )
-        parser.add_argument(
-            "--include", action=filters.AppendFilterAction, dest="filters", metavar="PATTERN"
-        )
-        # Not range-validated: aws-cli passes any int through and lets the
-        # server decide (same policy as ls; charter, docs/overview.md section 3). No
-        # type=int: a non-integer must exit 255 like aws's bare int()
-        # conversion, not argparse's 252 (parse_integer_option, commands/base.py).
-        parser.add_argument("--page-size", default=1000)
+        filters.add_filter_arguments(parser)
+        add_page_size_argument(parser)
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Delete the target(s) and return an ``aws s3 rm``-style exit code.
@@ -92,20 +86,23 @@ class RmCommand(Command):
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
-        # First, like aws's parse-time conversion: a non-integer exits 255
-        # before the path checks and before any client (or the SDK) is touched.
+        # The aws parse-to-validation order (measured, docs/cli.md section 6):
+        # the --endpoint-url scheme check (252) and the --page-size paramfile
+        # expansion (252) beat the integer coercion (255), which beats the
+        # session profile resolution (255), which beats the path usage check
+        # below (252).
+        clientfactory.validate_endpoint_url(args)
+        expand_option_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
+        clientfactory.validate_profile(args)
         # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
+        # entry (whose chain reaches botocore).
         from boto3_s3 import S3, S3Storage
 
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
-            raise ValidationError(
-                "usage: boto3-s3 rm <S3Uri>\nError: Invalid argument type", operation="rm"
-            )
+            raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
 
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
         if not bucket_part:
@@ -115,8 +112,7 @@ class RmCommand(Command):
             # enumerating paths. S3Storage.validate() would reject "s3:///k" as a
             # ValidationError (252-shaped), so handle the form before construction
             # to keep this path at rc 1.
-            # botocore's ParamValidationError str uses a colon + newline.
-            message = 'Parameter validation failed:\nInvalid bucket name ""'
+            message = usage.invalid_bucket_name_message()
             if not args.quiet:
                 if key_part and not args.recursive:
                     sys.stderr.write(f"delete failed: {target} {message}\n")
@@ -130,7 +126,7 @@ class RmCommand(Command):
         storage = S3Storage(target, client=ctx.client_factory(args))
         storage.validate()
 
-        item_filter = filters.build_filter(args.filters, key=storage.key, recursive=args.recursive)
+        item_filter = filters.compile_filter(args.filters)
         printer = _DeletePrinter(
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )

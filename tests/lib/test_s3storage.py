@@ -12,18 +12,22 @@ import threading
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
     S3,
     AccessDeniedError,
+    Boto3S3Error,
+    ConfigurationError,
     FileInfo,
     FileKind,
+    InvalidConfigError,
     LocalStorage,
     NotFoundError,
     S3FileInfo,
     S3Storage,
     ScanOptions,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.storage import _sieve_pages
@@ -320,6 +324,24 @@ class TestGetFileinfo:
         assert info.compare_key == "f.txt"
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
 
+    def test_child_key_joins_under_a_slashless_prefix(self) -> None:
+        # The "/" boundary is inserted even when the prefix lacks one, so a child
+        # key is an entry beneath the location (not a bare-concat "prefixsub/...").
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket/prefix", head_response=head)
+        info = storage.get_fileinfo("sub/f.txt")
+        assert info is not None
+        assert info.key == "prefix/sub/f.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
+
+    def test_child_key_under_a_keyless_location_has_no_leading_slash(self) -> None:
+        head = {"ContentLength": 1, "LastModified": _MTIME}
+        storage, client = _storage(url="s3://bucket", head_response=head)
+        info = storage.get_fileinfo("a.txt")
+        assert info is not None
+        assert info.key == "a.txt"
+        assert client.head_calls == [{"Bucket": "bucket", "Key": "a.txt"}]
+
 
 def _bucket_entry(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": _MTIME}
@@ -409,6 +431,68 @@ class TestScanErrorMapping:
         with pytest.raises(NotFoundError) as exc_info:
             list(storage.scan())
         assert isinstance(exc_info.value.__cause__, ClientError)
+
+    def test_lazy_client_build_failure_maps_to_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A lazily-built default client whose construction fails - e.g.
+        # AWS_PROFILE naming a missing profile - surfaces as the documented
+        # InvalidConfigError refinement (a set-but-unusable configuration,
+        # docs/exceptions.md section 3), not the raw botocore error.
+        import boto3
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise ProfileNotFound(profile="missing-profile")
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(InvalidConfigError) as exc_info:
+            list(S3Storage("s3://bucket/prefix/").scan())
+        assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    def test_unresolvable_credentials_stay_plain_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NoCredentials/NoRegion keep the PLAIN ConfigurationError - the CLI
+        # maps that to aws's dedicated rc 253, while the InvalidConfigError
+        # refinement maps to the general 255 (docs/exceptions.md section 3).
+        import boto3
+        from botocore.exceptions import NoCredentialsError
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise NoCredentialsError()
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(ConfigurationError) as exc_info:
+            list(S3Storage("s3://bucket/prefix/").scan())
+        assert type(exc_info.value) is ConfigurationError
+
+    @pytest.mark.parametrize(
+        ("status", "category"),
+        [(500, TransportError), (None, Boto3S3Error)],
+    )
+    def test_unknown_code_widens_on_http_status(
+        self, status: int | None, category: type[Boto3S3Error]
+    ) -> None:
+        # docs/exceptions.md section 3: a code not in the table falls back to
+        # HTTP-status widening - 5xx -> TransportError, no usable status ->
+        # the base Boto3S3Error.
+        meta: dict[str, Any] = {"HTTPStatusCode": status} if status is not None else {}
+        error = ClientError(
+            {"Error": {"Code": "SomethingNovel", "Message": "boom"}, "ResponseMetadata": meta},
+            "ListObjectsV2",
+        )
+        storage, _ = _storage(error=error)
+        with pytest.raises(Boto3S3Error) as exc_info:
+            list(storage.scan())
+        assert type(exc_info.value) is category
+
+    def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
+        # docs/exceptions.md section 2: KeyboardInterrupt is never wrapped.
+        from boto3_s3.s3storage import s3_errors
+
+        with pytest.raises(KeyboardInterrupt):
+            with s3_errors(operation="ls"):
+                raise KeyboardInterrupt
 
 
 class _DeleteRecordingClient:

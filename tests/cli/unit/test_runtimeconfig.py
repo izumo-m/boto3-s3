@@ -2,9 +2,10 @@
 
 The parsing matrix is aws-cli ``tests/unit/customizations/s3/
 test_transferconfig.py`` translated (their ``InvalidConfigError`` escapes to
-the aws general handler = rc 255; ours is the library base ``Boto3S3Error``
-which the CLI maps to the same 255). The added classes pin what the port owns
-beyond the aws-cli file: byte-exact error wording and the scoped-config read.
+the aws general handler = rc 255; ours is the library class of the same name,
+which the CLI's exit-code mapping sends to the same 255). The added classes pin
+what the port owns beyond the aws-cli file: byte-exact error wording and the
+scoped-config read.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from boto3_s3 import Boto3S3Error
+from boto3_s3 import InvalidConfigError
 from boto3_s3_cli import runtimeconfig
 
 
@@ -39,15 +40,15 @@ class TestRuntimeConfig:
         assert runtime_config["max_queue_size"] == runtimeconfig.DEFAULTS["max_queue_size"]
 
     def test_validates_integer_types(self) -> None:
-        with pytest.raises(Boto3S3Error):
+        with pytest.raises(InvalidConfigError):
             build_config_with(max_concurrent_requests="not an int")
 
     def test_validates_positive_integers(self) -> None:
-        with pytest.raises(Boto3S3Error):
+        with pytest.raises(InvalidConfigError):
             build_config_with(max_concurrent_requests="-10")
 
     def test_min_value(self) -> None:
-        with pytest.raises(Boto3S3Error):
+        with pytest.raises(InvalidConfigError):
             build_config_with(max_concurrent_requests="0")
 
     def test_human_readable_sizes_converted_to_bytes(self) -> None:
@@ -109,11 +110,11 @@ class TestRuntimeConfig:
         ],
     )
     def test_invalid_rate_values(self, config_name: str, provided: str) -> None:
-        with pytest.raises(Boto3S3Error):
+        with pytest.raises(InvalidConfigError):
             build_config_with(**{config_name: provided})
 
     def test_validates_preferred_transfer_client_choices(self) -> None:
-        with pytest.raises(Boto3S3Error):
+        with pytest.raises(InvalidConfigError):
             build_config_with(preferred_transfer_client="not-supported")
 
     @pytest.mark.parametrize(
@@ -136,7 +137,7 @@ class TestErrorWording:
     """Byte-exact aws wording (each exits 255 over there)."""
 
     def test_invalid_choice_message(self) -> None:
-        with pytest.raises(Boto3S3Error) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             build_config_with(preferred_transfer_client="bogus")
         assert str(exc_info.value) == (
             'Invalid value: "bogus" for configuration option: '
@@ -144,12 +145,12 @@ class TestErrorWording:
         )
 
     def test_positive_integer_message(self) -> None:
-        with pytest.raises(Boto3S3Error) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             build_config_with(max_queue_size="0")
         assert str(exc_info.value) == "Value for max_queue_size must be a positive integer: 0"
 
     def test_invalid_size_message(self) -> None:
-        with pytest.raises(Boto3S3Error) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             build_config_with(multipart_threshold="10XB")
         assert str(exc_info.value) == "Invalid size value: 10xb"
 
@@ -194,3 +195,22 @@ class TestLoadScopedS3Config:
         )
         scoped = runtimeconfig.load_scoped_s3_config(self._args(profile="alt"))
         assert scoped == {"preferred_transfer_client": "classic"}
+
+    def test_env_profile_precedence_matches_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no --profile, the scoped ``[s3]`` read must honor aws-cli's env
+        # precedence (AWS_PROFILE > AWS_DEFAULT_PROFILE), the same as the client
+        # this transfer uses. A bare boto3.Session(profile_name=None) would adopt
+        # stock botocore's reversed order and read the wrong profile's section
+        # (botocore #1725) - a charter-breaking exit-code divergence.
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "[profile aws_profile]\ns3 =\n  preferred_transfer_client = crt\n"
+            "[profile aws_default_profile]\ns3 =\n  preferred_transfer_client = classic\n",
+        )
+        monkeypatch.setenv("AWS_PROFILE", "aws_profile")
+        monkeypatch.setenv("AWS_DEFAULT_PROFILE", "aws_default_profile")
+        scoped = runtimeconfig.load_scoped_s3_config(self._args())
+        assert scoped == {"preferred_transfer_client": "crt"}

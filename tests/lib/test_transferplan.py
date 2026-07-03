@@ -1,10 +1,9 @@
-"""``boto3_s3.naming``: the pure path-shape rules behind cp/mv/sync.
+"""``boto3_s3.transferplan``: the transfer planner behind cp/mv/sync.
 
 Pins the aws-cli parity contracts (aws-cli ``fileformat.py`` +
-``find_dest_path_comp_key`` + ``filters._get_*_root``): how a path pair
-resolves to roots and ``use_src_name``, how each item's destination and
-``compare_key`` derive from its source path, and how the filter root feeds
-``globsieve.translate_pattern_for_root``.
+``find_dest_path_comp_key``): how a path pair resolves to roots and
+``use_src_name``, and how each item's destination and ``compare_key`` derive
+from its source path.
 """
 
 from __future__ import annotations
@@ -17,40 +16,37 @@ from typing import BinaryIO, Literal
 import pytest
 from typing_extensions import override
 
-from boto3_s3 import LocalStorage, S3Storage, Storage, naming
+from boto3_s3 import LocalStorage, S3Storage, Storage, transferplan
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.globsieve import translate_pattern_for_root
-from boto3_s3.naming import (
-    classify,
-    dest_for,
-    item_paths,
-    local_format,
-    normalize_s3_uri,
-    s3_format,
-    same_key,
-    same_path,
-    split_bucket_key,
-)
+from boto3_s3.transferplan import dest_for, item_paths
 from boto3_s3.types import FileInfo, ScanOptions
+
+# The S3 string grammar lives on S3Storage; alias the names so the
+# pinned aws-parity cases below read unchanged.
+split_bucket_key = S3Storage.split_bucket_key
+normalize_s3_uri = S3Storage.normalize_s3_uri
+same_path = S3Storage.same_path
+same_key = S3Storage.same_key
 
 _ACCESSPOINT_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myap"
 _OUTPOST_ARN = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567/accesspoint/my-ap"
 
 
 def _storage(arg: str) -> S3Storage | LocalStorage:
-    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by
-    ``classify`` on the raw path - exactly how the CLI builds its endpoints."""
-    return S3Storage(arg) if classify(arg) == "s3" else LocalStorage(arg)
+    """The scheme-bearing endpoint the test feeds plan_transfer, chosen by the
+    ``s3://`` marker on the raw path - exactly how the CLI builds its endpoints
+    (its ``identify_type``)."""
+    return S3Storage(arg) if arg.startswith("s3://") else LocalStorage(arg)
 
 
 def plan_transfer(
-    src: str, dst: str, *, recursive: bool, operation: str = "cp"
-) -> naming.TransferPlan:
-    """Test wrapper: build each endpoint Storage from its raw path (classify-chosen)
-    and call the real formatter, so the call sites below stay path-focused.
+    src: str, dest: str, *, recursive: bool, operation: str = "cp"
+) -> transferplan.TransferPlan:
+    """Test wrapper: build each endpoint Storage from its raw path and call the
+    real formatter, so the call sites below stay path-focused.
     """
-    return naming.plan_transfer(
-        _storage(src), _storage(dst), recursive=recursive, operation=operation
+    return transferplan.plan_transfer(
+        _storage(src), _storage(dest), recursive=recursive, operation=operation
     )
 
 
@@ -91,19 +87,6 @@ class _FakeOpen(Storage):
         return self._token
 
 
-class TestClassify:
-    def test_s3_scheme(self) -> None:
-        assert classify("s3://bucket/key") == "s3"
-
-    def test_bare_bucket_is_local(self) -> None:
-        # Only the literal scheme marks S3 (aws identify_type); a bare
-        # "bucket/key" is a local path for cp purposes.
-        assert classify("bucket/key") == "local"
-
-    def test_scheme_is_case_sensitive(self) -> None:
-        assert classify("S3://bucket") == "local"
-
-
 class TestSplitBucketKey:
     def test_plain_forms(self) -> None:
         assert split_bucket_key("b") == ("b", "")
@@ -121,45 +104,92 @@ class TestSplitBucketKey:
 
 
 class TestLocalFormat:
+    """``LocalStorage.format`` - aws-cli's ``FileFormat.local_format`` on the
+    held state (the construction-time abspath; the raw form for the
+    trailing-separator rule)."""
+
     def test_existing_directory_takes_src_name(self, tmp_path: Path) -> None:
-        assert local_format(str(tmp_path), dir_op=False) == (str(tmp_path) + os.sep, True)
+        assert LocalStorage(str(tmp_path)).format(dir_op=False) == (str(tmp_path) + os.sep, True)
 
     def test_existing_file_keeps_given_name(self, tmp_path: Path) -> None:
         target = tmp_path / "a.txt"
         target.write_bytes(b"x")
-        assert local_format(str(target), dir_op=False) == (str(target), False)
+        assert LocalStorage(str(target)).format(dir_op=False) == (str(target), False)
 
     def test_dir_op_forces_directory_semantics(self, tmp_path: Path) -> None:
         missing = tmp_path / "new"
-        assert local_format(str(missing), dir_op=True) == (str(missing) + os.sep, True)
+        assert LocalStorage(str(missing)).format(dir_op=True) == (str(missing) + os.sep, True)
 
     def test_trailing_separator_on_missing_path(self, tmp_path: Path) -> None:
         missing = tmp_path / "new"
-        assert local_format(str(missing) + os.sep, dir_op=False) == (str(missing) + os.sep, True)
+        storage = LocalStorage(str(missing) + os.sep)
+        assert storage.format(dir_op=False) == (str(missing) + os.sep, True)
 
     def test_missing_plain_path_keeps_given_name(self, tmp_path: Path) -> None:
         missing = tmp_path / "renamed.bin"
-        assert local_format(str(missing), dir_op=False) == (str(missing), False)
+        assert LocalStorage(str(missing)).format(dir_op=False) == (str(missing), False)
 
     def test_relative_path_is_absolutized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        assert local_format("sub/f.txt", dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
+        storage = LocalStorage("sub/f.txt")
+        assert storage.format(dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
+
+    def test_root_is_anchored_at_construction_not_format_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The plan root and the scan walk must agree: both anchor at the
+        # construction-time cwd (the held _abspath), so a later chdir cannot
+        # split them apart.
+        monkeypatch.chdir(tmp_path)
+        storage = LocalStorage("sub/f.txt")
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        assert storage.format(dir_op=False) == (str(tmp_path / "sub" / "f.txt"), False)
 
 
 class TestS3Format:
+    """``S3Storage.format`` - aws-cli's ``FileFormat.s3_format`` from the held
+    bucket/key (the keyless normalization falls out of the join)."""
+
     def test_dir_op_appends_slash(self) -> None:
-        assert s3_format("b/pre", dir_op=True) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre").format(dir_op=True) == ("b/pre/", True)
 
     def test_dir_op_keeps_existing_slash(self) -> None:
-        assert s3_format("b/pre/", dir_op=True) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre/").format(dir_op=True) == ("b/pre/", True)
 
     def test_single_with_trailing_slash_takes_src_name(self) -> None:
-        assert s3_format("b/pre/", dir_op=False) == ("b/pre/", True)
+        assert S3Storage("s3://b/pre/").format(dir_op=False) == ("b/pre/", True)
 
     def test_single_plain_keeps_given_name(self) -> None:
-        assert s3_format("b/pre/key", dir_op=False) == ("b/pre/key", False)
+        assert S3Storage("s3://b/pre/key").format(dir_op=False) == ("b/pre/key", False)
+
+    def test_keyless_bucket_normalizes_to_bucket_root(self) -> None:
+        # aws-cli's _normalize_s3_trailing_slash: "s3://bucket" reads as
+        # "bucket/" even without dir_op, so the dest takes the source's name.
+        assert S3Storage("s3://bucket").format(dir_op=False) == ("bucket/", True)
+
+    def test_bare_service_root_stays_empty(self) -> None:
+        assert S3Storage("s3://").format(dir_op=False) == ("", False)
+
+
+class TestFormatDefaults:
+    """The ``Storage`` base: the open-route rule and the ``sep`` attribute."""
+
+    def test_custom_backend_roots_at_empty(self) -> None:
+        # The default format is the open-route rule: root "" (entries are
+        # addressed by their relative compare_key), use_src_name from
+        # dir_op / a trailing "/" on the token (s3_format parity).
+        assert _FakeOpen("mem://x").format(dir_op=False) == ("", False)
+        assert _FakeOpen("mem://x/").format(dir_op=False) == ("", True)
+        assert _FakeOpen("mem://x").format(dir_op=True) == ("", True)
+
+    def test_sep_is_native_only_for_local(self) -> None:
+        assert LocalStorage(".").sep == os.sep
+        assert S3Storage("s3://b").sep == "/"
+        assert _FakeOpen().sep == "/"
 
 
 class TestPlanTransfer:
@@ -174,33 +204,31 @@ class TestPlanTransfer:
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), "s3://bucket", recursive=False)
         assert (plan.paths_type, plan.dir_op) == ("locals3", False)
-        assert (plan.dst_root, plan.use_src_name) == ("bucket/", True)
+        assert (plan.dest_root, plan.use_src_name) == ("bucket/", True)
         assert plan.src_root == str(src)
-        assert (plan.src_sep, plan.dst_sep) == (os.sep, "/")
+        assert (plan.src.sep, plan.dest.sep) == (os.sep, "/")
 
     def test_upload_single_rename(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), "s3://bucket/up/key.bin", recursive=False)
-        assert (plan.dst_root, plan.use_src_name) == ("bucket/up/key.bin", False)
+        assert (plan.dest_root, plan.use_src_name) == ("bucket/up/key.bin", False)
 
     def test_download_recursive(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://b/pre", str(tmp_path / "out"), recursive=True)
         assert plan.paths_type == "s3local"
         assert plan.src_root == "b/pre/"
-        assert plan.dst_root == str(tmp_path / "out") + os.sep
+        assert plan.dest_root == str(tmp_path / "out") + os.sep
         assert plan.use_src_name is True
-        assert plan.filter_root == "pre"
 
     def test_s3_single_source_roots_at_parent(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://b/pre/key", str(tmp_path / "f"), recursive=False)
         assert plan.src_root == "b/pre/key"
-        assert plan.filter_root == "pre"
 
     def test_s3_to_s3(self) -> None:
         plan = plan_transfer("s3://a/x/", "s3://b/y", recursive=True)
         assert plan.paths_type == "s3s3"
-        assert (plan.src_root, plan.dst_root) == ("a/x/", "b/y/")
+        assert (plan.src_root, plan.dest_root) == ("a/x/", "b/y/")
 
     def test_bare_service_root_stays_empty(self, tmp_path: Path) -> None:
         plan = plan_transfer("s3://", str(tmp_path), recursive=False)
@@ -210,7 +238,7 @@ class TestPlanTransfer:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
         plan = plan_transfer(str(src), f"s3://{_ACCESSPOINT_ARN}", recursive=False)
-        assert (plan.dst_root, plan.use_src_name) == (f"{_ACCESSPOINT_ARN}/", True)
+        assert (plan.dest_root, plan.use_src_name) == (f"{_ACCESSPOINT_ARN}/", True)
 
 
 class TestPlanTransferOpenRoute:
@@ -218,26 +246,26 @@ class TestPlanTransferOpenRoute:
     relative compare_key is handed straight to the custom side's open()."""
 
     def test_custom_source_to_s3_is_opens3(self) -> None:
-        plan = naming.plan_transfer(_FakeOpen(), S3Storage("s3://b/dst/"), recursive=True)
+        plan = transferplan.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
         # the custom side roots at "" and is addressed by relative compare_key
-        assert (plan.src_root, plan.src_sep, plan.filter_root) == ("", "/", "")
-        # use_src_name comes from the s3 dst (dir_op -> adopts the source name)
+        assert (plan.src_root, plan.src.sep) == ("", "/")
+        # use_src_name comes from the s3 dest (dir_op -> adopts the source name)
         assert plan.use_src_name is True
-        assert dest_for(plan, "sub/f.txt") == "b/dst/sub/f.txt"
+        assert dest_for(plan, "sub/f.txt") == "b/dest/sub/f.txt"
 
     def test_s3_to_custom_dest_is_s3open(self) -> None:
-        plan = naming.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
+        plan = transferplan.plan_transfer(S3Storage("s3://b/pre"), _FakeOpen(), recursive=True)
         assert plan.paths_type == "s3open"
-        # the custom dst roots at "" so dest_for hands the relative key to open()
-        assert (plan.dst_root, plan.dst_sep) == ("", "/")
+        # the custom dest roots at "" so dest_for hands the relative key to open()
+        assert (plan.dest_root, plan.dest.sep) == ("", "/")
         assert plan.use_src_name is True
         assert dest_for(plan, "sub/f.txt") == "sub/f.txt"
 
     def test_custom_dest_single_rename_targets_the_location_itself(self) -> None:
         # non-dir_op, no trailing "/" -> use_src_name False -> dest_for returns ""
         # ("" is the custom Storage's own location, per the Storage.open key rule)
-        plan = naming.plan_transfer(
+        plan = transferplan.plan_transfer(
             S3Storage("s3://b/key"), _FakeOpen("mem://one"), recursive=False
         )
         assert (plan.paths_type, plan.use_src_name) == ("s3open", False)
@@ -245,7 +273,7 @@ class TestPlanTransferOpenRoute:
 
     def test_custom_dest_trailing_slash_adopts_src_name(self) -> None:
         # a trailing "/" in the custom token means directory semantics (s3_format parity)
-        plan = naming.plan_transfer(
+        plan = transferplan.plan_transfer(
             S3Storage("s3://b/key"), _FakeOpen("mem://dir/"), recursive=False
         )
         assert plan.use_src_name is True
@@ -253,15 +281,61 @@ class TestPlanTransferOpenRoute:
 
     def test_custom_to_local_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError):
-            naming.plan_transfer(_FakeOpen(), LocalStorage(str(tmp_path)), recursive=False)
+            transferplan.plan_transfer(_FakeOpen(), LocalStorage(str(tmp_path)), recursive=False)
 
     def test_local_to_custom_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError):
-            naming.plan_transfer(LocalStorage(str(tmp_path)), _FakeOpen(), recursive=False)
+            transferplan.plan_transfer(LocalStorage(str(tmp_path)), _FakeOpen(), recursive=False)
 
     def test_custom_to_custom_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            naming.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
+            transferplan.plan_transfer(_FakeOpen(), _FakeOpen(), recursive=False)
+
+
+_ENDPOINTS: dict[str, Callable[[], Storage]] = {
+    "s3": lambda: S3Storage("s3://b/k"),
+    "local": lambda: LocalStorage("f.txt"),
+    "open": _FakeOpen,
+}
+
+
+class TestPathsType:
+    """``_paths_type``: the full 3x3 endpoint-pair matrix in one place - the
+    five aws routes name their ``PathsType``, the four impossible pairings
+    raise. The class patterns are ``isinstance``, so a built-in subclass keeps
+    its parent's route."""
+
+    @pytest.mark.parametrize(
+        ("src", "dest", "expected"),
+        [
+            ("local", "s3", "locals3"),
+            ("s3", "local", "s3local"),
+            ("s3", "s3", "s3s3"),
+            ("open", "s3", "opens3"),
+            ("s3", "open", "s3open"),
+        ],
+    )
+    def test_valid_pairs(self, src: str, dest: str, expected: str) -> None:
+        pair = transferplan._paths_type(_ENDPOINTS[src](), _ENDPOINTS[dest](), operation="cp")
+        assert pair == expected
+
+    @pytest.mark.parametrize(
+        ("src", "dest"),
+        [("local", "local"), ("open", "local"), ("local", "open"), ("open", "open")],
+    )
+    def test_impossible_pairs_are_rejected(self, src: str, dest: str) -> None:
+        with pytest.raises(ValidationError):
+            transferplan._paths_type(_ENDPOINTS[src](), _ENDPOINTS[dest](), operation="cp")
+
+    def test_builtin_subclasses_keep_their_parents_route(self) -> None:
+        class _MyS3(S3Storage):
+            pass
+
+        class _MyLocal(LocalStorage):
+            pass
+
+        pair = transferplan._paths_type(_MyLocal("f.txt"), _MyS3("s3://b/k"), operation="cp")
+        assert pair == "locals3"
 
 
 class TestItemPaths:
@@ -332,36 +406,6 @@ class TestDestFor:
         assert dest_for(plan, compare_key) == dest
 
 
-class TestFilterRoot:
-    """The plan's filter root composes with translate_pattern_for_root so the
-    matcher - fed each item's compare_key - selects the same set aws-cli's
-    rootdir-joined fnmatch selects."""
-
-    def test_local_single_roots_at_the_parent_directory(self, tmp_path: Path) -> None:
-        src = tmp_path / "a.txt"
-        src.write_bytes(b"x")
-        plan = plan_transfer(str(src), "s3://b/k", recursive=False)
-        assert plan.filter_root == str(tmp_path)
-        assert translate_pattern_for_root("*.txt", plan.filter_root) == "*.txt"
-
-    def test_local_recursive_roots_at_the_directory(self, tmp_path: Path) -> None:
-        plan = plan_transfer(str(tmp_path), "s3://b/tree", recursive=True)
-        assert plan.filter_root == str(tmp_path)
-        anchored = str(tmp_path / "sub") + "/*"
-        assert translate_pattern_for_root(anchored, plan.filter_root) == "sub/*"
-        assert translate_pattern_for_root("/elsewhere/*", plan.filter_root) is None
-
-    def test_s3_recursive_root_is_the_raw_key(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://b/pre", str(tmp_path), recursive=True)
-        assert plan.filter_root == "pre"
-        assert translate_pattern_for_root("*.txt", "pre") == "*.txt"
-
-    def test_s3_bucket_root_single_key(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://b/key", str(tmp_path / "f"), recursive=False)
-        assert plan.filter_root == ""
-        assert translate_pattern_for_root("key*", "") == "key*"
-
-
 class TestMvSamePathGuards:
     """The mv onto-itself rules (aws-cli ``_same_path`` / ``_same_key``).
 
@@ -398,6 +442,41 @@ class TestMvSamePathGuards:
         assert same_key("s3://b1/k.txt", "s3://b2/")
         assert not same_key("s3://b1/d/k.txt", "s3://b2/")
         assert same_key("s3://b1/d/k.txt", "s3://b2/d/")
+
+    # The full URI matrix the string rule covers, for the equivalence pin below.
+    _URIS = (
+        "s3://b/k.txt",
+        "s3://b/d/a.txt",
+        "s3://b/d/",
+        "s3://b/d",
+        "s3://b/",
+        "s3://b",
+        "s3://other/k.txt",
+        "s3://other/d/",
+    )
+
+    @pytest.mark.parametrize("src", _URIS)
+    @pytest.mark.parametrize("dest", _URIS)
+    def test_same_path_as_is_equivalent_to_the_string_rule(self, src: str, dest: str) -> None:
+        # The Storage-level comparison (held bucket/key, '/'-anchored keys)
+        # must decide exactly like aws's string rule over the
+        # keyless-normalized URIs - every pair of the matrix, both ways.
+        expected = same_path(normalize_s3_uri(src), normalize_s3_uri(dest))
+        assert S3Storage(src).same_path_as(S3Storage(dest)) is expected
+
+    @pytest.mark.parametrize("uri", (*_URIS, "s3://"))
+    def test_normalized_uri_is_equivalent_to_the_string_form(self, uri: str) -> None:
+        # The instance form derives the keyless-normalized URI from the held
+        # state; it must render exactly what the string pass produces.
+        assert S3Storage(uri).normalized_uri() == normalize_s3_uri(uri)
+
+    def test_same_path_as_direct_shapes(self) -> None:
+        # The three aws shapes, plus the bucket gate, on held state.
+        assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b/k"))
+        assert S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/d/"))
+        assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b"))  # keyless dest
+        assert not S3Storage("s3://b/k").same_path_as(S3Storage("s3://other/k"))
+        assert not S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/other/"))
 
     def test_same_key_splits_access_point_arns_whole(self) -> None:
         assert same_key(f"s3://{_ACCESSPOINT_ARN}/k.txt", "s3://plain-bucket/k.txt")

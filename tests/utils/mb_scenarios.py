@@ -21,28 +21,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tests.utils.harness import BUCKET_TOKEN
+from tests.utils.scenario import BaseScenario, resolve_argv
+
+__all__ = ["SCENARIOS", "MbScenario", "resolve_argv"]
 
 
 @dataclass(frozen=True)
-class MbScenario:
+class MbScenario(BaseScenario):
     """One ``mb`` invocation against a fixed sibling-bucket start state."""
 
-    name: str
-    argv: tuple[str, ...]
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
-    # False => normalized stdout is not compared (rc still is - charter).
-    compare_stdout: bool = True
-    # True => live aws-vs-ours diff only: no golden written or checked, and no
-    # functional replay. For moto fidelity gaps (see rm_scenarios).
-    diff_only: bool = False
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: MbScenario, bucket: str) -> list[str]:
-    """Materialize the argv template against a concrete bucket name."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 SCENARIOS: tuple[MbScenario, ...] = (

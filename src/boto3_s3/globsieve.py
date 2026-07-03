@@ -28,13 +28,24 @@ partitioned by shape (literal, suffix, prefix, general fnmatch): a
 uniform set uses that shape's dedicated :class:`SetMatcher`, and a mixed
 set is folded into a :class:`CompositeSet` that ORs one matcher per shape.
 
-Keys are matched verbatim. ``S3.rm`` feeds root-stripped keys (relative
-to the operation's effective prefix root), so this module never needs to
-know about buckets - ``fnmatch.fnmatch`` is greedy across ``/`` so the
-verdict is identical whether the root prefix is included or stripped.
-User patterns anchored at the root (aws-cli joins each pattern with the
-source root) are converted to the same relative form by
-:func:`translate_pattern_for_root`.
+A relative pattern is matched against the entry's root-relative
+``compare_key`` (``fnmatch`` is greedy across ``/``, so it matches anywhere
+in the key the way aws-cli's root-joined form does). A root-anchored
+(absolute) pattern - ``--exclude /data/secret/*`` - is matched against the
+entry's ``full_key`` instead, anchored with ``os.path.join`` exactly like
+aws-cli joins each pattern onto the source / destination root; this is what
+makes the same filter prune the two ``sync`` sides per-side (a source-rooted
+absolute pattern matches the local source's full path but not the S3
+destination's anchorless key). See :class:`Anchored`.
+
+This module is a self-contained, stdlib-only building block: everything in
+``__all__`` is public and reached by submodule path (``boto3_s3.globsieve``,
+as above); :class:`GlobFilter` / :class:`GlobPattern` are additionally
+re-exported at the package root. The matcher classes are public so a custom
+tool can assemble its own decision pipeline from the same parts ``compile``
+picks from; :func:`compile_set_matcher` builds the shape-specialized
+:class:`SetMatcher` those classes consume, and :func:`is_anchored` exposes
+the anchored/relative split.
 """
 
 from __future__ import annotations
@@ -53,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AlwaysExclude",
     "AlwaysInclude",
+    "Anchored",
     "CompositeSet",
     "ExcludeOnly",
     "GlobFilter",
@@ -67,7 +79,8 @@ __all__ = [
     "SuffixSet",
     "UnionRegex",
     "compile",
-    "translate_pattern_for_root",
+    "compile_set_matcher",
+    "is_anchored",
 ]
 
 # ----- pattern definition --------------------------------------------------
@@ -102,69 +115,38 @@ class GlobPattern:
         return cls(PatternKind.EXCLUDE, pattern)
 
 
-# ----- pattern translation -------------------------------------------------
+# ----- pattern classification ----------------------------------------------
 
 
-def translate_pattern_for_root(pattern: str, rootdir: str) -> str | None:
-    """Translate a user-supplied glob into a relative-key-equivalent form.
+def is_anchored(pattern: str) -> bool:
+    """Whether a pattern is root-anchored (absolute) rather than root-relative.
 
-    aws-cli's filter joins each pattern with the source rootdir
-    (``os.path.join(rootdir, pattern)``) and matches the result against
-    the absolute file path via ``fnmatch``. ``S3.rm`` feeds root-stripped
-    relative keys to the matcher, so a user pattern like
-    ``--exclude /abs/data/secret/*`` (which aws-cli turns into a literal
-    absolute pattern) needs the rootdir prefix stripped to match the
-    same set of keys against the relative form. Doing the translation
-    once at compile time keeps the per-key fast paths
-    (LiteralSet / SuffixSet / PrefixSet / UnionRegex) intact.
-
-    Returns the translated pattern, or ``None`` if the pattern is
-    anchored OUTSIDE ``rootdir`` and can therefore never match any
-    key under it (caller should drop the entry from the pattern list).
+    aws-cli joins every pattern onto the operation root with ``os.path.join``,
+    which *drops* the root for an absolute right-hand side - so an absolute
+    pattern is matched against the entry's full path, a relative one effectively
+    against its root-relative tail. :func:`compile` mirrors that split: anchored
+    patterns go to :class:`Anchored` (matched against ``full_key``), the rest
+    keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
+    POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
+    UNC do (a drive-relative ``C:foo`` does not, exactly as ``os.path.join``
+    treats it).
     """
-    # Normalise the host separator to ``/``: aws-cli matches a pattern against
-    # the source path with ``pattern.replace(os.sep, '/')`` for an s3 source and
-    # ``pattern.replace('/', os.sep)`` against os.sep paths for a local one
-    # (aws-cli's filters._match_pattern). Folding ``os.sep`` -> ``/`` on both sides
-    # reproduces both: on Windows it rewrites ``\`` like the local case, while on
-    # POSIX (os.sep == '/') it is a no-op, so a literal backslash in an s3 key
-    # survives instead of being wrongly rewritten to ``/``.
-    pat = pattern.replace(os.sep, "/")
-    root = rootdir.replace(os.sep, "/").rstrip("/")
-    if not root:
-        return pat
-
-    # Mimic ``os.path.join`` semantics: an absolute right-hand side
-    # discards the left-hand rootdir. POSIX-absolute (``/foo``) and
-    # Windows drive-rooted (``C:/foo``) both qualify.
-    if pat.startswith("/") or _has_drive(pat):
-        joined = pat
-    else:
-        joined = f"{root}/{pat}"
-
-    prefix = f"{root}/"
-    if joined.startswith(prefix):
-        return joined[len(prefix) :]
-    # Anchored outside the rootdir: aws-cli's fnmatch against any file
-    # under the rootdir would also miss, so the pattern entry is dead.
-    return None
-
-
-def _has_drive(p: str) -> bool:
-    return len(p) >= 2 and p[1] == ":" and p[0].isalpha()
+    return os.path.isabs(pattern)
 
 
 # ----- runtime protocols ---------------------------------------------------
 
 
 class Matcher(Protocol):
-    """Final include/exclude decision for a key.
+    """Final include/exclude decision for an entry.
 
-    A single-method protocol (``included(key) -> bool``); the matchers
-    :func:`compile` returns all satisfy it.
+    ``included(compare_key, full_key=None) -> bool``. A relative pattern matches
+    the root-relative ``compare_key``; a root-anchored (absolute) pattern is
+    anchored against ``full_key`` (the entry's full path - see :class:`Anchored`).
+    Matchers built from relative-only pattern lists ignore ``full_key``.
     """
 
-    def included(self, key: str) -> bool: ...
+    def included(self, compare_key: str, full_key: str | None = None) -> bool: ...
 
 
 class SetMatcher(Protocol):
@@ -179,52 +161,90 @@ class SetMatcher(Protocol):
 class AlwaysInclude:
     """No patterns - every key is included."""
 
-    def included(self, key: str) -> bool:
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
         return True
 
 
 class AlwaysExclude:
     """Catch-all exclude with no includes - nothing is included."""
 
-    def included(self, key: str) -> bool:
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
         return False
 
 
 class IncludeOnly:
-    """Default-deny: include iff the key matches the wrapped set."""
+    """Default-deny: include iff the compare key matches the wrapped set."""
 
     def __init__(self, set_matcher: SetMatcher) -> None:
         self.set_matcher = set_matcher
 
-    def included(self, key: str) -> bool:
-        return self.set_matcher.matches(key)
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
+        return self.set_matcher.matches(compare_key)
 
 
 class ExcludeOnly:
-    """Default-allow: include iff the key does NOT match the wrapped set."""
+    """Default-allow: include iff the compare key does NOT match the wrapped set."""
 
     def __init__(self, set_matcher: SetMatcher) -> None:
         self.set_matcher = set_matcher
 
-    def included(self, key: str) -> bool:
-        return not self.set_matcher.matches(key)
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
+        return not self.set_matcher.matches(compare_key)
 
 
 class Sequential:
     """Last-match-wins walk through ``(PatternKind, SetMatcher)`` pairs.
 
-    Default to include. Each pair is consulted in order; a hit
-    overwrites the running decision. This is the general-case fallback
-    for mixed include/exclude orderings.
+    Default to include. Each pair is consulted in order against the
+    ``compare_key``; a hit overwrites the running decision. This is the
+    general-case fallback for mixed include/exclude orderings of
+    relative patterns (a list with a root-anchored pattern uses
+    :class:`Anchored` instead).
     """
 
     def __init__(self, items: Iterable[tuple[PatternKind, SetMatcher]]) -> None:
         self.items: tuple[tuple[PatternKind, SetMatcher], ...] = tuple(items)
 
-    def included(self, key: str) -> bool:
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
         included = True
         for kind, sm in self.items:
-            if sm.matches(key):
+            if sm.matches(compare_key):
+                included = kind is PatternKind.INCLUDE
+        return included
+
+
+class Anchored:
+    """Last-match-wins when the pattern list contains a root-anchored pattern.
+
+    A relative pattern matches the root-relative ``compare_key`` (like the other
+    matchers, via its precompiled :class:`SetMatcher`). A root-anchored
+    (absolute) pattern is anchored against the entry's ``full_key`` exactly the
+    way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
+    the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
+    under ``C:\\data`` -> ``C:/data/*``), and the joined form is fnmatched against
+    ``full_key``. With no ``full_key`` - an S3 listing has none - a root-anchored
+    pattern can never match, exactly like aws-cli (its s3 paths carry no anchor).
+
+    Items are ``(PatternKind, is_anchored, payload)``: ``payload`` is the raw
+    pattern string when anchored, else a :class:`SetMatcher` for ``compare_key``.
+    """
+
+    def __init__(self, items: Iterable[tuple[PatternKind, bool, SetMatcher | str]]) -> None:
+        self.items: tuple[tuple[PatternKind, bool, SetMatcher | str], ...] = tuple(items)
+
+    def included(self, compare_key: str, full_key: str | None = None) -> bool:
+        included = True
+        for kind, is_anchored, payload in self.items:
+            if is_anchored:
+                if full_key is None:
+                    continue
+                assert isinstance(payload, str)
+                rooted = os.path.join(full_key, payload).replace(os.sep, "/")
+                hit = fnmatch.fnmatchcase(full_key, rooted)
+            else:
+                assert not isinstance(payload, str)
+                hit = payload.matches(compare_key)
+            if hit:
                 included = kind is PatternKind.INCLUDE
         return included
 
@@ -356,10 +376,24 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
     specialized: literal-only sets use :class:`LiteralSet`, all-``*X``
     sets use :class:`SuffixSet`, all-``X*`` sets use :class:`PrefixSet`,
     and mixed shapes fall back to :class:`UnionRegex`.
+
+    A list that contains a root-anchored (absolute) pattern bypasses the
+    macro-shape fast paths and uses :class:`Anchored`, which matches relative
+    patterns against the ``compare_key`` and anchored ones against the entry's
+    ``full_key`` (the per-side behavior aws-cli gets from joining each pattern
+    onto the source / destination root).
     """
     pats = tuple(patterns)
     if not pats:
         return AlwaysInclude()
+
+    if any(is_anchored(p.pattern) for p in pats):
+        return Anchored(
+            (p.kind, True, p.pattern)
+            if is_anchored(p.pattern)
+            else (p.kind, False, compile_set_matcher((p.pattern,)))
+            for p in pats
+        )
 
     head = pats[0]
     rest = pats[1:]
@@ -371,18 +405,18 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
         return AlwaysExclude()
 
     if is_catch_all_exclude and all(p.kind is PatternKind.INCLUDE for p in rest):
-        return IncludeOnly(_compile_set_matcher([p.pattern for p in rest]))
+        return IncludeOnly(compile_set_matcher([p.pattern for p in rest]))
 
     if is_catch_all_include and all(p.kind is PatternKind.EXCLUDE for p in rest):
-        return ExcludeOnly(_compile_set_matcher([p.pattern for p in rest]))
+        return ExcludeOnly(compile_set_matcher([p.pattern for p in rest]))
 
     if all(p.kind is PatternKind.EXCLUDE for p in pats):
-        return ExcludeOnly(_compile_set_matcher([p.pattern for p in pats]))
+        return ExcludeOnly(compile_set_matcher([p.pattern for p in pats]))
 
-    return Sequential((p.kind, _compile_one_set(p.pattern)) for p in pats)
+    return Sequential((p.kind, compile_set_matcher((p.pattern,))) for p in pats)
 
 
-def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
+def compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
     """Pick the fastest :class:`SetMatcher` for a pattern list.
 
     Patterns are partitioned by shape (literal / ``*X`` suffix / ``X*``
@@ -392,7 +426,11 @@ def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
     case for a real exclude list (``dir/*`` directory excludes alongside a
     ``*.ext`` suffix and a couple of literals) - is folded into a
     :class:`CompositeSet` that ORs one matcher per present shape, which is
-    faster than collapsing everything into one regex.
+    faster than collapsing everything into one regex. An empty list yields
+    a matcher that never matches. This is the companion of the public
+    decision classes: it builds the :class:`SetMatcher` that
+    :class:`IncludeOnly` / :class:`ExcludeOnly` / :class:`Sequential`
+    consume.
     """
     literals: list[str] = []
     suffixes: list[str] = []
@@ -420,17 +458,6 @@ def _compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
             return PrefixSet(prefixes)
         return UnionRegex(general)
     return CompositeSet(literals, suffixes, prefixes, general)
-
-
-def _compile_one_set(pattern: str) -> SetMatcher:
-    """Specialize one pattern (used inside :class:`Sequential`)."""
-    if _is_literal(pattern):
-        return LiteralSet((pattern,))
-    if _is_pure_suffix(pattern):
-        return SuffixSet((pattern[1:],))
-    if _is_pure_prefix(pattern):
-        return PrefixSet((pattern[:-1],))
-    return UnionRegex((pattern,))
 
 
 # ----- shape predicates ----------------------------------------------------
@@ -483,12 +510,11 @@ class GlobFilter:
     ``sync`` both sides may then race to compile, which is harmless - the
     patterns are read-only and every compilation is equivalent).
 
-    As a ``FileFilter`` it is invoked with a :class:`~boto3_s3.types.FileInfo`
-    and matches its ``compare_key`` (the root-relative key the operation stamps
-    before consulting the filter). Patterns are matched verbatim against that
-    ``/``-form compare key, exactly like :func:`compile`; route them through
-    :func:`translate_pattern_for_root` first if they need root anchoring or host
-    separator folding.
+    As a ``FileFilter`` it is invoked with a :class:`~boto3_s3.types.FileInfo`:
+    a relative pattern matches its ``compare_key`` (the root-relative key the
+    operation stamps), a root-anchored (absolute) pattern its ``key`` (the full
+    path), exactly like :func:`compile`. Byte-exact (the permissive building
+    block); host case-folding for ``aws s3`` parity is the CLI layer's job.
     """
 
     __slots__ = ("_compiled", "_patterns")
@@ -526,4 +552,4 @@ class GlobFilter:
         compiled = self._compiled
         if compiled is None:
             compiled = self._compiled = compile(self._patterns)
-        return compiled.included(key)
+        return compiled.included(key, info.key)

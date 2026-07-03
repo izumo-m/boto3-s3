@@ -11,7 +11,7 @@ copy or delete. This module is layer two's material:
   records. It is a **pure pairer** - every key on either side comes out and
   no copy/delete judgment happens here (unlike aws-cli's comparator, which
   buries its strategy calls in the merge loop; splitting them keeps each
-  side replaceable). It only stamps the run's direction (``kind``) onto each
+  side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
 - A :data:`PairFilter` is a copy judgment: a predicate over a pair where
   ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
@@ -20,8 +20,15 @@ copy or delete. This module is layer two's material:
   ``FileFilter`` over the destination-only orphan.)
 - :func:`compare_size_time` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
-  re-exported building block (kept out of ``__all__``); ``S3.sync`` selects it
-  for ``compare=None`` and reads the direction from ``pair.kind``.
+  re-exported building block (kept out of ``__all__``); it is the judgment
+  behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
+  selects for ``compare=None``. The direction is read from
+  ``pair.transfer_type``.
+- :class:`ContentComparison` is the shared template of the content
+  strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
+  skeleton every content comparison runs before its leaf digest work - the
+  guards, the ``check_size`` safeguard, and the direction dispatch - lives
+  here once, so the two strategies cannot drift apart on it.
 - :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
   the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
   (a copy strategy is *chosen*, not composed).
@@ -34,9 +41,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import ClassVar, TypeVar
 
-from boto3_s3.types import FileInfo, OpKind
+from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
 
 _T = TypeVar("_T")
 
@@ -47,21 +54,21 @@ class SyncPair:
 
     ``key`` is the compare key - the entry's path relative to its side's
     sync root, ``/``-separated on every platform - so name-based filters
-    need not care where either root lives. ``kind`` is the sync's transfer
-    direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a pair
-    filter can apply the direction-asymmetric rules without being told the
-    route. ``src`` / ``dst`` are the sides' listing entries; exactly one may
+    need not care where either root lives. ``transfer_type`` is the sync's
+    transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
+    pair filter can apply the direction-asymmetric rules without being told the
+    route. ``src`` / ``dest`` are the sides' listing entries; exactly one may
     be ``None``:
 
     - both set: the key exists on both sides (copy is an *update*),
-    - ``dst`` is ``None``: source-only (copy is a *new* transfer),
+    - ``dest`` is ``None``: source-only (copy is a *new* transfer),
     - ``src`` is ``None``: destination-only (the delete candidate).
     """
 
     key: str
-    kind: OpKind
+    transfer_type: TransferType
     src: FileInfo | None = None
-    dst: FileInfo | None = None
+    dest: FileInfo | None = None
 
 
 PairFilter = Callable[[SyncPair], bool]
@@ -104,45 +111,45 @@ class Comparator:
     Inputs must be ascending by compare key - that is the ``Storage.scan``
     ordering contract (S3 byte order; the local walk sorts to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
-    to a :data:`PairFilter` for that. ``kind`` (the run's direction) is
+    to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment.
     """
 
-    kind: OpKind
+    transfer_type: TransferType
 
     def compare(
         self,
         src_entries: Iterable[tuple[str, FileInfo]],
-        dst_entries: Iterable[tuple[str, FileInfo]],
+        dest_entries: Iterable[tuple[str, FileInfo]],
     ) -> Iterator[SyncPair]:
         """Yield every key on either side as a :class:`SyncPair`.
 
-        ``src_entries`` / ``dst_entries`` are ``(compare_key, info)``
+        ``src_entries`` / ``dest_entries`` are ``(compare_key, info)``
         streams, lazily consumed - pairing streams page-by-page listings
         without materializing either side.
         """
-        kind = self.kind
+        transfer_type = self.transfer_type
         src_iter = iter(src_entries)
-        dst_iter = iter(dst_entries)
+        dest_iter = iter(dest_entries)
         src = next(src_iter, None)
-        dst = next(dst_iter, None)
-        while src is not None and dst is not None:
-            if src[0] < dst[0]:
-                yield SyncPair(key=src[0], kind=kind, src=src[1])
+        dest = next(dest_iter, None)
+        while src is not None and dest is not None:
+            if src[0] < dest[0]:
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
-            elif src[0] > dst[0]:
-                yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
-                dst = next(dst_iter, None)
+            elif src[0] > dest[0]:
+                yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                dest = next(dest_iter, None)
             else:
-                yield SyncPair(key=src[0], kind=kind, src=src[1], dst=dst[1])
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
                 src = next(src_iter, None)
-                dst = next(dst_iter, None)
+                dest = next(dest_iter, None)
         while src is not None:
-            yield SyncPair(key=src[0], kind=kind, src=src[1])
+            yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
-        while dst is not None:
-            yield SyncPair(key=dst[0], kind=kind, dst=dst[1])
-            dst = next(dst_iter, None)
+        while dest is not None:
+            yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            dest = next(dest_iter, None)
 
 
 def compare_size_time(
@@ -150,8 +157,10 @@ def compare_size_time(
 ) -> bool:
     """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
 
-    Not a public building block: ``S3.sync`` selects it for ``compare=None``.
-    The transfer direction comes from ``pair.kind`` (the time rule is
+    Not a public building block: it implements
+    :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
+    for ``compare=None``.
+    The transfer direction comes from ``pair.transfer_type`` (the time rule is
     direction-asymmetric). A source-only pair always copies (aws-cli's
     ``MissingFileSync``). For a pair present on both sides:
 
@@ -173,25 +182,98 @@ def compare_size_time(
     faces one (its listings always carry both), so leaning toward copying is the
     permissive reading.
     """
-    src, dst = pair.src, pair.dst
+    src, dest = pair.src, pair.dest
     if src is None:
         raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-    if dst is None:
+    if dest is None:
         return True
-    same_size = src.size is not None and src.size == dst.size
+    same_size = src.size is not None and src.size == dest.size
     if size_only and not exact_timestamps:
         return not same_size
-    return not same_size or not _times_match(src, dst, pair.kind, exact_timestamps)
+    return not same_size or not _times_match(src, dest, pair.transfer_type, exact_timestamps)
 
 
-def _times_match(src: FileInfo, dst: FileInfo, kind: OpKind, exact: bool) -> bool:
+def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
     """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
-    if src.mtime is None or dst.mtime is None:
+    if src.mtime is None or dest.mtime is None:
         return False
-    delta = (dst.mtime - src.mtime).total_seconds()
-    if kind is OpKind.DOWNLOAD:
+    delta = (dest.mtime - src.mtime).total_seconds()
+    if transfer_type is TransferType.DOWNLOAD:
         return delta == 0 if exact else delta <= 0
     return delta >= 0
+
+
+READ_CHUNK = 1024 * 1024
+"""The content strategies' streaming read granularity; bounds memory."""
+
+
+class ContentComparison:
+    """The shared skeleton of the content ``compare=`` strategies (``True`` = copy).
+
+    Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
+    with their leaf digest work. What lives here is everything the two must
+    agree on - the missing-source guard, the source-only always-copy, the
+    ``check_size`` size-mismatch decision, and the ``transfer_type`` dispatch
+    onto the two hooks - so the strategies cannot silently drift apart on the
+    decision shape.
+    """
+
+    __slots__ = ()
+
+    #: The guard-message name ("etag comparison" / "checksum comparison").
+    _strategy_name: ClassVar[str]
+
+    # Storage is the subclass's (each declares its own slot).
+    check_size: bool
+
+    def __call__(self, pair: SyncPair) -> bool:
+        src, dest = pair.src, pair.dest
+        if src is None:
+            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
+        if dest is None:
+            return True
+        if (
+            self.check_size
+            and src.size is not None
+            and dest.size is not None
+            and src.size != dest.size
+        ):
+            # Differing sizes mean differing content - copy without trusting the
+            # stored digest (MD5 / a fixed-width CRC can collide; the size is
+            # independent evidence) and without reading the local file.
+            return True
+        transfer_type = pair.transfer_type
+        if transfer_type is TransferType.COPY:
+            return self._copy_differs(src, dest)
+        if transfer_type is TransferType.UPLOAD:
+            local, remote = src, dest
+        elif transfer_type is TransferType.DOWNLOAD:
+            local, remote = dest, src
+        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
+            raise ValueError(
+                f"{self._strategy_name} cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
+            )
+        if not isinstance(local, LocalFileInfo):
+            raise ValueError(
+                f"{self._strategy_name}: no local side for pair {pair.key!r} "
+                f"(transfer_type={transfer_type.value})"
+            )
+        return self._local_remote_differ(local, remote, transfer_type)
+
+    def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
+        """s3-to-s3: whether the two S3 sides' stored digests disagree."""
+        raise NotImplementedError
+
+    def _local_remote_differ(
+        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    ) -> bool:
+        """Upload/download: whether the local content differs from the S3 side.
+
+        ``transfer_type`` tells which endpoint the remote entry belongs to
+        (UPLOAD -> the destination, DOWNLOAD -> the source) for a strategy
+        that must reach that endpoint's client.
+        """
+        raise NotImplementedError
 
 
 def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:

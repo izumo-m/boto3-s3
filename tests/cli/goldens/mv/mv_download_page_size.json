@@ -2,7 +2,7 @@
   "argv": [
     "mv",
     "s3://<BUCKET>/pg",
-    "dst/",
+    "dest/",
     "--recursive",
     "--page-size",
     "2"
@@ -22,10 +22,10 @@
   "scenario": "mv_download_page_size",
   "src_tree": [],
   "stdout_lines": [
-    "move: s3://<BUCKET>/pg/k00 to dst/k00",
-    "move: s3://<BUCKET>/pg/k01 to dst/k01",
-    "move: s3://<BUCKET>/pg/k02 to dst/k02",
-    "move: s3://<BUCKET>/pg/k03 to dst/k03",
-    "move: s3://<BUCKET>/pg/k04 to dst/k04"
+    "move: s3://<BUCKET>/pg/k00 to dest/k00",
+    "move: s3://<BUCKET>/pg/k01 to dest/k01",
+    "move: s3://<BUCKET>/pg/k02 to dest/k02",
+    "move: s3://<BUCKET>/pg/k03 to dest/k03",
+    "move: s3://<BUCKET>/pg/k04 to dest/k04"
   ]
 }

@@ -110,8 +110,16 @@ class TestUsageErrors:
         ],
     )
     def test_directory_buckets_are_rejected(
-        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+        self,
+        argv: list[str],
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # chdir: aws (and this CLI, faithfully) pre-creates a local dest dir
+        # during validation, before the directory-bucket rejection - keep the
+        # "dl" byproduct out of the repo working tree.
+        monkeypatch.chdir(tmp_path)
         rc = cli.main(argv, ctx=_failing_factory_ctx())
         assert rc == 252
         assert "Cannot use sync command with a directory bucket." in capsys.readouterr().err
@@ -224,9 +232,11 @@ class TestOutputShapes:
     def test_excluded_dest_objects_survive_delete(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The patterns compile against BOTH roots; the destination-side set
-        # is what shields excluded objects from --delete (aws-cli
-        # create_filter's dst_rootdir).
+        # The single source-root filter is applied to the destination stream
+        # too (sync.md section 1), shielding excluded objects from --delete.
+        # For this relative pattern that matches aws-cli's per-root filtering
+        # (sync.md section 7 records the absolute-pattern edge as the only
+        # divergence).
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client(

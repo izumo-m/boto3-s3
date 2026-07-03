@@ -6,7 +6,7 @@ A faithful port of aws-cli's ``S3PathResolver`` (aws-cli
 S3 on Outposts access point ARN, or a Multi-Region Access Point ARN can hide
 the bucket a path really lands in, so ``mv`` would copy an object onto
 itself and then delete it. Resolving first lets a caller compare the real
-``s3://bucket/key`` pairs (``naming.same_path``) before moving anything.
+``s3://bucket/key`` pairs (``S3Storage.same_path``) before moving anything.
 
 Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
@@ -25,7 +25,6 @@ import re
 from typing import Any
 
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.naming import split_bucket_key
 
 # aws-cli regexes, verbatim. ``has_underlying_s3_path`` and the resolution
 # dispatch share them; the suffix forms (-s3alias / --op-s3) have no regex.
@@ -49,7 +48,7 @@ def has_underlying_s3_path(path: str) -> bool:
     this is what gates aws's "may resolve to same underlying s3 object(s)"
     warning when validation is off.
     """
-    bucket, _key = split_bucket_key(_strip_scheme(path))
+    bucket, _key = _split_bucket_key(path)
     return bool(
         _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX.match(bucket)
         or _S3_OUTPOST_ACCESSPOINT_ARN_TO_ACCOUNT_REGEX.match(bucket)
@@ -59,10 +58,16 @@ def has_underlying_s3_path(path: str) -> bool:
     )
 
 
-def _strip_scheme(path: str) -> str:
-    if path.startswith("s3://"):
-        return path[len("s3://") :]
-    return path
+def _split_bucket_key(path: str) -> tuple[str, str]:
+    """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
+
+    Deferred import: ``s3storage`` top-imports ``botocore.exceptions``, and this
+    module must stay SDK-free at import time (its docstring's contract) - the
+    same pattern as :func:`_api_errors` below.
+    """
+    from boto3_s3.s3storage import S3Storage
+
+    return S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
 
 
 class S3PathResolver:
@@ -86,7 +91,7 @@ class S3PathResolver:
         (no API exists) and raises aws's usage-shaped error; a plain bucket
         path comes back unchanged.
         """
-        bucket, key = split_bucket_key(_strip_scheme(path))
+        bucket, key = _split_bucket_key(path)
         match = _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX.match(bucket)
         if match:
             return self._resolve_accesspoint_arn(match.group("account"), match.group("name"), key)

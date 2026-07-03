@@ -5,21 +5,15 @@ from __future__ import annotations
 import argparse
 import os
 
-# Pure-Python names only (exceptions / naming modules) - safe on the parse
-# path; S3 / S3Storage reach botocore and are imported in run() instead
-# (import contract, docs/imports.md).
-from boto3_s3 import Boto3S3Error, ValidationError
+# Loaded only once sync is determined (stage 2 of the lazy dispatch), so these
+# may reach botocore.exceptions - transferargs does, through S3Storage (import
+# contract, docs/imports.md); the boto3 / s3transfer client stack still waits
+# for build_client.
+from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
-from boto3_s3.naming import classify, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
-from boto3_s3_cli.progress import TransferPrinter
-
-_USAGE = (
-    "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
-    "Error: Invalid argument type"
-)
+from boto3_s3_cli.commands.base import Command, Context
 
 
 class SyncCommand(Command):
@@ -51,21 +45,18 @@ class SyncCommand(Command):
         ``--exclude`` / ``--include`` patterns compile once against the source
         root and apply to both sides (sync.md section 1).
         """
-        page_size = parse_integer_option(args.page_size, operation="sync")
-        progress_frequency = parse_integer_option(args.progress_frequency, operation="sync")
-        src, dst = args.paths
-        src_type = classify(src)
-        dst_type = classify(dst)
-        if src_type == "local" and dst_type == "local":
-            raise ValidationError(_USAGE, operation="sync")
-        if src == "-" or dst == "-":
+        head = transferargs.classify_paths(args, operation="sync")
+        page_size, progress_frequency = head.page_size, head.progress_frequency
+        src, dest = head.src, head.dest
+        src_type, dest_type = head.src_type, head.dest_type
+        if src == "-" or dest == "-":
             # aws-cli's _validate_streaming_paths: only cp streams, and its
             # wording names cp even from sync.
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="sync",
             )
-        paths_type = src_type + dst_type  # "locals3" | "s3local" | "s3s3" here
+        paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
         # aws-cli's _validate_path_args (one function) does BOTH the missing-source
         # check and the s3local dest-dir creation, and runs entirely BEFORE
@@ -73,21 +64,15 @@ class SyncCommand(Command):
         # below precede the SSE-C / S3 Express 252 checks: when more than one
         # fails, that order decides the exit code.
         if src_type == "local" and not os.path.exists(src):
-            # Missing local source: aws's bare RuntimeError -> rc 255.
-            raise Boto3S3Error(f"The user-provided path {src} does not exist.", operation="sync")
-        if dst_type == "local" and not os.path.exists(dst):
-            # aws creates the s3local destination during validation (before run),
-            # so an OSError here is its pre-pipeline rc 255 - not the transfer
-            # pipeline's rc 1. Pre-creating it outside finish_transfer's catch
-            # makes a creation failure surface with the validation exit code (the
-            # library S3.sync still ensures the dir for direct callers; this
-            # pre-check makes it a no-op there).
-            try:
-                os.makedirs(dst)
-            except OSError as exc:
-                raise Boto3S3Error(str(exc), operation="sync") from exc
+            # Missing local source: aws's bare RuntimeError -> rc 255
+            # (NotFoundError without a ClientError cause maps the same).
+            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
+        if dest_type == "local":
+            # aws creates the s3local destination during validation (before
+            # run): a creation failure is the pre-pipeline rc 255.
+            transferargs.create_local_dest_dir(dest, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
-        if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dst):
+        if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
             # aws-cli's _validate_not_s3express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
             raise ValidationError(
@@ -104,32 +89,22 @@ class SyncCommand(Command):
         from boto3_s3 import S3
 
         client = ctx.client_factory(args)
-        src_location, dst_location = transferargs.resolve_locations(
-            args, ctx, client, src, dst, src_type=src_type, dst_type=dst_type
+        src_location, dest_location = transferargs.resolve_locations(
+            args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
         )
 
-        plan = plan_transfer(
-            transferargs.path_storage(src, src_type),
-            transferargs.path_storage(dst, dst_type),
-            recursive=True,
-        )
-        # One symmetric filter, compiled against the source root and applied to
-        # both sides by S3.sync (sync.md section 1; relative patterns are
-        # root-independent, so one compilation suffices).
-        item_filter = filters.compile_for_root(args.filters, root=plan.filter_root)
+        # One symmetric filter applied to both sides by S3.sync (sync.md section
+        # 1). It needs no root: a relative pattern matches each entry's
+        # compare_key, an absolute one its full key, so the same filter prunes
+        # the source and destination per-side (globsieve.Anchored).
+        item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
-        printer = TransferPrinter(
-            quiet=args.quiet,
-            only_show_errors=args.only_show_errors,
-            progress=args.progress,
-            frequency=progress_frequency,
-            multiline=args.progress_multiline,
-        )
+        printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:
             S3().sync(
                 src_location,  # type: ignore[arg-type]
-                dst_location,  # type: ignore[arg-type]
+                dest_location,  # type: ignore[arg-type]
                 delete=args.delete,
                 compare=AwsCliComparison(
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps

@@ -82,7 +82,7 @@ def _run_side(
     result = runner(argv, cwd=str(workdir), stdin_payload=scenario.stdin, env=env)
     lines = normalize_cp_stdout(result.stdout, bucket=bucket)
     remaining = remaining_keys(s3_client, bucket)
-    tree = capture_local_tree(str(workdir / "dst")) if scenario.capture_tree else None
+    tree = capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None
     if scenario.mtime_key is not None:
         key, rel_path = scenario.mtime_key
         last_modified = s3_client.head_object(Bucket=bucket, Key=key)["LastModified"]

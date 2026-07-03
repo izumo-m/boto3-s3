@@ -26,10 +26,10 @@ from boto3_s3.comparator import (
     any_of,
     compare_size_time,
 )
-from boto3_s3.types import FileInfo, OpKind
+from boto3_s3.types import FileInfo, TransferType
 
 _TIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-_KIND = OpKind.UPLOAD  # pairing is direction-agnostic; any transfer kind stamps the pairs
+_KIND = TransferType.UPLOAD  # pairing is direction-agnostic; any transfer kind stamps the pairs
 
 
 def _info(key: str = "k", *, size: int | None = 10, mtime: datetime | None = _TIME) -> FileInfo:
@@ -40,8 +40,8 @@ def _entries(*keys: str) -> list[tuple[str, FileInfo]]:
     return [(key, _info(key)) for key in keys]
 
 
-def _pairs(src: list[tuple[str, FileInfo]], dst: list[tuple[str, FileInfo]]) -> list[SyncPair]:
-    return list(Comparator(_KIND).compare(iter(src), iter(dst)))
+def _pairs(src: list[tuple[str, FileInfo]], dest: list[tuple[str, FileInfo]]) -> list[SyncPair]:
+    return list(Comparator(_KIND).compare(iter(src), iter(dest)))
 
 
 class TestComparatorPairing:
@@ -49,43 +49,43 @@ class TestComparatorPairing:
 
     def test_equal_keys_pair_both_sides(self) -> None:
         src = _entries("a.txt")
-        dst = _entries("a.txt")
-        pairs = _pairs(src, dst)
-        assert pairs == [SyncPair(key="a.txt", kind=_KIND, src=src[0][1], dst=dst[0][1])]
+        dest = _entries("a.txt")
+        pairs = _pairs(src, dest)
+        assert pairs == [SyncPair(key="a.txt", transfer_type=_KIND, src=src[0][1], dest=dest[0][1])]
 
     def test_source_only_key_yields_src_pair(self) -> None:
         # aws-cli's test_compare_key_less: 'b...' sorts before 'c...', so the
         # source-only entry surfaces first, then the dest-only one.
         src = _entries("bomparator_test.py")
-        dst = _entries("comparator_test.py")
-        pairs = _pairs(src, dst)
+        dest = _entries("comparator_test.py")
+        pairs = _pairs(src, dest)
         assert pairs == [
-            SyncPair(key="bomparator_test.py", kind=_KIND, src=src[0][1]),
-            SyncPair(key="comparator_test.py", kind=_KIND, dst=dst[0][1]),
+            SyncPair(key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
+            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
         ]
 
-    def test_dest_only_key_yields_dst_pair(self) -> None:
+    def test_dest_only_key_yields_dest_pair(self) -> None:
         # aws-cli's test_compare_key_greater: the dest-only entry sorts first.
         src = _entries("domparator_test.py")
-        dst = _entries("comparator_test.py")
-        pairs = _pairs(src, dst)
+        dest = _entries("comparator_test.py")
+        pairs = _pairs(src, dest)
         assert pairs == [
-            SyncPair(key="comparator_test.py", kind=_KIND, dst=dst[0][1]),
-            SyncPair(key="domparator_test.py", kind=_KIND, src=src[0][1]),
+            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
+            SyncPair(key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
         ]
 
     def test_empty_src_flushes_dest(self) -> None:
-        dst = _entries("a", "b")
-        assert _pairs([], dst) == [
-            SyncPair(key="a", kind=_KIND, dst=dst[0][1]),
-            SyncPair(key="b", kind=_KIND, dst=dst[1][1]),
+        dest = _entries("a", "b")
+        assert _pairs([], dest) == [
+            SyncPair(key="a", transfer_type=_KIND, dest=dest[0][1]),
+            SyncPair(key="b", transfer_type=_KIND, dest=dest[1][1]),
         ]
 
     def test_empty_dest_flushes_src(self) -> None:
         src = _entries("a", "b")
         assert _pairs(src, []) == [
-            SyncPair(key="a", kind=_KIND, src=src[0][1]),
-            SyncPair(key="b", kind=_KIND, src=src[1][1]),
+            SyncPair(key="a", transfer_type=_KIND, src=src[0][1]),
+            SyncPair(key="b", transfer_type=_KIND, src=src[1][1]),
         ]
 
     def test_both_empty_yields_nothing(self) -> None:
@@ -93,9 +93,9 @@ class TestComparatorPairing:
 
     def test_interleaved_streams_merge_in_key_order(self) -> None:
         src = _entries("a", "c", "d", "f")
-        dst = _entries("b", "c", "e", "f")
-        pairs = _pairs(src, dst)
-        assert [(p.key, p.src is not None, p.dst is not None) for p in pairs] == [
+        dest = _entries("b", "c", "e", "f")
+        pairs = _pairs(src, dest)
+        assert [(p.key, p.src is not None, p.dest is not None) for p in pairs] == [
             ("a", True, False),
             ("b", False, True),
             ("c", True, True),
@@ -107,21 +107,25 @@ class TestComparatorPairing:
     def test_stamps_the_run_kind_on_every_pair(self) -> None:
         # The direction rides each pair so a filter applies the asymmetric
         # rules without being told the route.
-        pairs = list(Comparator(OpKind.DOWNLOAD).compare(iter(_entries("a")), iter(_entries("b"))))
-        assert {p.kind for p in pairs} == {OpKind.DOWNLOAD}
+        pairs = list(
+            Comparator(TransferType.DOWNLOAD).compare(iter(_entries("a")), iter(_entries("b")))
+        )
+        assert {p.transfer_type for p in pairs} == {TransferType.DOWNLOAD}
 
     def test_consumes_streams_lazily(self) -> None:
         # Pairing must stream: the first pair comes out before either side
         # is fully consumed (both sides are paged listings in practice).
         src = iter(_entries("a", "b", "c"))
-        dst = iter(_entries("a", "b", "c"))
-        stream = Comparator(_KIND).compare(src, dst)
+        dest = iter(_entries("a", "b", "c"))
+        stream = Comparator(_KIND).compare(src, dest)
         assert next(stream).key == "a"
         assert next(src, None) is not None, "source stream was drained eagerly"
 
 
-def _both(kind: OpKind, src: FileInfo, dst: FileInfo, **flags: bool) -> bool:
-    return compare_size_time(SyncPair(key=src.key, kind=kind, src=src, dst=dst), **flags)
+def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: bool) -> bool:
+    return compare_size_time(
+        SyncPair(key=src.key, transfer_type=transfer_type, src=src, dest=dest), **flags
+    )
 
 
 class TestCompareSizeTime:
@@ -129,32 +133,35 @@ class TestCompareSizeTime:
 
     def test_source_only_pair_always_copies(self) -> None:
         # aws-cli's MissingFileSync: no destination entry -> transfer.
-        for kind in (OpKind.UPLOAD, OpKind.DOWNLOAD, OpKind.COPY):
-            assert compare_size_time(SyncPair(key="k", kind=kind, src=_info())) is True
+        for transfer_type in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
+            assert (
+                compare_size_time(SyncPair(key="k", transfer_type=transfer_type, src=_info()))
+                is True
+            )
 
     def test_rejects_pair_without_source(self) -> None:
         with pytest.raises(ValueError, match="without a source entry"):
-            compare_size_time(SyncPair(key="k", kind=OpKind.UPLOAD, dst=_info()))
+            compare_size_time(SyncPair(key="k", transfer_type=TransferType.UPLOAD, dest=_info()))
 
     # -- size + last-modified (the default judgment) -----------------------
 
     def test_size_difference_copies_regardless_of_time(self) -> None:
         src = _info(size=10)
-        dst = _info(size=11, mtime=_TIME + timedelta(days=1))
-        assert _both(OpKind.UPLOAD, src, dst) is True
-        assert _both(OpKind.DOWNLOAD, src, dst) is True
+        dest = _info(size=11, mtime=_TIME + timedelta(days=1))
+        assert _both(TransferType.UPLOAD, src, dest) is True
+        assert _both(TransferType.DOWNLOAD, src, dest) is True
 
     def test_upload_skips_when_dest_is_newer_or_equal(self) -> None:
         # aws-cli's compare_time upload/copy: delta = dest - src >= 0 -> skip.
         src = _info()
-        assert _both(OpKind.UPLOAD, src, _info(mtime=_TIME + timedelta(seconds=1))) is False
-        assert _both(OpKind.UPLOAD, src, _info()) is False
-        assert _both(OpKind.UPLOAD, src, _info(mtime=_TIME - timedelta(seconds=1))) is True
+        assert _both(TransferType.UPLOAD, src, _info(mtime=_TIME + timedelta(seconds=1))) is False
+        assert _both(TransferType.UPLOAD, src, _info()) is False
+        assert _both(TransferType.UPLOAD, src, _info(mtime=_TIME - timedelta(seconds=1))) is True
 
     def test_copy_uses_the_upload_rule(self) -> None:
         src = _info()
-        assert _both(OpKind.COPY, src, _info(mtime=_TIME + timedelta(seconds=1))) is False
-        assert _both(OpKind.COPY, src, _info(mtime=_TIME - timedelta(seconds=1))) is True
+        assert _both(TransferType.COPY, src, _info(mtime=_TIME + timedelta(seconds=1))) is False
+        assert _both(TransferType.COPY, src, _info(mtime=_TIME - timedelta(seconds=1))) is True
 
     def test_download_skips_when_dest_is_older_or_equal(self) -> None:
         # The aws-cli asymmetry: a same-size download syncs only when the
@@ -162,23 +169,23 @@ class TestCompareSizeTime:
         # same size is deliberately ignored (--exact-timestamps exists for
         # exactly this).
         src = _info()
-        assert _both(OpKind.DOWNLOAD, src, _info(mtime=_TIME - timedelta(seconds=1))) is False
-        assert _both(OpKind.DOWNLOAD, src, _info()) is False
-        assert _both(OpKind.DOWNLOAD, src, _info(mtime=_TIME + timedelta(seconds=1))) is True
+        assert _both(TransferType.DOWNLOAD, src, _info(mtime=_TIME - timedelta(seconds=1))) is False
+        assert _both(TransferType.DOWNLOAD, src, _info()) is False
+        assert _both(TransferType.DOWNLOAD, src, _info(mtime=_TIME + timedelta(seconds=1))) is True
 
     def test_comparison_keeps_sub_second_precision(self) -> None:
         # aws-cli's total_seconds() is a full-precision float, not whole seconds.
         src = _info()
         newer = _info(mtime=_TIME + timedelta(microseconds=1))
-        assert _both(OpKind.UPLOAD, src, newer) is False
-        assert _both(OpKind.DOWNLOAD, src, newer) is True
+        assert _both(TransferType.UPLOAD, src, newer) is False
+        assert _both(TransferType.DOWNLOAD, src, newer) is True
 
     def test_missing_mtime_counts_as_difference(self) -> None:
-        assert _both(OpKind.UPLOAD, _info(mtime=None), _info()) is True
-        assert _both(OpKind.UPLOAD, _info(), _info(mtime=None)) is True
+        assert _both(TransferType.UPLOAD, _info(mtime=None), _info()) is True
+        assert _both(TransferType.UPLOAD, _info(), _info(mtime=None)) is True
 
     def test_missing_size_counts_as_difference(self) -> None:
-        assert _both(OpKind.UPLOAD, _info(size=None), _info(size=None)) is True
+        assert _both(TransferType.UPLOAD, _info(size=None), _info(size=None)) is True
 
     # -- size_only ----------------------------------------------------------
 
@@ -187,12 +194,14 @@ class TestCompareSizeTime:
         # different update times; differing sizes -> copy.
         src = _info()
         older = _info(mtime=_TIME - timedelta(days=1))
-        assert _both(OpKind.UPLOAD, src, older, size_only=True) is False
+        assert _both(TransferType.UPLOAD, src, older, size_only=True) is False
         assert (
-            _both(OpKind.DOWNLOAD, src, _info(mtime=_TIME + timedelta(days=1)), size_only=True)
+            _both(
+                TransferType.DOWNLOAD, src, _info(mtime=_TIME + timedelta(days=1)), size_only=True
+            )
             is False
         )
-        assert _both(OpKind.UPLOAD, src, _info(size=11), size_only=True) is True
+        assert _both(TransferType.UPLOAD, src, _info(size=11), size_only=True) is True
 
     # -- exact_timestamps ----------------------------------------------------
 
@@ -201,12 +210,14 @@ class TestCompareSizeTime:
         # exactly equal - in either direction of skew.
         src = _info()
         flags = {"exact_timestamps": True}
-        assert _both(OpKind.DOWNLOAD, src, _info(), **flags) is False
+        assert _both(TransferType.DOWNLOAD, src, _info(), **flags) is False
         assert (
-            _both(OpKind.DOWNLOAD, src, _info(mtime=_TIME - timedelta(seconds=1)), **flags) is True
+            _both(TransferType.DOWNLOAD, src, _info(mtime=_TIME - timedelta(seconds=1)), **flags)
+            is True
         )
         assert (
-            _both(OpKind.DOWNLOAD, src, _info(mtime=_TIME + timedelta(seconds=1)), **flags) is True
+            _both(TransferType.DOWNLOAD, src, _info(mtime=_TIME + timedelta(seconds=1)), **flags)
+            is True
         )
 
     def test_exact_timestamps_wins_over_size_only(self) -> None:
@@ -216,15 +227,18 @@ class TestCompareSizeTime:
         src = _info()
         stale = _info(mtime=_TIME - timedelta(days=1))
         flags = {"size_only": True, "exact_timestamps": True}
-        assert _both(OpKind.DOWNLOAD, src, stale, **flags) is True
-        assert _both(OpKind.UPLOAD, src, _info(mtime=_TIME + timedelta(days=1)), **flags) is False
+        assert _both(TransferType.DOWNLOAD, src, stale, **flags) is True
+        assert (
+            _both(TransferType.UPLOAD, src, _info(mtime=_TIME + timedelta(days=1)), **flags)
+            is False
+        )
 
     def test_exact_timestamps_leaves_uploads_on_the_default_rule(self) -> None:
         # aws-cli's test_compare_exact_timestamps_diff_age_not_download.
         src = _info()
         newer = _info(mtime=_TIME + timedelta(seconds=1))
-        assert _both(OpKind.UPLOAD, src, newer, exact_timestamps=True) is False
-        assert _both(OpKind.COPY, src, newer, exact_timestamps=True) is False
+        assert _both(TransferType.UPLOAD, src, newer, exact_timestamps=True) is False
+        assert _both(TransferType.COPY, src, newer, exact_timestamps=True) is False
 
 
 def _json_only(pair: SyncPair) -> bool:
@@ -235,22 +249,26 @@ class TestCombinators:
     def test_all_of_requires_every_predicate(self) -> None:
         copy_all = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = all_of(_json_only, copy_all)
-        assert combined(SyncPair(key="a.json", kind=_KIND, src=_info("a.json"))) is True
-        assert combined(SyncPair(key="a.txt", kind=_KIND, src=_info("a.txt"))) is False
+        assert combined(SyncPair(key="a.json", transfer_type=_KIND, src=_info("a.json"))) is True
+        assert combined(SyncPair(key="a.txt", transfer_type=_KIND, src=_info("a.txt"))) is False
 
     def test_any_of_passes_on_first_hit(self) -> None:
         # A visibility-style override composed with the size+time default:
         # one extra rule forces certain keys through.
         base = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = any_of(_json_only, base)
-        up_to_date = SyncPair(key="a.json", kind=_KIND, src=_info("a.json"), dst=_info("a.json"))
+        up_to_date = SyncPair(
+            key="a.json", transfer_type=_KIND, src=_info("a.json"), dest=_info("a.json")
+        )
         assert base(up_to_date) is False
         assert combined(up_to_date) is True
-        skipped = SyncPair(key="a.txt", kind=_KIND, src=_info("a.txt"), dst=_info("a.txt"))
+        skipped = SyncPair(
+            key="a.txt", transfer_type=_KIND, src=_info("a.txt"), dest=_info("a.txt")
+        )
         assert combined(skipped) is False
 
     def test_empty_combinators_follow_all_any_semantics(self) -> None:
-        pair = SyncPair(key="k", kind=_KIND, src=_info())
+        pair = SyncPair(key="k", transfer_type=_KIND, src=_info())
         assert all_of()(pair) is True
         assert any_of()(pair) is False
 

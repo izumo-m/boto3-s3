@@ -51,21 +51,19 @@ import hashlib
 import os
 from typing import TYPE_CHECKING
 
-from boto3_s3.comparator import SyncPair
+from boto3_s3.comparator import READ_CHUNK, ContentComparison
 from boto3_s3.localstorage import to_native_path
-from boto3_s3.types import LocalFileInfo, OpKind, S3FileInfo
+from boto3_s3.types import S3FileInfo
 
 if TYPE_CHECKING:
     from boto3_s3.s3 import S3
+    from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024
 """Default multipart part size - boto3 ``TransferConfig.multipart_chunksize``."""
 
-_READ_CHUNK = 1024 * 1024
-"""Streaming read granularity; bounds memory regardless of file size."""
 
-
-class EtagComparison:
+class EtagComparison(ContentComparison):
     """A content-comparison :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's S3
@@ -106,6 +104,8 @@ class EtagComparison:
 
     __slots__ = ("check_size", "part_size")
 
+    _strategy_name = "etag comparison"
+
     def __init__(
         self,
         s3: S3 | None = None,
@@ -118,36 +118,14 @@ class EtagComparison:
         self.part_size = DEFAULT_PART_SIZE if part_size is None else part_size
         self.check_size = check_size
 
-    def __call__(self, pair: SyncPair) -> bool:
-        src, dst = pair.src, pair.dst
-        if src is None:
-            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dst is None:
-            return True
-        if (
-            self.check_size
-            and src.size is not None
-            and dst.size is not None
-            and src.size != dst.size
-        ):
-            # Differing sizes mean differing content - copy without trusting an
-            # ETag (MD5 can collide) or reading the local file.
-            return True
-        if pair.kind is OpKind.COPY:
-            # Both sides are S3 listings: the stored ETags are directly comparable.
-            return _etag_differs(_s3_etag(src), _s3_etag(dst))
-        if pair.kind is OpKind.UPLOAD:
-            local, remote = src, dst
-        elif pair.kind is OpKind.DOWNLOAD:
-            local, remote = dst, src
-        else:  # MOVE never reaches a copy decision; guard defensively.
-            raise ValueError(
-                f"etag comparison cannot judge a {pair.kind.value!r} pair: {pair.key!r}"
-            )
-        if not isinstance(local, LocalFileInfo):
-            raise ValueError(
-                f"etag comparison: no local side for pair {pair.key!r} (kind={pair.kind.value})"
-            )
+    def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
+        # Both sides are S3 listings: the stored ETags are directly comparable.
+        return _etag_differs(_s3_etag(src), _s3_etag(dest))
+
+    def _local_remote_differ(
+        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    ) -> bool:
+        del transfer_type  # the listing ETag travels on the entry; no endpoint needed
         remote_etag = _s3_etag(remote)
         if not remote_etag:
             return True
@@ -179,7 +157,7 @@ def _file_md5_hex(path: str) -> str:
     """
     hasher = hashlib.md5()
     with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(_READ_CHUNK), b""):
+        for block in iter(lambda: fh.read(READ_CHUNK), b""):
             hasher.update(block)
     return hasher.hexdigest()
 
@@ -201,7 +179,7 @@ def _multipart_etag_at(path: str, *, chunk_size: int) -> str:
             remaining = chunk_size
             read_any = False
             while remaining > 0:
-                block = fh.read(min(_READ_CHUNK, remaining))
+                block = fh.read(min(READ_CHUNK, remaining))
                 if not block:
                     break
                 read_any = True

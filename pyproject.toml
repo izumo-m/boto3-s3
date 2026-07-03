@@ -1,13 +1,13 @@
 [project]
 name = "boto3-s3"
-version = "0.3.0"
+version = "0.4.0"
 description = "A Python library providing `aws s3` operations with a boto3-like API."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
-    { name = "Masanao Izumo", email = "ngc.izumo@gmail.com" },
+    { name = "Masanao Izumo" },
 ]
 keywords = ["aws", "s3", "boto3"]
 classifiers = [
@@ -20,6 +20,9 @@ classifiers = [
 ]
 dependencies = [
     "boto3>=1.28",
+    # Imported directly (exceptions, config types); floor per docs/overview.md
+    # section 2 (boto3 1.28 already requires it, so this is declarative).
+    "botocore>=1.31",
     "s3transfer>=0.6.2",
     "typing-extensions>=4.6",
 ]

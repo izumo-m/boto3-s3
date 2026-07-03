@@ -82,10 +82,11 @@ crt = [
 
 [[package]]
 name = "boto3-s3"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
+    { name = "botocore" },
     { name = "s3transfer" },
     { name = "typing-extensions" },
 ]
@@ -111,6 +112,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.28" },
     { name = "boto3", extras = ["crt"], marker = "extra == 'crt'", specifier = ">=1.28" },
+    { name = "botocore", specifier = ">=1.31" },
     { name = "s3transfer", specifier = ">=0.6.2" },
     { name = "typing-extensions", specifier = ">=4.6" },
 ]
@@ -130,7 +132,7 @@ dev = [
 
 [[package]]
 name = "boto3-s3-cli"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "boto3-s3" },

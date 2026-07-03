@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from typing import Any
+from typing import Any, cast
 
 import boto3
 import pytest
 from botocore.config import Config
+from botocore.exceptions import ProfileNotFound
 
-from boto3_s3 import S3, FileKind, LocalStorage, S3Storage, TransferConfig, ValidationError
+from boto3_s3 import (
+    S3,
+    ConfigurationError,
+    FileKind,
+    LocalStorage,
+    S3Storage,
+    TransferConfig,
+    ValidationError,
+)
 
 _MTIME = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -92,6 +101,32 @@ class TestClientSeam:
         # Documented contract: a fresh client per call, owned by the caller.
         s3 = S3()
         assert s3.client() is not s3.client()
+
+    def test_build_failure_maps_to_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A build failure - e.g. AWS_PROFILE naming a missing profile - raises
+        # the translated ConfigurationError (docs/exceptions.md section 3), not
+        # the raw botocore error, like every other public-API failure.
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise ProfileNotFound(profile="missing-profile")
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(ConfigurationError) as exc_info:
+            S3().client()
+        assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    def test_session_build_failure_maps_to_configuration_error(self) -> None:
+        # The session branch of client() is wrapped like the default-session
+        # branch: a session whose client build fails raises the translated
+        # ConfigurationError, not the raw botocore error.
+        class _BrokenSession:
+            def client(self, *args: Any, **kwargs: Any) -> Any:
+                raise ProfileNotFound(profile="missing-profile")
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            S3(session=cast("Any", _BrokenSession())).client()
+        assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
 
 class TestResolveSeam:

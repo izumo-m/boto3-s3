@@ -23,11 +23,12 @@ from boto3_s3 import (
     ConfigurationError,
     LocalStorage,
     NotFoundError,
-    OpKind,
     OpOutcome,
     OpResult,
     S3Deleter,
+    S3FileInfo,
     S3Storage,
+    TransferType,
     TransportError,
     ValidationError,
 )
@@ -64,6 +65,11 @@ class _FakeS3Client:
 
 def _deleter(fake: _FakeS3Client, **kwargs: Any) -> S3Deleter:
     return S3Deleter(S3Storage("s3://bucket/prefix/", client=fake), **kwargs)
+
+
+def _info(key: str) -> S3FileInfo:
+    """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters)."""
+    return S3FileInfo(key=key)
 
 
 def _keys(calls: list[dict[str, Any]]) -> list[list[str]]:
@@ -115,10 +121,10 @@ class TestBatching:
     def test_submit_buffers_until_batch_size(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=3)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         assert fake.calls == []
-        deleter.submit("c")  # reaches batch_size -> auto-flush
+        deleter.submit(_info("c"))  # reaches batch_size -> auto-flush
         deleter.close()
         assert _keys(fake.calls) == [["a", "b", "c"]]
         assert fake.calls[0]["Bucket"] == "bucket"
@@ -126,29 +132,29 @@ class TestBatching:
     def test_quiet_is_always_true(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert fake.calls[0]["Delete"]["Quiet"] is True
 
     def test_request_payer_forwarded(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, request_payer="requester")
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert fake.calls[0]["RequestPayer"] == "requester"
 
     def test_request_payer_omitted_by_default(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert "RequestPayer" not in fake.calls[0]
 
     def test_flush_sends_partial_batch(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         deleter.flush()
         deleter.close()
         assert _keys(fake.calls) == [["a", "b"]]
@@ -163,14 +169,14 @@ class TestBatching:
     def test_close_flushes_remaining(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert _keys(fake.calls) == [["a"]]
 
     def test_close_without_flush_abandons_buffer(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close(flush=False)
         assert fake.calls == []
         assert deleter.succeeded == 0
@@ -179,7 +185,7 @@ class TestBatching:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=2)
         for key in ("a", "b", "c", "d", "e"):
-            deleter.submit(key)
+            deleter.submit(_info(key))
         deleter.close()
         assert _keys(fake.calls) == [["a", "b"], ["c", "d"], ["e"]]
 
@@ -189,8 +195,8 @@ class TestBatching:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10)
         with pytest.raises(ValidationError, match="empty"):
-            deleter.submit("")
-        deleter.submit("a")  # the deleter stays usable
+            deleter.submit(_info(""))
+        deleter.submit(_info("a"))  # the deleter stays usable
         deleter.close()
         assert _keys(fake.calls) == [["a"]]
 
@@ -198,8 +204,8 @@ class TestBatching:
         fake = _FakeS3Client()
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
-        deleter.submit("k")
-        deleter.submit("k")
+        deleter.submit(_info("k"))
+        deleter.submit(_info("k"))
         deleter.close()
         assert _keys(fake.calls) == [["k", "k"]]
         assert [r.key for r in results] == ["k", "k"]
@@ -212,10 +218,10 @@ class TestResults:
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
         for key in ("a", "b", "c"):
-            deleter.submit(key)
+            deleter.submit(_info(key))
         deleter.close()
         assert [r.key for r in results] == ["a", "b", "c"]
-        assert all(r.kind is OpKind.DELETE for r in results)
+        assert all(r.transfer_type is TransferType.DELETE for r in results)
         assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
         assert all(r.bytes_transferred == 0 for r in results)
         assert all(r.error is None for r in results)
@@ -241,7 +247,7 @@ class TestResults:
         fake = _FakeS3Client(script=[{"Errors": [{"Key": "k", "Code": code, "Message": "msg"}]}])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append, operation="delete")
-        deleter.submit("k")
+        deleter.submit(_info("k"))
         deleter.close()
         error = results[0].error
         assert type(error) is category
@@ -258,7 +264,7 @@ class TestResults:
         fake = _FakeS3Client(script=[{"Errors": [{"Key": "k"}]}])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
-        deleter.submit("k")
+        deleter.submit(_info("k"))
         deleter.close()
         error = results[0].error
         assert type(error) is Boto3S3Error
@@ -273,7 +279,7 @@ class TestResults:
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
         for key in ("a", "b", "c"):
-            deleter.submit(key)
+            deleter.submit(_info(key))
         deleter.close()
         assert [(r.key, r.outcome) for r in results] == [
             ("a", OpOutcome.SUCCEEDED),
@@ -291,8 +297,8 @@ class TestResults:
         )
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=1, on_result=results.append)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         deleter.close()
         assert deleter.failed == 2
         assert deleter.first_error is results[0].error
@@ -302,8 +308,8 @@ class TestResults:
         fake = _FakeS3Client(script=[boom])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         deleter.close()  # must not raise: the failure is recorded per key
         assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
         error = results[0].error
@@ -322,8 +328,8 @@ class TestResults:
         fake = _FakeS3Client(script=[_client_error(), {}])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=1, on_result=results.append)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         deleter.close()
         assert _keys(fake.calls) == [["a"], ["b"]]
         assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.SUCCEEDED]
@@ -335,7 +341,7 @@ class TestResults:
         fake = _FakeS3Client(script=[_client_error("RequestTimeout", 400)])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert isinstance(results[0].error, TransportError)
 
@@ -358,8 +364,8 @@ class TestResults:
         )
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
-        deleter.submit("a")
-        deleter.submit("b")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         with caplog.at_level(logging.WARNING, logger="boto3_s3.deleter"):
             deleter.close()
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
@@ -370,7 +376,7 @@ class TestResults:
         fake = _FakeS3Client(script=[NoCredentialsError()])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert isinstance(results[0].error, ConfigurationError)
 
@@ -385,13 +391,13 @@ class TestResults:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10, on_result=explosive)
         for key in ("a", "b", "c"):
-            deleter.submit(key)
+            deleter.submit(_info(key))
         with pytest.raises(RuntimeError, match="callback boom"):
             deleter.close()
         assert seen == ["a", "b"]  # "c" was never dispatched
         assert deleter.succeeded == 2  # counted before the callback ran
         with pytest.raises(ValidationError):  # the deleter still ended up closed
-            deleter.submit("d")
+            deleter.submit(_info("d"))
 
     def test_operation_kwarg_threads_into_errors(self) -> None:
         fake = _FakeS3Client(
@@ -399,14 +405,49 @@ class TestResults:
         )
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append, operation="rm")
-        deleter.submit("k")
+        deleter.submit(_info("k"))
         deleter.close()
         error = results[0].error
         assert isinstance(error, Boto3S3Error)
         assert error.operation == "rm"
         with pytest.raises(ValidationError) as exc_info:
-            deleter.submit("again")
+            deleter.submit(_info("again"))
         assert exc_info.value.operation == "rm"
+
+
+class TestCaptureSlots:
+    def test_batch_slot_strips_key_and_copies_request_charged(self) -> None:
+        # docs/deleter.md: each Deleted[] entry becomes a per-key slot shaped
+        # like a single DeleteObject response - the entry minus its Key
+        # (already the result's key), plus the batch-wide RequestCharged.
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Deleted": [
+                        {
+                            "Key": "prefix/a.txt",
+                            "DeleteMarker": True,
+                            "DeleteMarkerVersionId": "dm1",
+                        },
+                        {"Key": "prefix/b.txt", "VersionId": "v2"},
+                    ],
+                    "RequestCharged": "requester",
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, capture_response=True)
+        deleter.submit(_info("prefix/a.txt"))
+        deleter.submit(_info("prefix/b.txt"))
+        deleter.close()
+        slots = [(r.extra_info or {}).get("delete") for r in results]
+        assert slots[0] == {
+            "DeleteMarker": True,
+            "DeleteMarkerVersionId": "dm1",
+            "RequestCharged": "requester",
+        }
+        assert slots[1] == {"VersionId": "v2", "RequestCharged": "requester"}
+        assert all(slot is not None and "Key" not in slot for slot in slots)
 
 
 class TestThreading:
@@ -416,8 +457,8 @@ class TestThreading:
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=2, on_result=results.append)
         try:
-            deleter.submit("a")
-            deleter.submit("b")  # auto-flush; the worker is now held on the gate
+            deleter.submit(_info("a"))
+            deleter.submit(_info("b"))  # auto-flush; the worker is now held on the gate
             # Reaching these asserts at all proves submit/flush returned while
             # the batch is still in flight.
             assert fake.entered.wait(5.0)
@@ -435,10 +476,10 @@ class TestThreading:
         fake.gate = threading.Event()
         deleter = _deleter(fake, batch_size=10)
         try:
-            deleter.submit("a")
+            deleter.submit(_info("a"))
             deleter.flush()  # batch 1 in flight, held on the gate
             assert fake.entered.wait(5.0)
-            deleter.submit("b")
+            deleter.submit(_info("b"))
             threading.Timer(0.25, fake.gate.set).start()
             start = time.monotonic()
             deleter.flush()  # must wait out batch 1 before dispatching batch 2
@@ -457,8 +498,8 @@ class TestThreading:
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=2, on_result=results.append)
         try:
-            deleter.submit("a")
-            deleter.submit("b")
+            deleter.submit(_info("a"))
+            deleter.submit(_info("b"))
             assert fake.entered.wait(5.0)
             threading.Timer(0.05, fake.gate.set).start()
             deleter.close()  # blocks until the gated batch completes
@@ -474,7 +515,7 @@ class TestThreading:
         threads: list[int] = []
         fake = _FakeS3Client()
         deleter = _deleter(fake, on_result=lambda _r: threads.append(threading.get_ident()))
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         assert threads[0] != threading.get_ident()
         assert threads[0] == fake.call_threads[0]
@@ -483,9 +524,9 @@ class TestThreading:
         fake = _FakeS3Client(script=[RuntimeError("worker boom")])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.flush()  # batch 1 will fail with a non-boto (programming) error
-        deleter.submit("b")
+        deleter.submit(_info("b"))
         with pytest.raises(RuntimeError, match="worker boom"):
             deleter.flush()
         # The failure was not converted to per-key results, and the buffered
@@ -502,30 +543,30 @@ class TestThreading:
         # than batch_size keys (1000 is an AWS hard limit).
         fake = _FakeS3Client(script=[RuntimeError("worker boom")])
         deleter = _deleter(fake, batch_size=2)
-        deleter.submit("a")
-        deleter.submit("b")  # auto-flush; the batch will fail in the worker
-        deleter.submit("c")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))  # auto-flush; the batch will fail in the worker
+        deleter.submit(_info("c"))
         with pytest.raises(RuntimeError, match="worker boom"):
-            deleter.submit("d")  # auto-flush waits batch 1 -> re-raise; c,d stay
-        deleter.submit("e")  # buffer is now c,d,e: larger than batch_size
+            deleter.submit(_info("d"))  # auto-flush waits batch 1 -> re-raise; c,d stay
+        deleter.submit(_info("e"))  # buffer is now c,d,e: larger than batch_size
         deleter.close()
         assert _keys(fake.calls) == [["a", "b"], ["c", "d"], ["e"]]
 
     def test_unexpected_worker_exception_reraises_at_close(self) -> None:
         fake = _FakeS3Client(script=[RuntimeError("worker boom")])
         deleter = _deleter(fake, batch_size=10)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.flush()
         with pytest.raises(RuntimeError, match="worker boom"):
             deleter.close()
         with pytest.raises(ValidationError):  # closed despite the error
-            deleter.submit("b")
+            deleter.submit(_info("b"))
         assert not _deleter_worker_alive()
 
     def test_no_worker_thread_until_first_flush(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake, batch_size=10)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         assert not _deleter_worker_alive()
         deleter.close(flush=False)
         assert not _deleter_worker_alive()
@@ -535,7 +576,7 @@ class TestLifecycle:
     def test_close_is_idempotent(self) -> None:
         fake = _FakeS3Client()
         deleter = _deleter(fake)
-        deleter.submit("a")
+        deleter.submit(_info("a"))
         deleter.close()
         deleter.close()
         assert len(fake.calls) == 1
@@ -544,14 +585,14 @@ class TestLifecycle:
         deleter = _deleter(_FakeS3Client())
         deleter.close()
         with pytest.raises(ValidationError, match="deleter is closed"):
-            deleter.submit("a")
+            deleter.submit(_info("a"))
         with pytest.raises(ValidationError, match="deleter is closed"):
             deleter.flush()
 
     def test_context_manager_flushes_on_clean_exit(self) -> None:
         fake = _FakeS3Client()
         with _deleter(fake, batch_size=10) as deleter:
-            deleter.submit("a")
+            deleter.submit(_info("a"))
             assert fake.calls == []
         assert _keys(fake.calls) == [["a"]]
 
@@ -561,14 +602,14 @@ class TestLifecycle:
         results: list[OpResult] = []
         with pytest.raises(ValueError, match="body boom"):
             with _deleter(fake, batch_size=2, on_result=results.append) as deleter:
-                deleter.submit("a")
-                deleter.submit("b")  # auto-flush; held in flight on the gate
+                deleter.submit(_info("a"))
+                deleter.submit(_info("b"))  # auto-flush; held in flight on the gate
                 # Started before any assert can fail, so __exit__'s close()
                 # always gets the gate released and a failing assert is never
                 # shadowed by the worker's gate-timeout error.
                 threading.Timer(0.2, fake.gate.set).start()
                 assert fake.entered.wait(5.0)
-                deleter.submit("c")  # buffered; must be abandoned
+                deleter.submit(_info("c"))  # buffered; must be abandoned
                 raise ValueError("body boom")
         assert _keys(fake.calls) == [["a", "b"]]  # "c" was never sent
         assert [r.key for r in results] == ["a", "b"]  # the in-flight batch was awaited

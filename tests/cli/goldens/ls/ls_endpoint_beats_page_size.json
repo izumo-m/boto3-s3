@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "ls",
+    "s3://<BUCKET>/pg/",
+    "--page-size",
+    "abc",
+    "--endpoint-url",
+    "badurl"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 252,
+  "remaining_keys": null,
+  "scenario": "ls_endpoint_beats_page_size",
+  "src_tree": null,
+  "stdout_lines": []
+}

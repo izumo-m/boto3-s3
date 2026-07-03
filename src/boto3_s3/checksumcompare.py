@@ -26,7 +26,7 @@ imports no AWS SDK module at import time; the SDK touches - the boto3 client (vi
 checksums - are all deferred into the construct / compute paths.
 
 It is a replacement ``compare=`` strategy, not composed with the default:
-``S3.sync(compare=ChecksumComparison(s3, src, dst))`` decides every pair by content.
+``S3.sync(compare=ChecksumComparison(s3, src, dest))`` decides every pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + local hash on
@@ -60,16 +60,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from boto3_s3.comparator import SyncPair
+from boto3_s3.comparator import READ_CHUNK, ContentComparison
 from boto3_s3.localstorage import to_native_path
-from boto3_s3.types import LocalFileInfo, OpKind
+from boto3_s3.types import LocalFileInfo, TransferType
 
 if TYPE_CHECKING:
     from boto3_s3.s3 import S3
     from boto3_s3.storage import Location
-
-_READ_CHUNK = 1024 * 1024
-"""Streaming read granularity; bounds memory regardless of file size."""
+    from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
 # at most one; the first present key wins (priority is irrelevant - only one is set).
@@ -88,7 +86,7 @@ _POLY_CRC64NVME = 0x9A6C9329AC4BC9B5  # CRC-64/NVME, reflected
 _LITTLE = sys.byteorder == "little"
 
 
-class ChecksumComparison:
+class ChecksumComparison(ContentComparison):
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's
@@ -104,7 +102,7 @@ class ChecksumComparison:
     replacement ``compare=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
-    ``dst`` against ``s3`` (``s3.resolve`` - the same values passed to
+    ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to
     ``s3.sync``); pass ``S3Storage`` instances for a cross-account s3-to-s3 sync,
     exactly as ``sync`` does. ``bucket`` is not on a ``FileInfo``, which is why
     the endpoint is injected explicitly here rather than read from the pair.
@@ -121,82 +119,66 @@ class ChecksumComparison:
     without ``awscrt``.
     """
 
-    __slots__ = ("_dst_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
+    __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
+
+    _strategy_name = "checksum comparison"
 
     check_size: bool
     pure_max_size: int | None
     # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries
     # ``.bucket`` / ``.get_client()``. Held as ``Any`` so this module needs no
     # ``S3Storage`` import (which would drag ``botocore`` at import time); the
-    # route (``pair.kind``) tells which side is the S3 one.
+    # route (``pair.transfer_type``) tells which side is the S3 one.
     _src_storage: Any
-    _dst_storage: Any
+    _dest_storage: Any
     _request_payer: str | None
 
     def __init__(
         self,
         s3: S3,
         src: Location,
-        dst: Location,
+        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
         self._src_storage = s3.resolve(src)
-        self._dst_storage = s3.resolve(dst)
+        self._dest_storage = s3.resolve(dest)
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
-    def __call__(self, pair: SyncPair) -> bool:
-        src, dst = pair.src, pair.dst
-        if src is None:
-            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dst is None:
+    def _local_remote_differ(
+        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    ) -> bool:
+        # The remote entry belongs to the endpoint the direction names; its
+        # storage carries the client/bucket GetObjectAttributes needs.
+        storage = self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
+        remote_checksum = self._remote_checksum(storage, remote.key)
+        if remote_checksum is None:
             return True
-        if (
-            self.check_size
-            and src.size is not None
-            and dst.size is not None
-            and src.size != dst.size
-        ):
-            return True
-        kind = pair.kind
-        if kind is OpKind.COPY:
-            return self._copy_differs(src.key, dst.key)
-        if kind is OpKind.UPLOAD:
-            local, remote_key, storage = src, dst.key, self._dst_storage
-        elif kind is OpKind.DOWNLOAD:
-            local, remote_key, storage = dst, src.key, self._src_storage
-        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
-            raise ValueError(
-                f"checksum comparison cannot judge a {kind.value!r} pair: {pair.key!r}"
-            )
-        if not isinstance(local, LocalFileInfo):
-            raise ValueError(
-                f"checksum comparison: no local side for pair {pair.key!r} (kind={kind.value})"
-            )
-        remote = self._remote_checksum(storage, remote_key)
-        if remote is None:
-            return True
-        if not _can_compute(remote.algorithm, local.size, self.pure_max_size):
+        if not _can_compute(remote_checksum.algorithm, local.size, self.pure_max_size):
             return True
         path = to_native_path(local.key)
-        if remote.part_sizes is not None:
-            local_value = _composite_b64(path, remote.algorithm, remote.part_sizes)
+        if remote_checksum.part_sizes is not None:
+            # None = the local file outruns the parts sum (an appended tail):
+            # definitely different content, whatever the part digests say.
+            local_value = _composite_b64(
+                path, remote_checksum.algorithm, remote_checksum.part_sizes
+            )
         else:
-            local_value = _whole_b64(path, remote.algorithm)
-        return local_value != remote.value
+            local_value = _whole_b64(path, remote_checksum.algorithm)
+        return local_value != remote_checksum.value
 
-    def _copy_differs(self, src_key: str, dst_key: str) -> bool:
+    def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: compare the two objects' stored checksums (no bytes read).
 
         The stored value strings are compared directly, so the COMPOSITE part
         sizes are not needed (``need_parts=False`` skips that pagination).
         """
-        a = self._remote_checksum(self._src_storage, src_key, need_parts=False)
-        b = self._remote_checksum(self._dst_storage, dst_key, need_parts=False)
+        a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
+        b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
         if a is None or b is None or a.algorithm != b.algorithm:
             return True
         return a.value != b.value
@@ -252,7 +234,13 @@ def _fetch_remote(
         if algorithm is None or value is None:
             return None
         part_sizes: tuple[int, ...] | None = None
-        if need_parts and "-" in value:  # a COMPOSITE multipart checksum ("base64-N")
+        # A composite (multipart) checksum is reported as "base64-N" (the part
+        # count suffix); a full-object checksum has no suffix. The standard base64
+        # alphabet plus '=' padding never contains '-', so the substring test
+        # reliably tells the two apart on real S3 responses - the model's
+        # ChecksumType would be marginally more robust, but S3's aws-cli
+        # customizations carry no COMPOSITE handling to mirror.
+        if need_parts and "-" in value:
             part_sizes = _part_sizes(client, bucket, key, resp, request_payer)
             if part_sizes is None:
                 return None
@@ -316,18 +304,22 @@ def _whole_b64(path: str, algorithm: str) -> str:
     hasher = _new_hasher(algorithm)
     assert hasher is not None  # callers gate on _can_compute
     with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(_READ_CHUNK), b""):
+        for block in iter(lambda: fh.read(READ_CHUNK), b""):
             hasher.update(block)
     return base64.b64encode(hasher.digest()).decode("ascii")
 
 
-def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> str:
+def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> str | None:
     """The base64 ``COMPOSITE`` checksum + ``"-N"`` at the exact part boundaries.
 
     ``base64(ALGO(concat of each part's raw ALGO digest)) + "-<n>"`` - the
     checksum-of-checksums S3 forms for a multipart upload, with the part split
     taken from GetObjectAttributes' ``ObjectParts`` (so it is exact, not guessed).
-    A file shorter than the parts sum hashes short and so reads as differing.
+    Both length mismatches read as differing: a file shorter than the parts sum
+    hashes short (a truncated final part), and a file *longer* than it returns
+    ``None`` - the remote object is exactly the parts sum long, so an appended
+    local tail means different content even though the per-part digests (which
+    never see the tail) would collide.
     """
     combined = bytearray()
     with open(path, "rb") as fh:
@@ -336,12 +328,14 @@ def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> st
             assert part is not None
             remaining = size
             while remaining > 0:
-                block = fh.read(min(_READ_CHUNK, remaining))
+                block = fh.read(min(READ_CHUNK, remaining))
                 if not block:
                     break
                 part.update(block)
                 remaining -= len(block)
             combined += part.digest()
+        if fh.read(1):
+            return None
     top = _new_hasher(algorithm)
     assert top is not None
     top.update(bytes(combined))

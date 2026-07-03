@@ -2,7 +2,7 @@
   "argv": [
     "cp",
     "s3://<BUCKET>/d/a.txt",
-    "dst"
+    "dest"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
   "bucket_exists": null,
@@ -16,6 +16,6 @@
   ],
   "scenario": "cp_download_to_existing_dir",
   "stdout_lines": [
-    "download: s3://<BUCKET>/d/a.txt to dst/a.txt"
+    "download: s3://<BUCKET>/d/a.txt to dest/a.txt"
   ]
 }

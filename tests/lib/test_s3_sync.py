@@ -24,20 +24,26 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelCompare, SyncPair
-from boto3_s3.exceptions import BatchError, Boto3S3Error, CancelledError
+from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
-    OpKind,
     OpOutcome,
     OpResult,
     TransferOptions,
+    TransferType,
 )
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SERIAL = TransferConfig(use_threads=False)
+# The case-conflict gate detects a "two S3 twins" conflict via its in-flight set,
+# which only holds while the first twin's download is still running - it needs a
+# threaded (non-blocking) submit running ahead of completions, as aws-cli's own
+# tests do with a single worker (max_concurrent_requests = 1). _SERIAL completes
+# each twin before the next is judged, emptying the set.
+_CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 _MTIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 _OLDER = _MTIME - timedelta(hours=1)
 _NEWER = _MTIME + timedelta(hours=1)
@@ -99,7 +105,7 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "a.txt", b"x")
         (src / "loop").symlink_to(src)  # a directory cycle
-        client, calls = make_recording_client([_listing(), {}])  # empty dst, PutObject a.txt
+        client, calls = make_recording_client([_listing(), {}])  # empty dest, PutObject a.txt
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -156,12 +162,65 @@ class TestSyncUpload:
         assert delete_params["RequestPayer"] == "requester"
         keys = [entry["Key"] for entry in delete_params["Delete"]["Objects"]]
         assert keys == ["p/extra1.txt", "p/sub/extra2.txt"]
-        deleted = [r for r in results if r.kind is OpKind.DELETE]
+        deleted = [r for r in results if r.transfer_type is TransferType.DELETE]
         assert {r.outcome for r in deleted} == {OpOutcome.SUCCEEDED}
         assert sorted(r.src for r in deleted if r.src) == [
             "s3://bucket/p/extra1.txt",
             "s3://bucket/p/sub/extra2.txt",
         ]
+
+    def test_delete_result_carries_src_info_and_storage(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        client, _ = make_recording_client([_listing(("p/orphan.txt", 2)), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            delete=True,
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        deleted = [r for r in results if r.transfer_type is TransferType.DELETE]
+        assert len(deleted) == 1
+        assert deleted[0].src == "s3://bucket/p/orphan.txt"
+        assert deleted[0].src_info is not None and deleted[0].src_info.key == "p/orphan.txt"
+        assert isinstance(deleted[0].src_storage, S3Storage)
+        assert deleted[0].dest_info is None
+
+    def test_copy_update_result_carries_both_compared_sides(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"new")  # size 3 != the dest's 2 -> an update upload
+        client, _ = make_recording_client([_listing(("p/a.txt", 2)), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        copied = [r for r in results if r.transfer_type is not TransferType.DELETE]
+        assert len(copied) == 1
+        assert copied[0].src_info is not None and copied[0].src_info.key.endswith("a.txt")
+        assert copied[0].dest_info is not None and copied[0].dest_info.key == "p/a.txt"
+
+    def test_copy_new_result_has_no_dest_info(self, tmp_path: Path) -> None:
+        # docs/opresult.md: only an update pairs with a pre-existing
+        # destination entry; a new-file record carries dest_info=None.
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx")
+        client, _ = make_recording_client([_listing(), {}])
+        results: list[OpResult] = []
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        copied = [r for r in results if r.transfer_type is not TransferType.DELETE]
+        assert len(copied) == 1
+        assert copied[0].src_info is not None
+        assert copied[0].dest_info is None
 
     def test_delete_predicate_narrows_the_lane(self, tmp_path: Path) -> None:
         # A FileFilter predicate (the orphan's FileInfo) narrows which orphans
@@ -230,10 +289,10 @@ class TestSyncUpload:
             on_result=results.append,
         )
         assert _ops(calls) == ["ListObjectsV2"]
-        outcomes = {(r.kind, r.key): r.outcome for r in results}
+        outcomes = {(r.transfer_type, r.key): r.outcome for r in results}
         assert outcomes == {
-            (OpKind.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
-            (OpKind.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
+            (TransferType.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
+            (TransferType.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
     def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
@@ -285,12 +344,14 @@ class TestSyncUpload:
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
-    def test_missing_source_directory_raises_the_base_category(self, tmp_path: Path) -> None:
+    def test_missing_source_directory_raises_not_found(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().sync(missing, S3Storage("s3://bucket/p", client=client))
-        assert type(excinfo.value) is Boto3S3Error
+        # aws's bare RuntimeError -> rc 255; NotFoundError with no ClientError
+        # cause maps to the same general rc.
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
         assert calls == []
 
@@ -428,7 +489,9 @@ class TestSyncDownload:
         )
         assert _ops(calls) == ["ListObjectsV2"]
         assert not stale.exists() and not nested.exists()
-        assert {(r.kind, r.outcome) for r in results} == {(OpKind.DELETE, OpOutcome.SUCCEEDED)}
+        assert {(r.transfer_type, r.outcome) for r in results} == {
+            (TransferType.DELETE, OpOutcome.SUCCEEDED)
+        }
         assert sorted(r.src for r in results if r.src) == [str(stale), str(nested)]
 
     def test_dryrun_delete_keeps_local_files(self, tmp_path: Path) -> None:
@@ -505,7 +568,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            transfer_config=_SERIAL,
+            transfer_config=_CASE_CONFLICT_CONFIG,
             on_result=results.append,
             **TransferOptions(case_conflict=CaseConflictMode.SKIP),
         )
@@ -519,20 +582,20 @@ class TestSyncDownload:
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([_listing(("s/new.txt", 2))])
-        dst_client, dst_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
+        dest_client, dest_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
         S3().sync(
             S3Storage("s3://src-b/s", client=src_client),
-            S3Storage("s3://dst-b/t", client=dst_client),
+            S3Storage("s3://dest-b/t", client=dest_client),
             delete=True,
             transfer_config=_SERIAL,
         )
         assert _ops(src_calls) == ["ListObjectsV2"]
-        assert _ops(dst_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
-        copy = dst_calls[1].params
+        assert _ops(dest_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
+        copy = dest_calls[1].params
         assert copy["CopySource"] == {"Bucket": "src-b", "Key": "s/new.txt"}
-        assert copy["Bucket"] == "dst-b"
+        assert copy["Bucket"] == "dest-b"
         assert copy["Key"] == "t/new.txt"
-        keys = [entry["Key"] for entry in dst_calls[2].params["Delete"]["Objects"]]
+        keys = [entry["Key"] for entry in dest_calls[2].params["Delete"]["Objects"]]
         assert keys == ["t/extra.txt"]
 
     def test_same_location_sync_is_a_silent_noop(self, tmp_path: Path) -> None:
@@ -563,6 +626,24 @@ class TestParallelCompare:
         assert _compare_workers(None) == 10
         assert _compare_workers(TransferConfig(max_concurrency=7)) == 7
 
+    def test_cancel_token_aborts_the_pooled_path(self, tmp_path: Path) -> None:
+        # docs/sync.md: cancel_token is polled between pairs on the pooled
+        # (ParallelCompare) dispatch too, not only on the serial loop.
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"xx")
+        client, calls = make_recording_client([_listing()])
+        token = CancelToken()
+        token.cancel()
+        with pytest.raises(CancelledError):
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                compare=ParallelCompare(_always_copies, workers=2),
+                transfer_config=_SERIAL,
+                cancel_token=token,
+            )
+        assert not [call for call in calls if call.operation == "PutObject"]
+
     def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
         # Update pairs (a/b/c already at the destination) are pooled; new.txt is
         # new. The pool only changes WHERE decide runs, not WHAT it decides.
@@ -571,7 +652,7 @@ class TestParallelCompare:
             _write(src, name, b"xx")
 
         def decide(pair: SyncPair) -> bool:
-            return pair.dst is None or pair.key in {"a.txt", "c.txt"}
+            return pair.dest is None or pair.key in {"a.txt", "c.txt"}
 
         listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
         client, calls = make_recording_client([listing, {}, {}, {}])
@@ -595,7 +676,7 @@ class TestParallelCompare:
         seen: list[str] = []
 
         def decide(pair: SyncPair) -> bool:
-            assert pair.dst is None  # an empty listing leaves every pair new
+            assert pair.dest is None  # an empty listing leaves every pair new
             assert threading.get_ident() == main
             seen.append(pair.key)
             return False  # copy nothing; the test only pins the call order

@@ -2,7 +2,7 @@
   "argv": [
     "cp",
     "s3://<BUCKET>/cc/",
-    "dst",
+    "dest",
     "--recursive",
     "--case-conflict",
     "error"

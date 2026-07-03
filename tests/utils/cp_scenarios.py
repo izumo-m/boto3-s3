@@ -6,7 +6,7 @@ per-run workdir the CLI runs *in* - argv and result lines then carry
 cwd-stable relative paths, no path masking needed), the remote layout
 (``seed`` / ``seed_kwargs``), and the argv. End states are compared three
 ways: the bucket (``remaining_keys``), the local destination tree
-(``capture_tree`` -> ``harness.capture_local_tree`` of ``dst/``), and one
+(``capture_tree`` -> ``harness.capture_local_tree`` of ``dest/``), and one
 probe object's HeadObject fields (``head_key`` / ``head_fields``); the
 download mtime stamp (``mtime_key``) is asserted live per side, not via
 goldens. stdout is normalized by ``harness.normalize_cp_stdout`` (progress
@@ -31,14 +31,23 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tests.utils.harness import BUCKET_TOKEN, seed_bucket
+from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+__all__ = [
+    "SCENARIOS",
+    "CpScenario",
+    "materialize_workdir",
+    "resolve_argv",
+    "seed_remote",
+]
+
 _MB = 1024 * 1024
 
 # Local source trees (workdir-relative). "src" is the directory form; single
-# files address "src/<name>" directly. A "dst/" directory is always created
+# files address "src/<name>" directly. A "dest/" directory is always created
 # by materialize_workdir so existing-directory destination semantics hold.
 _SRC_SINGLE: Mapping[str, bytes] = {"src/a.txt": b"upload single body\n"}
 _SRC_JSON: Mapping[str, bytes] = {"src/data.json": b'{"k": 1}\n'}
@@ -80,18 +89,17 @@ _SEED_BIG_KWARGS: Mapping[str, Mapping[str, Any]] = {
 
 
 @dataclass(frozen=True)
-class CpScenario:
-    """One ``cp`` invocation against fixed local and remote layouts."""
+class CpScenario(BaseScenario):
+    """One ``cp`` invocation against fixed local and remote layouts.
 
-    name: str
-    argv: tuple[str, ...]
+    ``diff_only`` here marks rc-equality-only scenarios whose outcome is
+    endpoint-relative (no golden).
+    """
+
     local_src: Mapping[str, bytes] = field(default_factory=dict)
     seed: Mapping[str, bytes] = field(default_factory=dict)
     seed_kwargs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
-    compare_stdout: bool = True
-    # rc-equality-only scenarios whose outcome is endpoint-relative (no golden).
-    diff_only: bool = False
-    # Golden-record the dst/ tree (downloads; uploads leave it empty anyway).
+    # Golden-record the dest/ tree (downloads; uploads leave it empty anyway).
     capture_tree: bool = False
     # Golden-record HeadObject fields of one probe key.
     head_key: str | None = None
@@ -106,21 +114,17 @@ class CpScenario:
     local_mtimes: Mapping[str, int] = field(default_factory=dict)
     # Bytes fed to the CLI's stdin (the '-' upload scenarios).
     stdin: bytes | None = None
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: CpScenario, bucket: str) -> list[str]:
-    """The concrete argv for *bucket* (goldens keep the ``<BUCKET>`` token)."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
+    # Directories created with an explicit mode (workdir-relative -> mode),
+    # e.g. a read-only parent for the uncreatable-destination scenario.
+    local_dirs: Mapping[str, int] = field(default_factory=dict)
 
 
 def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
-    """Create the scenario's local source tree (plus the standing ``dst/``)."""
+    """Create the scenario's local source tree (plus the standing ``dest/``)."""
     import os
     import time
 
-    (workdir / "dst").mkdir(parents=True, exist_ok=True)
+    (workdir / "dest").mkdir(parents=True, exist_ok=True)
     for rel, body in scenario.local_src.items():
         target = workdir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +132,10 @@ def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
     now = time.time()
     for rel, offset in scenario.local_mtimes.items():
         os.utime(workdir / rel, (now + offset, now + offset))
+    for rel, mode in scenario.local_dirs.items():
+        target = workdir / rel
+        target.mkdir(parents=True, exist_ok=True)
+        os.chmod(target, mode)
 
 
 def seed_remote(client: Any, bucket: str, scenario: CpScenario) -> None:
@@ -249,6 +257,38 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("Metadata",),
     ),
     CpScenario(
+        # aws-cli's shorthand parser has no empty-key guard: "=bar" parses to
+        # {"": "bar"} and the command proceeds (rc 0). Pinned via --dryrun so
+        # the golden stays endpoint-independent - the layer under test is the
+        # option parse, not the empty-metadata-key PutObject semantics.
+        name="cp_upload_metadata_empty_key_dryrun",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            "=bar",
+            "--dryrun",
+        ),
+        local_src=_SRC_SINGLE,
+    ),
+    CpScenario(
+        # An empty key NOT followed by "=" is a shorthand syntax error on
+        # both sides - rc 252 with aws's "Expected: '='" wording, before any
+        # server contact.
+        name="cp_upload_metadata_leading_comma",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            ",foo=1",
+        ),
+        local_src=_SRC_SINGLE,
+        expected_stderr_tokens_ours=("Expected: '=', received: ','",),
+        expected_stderr_tokens_aws=("Expected: '=', received: ','",),
+    ),
+    CpScenario(
         name="cp_upload_cache_control",
         argv=(
             "cp",
@@ -344,40 +384,100 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_locallocal",
-        argv=("cp", "src/a.txt", "dst/b.txt"),
+        argv=("cp", "src/a.txt", "dest/b.txt"),
         local_src=_SRC_SINGLE,
         expected_stderr_tokens_ours=("Invalid argument type",),
         expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
         name="cp_page_size_nonint",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "abc"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "abc"),
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
+    ),
+    # -- the measured parse-to-validation head order (docs/cli.md 5.7) -------
+    CpScenario(
+        # A bad --profile (255: aws binds the profile at startup) beats the
+        # local-local usage error (252). No server contact on either side.
+        name="cp_bad_profile_beats_usage",
+        argv=("cp", "src/a.txt", "dest/b.txt", "--profile", "boto3-s3-e2e-no-such-profile"),
+        local_src=_SRC_SINGLE,
+        expected_stderr_tokens_ours=("could not be found",),
+        expected_stderr_tokens_aws=("could not be found",),
+    ),
+    CpScenario(
+        # A direct-option paramfile failure (252, aws's parse-time expansion)
+        # beats the missing local source (255).
+        name="cp_paramfile_beats_missing_src",
+        argv=(
+            "cp",
+            "missing.txt",
+            f"s3://{BUCKET_TOKEN}/up/k.txt",
+            "--content-type",
+            "file:///no/such/paramfile",
+        ),
+        expected_stderr_tokens_ours=("Unable to load paramfile",),
+        expected_stderr_tokens_aws=("Unable to load paramfile",),
+    ),
+    CpScenario(
+        # aws pre-creates the s3local --recursive destination during
+        # validation, so an uncreatable directory is the pre-pipeline rc 255,
+        # not the pipeline's rc 1. diff_only: the outcome depends on the
+        # runner's privileges (root creates anything), so the two CLIs are
+        # compared live only.
+        name="cp_recursive_dest_uncreatable",
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "ro/newdir", "--recursive"),
+        seed=_SEED_SINGLE,
+        local_dirs={"ro": 0o555},
+        diff_only=True,
     ),
     # -- downloads ----------------------------------------------------------
     CpScenario(
         name="cp_download_single",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.bin"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.bin"),
         seed=_SEED_SINGLE,
         capture_tree=True,
-        mtime_key=("d/a.txt", "dst/out.bin"),
+        mtime_key=("d/a.txt", "dest/out.bin"),
+    ),
+    CpScenario(
+        # aws applies --exclude/--include to a SINGLE-object cp too: the
+        # excluded object never transfers (rc 0, dest stays empty). Guards
+        # the single-source filter lane (producers.py, 2026-07 review).
+        name="cp_download_single_exclude_all",
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/", "--exclude", "*"),
+        seed=_SEED_SINGLE,
+        capture_tree=True,
+    ),
+    CpScenario(
+        # The shorthand @= paramfile operator: the metadata value loads from
+        # file://, proven end to end by the stored object Metadata.
+        name="cp_upload_metadata_at_paramfile",
+        argv=(
+            "cp",
+            "src/a.txt",
+            f"s3://{BUCKET_TOKEN}/up/key.txt",
+            "--metadata",
+            "loaded@=file://meta/value.txt",
+        ),
+        local_src={**_SRC_SINGLE, "meta/value.txt": b"from-paramfile"},
+        head_key="up/key.txt",
+        head_fields=("Metadata",),
     ),
     CpScenario(
         name="cp_download_to_existing_dir",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest"),
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
     CpScenario(
         name="cp_download_trailing_sep_new_dir",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/new/"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/new/"),
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
     CpScenario(
         name="cp_download_recursive",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dst", "--recursive"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dest", "--recursive"),
         seed=_SEED_TREE,
         capture_tree=True,
     ),
@@ -386,7 +486,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/d/",
-            "dst",
+            "dest",
             "--recursive",
             "--exclude",
             "*",
@@ -398,7 +498,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_download_missing_key",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", "dst/x"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", "dest/x"),
         expected_stderr_tokens_ours=("fatal error", 'Key "no-such-key" does not exist'),
         expected_stderr_tokens_aws=("fatal error", 'Key "no-such-key" does not exist'),
     ),
@@ -406,20 +506,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # A trailing-slash key is a *single* path: HeadObject on "d/" -> 404
         # (the marker object is deliberately not seeded here).
         name="cp_download_prefix_slash_nonrecursive",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dst/x"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dest/x"),
         seed=_SEED_SINGLE,
         expected_stderr_tokens_ours=("fatal error", 'Key "d/" does not exist'),
         expected_stderr_tokens_aws=("fatal error", 'Key "d/" does not exist'),
     ),
     CpScenario(
         name="cp_download_dryrun",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/x", "--dryrun"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/x", "--dryrun"),
         seed=_SEED_SINGLE,
         capture_tree=True,  # stays empty: HEAD only
     ),
     CpScenario(
         name="cp_download_page_size",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "2"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "2"),
         seed=_SEED_PAGED,
         capture_tree=True,
     ),
@@ -427,7 +527,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # MinIO answers InvalidArgument for MaxKeys=-1 (rm precedent); the
         # message text is endpoint-specific.
         name="cp_download_page_size_negative",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dst", "--recursive", "--page-size", "-1"),
+        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "-1"),
         seed=_SEED_PAGED,
         diff_only=True,
     ),
@@ -575,8 +675,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         name="cp_no_overwrite_download_exists",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dst/out.bin", "--no-overwrite"),
-        local_src={"dst/out.bin": b"keep the local bytes"},
+        argv=("cp", f"s3://{BUCKET_TOKEN}/d/a.txt", "dest/out.bin", "--no-overwrite"),
+        local_src={"dest/out.bin": b"keep the local bytes"},
         seed=_SEED_SINGLE,
         capture_tree=True,
     ),
@@ -634,7 +734,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/d/a.txt",
-            "dst/out.bin",
+            "dest/out.bin",
             "--checksum-mode",
             "ENABLED",
         ),
@@ -650,7 +750,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "skip",
@@ -665,7 +765,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "warn",
@@ -680,7 +780,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=(
             "cp",
             f"s3://{BUCKET_TOKEN}/cc/",
-            "dst",
+            "dest",
             "--recursive",
             "--case-conflict",
             "error",

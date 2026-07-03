@@ -25,33 +25,28 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from tests.utils.harness import BUCKET_TOKEN
+from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+__all__ = ["SCENARIOS", "PresignScenario", "resolve_argv"]
 
 # One small object; the fetch scenarios GET it through the presigned URL.
 _SEEDED: Mapping[str, int] = {"presign/basic.txt": 7}
 
 
 @dataclass(frozen=True)
-class PresignScenario:
-    """One ``presign`` invocation against a fixed bucket layout."""
+class PresignScenario(BaseScenario):
+    """One ``presign`` invocation against a fixed bucket layout.
 
-    name: str
-    argv: tuple[str, ...]
+    ``presign`` has no golden replay, so the base ``diff_only`` is inert here.
+    """
+
     seed: Mapping[str, int] = field(default_factory=dict)
-    # False => normalized stdout is not compared (rc still is - charter).
-    compare_stdout: bool = True
     # True => the e2e test GETs both sides' URLs and compares status (and
     # body when 200).
     fetch: bool = False
-    expected_stderr_tokens_ours: tuple[str, ...] = ()
-    expected_stderr_tokens_aws: tuple[str, ...] = ()
-
-
-def resolve_argv(scenario: PresignScenario, bucket: str) -> list[str]:
-    """Materialize the argv template against a concrete bucket name."""
-    return [arg.replace(BUCKET_TOKEN, bucket) for arg in scenario.argv]
 
 
 SCENARIOS: tuple[PresignScenario, ...] = (
@@ -131,6 +126,21 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--expires-in", "abc"),
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
+    ),
+    # Head-order (docs/cli.md 5.7): the --endpoint-url scheme check (252)
+    # beats the bare int() coercion (255).
+    PresignScenario(
+        "presign_endpoint_beats_expires",
+        (
+            "presign",
+            f"s3://{BUCKET_TOKEN}/presign/basic.txt",
+            "--expires-in",
+            "abc",
+            "--endpoint-url",
+            "badurl",
+        ),
+        expected_stderr_tokens_ours=("scheme is missing",),
+        expected_stderr_tokens_aws=("scheme is missing",),
     ),
     # UNSIGNED config -> the plain object URL, no query at all (rc 0).
     PresignScenario(

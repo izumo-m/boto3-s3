@@ -5,7 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli.commands.base import Command, Context, parse_integer_option
+from boto3_s3_cli import clientfactory
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_option_paramfile,
+    parse_integer_option,
+)
 
 
 class PresignCommand(Command):
@@ -34,8 +40,11 @@ class PresignCommand(Command):
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # First, like aws's parse-time conversion: a non-integer exits 255
-        # before any client (or the SDK) is touched.
+        # aws's parse-time order (measured, docs/cli.md section 6): the
+        # --endpoint-url scheme check (252) and the --expires-in paramfile
+        # expansion (252) both precede the bare int() coercion (255).
+        clientfactory.validate_endpoint_url(args)
+        expand_option_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay

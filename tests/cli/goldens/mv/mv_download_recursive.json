@@ -2,7 +2,7 @@
   "argv": [
     "mv",
     "s3://<BUCKET>/d",
-    "dst/",
+    "dest/",
     "--recursive"
   ],
   "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
@@ -21,8 +21,8 @@
   "scenario": "mv_download_recursive",
   "src_tree": [],
   "stdout_lines": [
-    "move: s3://<BUCKET>/d/a.txt to dst/a.txt",
-    "move: s3://<BUCKET>/d/b.bin to dst/b.bin",
-    "move: s3://<BUCKET>/d/sub/c.txt to dst/sub/c.txt"
+    "move: s3://<BUCKET>/d/a.txt to dest/a.txt",
+    "move: s3://<BUCKET>/d/b.bin to dest/b.bin",
+    "move: s3://<BUCKET>/d/sub/c.txt to dest/sub/c.txt"
   ]
 }

@@ -6,6 +6,7 @@ endpoint the host shell is configured for - nothing is mocked. The intended
 setup is the local MinIO stack::
 
     scripts/compose-up.sh
+    scripts/install-awscli.sh
     source scripts/minio-env.sh
     uv run pytest tests/cli/e2e
 

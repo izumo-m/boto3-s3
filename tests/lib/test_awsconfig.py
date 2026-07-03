@@ -13,7 +13,7 @@ from pathlib import Path
 import boto3
 import pytest
 
-from boto3_s3 import S3, ConfigurationError
+from boto3_s3 import S3, InvalidConfigError
 from boto3_s3.awsconfig import AwsConfig, ConfigSection
 
 _MIB = 1024 * 1024
@@ -78,14 +78,14 @@ class TestActiveProfile:
 
     def test_malformed_value_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         cfg = _reader(tmp_path, monkeypatch, "[default]\ns3 =\n    multipart_chunksize = huge\n")
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             cfg.get_size("s3.multipart_chunksize")
 
     def test_key_naming_a_section_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cfg = _reader(tmp_path, monkeypatch)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             cfg.get_str("s3")  # "s3" is a subsection, not a value
 
 
@@ -137,7 +137,7 @@ class TestActiveProfileResolution:
         path.write_text(_CONFIG)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(path))
         monkeypatch.setenv("AWS_PROFILE", "ghost")
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             AwsConfig.from_session()
 
 
@@ -236,15 +236,15 @@ class TestConfigSectionParsing:
 
     @pytest.mark.parametrize("text", ["abc", "", "10XB", "MB", "1.5MB"])
     def test_bad_size_raises(self, text: str) -> None:
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             ConfigSection({"k": text}).get_size("k")
 
     def test_bad_int_raises(self) -> None:
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             ConfigSection({"k": "abc"}).get_int("k")
 
     def test_bad_rate_raises(self) -> None:
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             ConfigSection({"k": "fast"}).get_rate("k")
 
     def test_nested_lookup(self) -> None:
@@ -263,7 +263,7 @@ class TestConfigSectionParsing:
 
     def test_section_as_value_raises(self) -> None:
         sec = ConfigSection({"s3": {"x": "1"}})
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(InvalidConfigError):
             sec.get_str("s3")
 
     def test_missing_returns_default_for_every_type(self) -> None:

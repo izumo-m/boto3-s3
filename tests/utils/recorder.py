@@ -29,6 +29,15 @@ import boto3
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
+#: Exhaustion events, drained after every test by the root conftest's
+#: ``_fail_on_recorder_exhaustion`` fixture. The AssertionError raised at the
+#: call site is enough on a direct call path, but on the transfer path it is
+#: raised on an s3transfer worker thread where ``translate_boto_error`` folds
+#: it into an ordinary FAILED item - a failure-expecting test would then pass
+#: for the wrong reason. The fixture makes an over-called recorder loud
+#: regardless of where the AssertionError ended up.
+exhausted_calls: list[str] = []
+
 
 class ApiCall(NamedTuple):
     """One recorded S3 API call (botocore operation name + caller params)."""
@@ -67,6 +76,7 @@ def make_recording_client(
     def _canned_api_call(operation_name: str, api_params: dict[str, Any]) -> dict[str, Any]:
         calls.append(ApiCall(operation_name, dict(api_params)))
         if not remaining:
+            exhausted_calls.append(f"{service}.{operation_name}")
             raise AssertionError(
                 f"unexpected API call {operation_name}: parsed_responses exhausted"
             )

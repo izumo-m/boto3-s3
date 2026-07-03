@@ -58,8 +58,15 @@ maintaining high functional compatibility (parity).
   algorithm. The bucket-listing filters `ls --bucket-name-prefix` /
   `--bucket-region` (paginated `ListBuckets`, late 2024 / botocore 1.34.162)
   are likewise silently inert below that botocore - `ls` itself still works,
-  falling back to an unpaginated `ListBuckets`. Everything else works at the
-  floor.
+  falling back to an unpaginated `ListBuckets`. Two more degradations at the
+  floor: `mb --tags` / `mb --bucket-name-prefix`-era CreateBucket parameters
+  (`CreateBucketConfiguration.Tags` / `Location`) fail client-side with a clean
+  ParamValidationError on a botocore that predates them; and without a modern
+  s3transfer the engine cannot pre-provide the copy/download source ETag
+  (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
+  `{"ETag": ...}` is `None` there unless `capture_response=True` supplies it
+  from the captured response, and s3transfer's own `CopySourceIfMatch`
+  consistency pin on copies is absent. Everything else works at the floor.
 
 ## 3. Design policy
 
@@ -67,6 +74,16 @@ maintaining high functional compatibility (parity).
   **prefer the one with higher parity with aws-cli**. When aws-cli's behavior is
   ambiguous, read the aws-cli source as the primary
   source rather than third-party documentation.
+- **Symbol-name traceability against aws-cli**: parity work depends on reading
+  this codebase side by side with the aws-cli source. When a symbol here (a
+  class, function, or option/config key) corresponds to an aws-cli counterpart,
+  keep the same name with the same meaning, or an extended form whose
+  correspondence remains easy to trace (e.g., the CLI's
+  `human_readable_to_int` keeps aws-cli's function name because it is a
+  verbatim port). Renaming such a symbol to something unrelated - or reusing an
+  aws-cli name for a different meaning - obscures the port; a change (including
+  a refactoring) that would significantly break this correspondence is
+  rejected.
 - **Responsibility boundary for parity**: the layer that ultimately guarantees
   full compatibility with `aws s3` is the **CLI layer (`boto3-s3-cli`)**. The
   library layer only needs to provide building blocks from which a compatible
@@ -113,6 +130,9 @@ written here.
 
 - [`glossary.md`](./glossary.md) - glossary.
 - [`exceptions.md`](./exceptions.md) - the exception model.
+- [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
+  callback): the fields, the `src` / `dest` convention, and which operation
+  populates which.
 - [`s3.md`](./s3.md) - the design of the `S3` entry point (the `client` /
   `resolve` customization seams, resolution rules, module-level functions).
 - [`storage.md`](./storage.md) - the `Storage` abstraction and custom backends

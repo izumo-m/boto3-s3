@@ -85,6 +85,36 @@ class TestMaskTextNotation:
         assert "X-Amz-Security-Token=***" in out
         assert "X-Amz-Expires=60" in out
 
+    def test_sso_bearer_token_dict_repr_header(self) -> None:
+        # botocore's `sso GetRoleCredentials` request carries the bearer token
+        # in the x-amz-sso_bearer_token header, logged at DEBUG - the secret
+        # that mints role credentials for every account the user can access.
+        token = "aoal-verylongssobearertokenvalue123456"
+        out = m.mask_text(f"{{'x-amz-sso_bearer_token': '{token}', 'Host': 'portal.sso'}}")
+        assert token not in out
+        assert "'x-amz-sso_bearer_token': '***" in out
+        assert "'Host': 'portal.sso'" in out
+
+    def test_sso_bearer_token_plain_header_form(self) -> None:
+        token = "aoal-verylongssobearertokenvalue123456"
+        out = m.mask_text(f"x-amz-sso_bearer_token:{token}")
+        assert token not in out
+        assert out.startswith("x-amz-sso_bearer_token:***")
+
+    def test_sso_oidc_token_response_body(self) -> None:
+        # botocore.parsers logs the CreateToken / RegisterClient response
+        # bodies at DEBUG ('Response body:'): accessToken / refreshToken /
+        # idToken / clientSecret are bearer-grade secrets.
+        body = (
+            '{"accessToken": "aoat-access123", "refreshToken": "aort-refresh456", '
+            '"idToken": "aoid-id789", "clientSecret": "secret-abc", "expiresIn": 3600}'
+        )
+        out = m.mask_text(body)
+        for secret in ("aoat-access123", "aort-refresh456", "aoid-id789", "secret-abc"):
+            assert secret not in out
+        assert '"accessToken": "***' in out
+        assert '"expiresIn": 3600' in out
+
     def test_session_token_dict_repr_header(self) -> None:
         out = m.mask_text(f"{{'X-Amz-Security-Token': '{SESSION_TOKEN}', 'Host': 'b.s3'}}")
         assert SESSION_TOKEN not in out
@@ -122,6 +152,32 @@ class TestMaskTextNotation:
         )
         assert SSE_C_KEY not in out
         assert "'x-amz-copy-source-server-side-encryption-customer-key': '***'" in out
+
+    def test_sse_c_key_s3transfer_task_kwargs_masked_md5_kept(self) -> None:
+        # s3transfer logs each task's kwargs at DEBUG *before* botocore's
+        # parameter build base64-encodes the key, so the boto3 parameter-name
+        # form carries the raw secret - the one SSE-C surface that is not a
+        # wire header.
+        out = m.mask_text(
+            "PutObjectTask(transfer_id=0, {'bucket': 'b', 'key': 'k', 'extra_args': "
+            f"{{'SSECustomerAlgorithm': 'AES256', 'SSECustomerKey': '{SSE_C_KEY}', "
+            "'SSECustomerKeyMD5': 'aGFzaA=='}) about to wait"
+        )
+        assert SSE_C_KEY not in out
+        assert "'SSECustomerKey': '***'" in out
+        assert "'SSECustomerKeyMD5': 'aGFzaA=='" in out
+
+    def test_sse_c_copy_source_param_and_bytes_repr_masked(self) -> None:
+        # A raw-bytes key logs as a bytes repr full of backslash escapes (and
+        # possibly the other quote character); the mask runs to the closing
+        # quote of the opener.
+        out = m.mask_text(
+            "'extra_args': {'CopySourceSSECustomerKey': b'\\x01\\x02raw\"byte\\'s', "
+            "'CopySourceSSECustomerKeyMD5': 'aGFzaA=='}"
+        )
+        assert "raw" not in out
+        assert "'CopySourceSSECustomerKey': b'***'" in out
+        assert "'CopySourceSSECustomerKeyMD5': 'aGFzaA=='" in out
 
     def test_sigv2_authorization_header_signature_masked(self) -> None:
         # Legacy SigV2 header `AWS <id>:<sig>` (signature_version='s3'): the

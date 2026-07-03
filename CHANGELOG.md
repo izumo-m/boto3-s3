@@ -5,6 +5,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-03
+
+- Fix: `cp` / `mv` now apply `filter=` to a single S3 source too (an excluded
+  object is neither transferred nor - the `mv` hazard - deleted), matching the
+  recursive and `rm` paths.
+- Fix: `ChecksumComparison` now reads a local file longer than a COMPOSITE
+  object's parts sum as differing (the appended tail never reached the
+  per-part digests, so `check_size=False` could judge an updated file
+  unchanged and `sync` would skip it).
+- Masking now also covers the SSO bearer token (`x-amz-sso_bearer_token`) and
+  the sso-oidc token bodies (`accessToken` / `refreshToken` / `idToken` /
+  `clientSecret`) that botocore logs at DEBUG on the SSO auth path.
+- Masking now also covers the SSE-C customer key in its boto3 parameter form
+  (`'SSECustomerKey': ...` / `'CopySourceSSECustomerKey': ...`): s3transfer
+  logs each task's kwargs at DEBUG with the raw key, which the wire-header
+  patterns did not match - `set_stream_logger` / the CLI's `--debug` leaked it
+  in cleartext.
+- `LocalStorage.open` now anchors on the construction-time absolutized path
+  like `scan` / `get_fileinfo`, so a later `chdir` cannot move where a relative
+  location's keys resolve.
+- `S3.mv` now supports a stream (`IOStorage`) **destination** for a single
+  object - the bytes land on the stream, then the S3 source is deleted. A
+  stream source (a move deletes its source, which a stream cannot be) and a
+  recursive stream destination raise `ValidationError` with clear messages.
+  The CLI keeps aws's blanket rejection of `-` for `mv`.
+- A failed client build (e.g. `AWS_PROFILE` naming a missing profile) now raises
+  the documented `ConfigurationError` from every public API - `S3.client()`, the
+  lazy `S3Storage` default client, and the scan path previously leaked the raw
+  botocore error.
+- `S3.cp` / `mv` / `rm` / `sync` gain `capture_response=True`, which surfaces the
+  operation's full S3 responses on `OpResult.extra_info`: the write response
+  (`PutObject` / `CopyObject` / `CompleteMultipartUpload`, minus `ResponseMetadata`)
+  under `"write"` with `"ETag"` promoted from it (so an upload carries one too), a
+  download's `GetObject` response (`Body`-stripped) under `"read"`, and the removed
+  object's `DeleteObject`-shaped response under `"delete"` (an `mv` source, or each
+  `rm` / `sync --delete` object, the batched path reconstructed from the
+  `DeleteObjects` batch). The `"write"` / `"read"` slots force the classic transfer
+  engine (capture rides botocore client events the CRT data plane bypasses).
+- `S3Storage.get_fileinfo(key)` now joins a non-empty child `key` under the
+  prefix with a `/` boundary (was a bare concat that only resolved correctly
+  when the prefix already ended in `/`), matching `LocalStorage` and the "an
+  entry beneath it" contract.
+- A root-anchored (absolute) `--exclude` / `--include` pattern now matches an
+  entry's full key instead of a root-stripped one, so the single `sync` filter
+  prunes each side against its own path (aws-cli's per-side roots).
+  `globsieve.Matcher.included` gains a `full_key`, a new `Anchored` matcher joins
+  each absolute pattern onto it, and `GlobFilter` passes `FileInfo.key`. Removed
+  `globsieve.translate_pattern_for_root` and `TransferPlan.filter_root`.
+- `--case-conflict` (`skip` / `warn` / `error`) now tracks only the downloads
+  still in flight - the admitted key is dropped when its transfer finishes
+  (aws-cli's `CaseConflictCleanupSubscriber`), not kept for the whole run - so a
+  same-case twin is a conflict only while the first download is still running,
+  matching aws on a case-sensitive filesystem.
+- Spell the destination `dest`, not `dst`, throughout - matching aws-cli
+  (`dest` is its spelling): `S3.cp` / `mv` / `sync`'s second argument,
+  `ChecksumComparison`'s `dest`, `OpResult.dest_info` / `dest_storage`, and the
+  internal types. A keyword caller switches `dst=` to `dest=`.
+- `OpResult` now carries the operation's listing entries and backend handles -
+  `src_info` / `dest_info` (`FileInfo`) and `src_storage` / `dest_storage`
+  (`Storage`), so a consumer can act on a result object directly (e.g.
+  `src_storage` + `src_info.key` to HeadObject it) - plus `extra_info`, the
+  result's S3 response metadata (`{"ETag": ...}` for an s3-to-s3 copy and a
+  download's source; an upload leaves it `None`, as s3transfer discards the
+  PutObject response). `error` is now typed `Boto3S3Error` (was `BaseException`).
+  See docs/opresult.md for which operation populates which field.
+- Rename `OpKind` to `TransferType`, and the `kind` field on `OpResult` /
+  `TransferProgress` to `transfer_type` (aws-cli's name for the record's verb).
+  Frees `.kind` to mean only a `FileInfo`'s `FileKind`.
+- `S3Deleter.submit` now takes the `FileInfo` to delete (was a `str` key): the
+  deleter buffers listing entries by `info.key`, so a richer subtype
+  (`S3FileInfo` with its `etag`) rides through to each `OpResult`. Callers pass
+  `info` rather than `info.key`.
+
 ## [0.3.0] - 2026-06-27
 
 - `Storage.delete` now takes the `FileInfo` to remove (was a `str` key): a

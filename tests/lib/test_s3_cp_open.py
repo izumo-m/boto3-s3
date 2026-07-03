@@ -25,11 +25,16 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3 import GlobFilter
-from boto3_s3.exceptions import BatchError, Boto3S3Error, ValidationError
+from boto3_s3.exceptions import (
+    BatchError,
+    CancelledError,
+    NotFoundError,
+    ValidationError,
+)
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, OpKind, OpOutcome, OpResult
+from boto3_s3.types import CancelToken, FileInfo, FileKind, OpOutcome, OpResult, TransferType
 from tests.utils.recorder import ApiCall, make_recording_client
 
 if TYPE_CHECKING:
@@ -160,6 +165,18 @@ class _MemStorage(Storage):
         del self._store[info.key]
 
 
+class _ArrivalOrderMem(_MemStorage):
+    """Yields entries in dict insertion order - deliberately unsorted - to pin
+    that the non-sync consumers take the backend's arrival order (a plain
+    ``SCAN`` side has no ordering guarantee; docs/storage.md section 3)."""
+
+    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+        yield [
+            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
+            for key, data in self._store.items()  # insertion order, NOT sorted
+        ]
+
+
 class _ReadOnlyMem(_MemStorage):
     """Declares only ``OPEN_READ`` - missing ``SCAN`` / ``GET_FILEINFO`` (opens3) and
     ``OPEN_WRITE`` (s3open), so it always trips the capability gate."""
@@ -222,6 +239,65 @@ class TestOpenUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
 
+    def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
+        # sync is the only order-sensitive consumer (docs/storage.md section 3):
+        # a recursive cp consumes a custom backend's entries exactly as its
+        # scan yields them - deliberately NOT sorted here - with no reordering
+        # anywhere in scan()'s prefetch or the submit loop.
+        store = {"z.txt": b"1", "a.txt": b"2", "m.txt": b"3"}  # insertion order
+        src = _ArrivalOrderMem(store, location="mem://data/")
+        client, calls = make_recording_client([{}, {}, {}])
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == [
+            "tree/z.txt",
+            "tree/a.txt",
+            "tree/m.txt",
+        ]
+
+    def test_recursive_move_deletes_in_arrival_order_too(self) -> None:
+        # mv rides the same enumeration: uploads and the per-item source
+        # deletes both follow the backend's yield order.
+        store = {"z.txt": b"1", "a.txt": b"2", "m.txt": b"3"}
+        src = _ArrivalOrderMem(store, location="mem://data/")
+        client, calls = make_recording_client([{}, {}, {}])
+        S3().mv(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == [
+            "tree/z.txt",
+            "tree/a.txt",
+            "tree/m.txt",
+        ]
+        assert src.deletes == ["z.txt", "a.txt", "m.txt"]
+        assert store == {}
+
+    def test_cancel_does_not_open_the_next_source(self) -> None:
+        # The submit loop checks the cancel token *before* pulling the next item,
+        # so a run cancelled mid-stream never opens (and thus never leaks) the
+        # fileobj of an item it will not submit. on_result cancels right after the
+        # first upload commits; the second source must never be opened.
+        src = _MemStorage({"a.txt": b"x", "b.txt": b"yy"}, location="mem://data/")
+        token = CancelToken()
+        client, _ = make_recording_client([{}, {}])
+        with pytest.raises(CancelledError):
+            S3().cp(
+                src,
+                S3Storage("s3://b/tree", client=client),
+                recursive=True,
+                transfer_config=_SYNC,
+                cancel_token=token,
+                on_result=lambda _result: token.cancel(),
+            )
+        assert src.opens == [("a.txt", "rb")]
+
     def test_glob_filter_matches_compare_keys(self) -> None:
         src = _MemStorage({"keep.txt": b"x", "drop.bin": b"y"}, location="mem://data/")
         keep = GlobFilter().exclude("*").include("*.txt").compile()
@@ -237,13 +313,13 @@ class TestOpenUploadRoute:
 
     def test_missing_single_source_raises_does_not_exist(self) -> None:
         # An unresolvable single source (get_fileinfo -> None) raises up front
-        # like a missing local source: the base category (rc 255), not a silent
-        # zero-item run and not NotFoundError (which would map to a different rc).
+        # like a missing local source - NotFoundError with no ClientError cause
+        # (the general rc 255) - not a silent zero-item run.
         src = _MemStorage({}, location="mem://data/gone.txt")
         client, calls = make_recording_client([])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(NotFoundError) as excinfo:
             S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
-        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is None
         assert str(excinfo.value) == "The user-provided path mem://data/gone.txt does not exist."
         assert calls == []
 
@@ -309,24 +385,41 @@ class TestOpenDownloadRoute:
         # A non-"/"-terminated destination names a single object (the location
         # itself, key ""); the writer commits only when the transfer closes it.
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/out.bin")
+        dest = _MemStorage(store, location="mem://data/out.bin")
         client, calls = make_recording_client([_head_response(), _get_response()])
-        S3().cp(S3Storage("s3://b/d/a.txt", client=client), dst, transfer_config=_SYNC)
+        S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
         assert _ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"": b"payload"}
 
     def test_single_download_into_a_directory_uses_the_basename(self) -> None:
         # A "/"-terminated destination adopts the source's name (use_src_name).
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/")
+        dest = _MemStorage(store, location="mem://data/")
         client, calls = make_recording_client([_head_response(), _get_response()])
-        S3().cp(S3Storage("s3://b/d/a.txt", client=client), dst, transfer_config=_SYNC)
+        S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
         assert _ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"a.txt": b"payload"}
 
+    def test_single_download_is_filtered_too(self) -> None:
+        # The open route mirrors the built-in one: aws filters the
+        # single-object case as well - the excluded object is headed but
+        # never fetched, and the backend is never opened.
+        from boto3_s3 import GlobFilter
+
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/out.bin")
+        drop = GlobFilter().exclude("*").compile()
+        client, calls = make_recording_client([_head_response()])
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
+        )
+        assert _ops(calls) == ["HeadObject"]
+        assert store == {}
+        assert dest.opens == []
+
     def test_recursive_download_writes_each_relative_key(self) -> None:
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/")
+        dest = _MemStorage(store, location="mem://data/")
         listing = {
             "Contents": [
                 {"Key": "pre/a.txt", "Size": 3, "LastModified": _MTIME, "ETag": '"a"'},
@@ -338,7 +431,7 @@ class TestOpenDownloadRoute:
         )
         S3().cp(
             S3Storage("s3://b/pre", client=client),
-            dst,
+            dest,
             recursive=True,
             transfer_config=_SYNC,
         )
@@ -346,12 +439,12 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_keyless_non_recursive_source_writes_nothing(self) -> None:
-        # `cp s3://bucket mem-dst`: aws lists the bucket and exact-matches nothing.
+        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches nothing.
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/out.bin")
+        dest = _MemStorage(store, location="mem://data/out.bin")
         client, calls = make_recording_client([])
         results: list[OpResult] = []
-        S3().cp(S3Storage("s3://bucket", client=client), dst, on_result=results.append)
+        S3().cp(S3Storage("s3://bucket", client=client), dest, on_result=results.append)
         assert calls == []
         assert results == []
         assert store == {}
@@ -359,12 +452,12 @@ class TestOpenDownloadRoute:
     def test_glacier_source_skips_and_commits_nothing(self) -> None:
         # The source-side glacier gate still runs for a custom destination.
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/out.bin")
+        dest = _MemStorage(store, location="mem://data/out.bin")
         client, calls = make_recording_client([_head_response(StorageClass="GLACIER")])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/cold", client=client),
-            dst,
+            dest,
             transfer_config=_SYNC,
             on_result=results.append,
         )
@@ -376,25 +469,25 @@ class TestOpenDownloadRoute:
         # A dry run enumerates (HeadObject) but must not open the destination
         # for writing - opening "wb" on a real backend is itself a side effect.
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/out.bin")
+        dest = _MemStorage(store, location="mem://data/out.bin")
         client, calls = make_recording_client([_head_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
-            dst,
+            dest,
             dryrun=True,
             on_result=results.append,
         )
         assert _ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
-        assert dst.opens == []
+        assert dest.opens == []
         assert store == {}
 
     def test_missing_open_write_capability_is_rejected(self) -> None:
-        dst = _ReadOnlyMem({}, location="mem://data/out.bin")
+        dest = _ReadOnlyMem({}, location="mem://data/out.bin")
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().cp(S3Storage("s3://b/d/a.txt", client=client), dst, transfer_config=_SYNC)
+            S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
         assert "OPEN_WRITE" in str(excinfo.value)
         assert calls == []
 
@@ -402,13 +495,13 @@ class TestOpenDownloadRoute:
         # The bytes move (HeadObject + GetObject), but the backend rejects the
         # write on close: _CloseFileobj flips the settled future to a failure.
         store: dict[str, bytes] = {}
-        dst = _CommitFailMem(store, location="mem://data/out.bin")
+        dest = _CommitFailMem(store, location="mem://data/out.bin")
         client, calls = make_recording_client([_head_response(), _get_response()])
         results: list[OpResult] = []
         with pytest.raises(BatchError):
             S3().cp(
                 S3Storage("s3://b/d/a.txt", client=client),
-                dst,
+                dest,
                 transfer_config=_SYNC,
                 on_result=results.append,
             )
@@ -423,7 +516,7 @@ class TestMoveRoute:
     For ``opens3`` (custom source) the source is removed through its own
     ``Storage.delete`` after each successful upload; for ``s3open`` (custom
     destination) the source is S3, deleted with ``DeleteObject`` like any other
-    download mv. Both report ``OpKind.MOVE``. A failed transfer keeps its source
+    download mv. Both report ``TransferType.MOVE``. A failed transfer keeps its source
     (``_CloseFileobj`` sits before the source delete, so a failed commit blocks
     it too).
     """
@@ -443,7 +536,9 @@ class TestMoveRoute:
         # The single source's open key is "" (the location itself); delete uses it.
         assert src.deletes == [""]
         assert src._store == {}
-        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.SUCCEEDED)
+        ]
 
     def test_recursive_move_from_a_custom_source_deletes_each_key(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
@@ -461,12 +556,12 @@ class TestMoveRoute:
 
     def test_move_into_a_custom_destination_deletes_the_s3_source(self) -> None:
         store: dict[str, bytes] = {}
-        dst = _MemStorage(store, location="mem://data/out.bin")
+        dest = _MemStorage(store, location="mem://data/out.bin")
         client, calls = make_recording_client([_head_response(), _get_response(), {}])
         results: list[OpResult] = []
         S3().mv(
             S3Storage("s3://b/d/a.txt", client=client),
-            dst,
+            dest,
             transfer_config=_SYNC,
             on_result=results.append,
         )
@@ -474,7 +569,9 @@ class TestMoveRoute:
         assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
         assert store == {"": b"payload"}
-        assert [(r.kind, r.outcome) for r in results] == [(OpKind.MOVE, OpOutcome.SUCCEEDED)]
+        assert [(r.transfer_type, r.outcome) for r in results] == [
+            (TransferType.MOVE, OpOutcome.SUCCEEDED)
+        ]
 
     def test_move_from_a_source_without_delete_is_rejected(self) -> None:
         src = _NoDeleteMem({"": b"x"}, location="mem://data/a.txt")
