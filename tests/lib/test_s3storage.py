@@ -167,7 +167,7 @@ class TestScanRecursive:
         pages = [{"Contents": [_obj("prefix/keep/a.txt"), _obj("prefix/drop/b.txt")]}]
         storage, _ = _storage(pages)
         options = ScanOptions(
-            recursive=True, filter=lambda info: info.compare_key.startswith("keep/")
+            recursive=True, filter=lambda info: (info.compare_key or "").startswith("keep/")
         )
         results = list(storage.scan(options))
         assert [r.key for r in results] == ["prefix/keep/a.txt"]

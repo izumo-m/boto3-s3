@@ -19,7 +19,7 @@ import pytest
 
 from boto3_s3.exceptions import NotFoundError
 from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path
-from boto3_s3.types import FileKind, ScanOptions
+from boto3_s3.types import FileKind, LocalFileInfo, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
@@ -209,7 +209,7 @@ class TestWalkIsOverridable:
         _make_tree(tmp_path, "a.txt")
 
         class _Tagged(LocalStorage):
-            def _stat_info(self, path: str, notify: object) -> object:
+            def _stat_info(self, path: str, notify: object) -> LocalFileInfo | None:
                 info = super()._stat_info(path, notify)  # type: ignore[arg-type]
                 if info is not None:
                     info.size = 999

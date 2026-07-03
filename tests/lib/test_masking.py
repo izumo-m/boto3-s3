@@ -3,7 +3,7 @@
 import io
 import logging
 import pathlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import pytest
@@ -29,7 +29,9 @@ MODULE_NAMES = [
 
 
 @contextmanager
-def _stream_logger(name: str, **kwargs: object) -> Iterator[tuple[logging.Logger, io.StringIO]]:
+def _stream_logger(
+    name: str, **kwargs: object
+) -> Generator[tuple[logging.Logger, io.StringIO], None, None]:
     """Set up a masked stream logger over a StringIO and restore on exit."""
     logger = logging.getLogger(name)
     before_handlers = list(logger.handlers)
