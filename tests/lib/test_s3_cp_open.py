@@ -165,6 +165,18 @@ class _MemStorage(Storage):
         del self._store[info.key]
 
 
+class _ArrivalOrderMem(_MemStorage):
+    """Yields entries in dict insertion order - deliberately unsorted - to pin
+    that the non-sync consumers take the backend's arrival order (a plain
+    ``SCAN`` side has no ordering guarantee; docs/storage.md section 3)."""
+
+    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+        yield [
+            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
+            for key, data in self._store.items()  # insertion order, NOT sorted
+        ]
+
+
 class _ReadOnlyMem(_MemStorage):
     """Declares only ``OPEN_READ`` - missing ``SCAN`` / ``GET_FILEINFO`` (opens3) and
     ``OPEN_WRITE`` (s3open), so it always trips the capability gate."""
@@ -226,6 +238,46 @@ class TestOpenUploadRoute:
             transfer_config=_SYNC,
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
+
+    def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
+        # sync is the only order-sensitive consumer (docs/storage.md section 3):
+        # a recursive cp consumes a custom backend's entries exactly as its
+        # scan yields them - deliberately NOT sorted here - with no reordering
+        # anywhere in scan()'s prefetch or the submit loop.
+        store = {"z.txt": b"1", "a.txt": b"2", "m.txt": b"3"}  # insertion order
+        src = _ArrivalOrderMem(store, location="mem://data/")
+        client, calls = make_recording_client([{}, {}, {}])
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == [
+            "tree/z.txt",
+            "tree/a.txt",
+            "tree/m.txt",
+        ]
+
+    def test_recursive_move_deletes_in_arrival_order_too(self) -> None:
+        # mv rides the same enumeration: uploads and the per-item source
+        # deletes both follow the backend's yield order.
+        store = {"z.txt": b"1", "a.txt": b"2", "m.txt": b"3"}
+        src = _ArrivalOrderMem(store, location="mem://data/")
+        client, calls = make_recording_client([{}, {}, {}])
+        S3().mv(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == [
+            "tree/z.txt",
+            "tree/a.txt",
+            "tree/m.txt",
+        ]
+        assert src.deletes == ["z.txt", "a.txt", "m.txt"]
+        assert store == {}
 
     def test_cancel_does_not_open_the_next_source(self) -> None:
         # The submit loop checks the cancel token *before* pulling the next item,
