@@ -153,15 +153,17 @@ class ScanOptions:
     entries have no ``DirEntry``).
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
-    ``scan`` itself - page by page on the prefetch worker, before pages cross
-    the hand-off queue - so ``scan_pages`` implementations and overrides keep
-    yielding raw pages and never handle it. It carries the item filter of
-    ``rm`` / ``cp`` / ``mv`` below the flatten loop, and sync's *visibility*
-    layer: each side's listing is pruned independently here (its own
-    ``--exclude`` / ``--include`` root) before the comparator pairs the
-    streams - which is exactly why filtered-out destination entries are
-    protected from ``--delete``. The predicate runs on the worker thread:
-    keep it thread-safe and fast.
+    each ``Storage.scan_pages`` producer, which returns already-filtered pages
+    (``scan`` flattens + prefetches them, it no longer sieves). A backend may
+    push the predicate to its source (a REST listing filtering server-side) or
+    wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
+    prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
+    / ``mv``, and sync's *visibility* layer: each side's listing is pruned
+    independently (its own ``--exclude`` / ``--include`` root) before the
+    comparator pairs the streams - which is exactly why filtered-out destination
+    entries are protected from ``--delete`` (an entry a producer does not return
+    is simply absent, so it is not a delete candidate). Keep the predicate
+    thread-safe and fast (it runs on the worker thread).
 
     ``sort`` requests entries in UTF-8 byte order of their ``compare_key``:
     ``sync`` sets it (its merge-join needs both sides ascending), while ``cp`` /

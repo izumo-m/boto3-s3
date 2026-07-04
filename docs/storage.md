@@ -50,9 +50,10 @@ declared capabilities promise:
   returns a readable stream; `"wb"` a writable one whose `close()` commits the
   write. `size` is an optional total-length hint for writes.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
-  container one page of `FileInfo` at a time (the base `scan()` flattens it and
-  applies `options.filter`). Honour `options.sort` when `SORTED_SCAN` is
-  declared.
+  container one page of `FileInfo` at a time, **applying `options.filter`**
+  (return already-filtered pages: push it to the source, or wrap raw pages with
+  `storage.sieve_pages`; the base `scan()` only flattens + prefetches). Honour
+  `options.sort` when `SORTED_SCAN` is declared.
 - **`get_fileinfo(key="", *, follow_symlinks=True, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry

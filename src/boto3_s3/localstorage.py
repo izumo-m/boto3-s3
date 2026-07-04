@@ -333,6 +333,7 @@ class LocalFileGenerator:
         follow_symlinks: bool = True,
         detect_loops: bool = False,
         capture_entry: bool = False,
+        item_filter: Callable[[FileInfo], bool] | None = None,
         notify: Callable[[str], None] | None = None,
     ) -> Iterator[LocalFileInfo]:
         """Yield every file under ``root`` (recursively) in aws-cli byte order.
@@ -342,8 +343,8 @@ class LocalFileGenerator:
         names, so the stream is S3's UTF-8 byte order (``foo.txt`` before
         ``foo/bar``). ``root`` is an absolute path with a trailing ``os.sep``;
         each yielded ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded
-        to ``/``) and ``compare_key`` is left unstamped for the caller
-        (``LocalStorage.walk_local`` makes it root-relative).
+        to ``/``) and ``compare_key`` is stamped here as the key relative to
+        ``root`` (what ``item_filter`` matches).
 
         The root is vetted with :meth:`should_ignore_file` (a missing / special /
         unreadable root, or a no-follow symlink root, yields nothing, warning as
@@ -354,7 +355,11 @@ class LocalFileGenerator:
         extension, off = ``aws s3`` behaviour, no extra ``stat``).
         ``capture_entry=True`` stamps each ``LocalFileInfo.entry`` with its
         ``os.DirEntry`` (scanning by path so the entry stays usable afterwards).
-        Warnings carry the aws-cli message bodies and go to ``notify``.
+        ``item_filter`` (the ``ScanOptions.filter`` predicate) drops entries it
+        rejects - applied *after* the aws-cli vetting so an excluded file still
+        emits the warnings aws-cli would (exit-code parity), and yielding only the
+        survivors saves paging them downstream. Warnings carry the aws-cli message
+        bodies and go to ``notify``.
         """
         emit: Callable[[str], None] = notify if notify is not None else (lambda body: None)
         if self.should_ignore_file(root, follow_symlinks=follow_symlinks, notify=emit):
@@ -362,13 +367,19 @@ class LocalFileGenerator:
         # No detector unless asked and reachable (a cycle needs a followed
         # symlink); None then costs no per-directory stat.
         detector = LoopDetector(root) if detect_loops and follow_symlinks else None
-        yield from self._descend(
+        # root ends in os.sep, so the normalized root ends in "/" and the slice
+        # never leaves a leading separator; compare_key is the key relative to root.
+        strip = len(root.replace(os.sep, "/"))
+        for info in self._descend(
             root,
             follow_symlinks=follow_symlinks,
             notify=emit,
             detector=detector,
             capture_entry=capture_entry,
-        )
+        ):
+            info.compare_key = info.key[strip:]
+            if item_filter is None or item_filter(info):
+                yield info
 
     def _descend(
         self,
@@ -759,11 +770,14 @@ class LocalStorage(Storage):
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path` one stat batch at a time.
 
-        Recursive enumeration streams :meth:`walk_local` in aws-cli byte order;
+        Recursive enumeration drives the walker's
+        :meth:`~LocalFileGenerator.list_files` in aws-cli byte order;
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
-        ``options.on_warning`` / ``options.capture_entry`` are threaded into it -
-        a symlink skip, the cycle guard, the aws-cli-worded warning channel a
-        transfer needs, and the opt-in ``LocalFileInfo.entry`` capture.
+        ``options.on_warning`` / ``options.capture_entry`` / ``options.filter``
+        are threaded into it - a symlink skip, the cycle guard, the aws-cli-worded
+        warning channel a transfer needs, the opt-in ``LocalFileInfo.entry``
+        capture, and the per-entry filter (applied in the walk, after vetting -
+        :meth:`Storage.scan_pages`'s "return filtered pages" contract).
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``), anchored at the absolutized path (``self._abspath``) so
@@ -773,11 +787,13 @@ class LocalStorage(Storage):
         """
         if options.recursive:
             yield from _paged(
-                self.walk_local(
+                self._walker.list_files(
+                    self._abspath + os.sep,
                     follow_symlinks=options.follow_symlinks,
                     detect_loops=options.detect_symlink_loops,
-                    on_warning=options.on_warning,
                     capture_entry=options.capture_entry,
+                    item_filter=options.filter,
+                    notify=options.on_warning,
                 )
             )
             return
@@ -787,6 +803,7 @@ class LocalStorage(Storage):
                 follow_symlinks=options.follow_symlinks,
                 on_warning=options.on_warning,
                 capture_entry=options.capture_entry,
+                item_filter=options.filter,
             )
         )
 
@@ -802,31 +819,25 @@ class LocalStorage(Storage):
 
         A thin wrapper over :meth:`self.walker.list_files <LocalFileGenerator.list_files>`:
         it anchors at the absolutized path with a trailing ``os.sep`` (so
-        ``FileInfo.key`` is absolute and a non-directory root degrades to a "does
-        not exist" warning rather than a scan error) and stamps each entry's
-        ``compare_key`` as its key relative to :attr:`path`. The knobs
-        (``follow_symlinks`` / ``detect_loops`` / ``capture_entry`` / warnings)
-        and the byte-order / warning semantics are the walker's - see
-        :meth:`LocalFileGenerator.list_files`. A single source object goes through
+        ``FileInfo.key`` is absolute, ``compare_key`` comes out relative to
+        :attr:`path`, and a non-directory root degrades to a "does not exist"
+        warning rather than a scan error). The knobs (``follow_symlinks`` /
+        ``detect_loops`` / ``capture_entry`` / warnings) and the byte-order /
+        warning semantics are the walker's - see
+        :meth:`LocalFileGenerator.list_files`. This is the raw walk (no
+        ``ScanOptions.filter``); ``scan`` applies the filter through
+        :meth:`scan_pages`. A single source object goes through
         :meth:`get_fileinfo` instead, not this walk.
         """
-        notify: Callable[[str], None] = (
-            on_warning if on_warning is not None else (lambda body: None)
-        )
         # local_format(dir_op=True) form; self._abspath is computed once at
-        # construction. The trailing separator makes the normalized root end in
-        # "/", so the slice below never leaves a leading separator.
-        start = self._abspath + os.sep
-        strip = len(start.replace(os.sep, "/"))
-        for info in self._walker.list_files(
-            start,
+        # construction. list_files stamps compare_key (key relative to root).
+        yield from self._walker.list_files(
+            self._abspath + os.sep,
             follow_symlinks=follow_symlinks,
             detect_loops=detect_loops,
             capture_entry=capture_entry,
-            notify=notify,
-        ):
-            info.compare_key = info.key[strip:]
-            yield info
+            notify=on_warning,
+        )
 
     def _scan_one_level(
         self,
@@ -835,13 +846,14 @@ class LocalStorage(Storage):
         follow_symlinks: bool,
         on_warning: Callable[[str], None] | None,
         capture_entry: bool = False,
+        item_filter: Callable[[FileInfo], bool] | None = None,
     ) -> Iterator[FileInfo]:
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
         )
         if not os.path.isdir(root):
             info = self.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=on_warning)
-            if info is not None:
+            if info is not None and (item_filter is None or item_filter(info)):
                 yield info
             return
         for sort_name, info, _loop_key in self._walker.scan_children(
@@ -850,7 +862,8 @@ class LocalStorage(Storage):
             # One level down: the entry name itself is the root-relative key (a
             # directory's sort_name / key already carry a trailing separator).
             info.compare_key = sort_name.replace(os.sep, "/")
-            yield info
+            if item_filter is None or item_filter(info):
+                yield info
 
     def _stat_one(
         self, path: str, *, follow_symlinks: bool, notify: Callable[[str], None]

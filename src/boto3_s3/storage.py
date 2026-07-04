@@ -50,14 +50,16 @@ from boto3_s3.concurrency import prefetch
 from boto3_s3.types import FileInfo, ScanOptions
 
 
-def _sieve_pages(
+def sieve_pages(
     pages: Iterator[Sequence[FileInfo]], keep: Callable[[FileInfo], bool]
 ) -> Iterator[list[FileInfo]]:
-    """Apply ``keep`` to each page; drop pages sieved empty.
+    """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
 
-    Lazily wraps a :meth:`Storage.scan_pages` producer: :func:`prefetch`'s
-    worker drives it, so the predicate runs on the worker thread and excluded
-    entries - and emptied pages - never enter the hand-off queue.
+    The building block a :meth:`Storage.scan_pages` implementation uses to honor
+    ``options.filter`` when it cannot push the predicate to the source: wrap the
+    raw page stream with it. Lazy, so :func:`prefetch`'s worker drives it - the
+    predicate runs on the worker thread and excluded entries (and pages emptied
+    by it) never enter the hand-off queue.
     """
     for page in pages:
         kept = [info for info in page if keep(info)]
@@ -163,19 +165,16 @@ class Storage(abc.ABC):
         producer and overlaps it with a background :func:`prefetch` worker, so the
         next page's I/O (an S3 ``ListObjectsV2`` round-trip, a local ``stat``
         batch) runs while the consumer handles the current page; a producer error
-        surfaces on the consumer's pull. ``options.filter`` is applied here, page
-        by page on that same worker - excluded entries (and pages sieved empty)
-        never cross the hand-off queue, and the predicate runs off the consumer's
-        thread. Pass ``options`` to control the walk (defaults to
+        surfaces on the consumer's pull. ``options.filter`` is *not* applied here -
+        it is :meth:`scan_pages`'s job (so a backend can push the predicate to the
+        source, e.g. a REST listing that filters server-side), and its output is
+        already filtered. Pass ``options`` to control the walk (defaults to
         ``ScanOptions()``). To customize the entries, override :meth:`scan_pages`,
         not this method. Used by ``ls`` and the recursive forms of ``cp`` /
         ``rm`` / ``sync``.
         """
         opts = options if options is not None else ScanOptions()
-        pages: Iterator[Sequence[FileInfo]] = self.scan_pages(opts)
-        if opts.filter is not None:
-            pages = _sieve_pages(pages, opts.filter)
-        with prefetch(pages, queue_size=self._scan_prefetch_pages) as items:
+        with prefetch(self.scan_pages(opts), queue_size=self._scan_prefetch_pages) as items:
             yield from items
 
     @abc.abstractmethod
@@ -187,9 +186,13 @@ class Storage(abc.ABC):
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
         customized stream keeps the page-ahead overlap, cheaper than
-        re-implementing :meth:`scan`. Yield raw pages: ``options.filter`` is
-        :meth:`scan`'s concern, applied centrally downstream of this producer
-        (and of any override), so implementations never check it.
+        re-implementing :meth:`scan`. **Apply ``options.filter`` here** and return
+        already-filtered pages: whatever this producer omits is simply absent
+        downstream (its ``sync`` effect is side-specific - the visibility layer in
+        ``ScanOptions.filter`` / docs/globsieve.md). A backend that cannot push the
+        predicate to its source wraps its raw pages with :func:`sieve_pages`; one
+        that can (e.g. a REST listing) translates ``options.filter`` into a
+        server-side query instead.
 
         ``options.recursive`` walks every entry beneath the prefix (all ``FILE``
         kind, no directory grouping); non-recursive yields the immediate entries

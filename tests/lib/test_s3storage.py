@@ -30,7 +30,7 @@ from boto3_s3 import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.storage import _sieve_pages
+from boto3_s3.storage import sieve_pages
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -222,7 +222,8 @@ class TestScanPages:
 
 
 class TestScanFilter:
-    """``ScanOptions.filter`` is ``scan``'s concern, applied on the prefetch worker."""
+    """``ScanOptions.filter`` is applied by ``scan_pages`` (which returns filtered
+    pages), on the prefetch worker that drives the producer."""
 
     def test_keeps_only_included_entries(self) -> None:
         pages = [
@@ -241,20 +242,24 @@ class TestScanFilter:
             "prefix/b",
         ]
 
-    def test_scan_pages_stays_raw(self) -> None:
-        # The producer never sieves: a backend or override yields raw pages
-        # even when the options carry a filter.
+    def test_scan_pages_returns_filtered(self) -> None:
+        # The producer applies options.filter itself (returns filtered pages);
+        # a page emptied by the filter is dropped, not yielded empty.
         pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.log")]}]
         storage, _ = _storage(pages)
-        options = ScanOptions(recursive=True, filter=lambda _info: False)
+        options = ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         result = list(storage.scan_pages(options))
-        assert [[fi.key for fi in page] for page in result] == [["prefix/a.txt", "prefix/b.log"]]
+        assert [[fi.key for fi in page] for page in result] == [["prefix/a.txt"]]
+        # a filter excluding everything yields no pages at all
+        storage2, _ = _storage(pages)
+        assert list(storage2.scan_pages(ScanOptions(recursive=True, filter=lambda _i: False))) == []
 
     def test_sieve_drops_emptied_pages(self) -> None:
-        # A page whose every entry is excluded is dropped, not yielded empty,
-        # so it never occupies a prefetch queue slot.
+        # sieve_pages (the helper a producer wraps its raw pages with): a page
+        # whose every entry is excluded is dropped, not yielded empty, so it
+        # never occupies a prefetch queue slot.
         pages = iter([[FileInfo(key="a.log")], [FileInfo(key="b.txt")]])
-        out = list(_sieve_pages(pages, lambda info: info.key.endswith(".txt")))
+        out = list(sieve_pages(pages, lambda info: info.key.endswith(".txt")))
         assert [[fi.key for fi in page] for page in out] == [["b.txt"]]
 
     def test_predicate_runs_on_the_prefetch_worker(self) -> None:

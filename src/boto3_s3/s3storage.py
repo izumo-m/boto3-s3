@@ -44,7 +44,7 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.storage import Storage, StorageCapability
+from boto3_s3.storage import Storage, StorageCapability, sieve_pages
 from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
 
 if TYPE_CHECKING:
@@ -563,15 +563,25 @@ class S3Storage(Storage):
         and the two bucket filters are ignored for object listings (aws-cli
         parity: ``aws s3 ls`` with no bucket disregards ``--recursive``).
 
-        This is the override seam (see :meth:`Storage.scan_pages`): subclass and
-        filter / enrich each page, then ``super().scan_pages(options)``; the work
-        runs on :meth:`Storage.scan`'s prefetch worker so it overlaps consumption.
-        Fetch-time botocore errors are translated to ``Boto3S3Error`` here and
-        surface on the consumer's pull.
+        ``options.filter`` is applied here (:meth:`Storage.scan_pages`'s contract):
+        the raw ``ListObjectsV2`` pages are sieved client-side with
+        :func:`~boto3_s3.storage.sieve_pages` before they are yielded. This is the
+        override seam: subclass and filter / enrich each page, then
+        ``super().scan_pages(options)``; the work runs on :meth:`Storage.scan`'s
+        prefetch worker so it overlaps consumption. Fetch-time botocore errors are
+        translated to ``Boto3S3Error`` here and surface on the consumer's pull.
         """
-        if not self._bucket:
-            yield from self._scan_bucket_pages(options)
-            return
+        raw = (
+            self._scan_bucket_pages(options)
+            if not self._bucket
+            else self._scan_object_pages(options)
+        )
+        if options.filter is not None:
+            raw = sieve_pages(raw, options.filter)
+        yield from raw
+
+    def _scan_object_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
+        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter)."""
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": self._key,

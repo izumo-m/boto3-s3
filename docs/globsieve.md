@@ -143,13 +143,18 @@ relativization, so it is not part of the root.
 `ScanOptions.filter` to the enumeration; the backend's `scan_pages` producer
 stamps each entry's root-relative `compare_key` (`info.key[len(root):]`) before
 the predicate runs.
-The evaluation is done **per page** by
-`Storage.scan` (the concrete base-class method) on the listing's prefetch
-worker thread - an excluded
-entry is not handed to the consumer, and a page that is wiped out entirely never
-even reaches the hand-off queue. A `scan_pages` implementation or override only
-ever needs to return raw pages and is unaware of the filter. The filter is
-invoked from a worker thread, so it must be thread-safe and lightweight.
+The evaluation is the **producer's** job: `scan_pages` returns already-filtered
+pages (`Storage.scan` just flattens + prefetches them). A backend may push the
+predicate to its source (a REST listing filtering server-side) or wrap its raw
+pages with `storage.sieve_pages` - the built-in S3 backend sieves client-side,
+and the local backend applies it inside the walk (after the aws-cli vetting, so
+an excluded file still emits the warnings aws-cli would). Whatever a producer
+omits is simply absent downstream, which makes the filter's effect easy to reason
+about (the per-side `sync` semantics - a filtered source entry versus a filtered
+destination entry - are the visibility layer described below). It runs **per
+page** on the listing's prefetch worker thread (an excluded
+entry is not handed to the consumer, a page wiped out entirely never reaches the
+hand-off queue), so it must be thread-safe and lightweight.
 
 The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync (all
 implemented); ls does not apply it yet. **sync prunes each side's listing

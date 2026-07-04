@@ -138,10 +138,16 @@ class _MemStorage(Storage):
         return _MemWriter(self._store, key)  # type: ignore[return-value]
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        yield [
+        # scan_pages returns already-filtered pages (the contract): a real custom
+        # backend would push options.filter to its source; this in-memory one sieves.
+        infos = [
             FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
             for key, data in sorted(self._store.items())
         ]
+        if options.filter is not None:
+            infos = [info for info in infos if options.filter(info)]
+        if infos:
+            yield infos
 
     def get_fileinfo(
         self,

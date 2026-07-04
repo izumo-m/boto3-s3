@@ -219,28 +219,33 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1, like aws-cli). Either way the
-    producer stamps each entry's ``compare_key``, so ``item_filter`` reads it
-    directly.
+    with [Errno 21] Is a directory, rc 1, like aws-cli). The recursive listing
+    stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
+    scan (``scan_pages``' contract); the single source, having no scan filter, is
+    filtered here.
     """
     infos: Iterator[FileInfo]
     if plan.dir_op:
+        # The recursive listing filters inside the scan (the scan_pages contract),
+        # so a LocalStorage subclass can prune during the walk.
         infos = plan.src.scan(
             ScanOptions(
                 recursive=True,
                 follow_symlinks=follow_symlinks,
                 detect_symlink_loops=detect_symlink_loops,
                 on_warning=transferrer.warn,
+                filter=item_filter,
             )
         )
     else:
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
+        # get_fileinfo has no filter, so an excluded single source is dropped here.
         single = plan.src.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=transferrer.warn)
         infos = iter([single] if single is not None else [])
+        if item_filter is not None:
+            infos = (info for info in infos if item_filter(info))
     for info in infos:
-        if item_filter is not None and not item_filter(info):
-            continue
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
 
 
@@ -626,12 +631,15 @@ def open_upload_items(
     (rc 0), matching an empty S3 prefix listing.
     """
     if plan.dir_op:
+        # The recursive listing filters inside the scan (the scan_pages contract),
+        # so a custom source backend can push the predicate to its source.
         infos: Iterator[FileInfo] = plan.src.scan(
             ScanOptions(
                 recursive=True,
                 follow_symlinks=follow_symlinks,
                 detect_symlink_loops=detect_symlink_loops,
                 on_warning=transferrer.warn,
+                filter=item_filter,
             )
         )
     else:
@@ -641,10 +649,11 @@ def open_upload_items(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
                 operation=operation,
             )
+        # get_fileinfo has no filter, so an excluded single source is dropped here.
         infos = iter([single])
+        if item_filter is not None:
+            infos = (info for info in infos if item_filter(info))
     for info in infos:
-        if item_filter is not None and not item_filter(info):
-            continue
         yield open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
 
 
@@ -868,10 +877,9 @@ def sync_entries(
             follow_symlinks=follow_symlinks,
             detect_symlink_loops=detect_symlink_loops,
             on_warning=transferrer.warn,
+            filter=item_filter,  # each side's visibility filter, applied in the scan
         )
     ):
-        if item_filter is not None and not item_filter(info):
-            continue
         yield _ckey(info), info
 
 

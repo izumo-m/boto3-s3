@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `Storage.scan_pages` now applies `ScanOptions.filter` itself and returns
+  already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
+  can push the predicate to its source; `storage.sieve_pages` is the helper for
+  client-side filtering.
 - `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator`
   (subclass its public seams and inject via `LocalStorage(path, walker=...)`).
 - New `ScanOptions.capture_entry`: exposes each local entry's `os.DirEntry` on
