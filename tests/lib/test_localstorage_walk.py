@@ -20,7 +20,7 @@ import pytest
 
 from boto3_s3.exceptions import NotFoundError
 from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path
-from boto3_s3.types import FileKind, LocalFileInfo, ScanOptions
+from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
@@ -333,6 +333,68 @@ class TestLocalStorageScan:
         options = ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         keys = [info.key for info in LocalStorage(tmp_path).scan(options)]
         assert keys == [str(tmp_path).replace(os.sep, "/") + "/a.txt"]
+
+
+class TestCaptureEntry:
+    """``capture_entry`` fills ``LocalFileInfo.entry`` with a usable ``os.DirEntry``."""
+
+    def test_default_leaves_entry_none(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt", "sub/b.txt")
+        infos = list(LocalStorage(str(tmp_path)).walk_local())
+        assert infos and all(info.entry is None for info in infos)
+
+    def test_capture_populates_and_matches_the_info(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt", "sub/b.txt")
+        infos = list(LocalStorage(str(tmp_path)).walk_local(capture_entry=True))
+        assert {info.compare_key for info in infos} == {"a.txt", "sub/b.txt"}
+        for info in infos:
+            assert info.entry is not None
+            # the entry describes the same file the info does
+            assert info.key.endswith(info.entry.name)
+            assert info.entry.stat().st_size == info.size
+            assert info.entry.is_dir() is False
+
+    def test_captured_entry_is_usable_after_the_walk(self, tmp_path: Path) -> None:
+        # The reason capture_entry scans by path, not a dir_fd: the entry must
+        # survive being used once the walk has closed the directory. A symlink is
+        # the case a fd-form entry would fail (uncached lstat -> Bad file
+        # descriptor); the path-form entry re-stats on demand.
+        _make_tree(tmp_path, "real.txt")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+        # Fully drain the walk first, then touch the retained entries.
+        infos = list(LocalStorage(str(tmp_path)).walk_local(capture_entry=True))
+        by_key = {info.compare_key: info for info in infos}
+        link = by_key["link.txt"].entry
+        assert link is not None
+        assert os.path.isabs(link.path) and os.path.exists(link.path)  # full path, not basename
+        assert link.is_symlink() is True
+        assert link.stat(follow_symlinks=True).st_size == 3  # follows to real.txt (b"x"*3)
+        assert link.stat(follow_symlinks=False).st_size != 3  # the link's own lstat, uncached
+
+    def test_capture_through_scan_options_reaches_a_filter(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "keep.txt", "sub/inner.txt")
+        seen: list[str] = []
+
+        def use_entry(info: FileInfo) -> bool:
+            # A filter that reuses the entry's cached stat (no fresh syscall).
+            assert isinstance(info, LocalFileInfo)
+            assert info.entry is not None
+            seen.append(f"{info.compare_key}:{info.entry.stat().st_size}")
+            return True
+
+        options = ScanOptions(recursive=True, capture_entry=True, filter=use_entry)
+        infos = list(LocalStorage(str(tmp_path)).scan(options))
+        assert len(infos) == 2
+        assert sorted(seen) == ["keep.txt:3", "sub/inner.txt:3"]
+
+    def test_non_recursive_captures_entry_on_files_and_directories(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt", "sub/inner.txt")
+        infos = list(LocalStorage(str(tmp_path)).scan(ScanOptions(capture_entry=True)))
+        by_key = {info.compare_key: info for info in infos}
+        assert by_key["a.txt"].entry is not None and by_key["a.txt"].entry.is_dir() is False
+        # a directory entry from the one-level listing is captured too
+        assert by_key["sub/"].kind is FileKind.DIRECTORY
+        assert by_key["sub/"].entry is not None and by_key["sub/"].entry.is_dir() is True
 
 
 class TestLocalStorageIO:

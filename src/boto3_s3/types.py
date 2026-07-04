@@ -82,10 +82,13 @@ class LocalFileInfo(FileInfo):
     (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
     turns it back into a host path for I/O.
 
-    ``entry`` is the same object ``os.scandir()`` yields when the producer had
-    one, so callers can reuse its ``stat()`` cache and other methods without
-    additional syscalls. Producers without a ``DirEntry`` at hand - the walk
-    root, or the ``os.listdir``-based aws-cli-order walk - leave it ``None``.
+    ``entry`` is the ``os.DirEntry`` the walk saw for this file, so a ``filter``
+    or ``on_result`` callback can reuse its cached ``stat()`` and its
+    ``is_dir`` / ``is_symlink`` without a fresh syscall. It is populated only
+    when the scan opts in with ``ScanOptions.capture_entry`` (that mode scans by
+    path so the entry stays usable after the walk moves on - its ``.path`` is the
+    full path and it re-stats on demand); the default fast walk and the
+    single-path point op (``get_fileinfo``) leave it ``None``.
     """
 
     entry: os.DirEntry[str] | None = None
@@ -139,6 +142,16 @@ class ScanOptions:
     ``Symbolic link loop detected`` warning instead of recursing until
     ``RecursionError``. Off is zero extra cost (no per-directory ``stat``).
 
+    ``capture_entry`` (default ``False``, local walk only) fills
+    :attr:`LocalFileInfo.entry` with each entry's ``os.DirEntry`` so a ``filter``
+    or ``on_result`` callback can reuse its cached ``stat`` and type without a
+    fresh syscall. It is opt-in because carrying a usable entry forces the walk
+    to scan by path rather than through a directory fd (a fd-relative entry
+    breaks once the walk closes the fd): with it the walk keeps ``os.scandir``'s
+    per-entry-stat savings but gives up the dir-relative ``fstatat``, so leave it
+    off unless a callback needs the entry. Ignored by non-local backends (S3
+    entries have no ``DirEntry``).
+
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     ``scan`` itself - page by page on the prefetch worker, before pages cross
     the hand-off queue - so ``scan_pages`` implementations and overrides keep
@@ -171,6 +184,7 @@ class ScanOptions:
     filter: Callable[[FileInfo], bool] | None = None
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
+    capture_entry: bool = False
     on_warning: Callable[[str], None] | None = None
 
 

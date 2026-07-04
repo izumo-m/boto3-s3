@@ -24,7 +24,10 @@ those APIs are absent, the same code path falls back to a path-based
 :func:`os.scandir`, whose ``FindNextFile`` data already supplies the attributes
 for free. The net effect is one ``stat`` per surviving entry (zero for a plain
 directory) plus aws-cli's one readability ``open`` per entry, versus the ~5
-restats per entry a naive port makes.
+restats per entry a naive port makes. The opt-in ``ScanOptions.capture_entry``
+also forces the path-based scan (a ``dir_fd`` entry breaks once the fd closes, so
+an entry a callback keeps must be path-form) and stamps each
+``LocalFileInfo.entry`` with its ``os.DirEntry``.
 
 The walk is a pipeline of **protected, overridable** ``LocalStorage`` methods -
 :meth:`~LocalStorage._walk` (recursion), :meth:`~LocalStorage._scan_children`
@@ -376,8 +379,9 @@ class LocalStorage(Storage):
 
         Recursive enumeration streams :meth:`walk_local` in aws-cli byte order;
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
-        ``options.on_warning`` are threaded into it - a symlink skip, the cycle
-        guard, and the aws-cli-worded warning channel a transfer needs.
+        ``options.on_warning`` / ``options.capture_entry`` are threaded into it -
+        a symlink skip, the cycle guard, the aws-cli-worded warning channel a
+        transfer needs, and the opt-in ``LocalFileInfo.entry`` capture.
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``), anchored at the absolutized path (``self._abspath``) so
@@ -391,6 +395,7 @@ class LocalStorage(Storage):
                     follow_symlinks=options.follow_symlinks,
                     detect_loops=options.detect_symlink_loops,
                     on_warning=options.on_warning,
+                    capture_entry=options.capture_entry,
                 )
             )
             return
@@ -399,6 +404,7 @@ class LocalStorage(Storage):
                 self._abspath,
                 follow_symlinks=options.follow_symlinks,
                 on_warning=options.on_warning,
+                capture_entry=options.capture_entry,
             )
         )
 
@@ -408,6 +414,7 @@ class LocalStorage(Storage):
         follow_symlinks: bool = True,
         detect_loops: bool = False,
         on_warning: Callable[[str], None] | None = None,
+        capture_entry: bool = False,
     ) -> Iterator[LocalFileInfo]:
         """Yield every file under :attr:`path` (recursively) in aws-cli's byte order.
 
@@ -425,8 +432,12 @@ class LocalStorage(Storage):
         normalized to ``/`` (:func:`to_native_path` inverts it); each entry's
         ``compare_key`` is stamped here as its key relative to :attr:`path`. A
         single source object goes through :meth:`get_fileinfo` instead, not this
-        walk. Override the protected ``_walk`` / ``_should_ignore`` / ``_stat_info``
-        below to customize the traversal (this module's docstring).
+        walk. ``capture_entry=True`` stamps each ``LocalFileInfo.entry`` with its
+        ``os.DirEntry`` (for a ``filter`` / ``on_result`` that reuses the cached
+        stat); it scans by path instead of a directory fd so the entry stays
+        usable afterwards (docs on ``ScanOptions.capture_entry``). Override the
+        protected ``_walk`` / ``_should_ignore`` / ``_stat_info`` below to
+        customize the traversal (this module's docstring).
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
@@ -451,7 +462,11 @@ class LocalStorage(Storage):
         # slice below never leaves a leading separator.
         strip = len(start.replace(os.sep, "/"))
         for info in self._walk(
-            start, follow_symlinks=follow_symlinks, notify=notify, detector=detector
+            start,
+            follow_symlinks=follow_symlinks,
+            notify=notify,
+            detector=detector,
+            capture_entry=capture_entry,
         ):
             info.compare_key = info.key[strip:]
             yield info
@@ -503,18 +518,20 @@ class LocalStorage(Storage):
         follow_symlinks: bool,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
+        capture_entry: bool,
     ) -> Iterator[LocalFileInfo]:
         """The recursive worker behind :meth:`walk_local` (an override seam).
 
         Iterates one directory's vetted, sorted children (:meth:`_scan_children`):
-        files are yielded, sub-directories recursed into depth-first so their
-        contents interleave in byte order. ``dir_path`` was already vetted - by
-        its parent's scan, or, for the root, by :meth:`walk_local`.
+        files are yielded, sub-directories (``kind == DIRECTORY``) recursed into
+        depth-first so their contents interleave in byte order. ``dir_path`` was
+        already vetted - by its parent's scan, or, for the root, by
+        :meth:`walk_local`.
         """
         for sort_name, info, loop_key in self._scan_children(
-            dir_path, follow_symlinks=follow_symlinks, notify=notify
+            dir_path, follow_symlinks=follow_symlinks, notify=notify, capture_entry=capture_entry
         ):
-            if info is not None:
+            if info.kind != FileKind.DIRECTORY:
                 yield info
                 continue
             # A sub-directory: sort_name carries the trailing os.sep (the sort
@@ -526,38 +543,61 @@ class LocalStorage(Storage):
                     continue
                 try:
                     yield from self._walk(
-                        child, follow_symlinks=follow_symlinks, notify=notify, detector=detector
+                        child,
+                        follow_symlinks=follow_symlinks,
+                        notify=notify,
+                        detector=detector,
+                        capture_entry=capture_entry,
                     )
                 finally:
                     detector.leave()
             else:
                 yield from self._walk(
-                    child, follow_symlinks=follow_symlinks, notify=notify, detector=detector
+                    child,
+                    follow_symlinks=follow_symlinks,
+                    notify=notify,
+                    detector=detector,
+                    capture_entry=capture_entry,
                 )
 
     def _scan_children(
-        self, dir_path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
-    ) -> list[tuple[str, LocalFileInfo | None, tuple[int, int] | None]]:
+        self,
+        dir_path: str,
+        *,
+        follow_symlinks: bool,
+        notify: Callable[[str], None],
+        capture_entry: bool,
+    ) -> list[tuple[str, LocalFileInfo, tuple[int, int] | None]]:
         """One directory's vetted children in aws-cli sort order (an override seam).
 
-        Scans ``dir_path`` once with :func:`os.scandir` - through the directory's
-        own fd where the platform allows (:data:`_HAVE_DIR_FD`), so each entry's
-        stat and readability probe are dir-relative (no path re-walk). Each
-        surviving child becomes a ``(sort_name, info, loop_key)`` triple: a file
-        carries its ``LocalFileInfo``; ``info is None`` marks a sub-directory (its
-        ``sort_name`` gains a trailing ``os.sep`` and ``loop_key`` is its
-        ``(st_dev, st_ino)`` for cycle detection, or ``None`` to fail open).
-        Entries :meth:`_should_ignore` skips never reach the list. The sort folds
-        ``os.sep`` to ``/``: str sorts by code point = UTF-8 byte order (S3's
-        exact key order), and the fold puts a directory (``foo/``) after a sibling
-        file (``foo.txt``) since ``/`` (0x2F) > ``.`` (0x2E) - matching aws-cli. A
-        directory that cannot be opened or scanned (a race after its parent vetted
-        it readable) yields an empty list.
+        Scans ``dir_path`` once with :func:`os.scandir`. Each surviving child is a
+        ``(sort_name, info, loop_key)`` triple: a file's ``info`` is its
+        ``LocalFileInfo`` (``kind == FILE``); a sub-directory's is a
+        ``DIRECTORY``-kind ``LocalFileInfo`` (``sort_name`` gains a trailing
+        ``os.sep``, ``loop_key`` is its ``(st_dev, st_ino)`` for cycle detection
+        or ``None`` to fail open). Entries :meth:`_should_ignore` skips never
+        reach the list. The sort folds ``os.sep`` to ``/``: str sorts by code
+        point = UTF-8 byte order (S3's exact key order), and the fold puts a
+        directory (``foo/``) after a sibling file (``foo.txt``) since ``/``
+        (0x2F) > ``.`` (0x2E) - matching aws-cli.
+
+        The default fast path scans through the directory's own fd where the
+        platform allows (:data:`_HAVE_DIR_FD`), so each entry's stat and
+        readability probe are dir-relative (``fstatat`` - no path re-walk). With
+        ``capture_entry`` each ``info`` also carries its ``os.DirEntry``, and the
+        scan runs by path (no fd): a fd-relative entry breaks once the fd is
+        closed, so an entry a callback may keep past the walk must be path-form
+        (full ``.path``, re-stats on demand). A directory that cannot be opened or
+        scanned (a race after its parent vetted it readable) yields an empty list.
         """
-        kept: list[tuple[str, LocalFileInfo | None, tuple[int, int] | None]] = []
+        kept: list[tuple[str, LocalFileInfo, tuple[int, int] | None]] = []
         dir_fd: int | None = None
+        # Capturing an entry a callback may keep forces path-form scanning (a
+        # dir_fd entry breaks once the fd is closed); otherwise scan through the
+        # fd for dir-relative stats where the platform supports it.
+        use_fd = _HAVE_DIR_FD and not capture_entry
         try:
-            if _HAVE_DIR_FD:
+            if use_fd:
                 dir_fd = os.open(dir_path, _DIR_OPEN_FLAGS)
             scan_target: int | str = dir_fd if dir_fd is not None else dir_path
             with os.scandir(scan_target) as it:
@@ -574,10 +614,17 @@ class LocalStorage(Storage):
                             loop_key = (st.st_dev, st.st_ino) if st.st_ino else None
                         except OSError:
                             loop_key = None
-                        kept.append((entry.name + os.sep, None, loop_key))
+                        dir_info = LocalFileInfo(
+                            key=(full + os.sep).replace(os.sep, "/"),
+                            kind=FileKind.DIRECTORY,
+                            entry=entry if capture_entry else None,
+                        )
+                        kept.append((entry.name + os.sep, dir_info, loop_key))
                     else:
                         child_info = self._stat_info(entry, full, notify)
                         if child_info is not None:
+                            if capture_entry:
+                                child_info.entry = entry
                             kept.append((entry.name, child_info, None))
         except OSError:
             return []
@@ -683,7 +730,12 @@ class LocalStorage(Storage):
         return LocalFileInfo(key=path.replace(os.sep, "/"), size=size, mtime=mtime)
 
     def _scan_one_level(
-        self, root: str, *, follow_symlinks: bool, on_warning: Callable[[str], None] | None
+        self,
+        root: str,
+        *,
+        follow_symlinks: bool,
+        on_warning: Callable[[str], None] | None,
+        capture_entry: bool = False,
     ) -> Iterator[FileInfo]:
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
@@ -694,21 +746,12 @@ class LocalStorage(Storage):
                 yield info
             return
         for sort_name, info, _loop_key in self._scan_children(
-            root, follow_symlinks=follow_symlinks, notify=notify
+            root, follow_symlinks=follow_symlinks, notify=notify, capture_entry=capture_entry
         ):
-            # One level down: the entry name itself is the root-relative key
-            # (a directory's sort_name already carries a trailing separator).
-            compare_key = sort_name.replace(os.sep, "/")
-            if info is None:
-                entry_path = os.path.join(root, sort_name)
-                yield LocalFileInfo(
-                    key=entry_path.replace(os.sep, "/"),
-                    kind=FileKind.DIRECTORY,
-                    compare_key=compare_key,
-                )
-            else:
-                info.compare_key = compare_key
-                yield info
+            # One level down: the entry name itself is the root-relative key (a
+            # directory's sort_name / key already carry a trailing separator).
+            info.compare_key = sort_name.replace(os.sep, "/")
+            yield info
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
