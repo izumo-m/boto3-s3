@@ -1,8 +1,12 @@
 """S3 storage backend: ``S3Storage`` (an ``s3://bucket/prefix`` + boto3 client).
 
-Implements ``scan`` (``ListObjectsV2``; ``ListBuckets`` at the bare-``s3://``
-service root) over an overridable ``scan_pages`` seam - subclasses customize
-per-page entry handling there while keeping scan's prefetch - and exposes
+Implements ``scan`` (``ListObjectsV2`` object listing) over an overridable
+``scan_pages`` seam - subclasses customize per-page entry handling there while
+keeping scan's prefetch. The bare-``s3://`` service root is a *different*
+operation - ``list_buckets`` (``ListBuckets``), kept separate because a bucket is
+a container, not an openable entity, so a transfer scan never yields one (aws-cli
+splits ``_list_all_buckets`` from ``_list_all_objects`` the same way). It also
+exposes
 ``get_client`` / ``bucket`` / ``key`` so the ``Transferrer`` can drive
 ``s3transfer`` directly for built-in S3 pairs. ``delete`` is implemented (a
 blind ``DeleteObject``); ``open`` is intentionally unimplemented - S3 always
@@ -293,9 +297,10 @@ class S3Storage(Storage):
     ``S3Storage("bucket/key")`` is read the same as ``S3Storage("s3://bucket/key")``
     (intentional library leniency; :meth:`S3.resolve` stays strict and routes a
     bare ``"bucket/key"`` to local instead). An empty bucket part (bare ``"s3://"``) is the
-    *service root*: :meth:`scan` then lists the account's buckets instead of
-    objects; a key without a bucket (``"s3:///k"``) is rejected by
-    :meth:`validate`. The bucket part may be an access-point ARN (plain or
+    *service root*: :meth:`list_buckets` lists the account's buckets there (what
+    ``S3.ls`` uses), while object listing / a transfer needs a bucket; a key
+    without a bucket (``"s3:///k"``) is rejected by :meth:`validate`. The bucket
+    part may be an access-point ARN (plain or
     Outposts), which is passed whole as the ``Bucket`` parameter; S3 Object Lambda
     and Outposts bucket ARNs are rejected like ``aws s3`` rejects them (by
     :meth:`validate`, deferred from construction). When
@@ -547,21 +552,20 @@ class S3Storage(Storage):
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
-        ``options.recursive`` omits ``Delimiter`` and yields every object as a
-        ``FILE`` entry; non-recursive passes ``Delimiter='/'`` and additionally
-        emits one ``DIRECTORY``-kind ``S3FileInfo`` per sub-"directory" (before the
-        page's objects). ``FileInfo.key`` is the full S3 key (or the prefix for
-        directories), in ListObjectsV2's UTF-8 lexicographic byte order across
-        pages - so a recursive stream is directly merge-joinable (the basis of
-        ``sync``). ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
-        ``S3FileInfo.owner``.
-
-        At the service root (empty bucket part) the pages come from
-        ``ListBuckets`` instead - one ``BUCKET``-kind entry per bucket, filtered
-        by ``options.bucket_name_prefix`` / ``options.bucket_region``;
-        ``recursive`` / ``request_payer`` / ``fetch_owner`` are ignored there,
-        and the two bucket filters are ignored for object listings (aws-cli
-        parity: ``aws s3 ls`` with no bucket disregards ``--recursive``).
+        Object listing only - the openable-entity enumeration ``scan`` promises
+        (aws-cli's ``_list_all_objects``). ``options.recursive`` omits
+        ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
+        passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
+        ``S3FileInfo`` per sub-"directory" (before the page's objects).
+        ``FileInfo.key`` is the full S3 key (or the prefix for directories), in
+        ListObjectsV2's UTF-8 lexicographic byte order across pages - so a
+        recursive stream is directly merge-joinable (the basis of ``sync``).
+        ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
+        ``S3FileInfo.owner``. The bare service root (empty bucket) is *not* an
+        object container: it is listed with :meth:`list_buckets` (``S3.ls``
+        dispatches there), and reaching object listing with an empty bucket fails
+        with botocore's ``Invalid bucket name`` ParamValidation - matching
+        ``aws s3 cp/rm/sync s3://``.
 
         ``options.filter`` is applied here (:meth:`Storage.scan_pages`'s contract):
         the raw ``ListObjectsV2`` pages are sieved client-side with
@@ -571,11 +575,7 @@ class S3Storage(Storage):
         prefetch worker so it overlaps consumption. Fetch-time botocore errors are
         translated to ``Boto3S3Error`` here and surface on the consumer's pull.
         """
-        raw = (
-            self._scan_bucket_pages(options)
-            if not self._bucket
-            else self._scan_object_pages(options)
-        )
+        raw = self._scan_object_pages(options)
         if options.filter is not None:
             raw = sieve_pages(raw, options.filter)
         yield from raw
@@ -600,34 +600,40 @@ class S3Storage(Storage):
             for page in paginator.paginate(**paging):
                 yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
 
-    def _scan_bucket_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one ``list[FileInfo]`` per ``ListBuckets`` page (service root).
+    def list_buckets(
+        self,
+        *,
+        page_size: int = 1000,
+        name_prefix: str | None = None,
+        region: str | None = None,
+    ) -> Iterator[FileInfo]:
+        """List the account's buckets as ``BUCKET``-kind ``FileInfo`` (the service root).
 
-        ``bucket_name_prefix`` / ``bucket_region`` map to ``Prefix`` /
-        ``BucketRegion`` and are omitted when falsy (matching aws-cli's
-        truthiness check, so ``""`` behaves like "not given").
+        The S3-only counterpart to :meth:`scan_pages`, kept separate because a
+        bucket is a container, not an openable entity (aws-cli's
+        ``_list_all_buckets``, which its ``ls`` dispatches to for a bare
+        ``s3://``): ``S3.ls`` calls this at the service root, and no transfer scan
+        ever yields buckets. ``name_prefix`` / ``region`` map to ``ListBuckets``
+        ``Prefix`` / ``BucketRegion`` (omitted when falsy, aws-cli's truthiness
+        check). Below the ListBuckets-paginator floor (botocore 1.34.162) it falls
+        back to one unpaginated ``list_buckets()`` with the filters inert
+        (docs/overview.md section 2). Errors surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
             if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31, docs/overview.md section 2):
-                # the ListBuckets paginator and its Prefix / BucketRegion /
-                # MaxBuckets parameters are a late-2024 addition (botocore
-                # 1.34.162). Below that, get_paginator("list_buckets") raises
-                # OperationNotPageableError, so fall back to a single
-                # unpaginated list_buckets() - the era-appropriate aws s3 ls,
-                # where the two bucket filters were silently inert. Drop this
-                # branch once the botocore floor reaches 1.34.162.
-                yield _page_to_bucket_infos(client.list_buckets())
+                # Back-compat (floor botocore 1.31): the ListBuckets paginator and
+                # its Prefix / BucketRegion parameters are a late-2024 addition
+                # (botocore 1.34.162). Drop this branch once the floor reaches it.
+                yield from _page_to_bucket_infos(client.list_buckets())
                 return
-            paginator = client.get_paginator("list_buckets")
-            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": options.page_size}}
-            if options.bucket_name_prefix:
-                paging["Prefix"] = options.bucket_name_prefix
-            if options.bucket_region:
-                paging["BucketRegion"] = options.bucket_region
-            for page in paginator.paginate(**paging):
-                yield _page_to_bucket_infos(page)
+            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": page_size}}
+            if name_prefix:
+                paging["Prefix"] = name_prefix
+            if region:
+                paging["BucketRegion"] = region
+            for page in client.get_paginator("list_buckets").paginate(**paging):
+                yield from _page_to_bucket_infos(page)
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:

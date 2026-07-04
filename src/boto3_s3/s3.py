@@ -566,23 +566,24 @@ class S3:
 
         ``ls`` is S3-only (aws-cli parity): ``target`` is an ``"s3://..."`` URI
         string (the ``s3://`` scheme is optional) or an ``S3Storage``. A target
-        with no bucket - the default bare ``"s3://"`` - is the service root and
-        yields one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
-        ``bucket_name_prefix`` / ``bucket_region`` filter that bucket listing
-        and are ignored for object listings; conversely ``recursive`` /
-        ``request_payer`` are ignored at the service root (aws-cli parity). A
-        non-S3 ``Location`` raises ``ValidationError``. The target is validated
-        eagerly; iteration is lazy.
+        with no bucket - the default bare ``"s3://"`` - is the service root:
+        ``ls`` dispatches to :meth:`S3Storage.list_buckets` (aws-cli's ``ls``
+        splits the bucket listing from the object listing the same way), yielding
+        one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
+        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing and
+        are meaningless for an object listing; conversely ``recursive`` /
+        ``request_payer`` are meaningless at the service root (both ignored, like
+        aws-cli). A non-S3 ``Location`` raises ``ValidationError``. The target is
+        validated eagerly; iteration is lazy.
         """
         storage = self._resolve_s3_target(target, operation="ls")
-        options = ScanOptions(
-            recursive=recursive,
-            page_size=page_size,
-            request_payer=request_payer,
-            bucket_name_prefix=bucket_name_prefix,
-            bucket_region=bucket_region,
+        if not storage.bucket:
+            return storage.list_buckets(
+                page_size=page_size, name_prefix=bucket_name_prefix, region=bucket_region
+            )
+        return storage.scan(
+            ScanOptions(recursive=recursive, page_size=page_size, request_payer=request_payer)
         )
-        return storage.scan(options)
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         if isinstance(target, S3Storage):
@@ -1373,10 +1374,11 @@ class S3:
         """
         storage = self._resolve_s3_target(target, operation="rm")
         if not storage.bucket:
-            # aws-cli sends Bucket="" to the API and fails botocore's
-            # client-side validation (general error, not usage error). rm has
-            # no bucket-listing mode, so reject instead of letting scan's
-            # service-root branch list buckets.
+            # rm has no bucket-listing mode (scan is object listing only), so a
+            # bucketless service root cannot resolve to anything to delete. aws
+            # sends Bucket="" to the API and fails botocore's client-side
+            # validation (rc 1); reject up front the same way - a deterministic
+            # library-level check that does not depend on the client validating.
             raise ValidationError('Invalid bucket name "": rm requires a bucket', operation="rm")
         root = rm_filter_root(storage.key, recursive=recursive)
 

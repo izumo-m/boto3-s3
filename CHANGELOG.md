@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- S3 bucket listing is now a separate `S3Storage.list_buckets` (the bare `s3://`
+  service root), not part of `scan` - `scan` enumerates only openable objects, and
+  `ScanOptions` drops `bucket_name_prefix` / `bucket_region` (now `list_buckets`
+  args). `S3.ls` dispatches; `ls` behaviour is unchanged.
 - `Storage.scan_pages` now applies `ScanOptions.filter` itself and returns
   already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
   can push the predicate to its source; `storage.sieve_pages` is the helper for

@@ -240,9 +240,11 @@ fills it in).
 | `--bucket-region REGION` | `BucketRegion` of `ListBuckets` for bucket listing (same as above) |
 
 When the target has no bucket name (`boto3-s3 ls` / `ls s3://`; as in aws, a
-leftover key in `s3:///k` is also dropped), it lists **all buckets**: passing the
-library's service root (`S3Storage("s3://")` = empty bucket) to `S3.ls` yields
-entries of `FileKind.BUCKET` (`mtime` = CreationDate).
+leftover key in `s3:///k` is also dropped), it lists **all buckets**: `S3.ls`
+dispatches the empty-bucket service root to the separate `S3Storage.list_buckets`
+(aws-cli splits its bucket listing from the object listing the same way), which
+yields entries of `FileKind.BUCKET` (`mtime` = CreationDate). `scan` itself is
+object listing only, so a transfer never sees a bucket entry.
 
 Output (follows `aws s3 ls`, though a byte-for-byte match of the console output
 is not guaranteed):

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 
 from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import (
@@ -362,6 +362,20 @@ class TestDownloadRoute:
             "An error occurred (404) when calling the HeadObject operation: "
             'Key "no-such" does not exist'
         )
+
+    def test_bucketless_service_root_source_reaches_head_not_silent_zero(
+        self, tmp_path: Path
+    ) -> None:
+        # A bare `s3://` (service root) as a non-recursive source must NOT take the
+        # keyless-bucket `cp s3://bucket .` zero-item short-circuit: it reaches
+        # HeadObject with Bucket="", which botocore rejects (Invalid bucket name)
+        # like `aws s3 cp s3://` (rc 1), not a silent rc-0 no-op.
+        err = ParamValidationError(report='Invalid bucket name ""')
+        client, calls = make_recording_client([err])
+        with pytest.raises(ValidationError, match="Invalid bucket name"):
+            S3().cp(S3Storage("s3://", client=client), str(tmp_path / "x"), transfer_config=_SYNC)
+        assert _ops(calls) == ["HeadObject"]  # attempted, not short-circuited to zero
+        assert calls[0].params["Bucket"] == ""
 
     def test_dryrun_heads_but_never_gets(self, tmp_path: Path) -> None:
         client, calls = make_recording_client([_head_response()])

@@ -352,13 +352,14 @@ def _bucket_entry(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": _MTIME}
 
 
-class TestScanServiceRoot:
-    """An empty bucket part scans ``ListBuckets`` instead of ``ListObjectsV2``."""
+class TestListBuckets:
+    """The S3 service root is a separate operation - ``list_buckets`` (``ListBuckets``),
+    not ``scan`` (which is object listing / openable entities)."""
 
     def test_lists_buckets_as_bucket_entries(self) -> None:
         pages = [{"Buckets": [_bucket_entry("alpha"), _bucket_entry("beta")]}]
         storage, client = _storage(pages, url="s3://")
-        results = list(storage.scan())
+        results = list(storage.list_buckets())
 
         assert client.paginator_names == ["list_buckets"]
         assert all(isinstance(r, S3FileInfo) for r in results)
@@ -369,42 +370,32 @@ class TestScanServiceRoot:
         assert results[0].mtime == _MTIME  # CreationDate
         assert results[0].size is None
 
-    def test_bucket_filters_forwarded(self) -> None:
+    def test_filters_forwarded(self) -> None:
         storage, client = _storage([], url="s3://")
-        options = ScanOptions(page_size=7, bucket_name_prefix="al", bucket_region="us-west-2")
-        list(storage.scan(options))
+        list(storage.list_buckets(page_size=7, name_prefix="al", region="us-west-2"))
         assert client.calls[0] == {
             "PaginationConfig": {"PageSize": 7},
             "Prefix": "al",
             "BucketRegion": "us-west-2",
         }
 
-    def test_bucket_filters_omitted_by_default(self) -> None:
+    def test_filters_omitted_by_default(self) -> None:
+        storage, client = _storage([], url="s3://")
+        list(storage.list_buckets())
+        assert client.calls[0] == {"PaginationConfig": {"PageSize": 1000}}
+
+    def test_scan_at_root_is_object_listing_not_buckets(self) -> None:
+        # scan is object listing only: at a service root it uses list_objects_v2
+        # (with an empty Bucket, which real botocore rejects as an Invalid bucket
+        # name - matching aws s3 cp/rm/sync s3://), never ListBuckets.
         storage, client = _storage([], url="s3://")
         list(storage.scan())
-        assert client.calls[0] == {"PaginationConfig": {"PageSize": 1000}}
-
-    def test_object_listing_knobs_ignored_at_root(self) -> None:
-        # aws-cli parity: `aws s3 ls` with no bucket ignores --recursive and
-        # --request-payer; same for the library's fetch_owner.
-        storage, client = _storage([], url="s3://")
-        options = ScanOptions(recursive=True, request_payer="requester", fetch_owner=True)
-        list(storage.scan(options))
-        assert client.paginator_names == ["list_buckets"]
-        assert client.calls[0] == {"PaginationConfig": {"PageSize": 1000}}
-
-    def test_bucket_filters_ignored_for_object_listing(self) -> None:
-        storage, client = _storage([])  # s3://bucket/prefix/
-        list(storage.scan(ScanOptions(bucket_name_prefix="al", bucket_region="us-west-2")))
         assert client.paginator_names == ["list_objects_v2"]
-        assert "Prefix" in client.calls[0]  # the object Prefix, not the bucket filter
-        assert client.calls[0]["Prefix"] == "prefix/"
-        assert "BucketRegion" not in client.calls[0]
 
     def test_falls_back_to_unpaginated_list_buckets_below_the_floor(self) -> None:
-        # botocore < 1.34.162 has no ListBuckets paginator; the service-root
-        # listing must fall back to a single list_buckets() call (filters inert)
-        # rather than crash with OperationNotPageableError.
+        # botocore < 1.34.162 has no ListBuckets paginator; list_buckets must fall
+        # back to a single list_buckets() call (filters inert) rather than crash
+        # with OperationNotPageableError.
         class _NoPaginatorClient:
             def __init__(self) -> None:
                 self.list_buckets_calls = 0
@@ -418,7 +409,7 @@ class TestScanServiceRoot:
 
         client = _NoPaginatorClient()
         storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
-        results = list(storage.scan(ScanOptions(bucket_name_prefix="al")))
+        results = list(storage.list_buckets(name_prefix="al"))
         assert client.list_buckets_calls == 1
         assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
 

@@ -123,11 +123,10 @@ class ScanOptions:
     arguments through ``scan`` -> ``scan_pages`` and every override - keeps the
     enumeration seam tidy and lets ``sync`` build one set of options and apply it
     to both sides. ``page_size`` / ``request_payer`` / ``fetch_owner`` are S3
-    listing knobs ignored by non-S3 backends. ``bucket_name_prefix`` /
-    ``bucket_region`` filter an S3 *bucket* listing (``ListBuckets`` ``Prefix`` /
-    ``BucketRegion``, scanned from the service root) and are ignored for object
-    listings - mirroring how inapplicable knobs are silently ignored elsewhere
-    (aws-cli parity). Values are not validated here: like aws-cli, they pass
+    listing knobs ignored by non-S3 backends. (Bucket *listing* - the S3 service
+    root - is a separate operation with its own params, ``S3Storage.list_buckets``
+    / ``S3.ls``, not a ``scan`` knob: ``scan`` enumerates openable entities.)
+    Values are not validated here: like aws-cli, they pass
     through to the service, which decides (``page_size=0`` lists nothing,
     negative values fail the call with ``InvalidArgument`` - the exit-code
     charter requires reproducing both). ``follow_symlinks`` /
@@ -181,8 +180,6 @@ class ScanOptions:
     page_size: int = 1000
     request_payer: str | None = None
     fetch_owner: bool = False
-    bucket_name_prefix: str | None = None
-    bucket_region: str | None = None
     filter: Callable[[FileInfo], bool] | None = None
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False

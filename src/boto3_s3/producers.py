@@ -304,10 +304,12 @@ def s3_source_items(
             item_filter=item_filter,
             options=options,
         )
-    elif not src_storage.key:
+    elif src_storage.bucket and not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
         # bucket and exact-matches nothing -> zero items, rc 0. Same
-        # outcome here without issuing the listing.
+        # outcome here without issuing the listing. A bucketless service root
+        # (`cp s3://`) is NOT this case: it falls to head_single, whose empty
+        # Bucket hits botocore's Invalid-bucket ParamValidation like aws.
         return
     else:
         infos = head_single(
@@ -718,10 +720,12 @@ def open_download_items(
             item_filter=item_filter,
             options=options,
         )
-    elif not src_storage.key:
+    elif src_storage.bucket and not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket custom`): aws lists
         # the bucket and exact-matches nothing -> zero items (the built-in
-        # download path's behavior, without issuing the listing).
+        # download path's behavior, without issuing the listing). A bucketless
+        # service root (`cp s3:// custom`) instead falls to head_single, whose
+        # empty Bucket hits botocore's Invalid-bucket ParamValidation like aws.
         return
     else:
         infos = head_single(
