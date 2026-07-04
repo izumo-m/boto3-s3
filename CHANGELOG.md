@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Internal rework of `LocalStorage`'s local directory walk.
+
 ## [0.4.0] - 2026-07-03
 
 - Fix: `cp` / `mv` now apply `filter=` to a single S3 source too (an excluded

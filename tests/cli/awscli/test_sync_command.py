@@ -276,13 +276,13 @@ class TestSyncCommand:
     ) -> None:
         (tmp_path / "foo.txt").write_text("mycontent")
 
-        # Patch the stat reader to return a value indicating that an invalid
-        # timestamp was loaded (impossible to set on all OSes; aws-cli patches
-        # get_file_stat the same way).
-        def invalid_stat(_path: str) -> tuple[None, None]:
+        # Patch the walk's stat reader to return a value indicating that an
+        # invalid timestamp was loaded (impossible to set on all OSes; aws-cli
+        # patches get_file_stat the same way).
+        def invalid_stat(_entry: os.DirEntry[str]) -> tuple[None, None]:
             return (None, None)
 
-        monkeypatch.setattr("boto3_s3.localstorage._file_stat", invalid_stat)
+        monkeypatch.setattr("boto3_s3.localstorage._entry_stat", invalid_stat)
         _, calls = _run_cmd(
             [
                 {"CommonPrefixes": [], "Contents": []},
@@ -319,11 +319,11 @@ class TestSyncCommand:
         full_path = tmp_path / "foo.txt"
         full_path.write_text("mycontent")
 
-        def side_effect(_path: str) -> tuple[int, Any]:
+        def side_effect(_entry: os.DirEntry[str]) -> tuple[int, Any]:
             os.remove(full_path)
             raise error()
 
-        monkeypatch.setattr("boto3_s3.localstorage._file_stat", side_effect)
+        monkeypatch.setattr("boto3_s3.localstorage._entry_stat", side_effect)
         _, calls = _run_cmd(
             [{"CommonPrefixes": [], "Contents": []}],
             ["sync", str(tmp_path), "s3://bucket/"],

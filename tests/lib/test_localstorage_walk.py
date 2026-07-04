@@ -12,6 +12,7 @@ deliberate absence of a directory check (aws fails later at open - rc 1
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -192,13 +193,19 @@ class TestWalkIsOverridable:
         _make_tree(tmp_path, "keep.txt", "skip.tmp")
 
         class _NoTmp(LocalStorage):
-            def _should_ignore(self, path: str, *, follow_symlinks: bool, notify: object) -> bool:
-                if path.endswith(".tmp"):
+            def _should_ignore(
+                self,
+                entry: os.DirEntry[str],
+                full: str,
+                dir_fd: int | None,
+                *,
+                follow_symlinks: bool,
+                notify: Callable[[str], None],
+            ) -> bool:
+                if full.endswith(".tmp"):
                     return True
                 return super()._should_ignore(
-                    path,
-                    follow_symlinks=follow_symlinks,
-                    notify=notify,  # type: ignore[arg-type]
+                    entry, full, dir_fd, follow_symlinks=follow_symlinks, notify=notify
                 )
 
         storage = _NoTmp(str(tmp_path))
@@ -209,8 +216,10 @@ class TestWalkIsOverridable:
         _make_tree(tmp_path, "a.txt")
 
         class _Tagged(LocalStorage):
-            def _stat_info(self, path: str, notify: object) -> LocalFileInfo | None:
-                info = super()._stat_info(path, notify)  # type: ignore[arg-type]
+            def _stat_info(
+                self, entry: os.DirEntry[str], full: str, notify: Callable[[str], None]
+            ) -> LocalFileInfo | None:
+                info = super()._stat_info(entry, full, notify)
                 if info is not None:
                     info.size = 999
                 return info
