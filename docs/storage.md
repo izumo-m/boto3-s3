@@ -158,8 +158,12 @@ class DictStorage(Storage):
         return io.BytesIO(self._store[key]) if mode == "rb" else _Committing(self._store, key)
 
     def scan_pages(self, options: ScanOptions):
-        yield [FileInfo(key=k, size=len(v), compare_key=k)      # compare_key = root-relative
-               for k, v in sorted(self._store.items())]         # sorted -> byte order (sync)
+        infos = [FileInfo(key=k, size=len(v), compare_key=k)    # compare_key = root-relative
+                 for k, v in sorted(self._store.items())]       # sorted -> byte order (sync)
+        if options.filter is not None:                          # the scan_pages contract: return
+            infos = [i for i in infos if options.filter(i)]     # filtered pages (or push the
+        if infos:                                               # predicate to your source;
+            yield infos                                         # storage.sieve_pages wraps raw)
 
     def get_fileinfo(self, key: str = "", *, follow_symlinks=True, on_warning=None):
         data = self._store.get(key)

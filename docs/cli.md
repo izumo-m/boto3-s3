@@ -239,12 +239,15 @@ fills it in).
 | `--bucket-name-prefix PREFIX` | `Prefix` of `ListBuckets` for bucket listing (ineffective in object listing = same as aws) |
 | `--bucket-region REGION` | `BucketRegion` of `ListBuckets` for bucket listing (same as above) |
 
-When the target has no bucket name (`boto3-s3 ls` / `ls s3://`; as in aws, a
-leftover key in `s3:///k` is also dropped), it lists **all buckets**: `S3.ls`
-dispatches the empty-bucket service root to the separate `S3Storage.list_buckets`
-(aws-cli splits its bucket listing from the object listing the same way), which
-yields entries of `FileKind.BUCKET` (`mtime` = CreationDate). `scan` itself is
-object listing only, so a transfer never sees a bucket entry.
+When the target has no bucket name (`boto3-s3 ls` / `ls s3://`), it lists **all
+buckets**. The CLI normalizes every empty-bucket target to the bare `s3://`
+service root first - including `s3:///k`, whose leftover key aws-cli also drops
+(the library itself rejects `s3:///k` as malformed; the CLI owns this aws quirk).
+`S3.ls` then dispatches the (already-normalized) service root to the separate
+`S3Storage.list_buckets` (aws-cli splits its bucket listing from the object
+listing the same way), which yields entries of `FileKind.BUCKET` (`mtime` =
+CreationDate). `scan` itself is object listing only, so a transfer never sees a
+bucket entry.
 
 Output (follows `aws s3 ls`, though a byte-for-byte match of the console output
 is not guaranteed):
