@@ -12,7 +12,7 @@ deliberate absence of a directory check (aws fails later at open - rc 1
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -187,6 +187,23 @@ class TestSymlinkLoopDetection:
         detector.leave()
         assert detector.is_cycle(str(tmp_path)) is True  # the seeded root is an ancestor
 
+    def test_early_close_of_walk_dir_leaves_the_detector_balanced(self, tmp_path: Path) -> None:
+        # walk_dir is a public seam a caller may drive with its own LoopDetector.
+        # The file-run is flushed *before* is_cycle_key pushes the next subdir, so
+        # closing the generator on that page cannot strand a push ahead of the
+        # try/finally that pops it.
+        _make_tree(tmp_path, "a.txt", "sub/b.txt")
+        walker = LocalFileGenerator()
+        root = str(tmp_path) + os.sep
+        detector = LoopDetector(root)
+        baseline = list(detector._ancestors)  # pyright: ignore[reportPrivateUsage]  # just the root
+        gen = walker.walk_dir(root, ScanOptions(), notify=lambda _b: None, detector=detector)
+        first = next(gen)  # [a.txt], flushed before descending into sub/
+        assert [os.path.basename(i.key) for i in first] == ["a.txt"]
+        gen.close()  # abandon before sub/ is consumed
+        # sub/ was never pushed (flush precedes the push), so no ancestor leaked.
+        assert detector._ancestors == baseline  # pyright: ignore[reportPrivateUsage]
+
 
 class TestWalkIsCustomizable:
     """The walk is a ``LocalFileGenerator`` an app subclasses and injects via
@@ -303,6 +320,63 @@ class TestWalkIsCustomizable:
         ]
         # '_' (0x5F) < 'a' (0x61) < 's' - the synthetic sorts first at each level.
         assert keys == ["_synthetic", "a.txt", "sub/_synthetic", "sub/b.txt"]
+
+    def test_walk_dir_override_prunes_a_subtree(self, tmp_path: Path) -> None:
+        # walk_dir is the public recursion seam: override it and return early for
+        # a directory to prune its subtree, calling super() for the rest. It
+        # recurses via self.walk_dir, so the override applies at every level (no
+        # depth counter needed - an app that wants depth re-implements the loop).
+        _make_tree(tmp_path, "a.txt", "keep/b.txt", "skip/c.txt", "keep/skip/d.txt")
+
+        class _PruneSkip(LocalFileGenerator):
+            def walk_dir(
+                self,
+                dir_path: str,
+                options: ScanOptions,
+                *,
+                notify: Callable[[str], None],
+                detector: LoopDetector | None,
+            ) -> Iterator[list[LocalFileInfo]]:
+                if os.path.basename(dir_path.rstrip(os.sep)) == "skip":
+                    return  # do not descend into any 'skip' directory
+                yield from super().walk_dir(dir_path, options, notify=notify, detector=detector)
+
+        keys = [
+            info.compare_key
+            for info in LocalStorage(str(tmp_path), walker=_PruneSkip()).walk_local()
+        ]
+        # every 'skip/' subtree is pruned at any depth (top-level and nested)
+        assert keys == ["a.txt", "keep/b.txt"]
+
+
+class TestScanPagesAreScandirAligned:
+    """``scan_pages`` hands off one page per directory file-run (one ``os.scandir``)."""
+
+    def test_pages_fall_on_directory_boundaries(self, tmp_path: Path) -> None:
+        # root=[a.txt, sub/, z.txt], sub=[b.txt]. Byte order interleaves sub's
+        # page between root's two file-runs, so the pages are [a.txt], [sub/b.txt],
+        # [z.txt] - not one arbitrary fixed-size batch.
+        _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
+        pages = [
+            [info.compare_key for info in page]
+            for page in LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=True))
+        ]
+        assert pages == [["a.txt"], ["sub/b.txt"], ["z.txt"]]
+
+    def test_files_of_one_directory_share_a_page(self, tmp_path: Path) -> None:
+        # No sub-directory splits them, so a directory's files come out as one page.
+        _make_tree(tmp_path, "a.txt", "b.txt", "c.txt")
+        pages = [
+            [info.compare_key for info in page]
+            for page in LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=True))
+        ]
+        assert pages == [["a.txt", "b.txt", "c.txt"]]
+
+    def test_non_recursive_level_is_one_page(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a.txt", "sub/b.txt")
+        pages = list(LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=False)))
+        assert len(pages) == 1
+        assert [info.compare_key for info in pages[0]] == ["a.txt", "sub/"]
 
 
 class TestGetFileinfo:

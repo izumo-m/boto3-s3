@@ -54,7 +54,14 @@ The override seams, finest first - extend at the smallest layer that fits:
 - :meth:`LocalFileGenerator.scan_children` - one directory enumerated and sorted
   (override to change *how* a directory is read, reusing ``classify_child`` /
   ``dir_child`` / :meth:`~LocalFileGenerator.normalize_sort`);
-- :meth:`LocalFileGenerator.list_files` - the recursion driver + root vetting.
+- :meth:`LocalFileGenerator.walk_dir` - the depth-first recursion yielding one
+  page per directory file-run (override to prune a subtree or otherwise
+  customize how the tree is descended);
+- :meth:`LocalFileGenerator.list_file_pages` - the entry point: root vetting,
+  then ``walk_dir`` with ``compare_key`` stamping and ``ScanOptions.filter``, in
+  ``os.scandir``-aligned pages (what ``Storage.scan_pages`` returns);
+- :meth:`LocalFileGenerator.list_files` - that flattened to a flat per-file
+  stream (aws-cli's ``FileGenerator.list_files``).
 
 The module-level helpers are public where an override needs them
 (:func:`is_special_file` / :func:`is_readable` / :func:`get_file_stat` /
@@ -86,11 +93,6 @@ if TYPE_CHECKING:
 
 # aws-cli EPOCH_TIME: the stamp used when a file's mtime cannot be represented.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-# Entries per page yielded by scan_pages - the hand-off granularity of
-# Storage.scan's prefetch worker (a stat batch, the local analog of one
-# ListObjectsV2 page).
-_LOCAL_PAGE_SIZE = 256
 
 
 def to_native_path(key: str) -> str:
@@ -329,13 +331,31 @@ class LocalFileGenerator:
     def list_files(self, root: str, options: ScanOptions) -> Iterator[LocalFileInfo]:
         """Yield every file under ``root`` (recursively) in aws-cli byte order.
 
-        aws-cli's ``FileGenerator.list_files`` (the ``dir_op=True`` branch): a
-        depth-first walk whose per-directory sort appends ``os.sep`` to directory
-        names, so the stream is S3's UTF-8 byte order (``foo.txt`` before
-        ``foo/bar``). ``root`` is an absolute path with a trailing ``os.sep``;
-        each yielded ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded
-        to ``/``) and ``compare_key`` is stamped here as the key relative to
-        ``root`` (what ``options.filter`` matches).
+        aws-cli's ``FileGenerator.list_files`` (the ``dir_op=True`` branch): the
+        flat per-file stream, a depth-first walk in S3's UTF-8 byte order
+        (``foo.txt`` before ``foo/bar``). This is :meth:`list_file_pages`
+        flattened - see it for the walk semantics (the ``options`` fields read,
+        vetting, ``compare_key`` stamping, and ``filter``). A single source object
+        goes through :meth:`get_fileinfo` instead, not this walk.
+        """
+        for page in self.list_file_pages(root, options):
+            yield from page
+
+    def list_file_pages(self, root: str, options: ScanOptions) -> Iterator[list[LocalFileInfo]]:
+        """Yield the files under ``root`` (recursively) as byte-order pages.
+
+        The paged form driving :meth:`Storage.scan_pages`: one page per directory
+        file-run - the sorted files between two sub-directory descents. A
+        directory's files can only surface once its ``os.scandir`` has been read in
+        full and sorted (the byte-order sort appends ``os.sep`` to directory names,
+        so ``foo.txt`` precedes ``foo/bar``), and they are handed off just before
+        the next descent's scandir. That aligns each page with one directory read,
+        so a consumer - e.g. ``Storage.scan``'s prefetch worker - overlaps the next
+        read on a network-mounted path, the reason the walk is paged at all. The
+        pages concatenate to :meth:`list_files`'s flat stream. ``root`` is an
+        absolute path with a trailing ``os.sep``; each ``LocalFileInfo.key`` is the
+        absolute path (``os.sep`` folded to ``/``) and ``compare_key`` is stamped
+        here as the key relative to ``root`` (what ``options.filter`` matches).
 
         Reads the local-walk fields of ``options`` (the same bundle
         ``Storage.scan_pages`` receives, so a custom walker sees the full scan
@@ -366,61 +386,74 @@ class LocalFileGenerator:
         # never leaves a leading separator; compare_key is the key relative to root.
         strip = len(root.replace(os.sep, "/"))
         item_filter = options.filter
-        for info in self._descend(
-            root,
-            follow_symlinks=follow_symlinks,
-            notify=notify,
-            detector=detector,
-            capture_entry=options.capture_entry,
-        ):
-            info.compare_key = info.key[strip:]
-            if item_filter is None or item_filter(info):
-                yield info
+        for page in self.walk_dir(root, options, notify=notify, detector=detector):
+            kept: list[LocalFileInfo] = []
+            for info in page:
+                info.compare_key = info.key[strip:]
+                if item_filter is None or item_filter(info):
+                    kept.append(info)
+            if kept:
+                yield kept
 
-    def _descend(
+    def walk_dir(
         self,
         dir_path: str,
+        options: ScanOptions,
         *,
-        follow_symlinks: bool,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
-        capture_entry: bool,
-    ) -> Iterator[LocalFileInfo]:
-        """The recursion behind :meth:`list_files` - files yielded, directories
-        (``kind == DIRECTORY``) recursed into depth-first so their contents
-        interleave in byte order. ``dir_path`` was already vetted (as the root, or
-        as a child in its parent's :meth:`scan_children`)."""
+    ) -> Iterator[list[LocalFileInfo]]:
+        """Recursively yield the files under ``dir_path`` as byte-order pages (an override seam).
+
+        The recursion behind :meth:`list_file_pages`: each directory's
+        :meth:`scan_children` is read and sorted in full, then its files are
+        collected into a run and handed off as one page just before descending
+        into each sub-directory (``kind == DIRECTORY``) - depth-first via
+        ``self.walk_dir`` (so an override applies at every level), the runs
+        interleaving with the sub-directories' pages in byte order. ``dir_path``
+        was already vetted (the root by :meth:`list_file_pages`, a child in its
+        parent's :meth:`scan_children`); ``detector`` guards symlink cycles.
+
+        This is where recursion is customizable: override it and return early for a
+        directory to prune its subtree (before ``super().walk_dir`` for the rest),
+        or re-implement the loop to cap depth or change traversal - preserving the
+        depth-first byte order that sync's merge-join relies on. ``compare_key``
+        stamping and ``ScanOptions.filter`` are :meth:`list_file_pages`'s job on
+        the yielded pages, not this method's.
+        """
+        run: list[LocalFileInfo] = []
         for sort_name, info, loop_key in self.scan_children(
-            dir_path, follow_symlinks=follow_symlinks, notify=notify, capture_entry=capture_entry
+            dir_path,
+            follow_symlinks=options.follow_symlinks,
+            notify=notify,
+            capture_entry=options.capture_entry,
         ):
             if info.kind != FileKind.DIRECTORY:
-                yield info
+                run.append(info)
                 continue
             # A sub-directory: sort_name carries the trailing os.sep (the sort
             # suffix), so the child path and the loop warning read correctly.
             sub = os.path.join(dir_path, sort_name)
+            # Descending runs sub's own scandir; hand off the files collected so
+            # far first (they all sort before anything under sub) as this
+            # directory's page, so a consumer overlaps that read. Flush before
+            # touching the detector so an early generator close cannot strand a
+            # push ahead of the try/finally that pops it (is_cycle_key pushes).
+            if run:
+                yield run
+                run = []
             if detector is not None:
                 if detector.is_cycle_key(loop_key):
                     notify(f"Skipping file {sub.rstrip(os.sep)}. Symbolic link loop detected.")
                     continue
                 try:
-                    yield from self._descend(
-                        sub,
-                        follow_symlinks=follow_symlinks,
-                        notify=notify,
-                        detector=detector,
-                        capture_entry=capture_entry,
-                    )
+                    yield from self.walk_dir(sub, options, notify=notify, detector=detector)
                 finally:
                     detector.leave()
             else:
-                yield from self._descend(
-                    sub,
-                    follow_symlinks=follow_symlinks,
-                    notify=notify,
-                    detector=detector,
-                    capture_entry=capture_entry,
-                )
+                yield from self.walk_dir(sub, options, notify=notify, detector=detector)
+        if run:
+            yield run
 
     def scan_children(
         self,
@@ -772,10 +805,13 @@ class LocalStorage(Storage):
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        """Yield entries under :attr:`path` one stat batch at a time.
+        """Yield entries under :attr:`path`, one directory read (``os.scandir``) per page.
 
         Recursive enumeration drives the walker's
-        :meth:`~LocalFileGenerator.list_files` in aws-cli byte order;
+        :meth:`~LocalFileGenerator.list_file_pages` in aws-cli byte order, whose
+        pages fall on directory boundaries (a directory's sorted files handed off
+        just before the walk descends into its next sub-directory) so a page maps
+        to one scandir - the unit a prefetch consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
         ``options.on_warning`` / ``options.capture_entry`` / ``options.filter``
         are threaded into it - a symlink skip, the cycle guard, the aws-cli-worded
@@ -784,15 +820,17 @@ class LocalStorage(Storage):
         :meth:`Storage.scan_pages`'s "return filtered pages" contract).
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
-        ends with ``/``), anchored at the absolutized path (``self._abspath``) so
-        ``FileInfo.key`` is absolute. The S3 listing knobs on ``options``
-        (``page_size`` / ``request_payer`` / ...) are ignored here (docs on
-        ``ScanOptions``).
+        ends with ``/``) as a single page, anchored at the absolutized path
+        (``self._abspath``) so ``FileInfo.key`` is absolute. The S3 listing knobs
+        on ``options`` (``page_size`` / ``request_payer`` / ...) are ignored here
+        (docs on ``ScanOptions``).
         """
         if options.recursive:
-            yield from _paged(self._walker.list_files(self._abspath + os.sep, options))
+            yield from self._walker.list_file_pages(self._abspath + os.sep, options)
             return
-        yield from _paged(self._scan_one_level(self._abspath, options))
+        page = list(self._scan_one_level(self._abspath, options))
+        if page:
+            yield page
 
     def walk_local(
         self,
@@ -960,17 +998,6 @@ class LocalStorage(Storage):
         if info is not None:
             info.compare_key = info.key.rsplit("/", 1)[-1]
         return info
-
-
-def _paged(infos: Iterator[FileInfo]) -> Iterator[list[FileInfo]]:
-    page: list[FileInfo] = []
-    for info in infos:
-        page.append(info)
-        if len(page) >= _LOCAL_PAGE_SIZE:
-            yield page
-            page = []
-    if page:
-        yield page
 
 
 __all__ = [
