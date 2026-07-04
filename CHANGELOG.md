@@ -5,18 +5,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- S3 bucket listing is now a separate `S3Storage.list_buckets` (the bare `s3://`
-  service root), not part of `scan` - `scan` enumerates only openable objects, and
-  `ScanOptions` drops `bucket_name_prefix` / `bucket_region` (now `list_buckets`
-  args). `S3.ls` dispatches; `ls` behaviour is unchanged.
-- `Storage.scan_pages` now applies `ScanOptions.filter` itself and returns
+- `Storage.scan_pages` now applies `ScanOptions.filter` and returns
   already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
-  can push the predicate to its source; `storage.sieve_pages` is the helper for
-  client-side filtering.
-- `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator`
-  (subclass its public seams and inject via `LocalStorage(path, walker=...)`).
+  can filter at its source; `storage.sieve_pages` wraps raw pages otherwise.
+- S3 bucket listing moved to a dedicated `S3Storage.list_buckets` (the bare
+  `s3://` service root); `scan` enumerates objects only, and `ScanOptions` drops
+  `bucket_name_prefix` / `bucket_region`. `ls` behaviour is unchanged.
+- `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator` -
+  subclass its public seams and inject via `LocalStorage(path, walker=...)`.
 - New `ScanOptions.capture_entry`: exposes each local entry's `os.DirEntry` on
-  `LocalFileInfo.entry` for a `filter` / `on_result` to reuse.
+  `LocalFileInfo.entry`, for a `filter` / `on_result` to reuse.
 
 ## [0.4.0] - 2026-07-03
 
