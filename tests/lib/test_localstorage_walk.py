@@ -19,7 +19,13 @@ from pathlib import Path
 import pytest
 
 from boto3_s3.exceptions import NotFoundError
-from boto3_s3.localstorage import LocalStorage, LoopDetector, to_native_path
+from boto3_s3.localstorage import (
+    LocalFileGenerator,
+    LocalStorage,
+    LoopDetector,
+    WalkChild,
+    to_native_path,
+)
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -182,18 +188,19 @@ class TestSymlinkLoopDetection:
         assert detector.is_cycle(str(tmp_path)) is True  # the seeded root is an ancestor
 
 
-class TestWalkIsOverridable:
-    """The walk is a pipeline of protected methods a subclass can replace.
+class TestWalkIsCustomizable:
+    """The walk is a ``LocalFileGenerator`` an app subclasses and injects via
+    ``LocalStorage(path, walker=...)`` - overriding its public methods.
 
     The extension point behind, e.g., resolving Cygwin ``!<symlink>`` files on a
-    native-Python Windows build - the engine dispatches through ``self``.
+    native-Python Windows build - the walker dispatches through ``self``.
     """
 
-    def test_should_ignore_override_is_honored_through_scan(self, tmp_path: Path) -> None:
+    def test_should_ignore_entry_override_is_honored_through_scan(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "keep.txt", "skip.tmp")
 
-        class _NoTmp(LocalStorage):
-            def _should_ignore(
+        class _NoTmp(LocalFileGenerator):
+            def should_ignore_entry(
                 self,
                 entry: os.DirEntry[str],
                 full: str,
@@ -204,28 +211,98 @@ class TestWalkIsOverridable:
             ) -> bool:
                 if full.endswith(".tmp"):
                     return True
-                return super()._should_ignore(
+                return super().should_ignore_entry(
                     entry, full, dir_fd, follow_symlinks=follow_symlinks, notify=notify
                 )
 
-        storage = _NoTmp(str(tmp_path))
+        storage = LocalStorage(str(tmp_path), walker=_NoTmp())
         keys = [info.compare_key for info in storage.scan(ScanOptions(recursive=True))]
         assert keys == ["keep.txt"]  # the override pruned skip.tmp
 
     def test_stat_info_override_can_rewrite_entries(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")
 
-        class _Tagged(LocalStorage):
-            def _stat_info(
+        class _Tagged(LocalFileGenerator):
+            def stat_info(
                 self, entry: os.DirEntry[str], full: str, notify: Callable[[str], None]
             ) -> LocalFileInfo | None:
-                info = super()._stat_info(entry, full, notify)
+                info = super().stat_info(entry, full, notify)
                 if info is not None:
                     info.size = 999
                 return info
 
-        infos = list(_Tagged(str(tmp_path)).walk_local())
+        infos = list(LocalStorage(str(tmp_path), walker=_Tagged()).walk_local())
         assert [(info.compare_key, info.size) for info in infos] == [("a.txt", 999)]
+
+    def test_classify_child_override_filters_per_entry(self, tmp_path: Path) -> None:
+        # The per-entry seam: decide file/dir/skip without touching the scan loop.
+        _make_tree(tmp_path, "keep.txt", "skip.me", "sub/keep2.txt")
+
+        class _Skip(LocalFileGenerator):
+            def classify_child(
+                self,
+                entry: os.DirEntry[str],
+                full: str,
+                dir_fd: int | None,
+                *,
+                follow_symlinks: bool,
+                notify: Callable[[str], None],
+                capture_entry: bool,
+            ) -> WalkChild | None:
+                if entry.name.endswith(".me"):
+                    return None  # skip decided here, not in should_ignore_entry
+                return super().classify_child(
+                    entry,
+                    full,
+                    dir_fd,
+                    follow_symlinks=follow_symlinks,
+                    notify=notify,
+                    capture_entry=capture_entry,
+                )
+
+        keys = [
+            info.compare_key for info in LocalStorage(str(tmp_path), walker=_Skip()).walk_local()
+        ]
+        assert keys == ["keep.txt", "sub/keep2.txt"]
+
+    def test_scan_children_reimplemented_with_building_blocks(self, tmp_path: Path) -> None:
+        # An app re-implements scan_children to inject a synthetic entry into
+        # every directory, reusing the public building blocks (no duplicated scan
+        # loop, sort key, or directory-info shape).
+        _make_tree(tmp_path, "a.txt", "sub/b.txt")
+
+        class _WithSynthetic(LocalFileGenerator):
+            def scan_children(
+                self,
+                dir_path: str,
+                *,
+                follow_symlinks: bool,
+                notify: Callable[[str], None],
+                capture_entry: bool,
+            ) -> list[WalkChild]:
+                children = super().scan_children(
+                    dir_path,
+                    follow_symlinks=follow_symlinks,
+                    notify=notify,
+                    capture_entry=capture_entry,
+                )
+                extra = WalkChild(
+                    "_synthetic",
+                    LocalFileInfo(
+                        key=(dir_path + "_synthetic").replace(os.sep, "/"),
+                        size=0,
+                        mtime=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                    ),
+                    None,
+                )
+                return self.normalize_sort([*children, extra])
+
+        walker = _WithSynthetic()
+        keys = [
+            info.compare_key for info in LocalStorage(str(tmp_path), walker=walker).walk_local()
+        ]
+        # '_' (0x5F) < 'a' (0x61) < 's' - the synthetic sorts first at each level.
+        assert keys == ["_synthetic", "a.txt", "sub/_synthetic", "sub/b.txt"]
 
 
 class TestGetFileinfo:

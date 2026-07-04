@@ -5,7 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Internal rework of `LocalStorage`'s local directory walk.
+- `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator`
+  (subclass its public seams and inject via `LocalStorage(path, walker=...)`).
 - New `ScanOptions.capture_entry`: exposes each local entry's `os.DirEntry` on
   `LocalFileInfo.entry` for a `filter` / `on_result` to reuse.
 

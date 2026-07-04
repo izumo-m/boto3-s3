@@ -282,7 +282,7 @@ class TestSyncCommand:
         def invalid_stat(_entry: os.DirEntry[str]) -> tuple[None, None]:
             return (None, None)
 
-        monkeypatch.setattr("boto3_s3.localstorage._entry_stat", invalid_stat)
+        monkeypatch.setattr("boto3_s3.localstorage.entry_stat", invalid_stat)
         _, calls = _run_cmd(
             [
                 {"CommonPrefixes": [], "Contents": []},
@@ -323,7 +323,7 @@ class TestSyncCommand:
             os.remove(full_path)
             raise error()
 
-        monkeypatch.setattr("boto3_s3.localstorage._entry_stat", side_effect)
+        monkeypatch.setattr("boto3_s3.localstorage.entry_stat", side_effect)
         _, calls = _run_cmd(
             [{"CommonPrefixes": [], "Contents": []}],
             ["sync", str(tmp_path), "s3://bucket/"],

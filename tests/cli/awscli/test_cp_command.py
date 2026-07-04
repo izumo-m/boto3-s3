@@ -25,7 +25,7 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   page-size default; rm port rule) and never show ``EncodingType``.
 - ``mock.patch`` targets translate: ``mimetypes.guess_type`` and ``os.utime``
   are identical seams; the aws-cli's ``filegenerator.get_file_stat`` becomes
-  ``boto3_s3.localstorage._file_stat``; the streaming tests swap ``sys.stdin``
+  ``boto3_s3.localstorage.get_file_stat``; the streaming tests swap ``sys.stdin``
   / ``sys.stdout`` for shims exposing a ``buffer`` instead of patching the
   aws-cli's ``BufferedBytesIO`` onto ``sys.stdin``.
 - The case-conflict ``*_with_existing_file`` variants keep the aws-cli's
@@ -677,7 +677,7 @@ class TestCPCommand:
         # Patch the stat helper to report an invalid timestamp (impossible to
         # produce portably on a real filesystem; aws-cli patches its
         # get_file_stat the same way).
-        with mock.patch("boto3_s3.localstorage._file_stat", return_value=(None, None)):
+        with mock.patch("boto3_s3.localstorage.get_file_stat", return_value=(None, None)):
             result, _ = _run_cmd(
                 [_client_error("NoSuchBucket", 404, "PutObject")],
                 ["cp", full_path, "s3://bucket/foo.txt"],

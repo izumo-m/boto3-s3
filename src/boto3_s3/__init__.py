@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     )
     from boto3_s3.globsieve import GlobFilter, GlobPattern
     from boto3_s3.iostorage import IOStorage, StdioStorage
-    from boto3_s3.localstorage import LocalStorage
+    from boto3_s3.localstorage import LocalFileGenerator, LocalStorage, WalkChild
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
     from boto3_s3.s3 import (
@@ -98,6 +98,7 @@ __all__ = [
     "IOStorage",
     "InvalidConfigError",
     "InvalidValueError",
+    "LocalFileGenerator",
     "LocalFileInfo",
     "LocalStorage",
     "Location",
@@ -123,6 +124,7 @@ __all__ = [
     "TransferType",
     "TransportError",
     "ValidationError",
+    "WalkChild",
     "__version__",
     "all_of",
     "any_of",
@@ -171,7 +173,9 @@ _EXPORT_HOMES: dict[str, str] = {
     "GlobPattern": "boto3_s3.globsieve",
     "IOStorage": "boto3_s3.iostorage",
     "StdioStorage": "boto3_s3.iostorage",
+    "LocalFileGenerator": "boto3_s3.localstorage",
     "LocalStorage": "boto3_s3.localstorage",
+    "WalkChild": "boto3_s3.localstorage",
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",
     "has_underlying_s3_path": "boto3_s3.pathresolver",
