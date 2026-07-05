@@ -374,8 +374,8 @@ ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
-# visibility, and ``sync``'s ``delete`` lane): a predicate over the ``FileInfo``
-# returning True to keep the entry. The operation stamps ``info.compare_key``
+# visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
+# predicate over the ``FileInfo`` returning True to keep the entry. The operation stamps ``info.compare_key``
 # (the key relative to its root, aws-cli --exclude/--include space) before
 # consulting it, so a glob predicate matches ``compare_key`` while a richer
 # predicate can decide on ``size`` / ``mtime`` / ``storage_class`` / ``key``.

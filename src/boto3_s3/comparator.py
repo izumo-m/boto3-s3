@@ -236,8 +236,10 @@ def compare_size_time(
     :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
     for ``update_filter=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
-    direction-asymmetric). A source-only pair always copies (aws-cli's
-    ``MissingFileSync``). For a pair present on both sides:
+    direction-asymmetric). ``S3.sync`` hands this only both-sides pairs (a
+    source-only pair is ``create_filter``'s lane); its dest-``None`` branch is a
+    defensive fallback that copies, matching aws-cli's ``MissingFileSync``, when
+    a strategy is called standalone. For a pair present on both sides:
 
     - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
       Ignored when ``exact_timestamps`` is also set: the flags fill the same
@@ -287,9 +289,11 @@ class ContentComparison:
 
     Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
     with their leaf digest work. What lives here is everything the two must
-    agree on - the missing-source guard, the source-only always-copy, the
-    ``check_size`` size-mismatch decision, and the split into the two hooks - so
-    the strategies cannot silently drift apart on the decision shape.
+    agree on - the missing-source guard, the defensive source-only copy (``S3.sync``
+    routes source-only pairs to ``create_filter``, so it is reached only when a
+    strategy is called standalone), the ``check_size`` size-mismatch decision, and
+    the split into the two hooks - so the strategies cannot silently drift apart
+    on the decision shape.
 
     Which side is the S3 object (the stored digest to compare against) is decided
     by **type** - the ``S3FileInfo`` side - not by the transfer direction, so the

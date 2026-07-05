@@ -4,9 +4,11 @@
 copies the source). :class:`AwsCliComparison` is the aws-cli judgment and the
 **explicit form of ``update_filter=None``** - ``update_filter=None`` is equivalent to
 ``AwsCliComparison()``. It decides by size + last-modified, reading the transfer
-direction from each :class:`~boto3_s3.comparator.SyncPair`:
+direction from each :class:`~boto3_s3.comparator.SyncPair`. ``S3.sync`` hands it
+only both-sides pairs (a source-only pair is ``create_filter``'s lane):
 
-- a source-only pair (no destination) always copies;
+- a source-only pair (no destination) always copies - a defensive fallback for a
+  standalone caller, matching aws-cli's ``MissingFileSync``;
 - a pair present on both sides copies when the sizes differ, or when the
   last-modified rule does not rule the copy out - an upload / copy is redundant
   when the destination is at least as new as the source, a download when the

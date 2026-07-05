@@ -70,10 +70,11 @@ class EtagComparison(ContentComparison):
     """A content-comparison :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's S3
-    ETag does not match the source's content. A source-only pair (no destination)
-    always copies; an s3-to-s3 pair compares the listings' ETags directly; an
-    upload / download reconstructs the local file's single- or multipart ETag (at
-    ``part_size``) and compares. A missing / non-MD5 ETag is treated as differing
+    ETag does not match the source's content. ``S3.sync`` hands it only both-sides
+    pairs (source-only is ``create_filter``'s lane; a standalone source-only pair
+    copies as a defensive fallback): an s3-to-s3 pair compares the listings' ETags
+    directly; an upload / download reconstructs the local file's single- or
+    multipart ETag (at ``part_size``) and compares. A missing / non-MD5 ETag is treated as differing
     (copy), so it never skips on an indeterminate comparison. It is a replacement
     ``update_filter=`` strategy - selected instead of the size+time default, not
     composed with it.

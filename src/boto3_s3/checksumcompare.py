@@ -93,8 +93,10 @@ class ChecksumComparison(ContentComparison):
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's
-    stored S3 checksum does not match the source's content. A source-only pair
-    (no destination) always copies. An upload / download reads the remote
+    stored S3 checksum does not match the source's content. ``S3.sync`` hands it
+    only both-sides pairs (source-only is ``create_filter``'s lane; a standalone
+    source-only pair copies as a defensive fallback). An upload / download reads
+    the remote
     object's checksum via ``GetObjectAttributes`` and recomputes it over the
     **readable** (non-S3) side's bytes (through its ``Storage.open`` - any
     backend), whole-file for a ``FULL_OBJECT`` checksum or part-by-part at the
