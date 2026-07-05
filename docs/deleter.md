@@ -1,7 +1,7 @@
 # S3Deleter - asynchronous batch deletion
 
 `S3Deleter` is a building block that batches the deletion of S3 objects. It is
-the foundation of `S3.rm` and `S3.sync(delete=True)`, and it can also be used
+the foundation of `S3.rm` and `S3.sync(delete_filter=True)`, and it can also be used
 directly. It accumulates listing entries (`FileInfo`) in a buffer and, each time
 the buffer fills (default 1000 = the `DeleteObjects` limit), hands one
 `DeleteObjects` request to

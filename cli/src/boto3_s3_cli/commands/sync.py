@@ -105,8 +105,8 @@ class SyncCommand(Command):
             S3().sync(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
-                delete=args.delete,
-                compare=AwsCliComparison(
+                delete_filter=args.delete,
+                update_filter=AwsCliComparison(
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps
                 ),
                 filter=item_filter,

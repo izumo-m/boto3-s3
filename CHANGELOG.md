@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3.sync` now splits the copy/delete decision into three per-lane filters:
+  `create_filter` (new entries), `update_filter` (existing, was `compare`),
+  `delete_filter` (orphans, was `delete`); a custom `update_filter` is only
+  ever handed an entry present on both sides, never a one-sided one.
 - `Storage.scan_pages` now applies `ScanOptions.filter` and returns
   already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
   can filter at its source; `storage.sieve_pages` wraps raw pages otherwise.

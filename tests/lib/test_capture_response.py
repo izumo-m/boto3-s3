@@ -413,7 +413,9 @@ class TestSyncDelete:
         src = tmp_path / "src"
         src.mkdir()
         out, cb = _sink()
-        S3().sync(str(src), f"s3://{BUCKET}/dst", delete=True, capture_response=True, on_result=cb)
+        S3().sync(
+            str(src), f"s3://{BUCKET}/dst", delete_filter=True, capture_response=True, on_result=cb
+        )
         assert len(out) == 1  # just the orphan removal (nothing to transfer)
         info = cast("dict[str, Any]", out[0].extra_info)
         assert "delete" in info  # the batched DeleteObjects entry, reconstructed

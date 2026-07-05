@@ -120,13 +120,26 @@ def _is_folder_marker(info: FileInfo) -> bool:
 
 
 def _copy_all(_pair: SyncPair) -> bool:
-    """``compare=True``: copy every source-present pair (cp-like)."""
+    """A pair judgment that always copies (``create_filter=True`` every new entry,
+    ``update_filter=True`` every update)."""
     return True
 
 
 def _copy_none(_pair: SyncPair) -> bool:
-    """``compare=False``: copy nothing (scan-only / delete-only sync)."""
+    """A pair judgment that never copies (``create_filter=False`` no new entry,
+    ``update_filter=False`` no update - additive-only, existing left as-is)."""
     return False
+
+
+def _create_via_filter(keep: FileFilter) -> PairFilter:
+    """``create_filter`` as a ``FileFilter``: copy a new (source-only) pair iff the
+    source entry is kept (matched like ``delete_filter`` / ``rm``)."""
+
+    def decide(pair: SyncPair) -> bool:
+        assert pair.src is not None  # a source-only (new) pair always has a source
+        return keep(pair.src)
+
+    return decide
 
 
 def _compare_workers(transfer_config: TransferConfig | None) -> int:
@@ -140,7 +153,8 @@ def _compare_workers(transfer_config: TransferConfig | None) -> int:
 def _run_sync_pairs(
     pairs: Iterator[SyncPair],
     *,
-    decide: PairFilter,
+    create_decide: PairFilter,
+    update_decide: PairFilter,
     submit_copy: Callable[[SyncPair], None],
     submit_delete: Callable[[SyncPair], None],
     no_overwrite: bool,
@@ -148,17 +162,20 @@ def _run_sync_pairs(
     cancel_token: CancelToken | None,
     workers: int | None,
 ) -> None:
-    """Drive ``S3.sync``'s compare/submit loop - serial, or pooled when ``workers``.
+    """Drive ``S3.sync``'s pair loop - serial, or pooled when ``workers``.
 
-    Only the both-sides copy decision (``decide`` on a pair that has a
-    destination) is parallelized: that is where a content compare does its I/O.
-    New (destination-missing) pairs and the delete lane stay on the calling
-    thread in compare-key order, so the case-conflict gate keeps its
-    deterministic "first key wins" order. ``submit_copy`` / ``submit_delete``
+    Each pair lands in exactly one lane by which sides it has: a source-only
+    (new) pair goes to ``create_decide``, a both-sides (update) pair to
+    ``update_decide``, a destination-only (orphan) pair to the delete lane
+    (``delete_on``). Only the update decision (``update_decide``, where a
+    content compare does its I/O) is parallelized; the new and delete lanes stay
+    on the calling thread in compare-key order, so the case-conflict gate keeps
+    its deterministic "first key wins" order. ``submit_copy`` / ``submit_delete``
     (and the gate they reach) therefore only ever run on this thread; the pool
-    runs nothing but ``decide``. A ``decide`` exception propagates here (aborting
-    the sync) when its result is consumed; ``cancel_token`` is polled between
-    pairs. Behaviour matches the serial path bar ordering of the pooled pairs.
+    runs nothing but ``update_decide``. A ``update_decide`` exception
+    propagates here (aborting the sync) when its result is consumed;
+    ``cancel_token`` is polled between pairs. Behaviour matches the serial path
+    bar ordering of the pooled pairs.
     """
 
     def cancelled() -> bool:
@@ -169,9 +186,10 @@ def _run_sync_pairs(
             if cancelled():
                 raise CancelledError("sync was cancelled", operation="sync")
             if pair.src is not None:
-                if no_overwrite and pair.dest is not None:
-                    continue
-                if decide(pair):
+                if pair.dest is None:
+                    if create_decide(pair):
+                        submit_copy(pair)
+                elif not no_overwrite and update_decide(pair):
                     submit_copy(pair)
             elif delete_on:
                 submit_delete(pair)
@@ -181,22 +199,24 @@ def _run_sync_pairs(
     with ThreadPoolExecutor(workers, thread_name_prefix="boto3-s3-compare") as pool:
 
         def dispatch() -> bool:
-            # Pull pairs (compare-key order) until one needs a pooled decision;
-            # handle destination-missing and delete pairs inline, in order.
+            # Pull pairs (compare-key order) until an update pair needs a pooled
+            # decision; handle new (source-only) and delete pairs inline, in order.
             for pair in pairs:
                 if cancelled():
                     raise CancelledError("sync was cancelled", operation="sync")
                 if pair.src is not None:
-                    if no_overwrite and pair.dest is not None:
-                        continue
                     if pair.dest is not None:
-                        pool.submit(decide, pair).add_done_callback(
+                        # Update (both sides): the content compare does I/O, so
+                        # pool it - unless no_overwrite already rules it out.
+                        if no_overwrite:
+                            continue
+                        pool.submit(update_decide, pair).add_done_callback(
                             lambda f, p=pair: done.put((p, f))
                         )
                         return True
-                    # Destination missing: a content compare does no I/O here,
-                    # so decide inline and keep the case-conflict gate in order.
-                    if decide(pair):
+                    # New (source-only): the create lane does no I/O, so decide
+                    # inline and keep the case-conflict gate in order.
+                    if create_decide(pair):
                         submit_copy(pair)
                 elif delete_on:
                     submit_delete(pair)
@@ -1088,9 +1108,10 @@ class S3:
         src: Location,
         dest: Location,
         *,
-        delete: bool | FileFilter = False,
         filter: FileFilter | None = None,
-        compare: bool | PairFilter | ParallelCompare | None = None,
+        create_filter: bool | FileFilter = True,
+        update_filter: bool | PairFilter | ParallelCompare | None = None,
+        delete_filter: bool | FileFilter = False,
         follow_symlinks: bool = True,
         detect_symlink_loops: bool = False,
         dryrun: bool = False,
@@ -1119,33 +1140,47 @@ class S3:
           symmetric, an excluded key is invisible on *both* sides and is thus
           neither transferred nor deleted (aws's "files excluded by filters
           are excluded from deletion"); visibility is never one-sided, so it
-          cannot manufacture a phantom new/delete pair. Per-side or per-lane
-          narrowing belongs in the pair layer below (``compare`` /
-          ``delete``).
+          cannot manufacture a phantom new/delete pair. Per-lane narrowing
+          belongs in the pair layer below (``create_filter`` / ``update_filter``
+          / ``delete_filter``).
         - **Pair decisions** - the surviving streams are merge-joined by
           compare key (:class:`~boto3_s3.comparator.Comparator`) and each
-          :class:`~boto3_s3.comparator.SyncPair` is judged. ``compare`` picks
-          exactly one copy strategy for source-present pairs: ``None``
-          (default) is the aws-cli size + last-modified judgment, equivalently
-          ``AwsCliComparison()`` - tune it with ``AwsCliComparison(size_only=...)``
-          / ``(exact_timestamps=...)``; ``True`` copies every source (cp-like);
-          ``False`` copies nothing (scan-only, or a delete-only sync with
-          ``delete``); any :data:`~boto3_s3.comparator.PairFilter` is a custom
-          strategy - the content building blocks ``EtagComparison`` / ``ChecksumComparison``
-          (submodule imports) are drop-in replacements that compare by content.
-          Wrapping any strategy in :class:`~boto3_s3.comparator.ParallelCompare`
-          runs its both-sides (update) decisions on a thread pool - identical
-          results, only faster (the wrapped strategy must be thread-safe).
-          ``no_overwrite`` is an
-          orthogonal write-guard applied *before* the strategy: an existing
-          destination is never overwritten (source-only pairs still copy), and
-          sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
-          ``delete`` is the deletion
-          lane in one value: ``False`` (default) deletes nothing, ``True``
-          deletes every destination-only pair (aws ``--delete``), and a
-          :data:`~boto3_s3.types.FileFilter` deletes only the orphans it
-          keeps (matched against the orphan's ``FileInfo`` / compare key -
-          the same shape as ``rm``'s ``filter``).
+          :class:`~boto3_s3.comparator.SyncPair` lands in exactly one of three
+          lanes by which sides it has, each a filter deciding whether to act:
+          **create** a new entry, **overwrite** one on both sides, or **delete**
+          an orphan. ``create_filter`` and ``delete_filter`` are the two
+          membership knobs (create / delete) - duals of each other;
+          ``update_filter`` is the overwrite judgment for the intersection. The
+          aws equivalent is the default of all three:
+
+          - ``create_filter`` - the **new** (source-only) entries: ``True``
+            (default) copies every one, ``False`` none, a
+            :data:`~boto3_s3.types.FileFilter` only those it keeps (matched
+            against the source ``FileInfo`` / compare key, the same shape as
+            ``rm``'s ``filter``). aws hard-codes "always create"
+            (``file_not_at_dest``), so this knob has no aws counterpart.
+          - ``update_filter`` - the **update** (both-sides) pairs: ``None``
+            (default) is the aws-cli size + last-modified judgment, equivalently
+            ``AwsCliComparison()`` - tune it with
+            ``AwsCliComparison(size_only=...)`` / ``(exact_timestamps=...)``;
+            ``True`` re-copies every one, ``False`` none (additive-only:
+            existing destinations are left as-is); any
+            :data:`~boto3_s3.comparator.PairFilter` is a custom strategy - the
+            content building blocks ``EtagComparison`` / ``ChecksumComparison``
+            (submodule imports) are drop-in replacements that compare by
+            content. Wrapping any strategy in
+            :class:`~boto3_s3.comparator.ParallelCompare` runs these update
+            decisions on a thread pool - identical results, only faster (the
+            wrapped strategy must be thread-safe). A custom strategy is only
+            ever handed an update pair, so it never faces a ``None`` side.
+          - ``delete_filter`` - the **orphan** (destination-only) entries:
+            ``False`` (default) deletes nothing, ``True`` deletes every one
+            (aws ``--delete``), a :data:`~boto3_s3.types.FileFilter` only those
+            it keeps (same shape as ``rm``'s ``filter``).
+
+          ``no_overwrite`` is an orthogonal write-guard on the update lane: an
+          existing destination is never overwritten (new entries still copy),
+          and sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
 
         Transfers run on the engine with cp's gates (glacier, the
         parent-directory guard, the ``--case-conflict`` gate for downloads -
@@ -1193,35 +1228,45 @@ class S3:
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the
         # I/O the route uses; reject up front before any listing (gate below).
-        producers.require_open_sync_capabilities(plan, delete=bool(delete), operation="sync")
+        producers.require_open_sync_capabilities(plan, delete=bool(delete_filter), operation="sync")
 
         # no_overwrite is an orthogonal write-guard (an option, so callers can
         # write ``sync(no_overwrite=True)``): strip it from the engine options
         # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
         no_overwrite = options.pop("no_overwrite", False)
-        # compare picks exactly one copy strategy; compare=None is the aws-cli
-        # size + last-modified default, equivalently AwsCliComparison().
+        # create_filter governs the new (source-only) pairs: True copies every new
+        # entry, False none, a FileFilter only those it keeps (matched like rm).
+        create_decide: PairFilter
+        if create_filter is True:
+            create_decide = _copy_all
+        elif create_filter is False:
+            create_decide = _copy_none
+        else:
+            create_decide = _create_via_filter(create_filter)
+        # update_filter picks exactly one copy strategy for the update
+        # (both-sides) pairs; update_filter=None is the aws-cli size +
+        # last-modified default, equivalently AwsCliComparison().
         compare_workers: int | None = None
-        decide: PairFilter
-        if isinstance(compare, ParallelCompare):
+        update_decide: PairFilter
+        if isinstance(update_filter, ParallelCompare):
             compare_workers = (
-                compare.workers
-                if compare.workers is not None
+                update_filter.workers
+                if update_filter.workers is not None
                 else _compare_workers(transfer_config)
             )
-            decide = compare.compare
-        elif compare is None:
-            decide = AwsCliComparison()
-        elif compare is True:
-            decide = _copy_all
-        elif compare is False:
-            decide = _copy_none
+            update_decide = update_filter.compare
+        elif update_filter is None:
+            update_decide = AwsCliComparison()
+        elif update_filter is True:
+            update_decide = _copy_all
+        elif update_filter is False:
+            update_decide = _copy_none
         else:
-            decide = compare
-        # delete is False/True (no per-orphan filter) or a FileFilter that
+            update_decide = update_filter
+        # delete_filter is False/True (no per-orphan filter) or a FileFilter that
         # narrows which destination-only orphans are deleted (matched like rm);
         # the producer-stamped compare_key lets it read the entry directly.
-        delete_keep = delete if not isinstance(delete, bool) else None
+        delete_keep = delete_filter if not isinstance(delete_filter, bool) else None
         case_gate = producers.sync_case_gate(transfer_type, dest_storage, options=options)
 
         transferrer = Transferrer(
@@ -1303,11 +1348,12 @@ class S3:
                 Comparator(
                     transfer_type, src_storage=src_storage, dest_storage=dest_storage
                 ).compare(src_entries, dest_entries),
-                decide=decide,
+                create_decide=create_decide,
+                update_decide=update_decide,
                 submit_copy=submit_copy,
                 submit_delete=submit_delete,
                 no_overwrite=no_overwrite,
-                delete_on=bool(delete),
+                delete_on=bool(delete_filter),
                 cancel_token=cancel_token,
                 workers=compare_workers,
             )

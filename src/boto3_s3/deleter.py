@@ -4,7 +4,7 @@
 one ``DeleteObjects`` call (up to :data:`S3_DELETE_BATCH` keys) dispatched on a
 single background worker thread, so a caller iterating ``S3Storage.scan()``
 keeps scanning while the previous batch deletes. It is the building block for
-``S3.rm`` and ``S3.sync(delete=True)``, and is usable directly.
+``S3.rm`` and ``S3.sync(delete_filter=True)``, and is usable directly.
 
 aws-cli note: ``aws s3 rm`` deletes one key per ``DeleteObject`` call and never
 uses the batch API. The batched ``DeleteObjects`` here is an accepted

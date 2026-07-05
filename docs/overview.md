@@ -115,8 +115,8 @@ maintaining high functional compatibility (parity).
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
   meaningless option combination **unrepresentable in the API** over policing it
   at runtime - e.g. `sync`'s size/timestamp tuners live inside `AwsCliComparison`
-  (the `compare=None` default), so they cannot be paired with a content
-  `compare=`. Where a combination cannot be designed away, raise vs ignore is
+  (the `update_filter=None` default), so they cannot be paired with a content
+  `update_filter=`. Where a combination cannot be designed away, raise vs ignore is
   decided per case and discussed beforehand (the library may fail loud where
   aws-cli is silent; the CLI keeps aws exit-code parity).
 - **Versioning**: `boto3-s3` and `boto3-s3-cli` are versioned independently.

@@ -13,16 +13,19 @@ copy or delete. This module is layer two's material:
   buries its strategy calls in the merge loop; splitting them keeps each
   side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
-- A :data:`PairFilter` is a copy judgment: a predicate over a pair where
-  ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
-  the size+time default, a content strategy (``EtagComparison`` / ``ChecksumComparison``),
-  or a caller's own. (``S3.sync``'s delete lane instead narrows with a
-  ``FileFilter`` over the destination-only orphan.)
+- A :data:`PairFilter` is the **update** judgment: a predicate over a
+  both-sides pair where ``True`` re-copies the source over the destination. It
+  is what ``S3.sync(update_filter=...)`` selects - the size+time default, a
+  content strategy (``EtagComparison`` / ``ChecksumComparison``), or a caller's
+  own. ``S3.sync`` only ever hands it an update pair (both sides present), so it
+  never faces a ``None`` side; the new (source-only) lane is governed by
+  ``create_filter`` and the delete lane by ``delete_filter``, each a ``FileFilter``
+  over the one side it has.
 - :func:`compare_size_time` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); it is the judgment
   behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
-  selects for ``compare=None``. The direction is read from
+  selects for ``update_filter=None``. The direction is read from
   ``pair.transfer_type``.
 - :class:`ContentComparison` is the shared template of the content
   strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
@@ -69,7 +72,7 @@ class SyncPair:
 
     ``src_storage`` / ``dest_storage`` are the backends the two sides were listed
     from (constant across a sync, stamped by :class:`Comparator`). A content
-    ``compare=`` strategy reads the non-S3 side's bytes through its ``Storage.open``
+    ``update_filter=`` strategy reads the non-S3 side's bytes through its ``Storage.open``
     - so content comparison works for any backend, not just a local filesystem.
     """
 
@@ -87,7 +90,7 @@ PairFilter = Callable[[SyncPair], bool]
 
 @dataclass(frozen=True, slots=True)
 class ParallelCompare:
-    """Run a content ``compare=`` strategy on a thread pool (``S3.sync`` only).
+    """Run a content ``update_filter=`` strategy on a thread pool (``S3.sync`` only).
 
     A value container, **not** a callable: ``S3.sync`` recognizes it and runs
     the wrapped ``compare`` concurrently on up to ``workers`` threads, deciding
@@ -147,7 +150,7 @@ class Comparator:
     to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment. ``src_storage`` /
     ``dest_storage`` are stamped alongside it (the two sides' backends), so a
-    content ``compare=`` strategy can open the non-S3 side of any pair.
+    content ``update_filter=`` strategy can open the non-S3 side of any pair.
     """
 
     transfer_type: TransferType
@@ -231,7 +234,7 @@ def compare_size_time(
 
     Not a public building block: it implements
     :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
-    for ``compare=None``.
+    for ``update_filter=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
     direction-asymmetric). A source-only pair always copies (aws-cli's
     ``MissingFileSync``). For a pair present on both sides:
@@ -248,7 +251,7 @@ def compare_size_time(
       ``ExactTimestampsSync``; uploads/copies are unaffected).
 
     The ``no_overwrite`` write-guard is orthogonal and lives in the ``S3.sync``
-    loop, not here, so it composes with any ``compare=`` strategy. Comparisons
+    loop, not here, so it composes with any ``update_filter=`` strategy. Comparisons
     run at full ``timedelta`` precision (aws-cli's ``total_seconds``). A missing
     ``size`` or ``mtime`` on either side counts as a difference - aws-cli never
     faces one (its listings always carry both), so leaning toward copying is the
@@ -280,7 +283,7 @@ READ_CHUNK = 1024 * 1024
 
 
 class ContentComparison:
-    """The shared skeleton of the content ``compare=`` strategies (``True`` = copy).
+    """The shared skeleton of the content ``update_filter=`` strategies (``True`` = copy).
 
     Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
     with their leaf digest work. What lives here is everything the two must

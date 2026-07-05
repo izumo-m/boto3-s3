@@ -19,7 +19,7 @@ src listing -- filter (visibility) --+
                                      +- Comparator (pure pairing)
 dest listing -- filter (visibility) --+        |
                                                           per SyncPair(key, src, dest):
-                                                          compare / delete
+                                                          create / update / delete
                                                                   |
                                                    Transferrer (transfer) / delete lane
 ```
@@ -55,57 +55,75 @@ dest listing -- filter (visibility) --+        |
 
 Structural correspondence with aws-cli: aws-cli's `Comparator` calls three
 strategies inside its merge loop (`file_at_src_and_dest` / `file_not_at_dest` /
-`file_not_at_src`), whereas we separate pairing from the decision. aws-cli's
-three slots map onto `compare` (a pair with a src = the unification of
-at_both + not_at_dest; it can branch on whether a dest exists) and `delete`
-(not_at_src).
+`file_not_at_src`), whereas we separate pairing from the decision. Those three
+slots map one-to-one onto sync's three lanes: `file_not_at_dest` -> `create_filter`
+(the new / source-only entries), `file_at_src_and_dest` -> `update_filter` (the
+update pairs), `file_not_at_src` -> `delete_filter` (the orphans).
 
 ## 3. Public API
 
 ```python
 S3().sync(src, dest, *,
-    delete: bool | FileFilter = False,             # False / True / predicate: lane + scope
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
-    compare: bool | PairFilter | ParallelCompare | None = None,  # None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelCompare=pooled
+    create_filter: bool | FileFilter = True,          # new (source-only) lane: True=all / False=none / predicate=scope
+    update_filter: bool | PairFilter | ParallelCompare | None = None,  # update lane: None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelCompare=pooled
+    delete_filter: bool | FileFilter = False,      # orphan lane: False=none / True=all / predicate=scope
     follow_symlinks=True, detect_symlink_loops=False, dryrun=False, page_size=1000,
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     capture_response=False,             # surface S3 responses on extra_info (opresult.md)
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
 ```
 
-"Filter" is reserved for **visibility** - a predicate that narrows which entries
-are in scope (`FileFilter = Callable[[FileInfo], bool]`, e.g. `GlobFilter`,
-applied per side); `filter` and the `delete` lane are filters. The **copy
-decision** is a separate axis, `compare`: it selects exactly one strategy (it
-does not compose), where a custom strategy is a `PairFilter =
-Callable[[SyncPair], bool]` that needs both sides (True = copy).
+Each `SyncPair` lands in exactly one lane by which sides it has, and each lane
+has its own filter deciding whether to act on the entry: **create** a new one
+(`create_filter`, source-only), **overwrite** one present on both sides
+(`update_filter`), or **delete** an orphan (`delete_filter`, destination-only).
+`create_filter` and `delete_filter` are the two membership knobs (create / delete) -
+duals of each other, and the reason `create_filter` has no `aws` counterpart is that
+aws hard-codes "always create" (`file_not_at_dest`); `update_filter` is the
+overwrite judgment for the intersection. The aws `sync` equivalent is the default
+of all three (`create_filter=True` / `update_filter=None` / `delete_filter=False`).
+`filter` is separate: it is **visibility** (`FileFilter = Callable[[FileInfo],
+bool]`, e.g. `GlobFilter`), applied per side *before* pairing to narrow which
+entries are in scope. `create_filter` / `delete_filter` are `FileFilter`s over the
+one side their lane has; `update_filter` is the copy decision over an update
+pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
 
 - `SyncPair(key, transfer_type, src, dest)` - `key` is the relative compare key common to
   both sides (`/`-separated); `transfer_type` is the sync's direction, stamped on every
   pair so a filter applies the direction-asymmetric rules without being told the
-  route. `dest is None` = new, `src is None` = deletion candidate, both present =
-  update decision.
-- `compare` is the copy decision, a single strategy: `None` (default) is the aws
-  size + last-modified judgment, equivalently `AwsCliComparison()` (it reads the
-  direction from `pair.transfer_type`, so it works across routes); `True` copies every
-  source, `False` copies nothing; any `PairFilter` is a custom strategy - the
-  building blocks `AwsCliComparison` (section 4) / `EtagComparison` /
-  `ChecksumComparison` (sections 8-9) are drop-in replacements. The aws-cli
-  `--size-only` / `--exact-timestamps` tuners are **constructor arguments of
+  route. `dest is None` = new (the `create_filter` lane), `src is None` = orphan
+  (the `delete_filter` lane), both present = update (the `update_filter` lane).
+- `create_filter` is the new (source-only) lane: `True` (default) copies every new
+  entry, `False` none, a `FileFilter` only those it keeps (matched against the
+  source `FileInfo` / compare key, the same shape as `rm`'s `filter`). This is
+  aws-cli's `MissingFileSync` (source-only always transfers) with an optional
+  scope.
+- `update_filter` is the update (both-sides) copy decision, a single strategy
+  (it does not compose): `None` (default) is the aws size + last-modified
+  judgment, equivalently `AwsCliComparison()` (it reads the direction from
+  `pair.transfer_type`, so it works across routes); `True` re-copies every
+  update, `False` none (additive-only: existing destinations are left as-is);
+  any `PairFilter` is a custom strategy - the building blocks `AwsCliComparison`
+  (section 4) / `EtagComparison` / `ChecksumComparison` (sections 8-9) are
+  drop-in replacements. Because a pair reaches this lane only when both sides
+  exist, a custom strategy never faces a `None` side. The aws-cli `--size-only`
+  / `--exact-timestamps` tuners are **constructor arguments of
   `AwsCliComparison`** (`AwsCliComparison(size_only=True)`), not `sync` options:
   a content compare replaces the judgment wholesale, so there is nothing for them
   to tune there, and the combination is simply unrepresentable. Note `None`
-  (default) != `False` (copy nothing).
-- `no_overwrite` is an orthogonal write-guard applied before `compare`: if a
-  destination already exists it is never overwritten (a source-only pair still
-  copies). It composes with any `compare`, and sync keeps it decision-only - no
-  `IfNoneMatch` on the wire (unlike cp / mv). `S3.sync(no_overwrite=True)` works
-  because it rides the shared `TransferOptions`.
-- `delete` is the deletion lane in one value (aws `--delete`): `False`
-  (default) deletes nothing, `True` deletes every destination-only pair, and a
-  `FileFilter` deletes only the orphans it keeps - matched against the orphan's
-  `FileInfo` / compare key, the same shape as `rm`'s `filter` (the delete lane
-  is rm over the orphans).
+  (default) != `False` (no update).
+- `no_overwrite` is an orthogonal write-guard on the update lane, applied before
+  `update_filter`: if a destination already exists it is never overwritten (a
+  new / source-only pair still copies via `create_filter`). It composes with any
+  `update_filter`, and sync keeps it decision-only - no `IfNoneMatch` on the
+  wire (unlike cp / mv). `S3.sync(no_overwrite=True)` works because it rides the
+  shared `TransferOptions`.
+- `delete_filter` is the orphan (destination-only) lane (aws `--delete`): `False`
+  (default) deletes nothing, `True` deletes every orphan, and a `FileFilter`
+  deletes only the orphans it keeps - matched against the orphan's `FileInfo` /
+  compare key, the same shape as `rm`'s `filter` (the delete lane is rm over the
+  orphans).
 
 Example (content-based sync + delete only old generations):
 
@@ -113,13 +131,13 @@ Example (content-based sync + delete only old generations):
 from boto3_s3.etagcompare import EtagComparison
 
 s3.sync(src, dest,
-    compare=EtagComparison(s3),                       # decide by content, not size + mtime
-    delete=lambda info: info.mtime < cutoff)   # delete only old orphans
+    update_filter=EtagComparison(s3),                 # decide updates by content, not size + mtime
+    delete_filter=lambda info: info.mtime < cutoff)    # delete only old orphans
 ```
 
 ## 4. The default decision (ported from aws-cli, pinned by measurement)
 
-`compare=None` is `AwsCliComparison()`, the public form of the internal
+`update_filter=None` is `AwsCliComparison()`, the public form of the internal
 `compare_size_time(pair, size_only, exact_timestamps)` (direction from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
@@ -204,8 +222,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 
 ## 8. ETag content comparison (`EtagComparison`, opt-in)
 
-`compare=None` decides by size + mtime. When the decision must follow
-**content**, `boto3_s3.etagcompare.EtagComparison(...)` builds a `compare=` strategy that
+`update_filter=None` decides by size + mtime. When the decision must follow
+**content**, `boto3_s3.etagcompare.EtagComparison(...)` builds a `update_filter=` strategy that
 compares S3's ETag against the ETag the source would carry. It is a standalone,
 opt-in building block - imported by submodule path, not part of the package root
 re-export:
@@ -213,9 +231,9 @@ re-export:
 ```python
 from boto3_s3.etagcompare import EtagComparison
 
-s3.sync(src, dest, compare=EtagComparison(s3))          # part_size from the profile
-s3.sync(src, dest, compare=EtagComparison())            # 8 MiB default part size
-s3.sync(src, dest, compare=EtagComparison(part_size=16 * 1024 * 1024))   # explicit part size
+s3.sync(src, dest, update_filter=EtagComparison(s3))          # part_size from the profile
+s3.sync(src, dest, update_filter=EtagComparison())            # 8 MiB default part size
+s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   # explicit part size
 ```
 
 - **s3->s3** compares the two listings' ETags directly (no bytes read);
@@ -237,7 +255,7 @@ s3.sync(src, dest, compare=EtagComparison(part_size=16 * 1024 * 1024))   # expli
   `check_size=False` restores pure-ETag semantics.
 - **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag, so
   against such a bucket every object reads as differing - use the default
-  `compare=None` there instead. The upload / download hash runs on sync's
+  `update_filter=None` there instead. The upload / download hash runs on sync's
   calling thread unless the strategy is wrapped in `ParallelCompare` (section 10).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
@@ -257,7 +275,7 @@ path, not part of the package root re-export:
 from boto3_s3.checksumcompare import ChecksumComparison
 
 # decide every both-sides pair by content (mtime is not consulted):
-s3.sync(src, dest, compare=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
 ```
 
 It is a **replacement** strategy, not composed with the size + time default.
@@ -267,7 +285,7 @@ size + mtime alone would copy - including a same-content object whose only
 change is its mtime - and reaches the content check only on the subset size +
 mtime already skips. Content comparison can then add copies but never prevent
 the mtime-driven ones, which defeats the reason to compare by content (mtime is
-exactly what content comparison must not trust). `compare=ChecksumComparison(...)`
+exactly what content comparison must not trust). `update_filter=ChecksumComparison(...)`
 instead decides every both-sides pair by content; the only shortcut is the
 `check_size` size pre-check (a differing size copies for free). The cost is one
 `GetObjectAttributes` (plus the local hash) per both-sides pair; wrap the
@@ -313,7 +331,7 @@ decisions on a thread pool instead:
 from boto3_s3.checksumcompare import ChecksumComparison
 from boto3_s3.comparator import ParallelCompare
 
-s3.sync(src, dest, compare=ParallelCompare(ChecksumComparison(s3, src, dest), workers=16))
+s3.sync(src, dest, update_filter=ParallelCompare(ChecksumComparison(s3, src, dest), workers=16))
 ```
 
 `ParallelCompare` is a value container, not a callable: `sync` recognizes it,

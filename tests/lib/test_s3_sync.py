@@ -30,6 +30,7 @@ from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
+    FileInfo,
     OpOutcome,
     OpResult,
     TransferOptions,
@@ -151,7 +152,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
             on_result=results.append,
             request_payer="requester",
@@ -177,7 +178,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
             on_result=results.append,
         )
@@ -233,7 +234,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=lambda info: info.key.endswith(".log"),
+            delete_filter=lambda info: info.key.endswith(".log"),
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -250,7 +251,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=GlobFilter().exclude("*").include("*.log").compile(),
+            delete_filter=GlobFilter().exclude("*").include("*.log").compile(),
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -268,7 +269,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=True,
+            delete_filter=True,
             filter=keep,
             transfer_config=_SERIAL,
         )
@@ -283,7 +284,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete=True,
+            delete_filter=True,
             dryrun=True,
             transfer_config=_SERIAL,
             on_result=results.append,
@@ -303,7 +304,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=lambda pair: True,
+            update_filter=lambda pair: True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
@@ -327,9 +328,9 @@ class TestSyncUpload:
         assert "IfNoneMatch" not in calls[1].params
 
     def test_no_overwrite_guards_any_compare_strategy(self, tmp_path: Path) -> None:
-        # The write-guard runs before the strategy: even compare=True (cp-like)
-        # never overwrites an existing destination, while a source-only pair
-        # still uploads.
+        # The write-guard runs on the update lane: even update_filter=True never
+        # re-copies an existing destination, while a new (source-only) pair still
+        # uploads via create_filter.
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_OLDER)  # at dest -> guarded
         _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> uploaded
@@ -337,7 +338,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=True,
+            update_filter=True,
             no_overwrite=True,
             transfer_config=_SERIAL,
         )
@@ -408,7 +409,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            compare=AwsCliComparison(exact_timestamps=True),
+            update_filter=AwsCliComparison(exact_timestamps=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
@@ -420,48 +421,82 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            compare=AwsCliComparison(size_only=True),
+            update_filter=AwsCliComparison(size_only=True),
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_compare_true_copies_every_source(self, tmp_path: Path) -> None:
-        # compare=True forces all source-present pairs through, even an
-        # up-to-date one the default would skip (cp-like).
+    def test_compare_true_recopies_every_update(self, tmp_path: Path) -> None:
+        # update_filter=True forces every update (both-sides) pair through, even
+        # an up-to-date one the default would skip.
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # same size, older -> default would skip
         client, calls = make_recording_client([_listing(("p/same.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=True,
+            update_filter=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
-    def test_compare_false_copies_nothing(self, tmp_path: Path) -> None:
-        # compare=False skips every copy, even a brand-new source file.
+    def test_compare_false_is_additive_only(self, tmp_path: Path) -> None:
+        # update_filter=False never re-copies an existing destination (additive
+        # only), but a brand-new source file still copies (create_filter default).
+        src = tmp_path / "src"
+        _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> copied
+        _write(src, "same.txt", b"xx", mtime=_NEWER)  # at dest, differs -> left as-is
+        client, calls = make_recording_client([_listing(("p/same.txt", 2)), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            update_filter=False,
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/new.txt"
+
+    def test_create_filter_false_skips_new_entries(self, tmp_path: Path) -> None:
+        # create_filter=False: a brand-new source file is not copied.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing()])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=False,
+            create_filter=False,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2"]
 
-    def test_compare_false_with_delete_is_delete_only(self, tmp_path: Path) -> None:
-        # compare=False + delete=True: prune orphans, copy nothing.
+    def test_create_filter_narrows_which_new_entries_copy(self, tmp_path: Path) -> None:
+        # create_filter as a FileFilter copies only the new entries it keeps,
+        # matched against the source compare key (rm's filter shape).
+        src = tmp_path / "src"
+        _write(src, "keep.log", b"xx", mtime=_OLDER)
+        _write(src, "skip.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(), {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/p", client=client),
+            create_filter=GlobFilter().exclude("*").include("*.log").compile(),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/keep.log"
+
+    def test_delete_only_sync_copies_nothing(self, tmp_path: Path) -> None:
+        # create_filter=False + update_filter=False + delete_filter=True: prune
+        # orphans and copy nothing (neither new nor updated entries).
         src = tmp_path / "src"
         _write(src, "keep.txt", b"xx", mtime=_OLDER)
         client, calls = make_recording_client([_listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=False,
-            delete=True,
+            create_filter=False,
+            update_filter=False,
+            delete_filter=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
@@ -483,7 +518,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            delete=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
             on_result=results.append,
         )
@@ -502,7 +537,7 @@ class TestSyncDownload:
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
-            delete=True,
+            delete_filter=True,
             dryrun=True,
             transfer_config=_SERIAL,
             on_result=results.append,
@@ -523,7 +558,7 @@ class TestSyncDownload:
                 S3().sync(
                     S3Storage("s3://bucket/d", client=client),
                     str(out),
-                    delete=True,
+                    delete_filter=True,
                     transfer_config=_SERIAL,
                     on_result=results.append,
                 )
@@ -586,7 +621,7 @@ class TestSyncCopy:
         S3().sync(
             S3Storage("s3://src-b/s", client=src_client),
             S3Storage("s3://dest-b/t", client=dest_client),
-            delete=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
         )
         assert _ops(src_calls) == ["ListObjectsV2"]
@@ -606,13 +641,15 @@ class TestSyncCopy:
         client, calls = make_recording_client([listing, listing])
         storage = S3Storage("s3://bucket/p", client=client)
         results: list[OpResult] = []
-        S3().sync(storage, storage, delete=True, transfer_config=_SERIAL, on_result=results.append)
+        S3().sync(
+            storage, storage, delete_filter=True, transfer_config=_SERIAL, on_result=results.append
+        )
         assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
         assert results == []
 
 
 class TestParallelCompare:
-    """``compare=ParallelCompare(...)`` pools the both-sides (update) decision
+    """``update_filter=ParallelCompare(...)`` pools the both-sides (update) decision
     while keeping new pairs and the case-conflict gate on the calling thread, so
     it copies exactly what the bare strategy would - only faster."""
 
@@ -638,54 +675,56 @@ class TestParallelCompare:
             S3().sync(
                 str(src),
                 S3Storage("s3://bucket/p", client=client),
-                compare=ParallelCompare(_always_copies, workers=2),
+                update_filter=ParallelCompare(_always_copies, workers=2),
                 transfer_config=_SERIAL,
                 cancel_token=token,
             )
         assert not [call for call in calls if call.operation == "PutObject"]
 
     def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
-        # Update pairs (a/b/c already at the destination) are pooled; new.txt is
-        # new. The pool only changes WHERE decide runs, not WHAT it decides.
+        # Update pairs (a/b/c already at the destination) are pooled through
+        # update_filter; new.txt is copied by create_filter. The pool only changes
+        # WHERE the update decision runs, not WHAT it decides.
         src = tmp_path / "src"
         for name in ("a.txt", "b.txt", "c.txt", "new.txt"):
             _write(src, name, b"xx")
 
         def decide(pair: SyncPair) -> bool:
-            return pair.dest is None or pair.key in {"a.txt", "c.txt"}
+            return pair.key in {"a.txt", "c.txt"}  # only update pairs reach here
 
         listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
         client, calls = make_recording_client([listing, {}, {}, {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=ParallelCompare(decide, workers=4),
+            update_filter=ParallelCompare(decide, workers=4),
             transfer_config=_SERIAL,
         )
         puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
         assert puts == {"p/a.txt", "p/c.txt", "p/new.txt"}
 
     def test_new_pairs_decided_on_calling_thread_in_key_order(self, tmp_path: Path) -> None:
-        # New (destination-missing) pairs are decided inline, in compare-key
-        # order, so the case-conflict gate's "first key wins" stays deterministic
-        # even under a parallel compare.
+        # New (destination-missing) pairs are decided by create_filter inline, in
+        # compare-key order, so the case-conflict gate's "first key wins" stays
+        # deterministic even under a parallel compare.
         src = tmp_path / "src"
         for name in ("n1.txt", "n2.txt", "n3.txt"):
             _write(src, name, b"xx")
         main = threading.get_ident()
         seen: list[str] = []
 
-        def decide(pair: SyncPair) -> bool:
-            assert pair.dest is None  # an empty listing leaves every pair new
+        def keep_new(info: FileInfo) -> bool:
             assert threading.get_ident() == main
-            seen.append(pair.key)
+            assert info.compare_key is not None  # stamped before the pair layer
+            seen.append(info.compare_key)
             return False  # copy nothing; the test only pins the call order
 
         client, _calls = make_recording_client([_listing()])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            compare=ParallelCompare(decide, workers=4),
+            create_filter=keep_new,
+            update_filter=ParallelCompare(_always_copies, workers=4),
             transfer_config=_SERIAL,
         )
         assert seen == ["n1.txt", "n2.txt", "n3.txt"]
@@ -704,6 +743,6 @@ class TestParallelCompare:
             S3().sync(
                 str(src),
                 S3Storage("s3://bucket/p", client=client),
-                compare=ParallelCompare(boom, workers=2),
+                update_filter=ParallelCompare(boom, workers=2),
                 transfer_config=_SERIAL,
             )

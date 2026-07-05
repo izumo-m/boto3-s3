@@ -1,7 +1,7 @@
 """``boto3_s3.etagcompare``: an ETag content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
-copies the source). The default ``compare=None`` decides by size + last-modified,
+copies the source). The default ``update_filter=None`` decides by size + last-modified,
 aws-cli style; :class:`EtagComparison` decides by **content**,
 comparing S3's ETag against the ETag the source would carry:
 
@@ -39,7 +39,7 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   carry an opaque, non-MD5 ETag that cannot be reconstructed, and a listing does
   not reveal an object's encryption - so against such a bucket this strategy
   treats every object as differing and re-copies it each run. Use the default
-  ``compare=None`` there instead.
+  ``update_filter=None`` there instead.
 
 Because the copy decision runs on ``sync``'s main thread, an upload / download
 pair blocks that thread on the local read + hash: the strategy trades wall-clock
@@ -75,7 +75,7 @@ class EtagComparison(ContentComparison):
     upload / download reconstructs the local file's single- or multipart ETag (at
     ``part_size``) and compares. A missing / non-MD5 ETag is treated as differing
     (copy), so it never skips on an indeterminate comparison. It is a replacement
-    ``compare=`` strategy - selected instead of the size+time default, not
+    ``update_filter=`` strategy - selected instead of the size+time default, not
     composed with it.
 
     The multipart part size is fixed at construction (``part_size``) and must

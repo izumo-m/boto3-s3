@@ -1,7 +1,7 @@
 """``boto3_s3.checksumcompare``: a native-checksum content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
-copies the source). The default ``compare=None`` decides by size + last-modified,
+copies the source). The default ``update_filter=None`` decides by size + last-modified,
 aws-cli style; :class:`ChecksumComparison` decides by **content**,
 comparing S3's stored native checksum against the checksum the local file would
 carry:
@@ -25,8 +25,8 @@ imports no AWS SDK module at import time; the SDK touches - the boto3 client (vi
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
-It is a replacement ``compare=`` strategy, not composed with the default:
-``S3.sync(compare=ChecksumComparison(s3, src, dest))`` decides every pair by content.
+It is a replacement ``update_filter=`` strategy, not composed with the default:
+``S3.sync(update_filter=ChecksumComparison(s3, src, dest))`` decides every pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + local hash on
@@ -103,7 +103,7 @@ class ChecksumComparison(ContentComparison):
     ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched
     algorithm, or an algorithm that cannot be computed locally is treated as
     differing (copy), so it never skips on an indeterminate comparison. It is a
-    replacement ``compare=`` strategy, selected instead of the size+time default.
+    replacement ``update_filter=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
     ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to

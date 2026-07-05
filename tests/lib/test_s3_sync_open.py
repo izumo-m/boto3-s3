@@ -9,7 +9,7 @@ destination (downloads via ``open("wb")``; orphan custom keys deleted via
 ``Storage.delete``). The in-memory ``_MemStorage`` family is reused from the
 cp/mv open-route tests; the S3 side rides the recording client.
 
-The transfer tests pin ``compare=True`` (copy every source) so the routing -
+The transfer tests pin ``update_filter=True`` (copy every source) so the routing -
 not the comparator (covered in ``test_s3_sync.py``) - is what is under test.
 """
 
@@ -58,7 +58,10 @@ class TestSyncOpens3Upload:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
         client, calls = make_recording_client([_listing(), {}, {}])  # empty dest, 2 PutObject
         S3().sync(
-            src, S3Storage("s3://b/dest/", client=client), compare=True, transfer_config=_SERIAL
+            src,
+            S3Storage("s3://b/dest/", client=client),
+            update_filter=True,
+            transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
         assert calls[0].params["Prefix"] == "dest/"
@@ -74,8 +77,8 @@ class TestSyncOpens3Upload:
         S3().sync(
             src,
             S3Storage("s3://b/dest/", client=client),
-            compare=True,
-            delete=True,
+            update_filter=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject", "DeleteObjects"]
@@ -107,7 +110,10 @@ class TestSyncS3openDownload:
             ]
         )
         S3().sync(
-            S3Storage("s3://b/src/", client=client), dest, compare=True, transfer_config=_SERIAL
+            S3Storage("s3://b/src/", client=client),
+            dest,
+            update_filter=True,
+            transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
@@ -121,8 +127,8 @@ class TestSyncS3openDownload:
         S3().sync(
             S3Storage("s3://b/src/", client=client),
             dest,
-            compare=True,
-            delete=True,
+            update_filter=True,
+            delete_filter=True,
             transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
@@ -148,7 +154,7 @@ class TestSyncS3openDownload:
         S3().sync(
             S3Storage("s3://b/src/", client=client),
             dest,
-            delete=True,
+            delete_filter=True,
             capture_response=True,
             on_result=results.append,
             transfer_config=_SERIAL,
@@ -162,7 +168,7 @@ class TestSyncS3openDownload:
             S3().sync(
                 S3Storage("s3://b/src/", client=client),
                 dest,
-                delete=True,
+                delete_filter=True,
                 transfer_config=_SERIAL,
             )
         assert "DELETE" in str(excinfo.value)
@@ -174,7 +180,10 @@ class TestSyncS3openDownload:
         dest = _NoDeleteMem(store, location="mem://data/")
         client, calls = make_recording_client([_listing(("src/a.txt", 3)), _get_response(b"AAA")])
         S3().sync(
-            S3Storage("s3://b/src/", client=client), dest, compare=True, transfer_config=_SERIAL
+            S3Storage("s3://b/src/", client=client),
+            dest,
+            update_filter=True,
+            transfer_config=_SERIAL,
         )
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
         assert store == {"a.txt": b"AAA"}
@@ -187,7 +196,7 @@ class TestSyncS3openDownload:
         S3().sync(
             S3Storage("s3://b/src/", client=client),
             dest,
-            compare=True,
+            update_filter=True,
             dryrun=True,
             transfer_config=_SERIAL,
             on_result=results.append,
