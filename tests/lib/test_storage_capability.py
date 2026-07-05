@@ -97,6 +97,42 @@ class TestCustomBackendScanOptions:
         assert isinstance(storage.default_scan_options(), MyScanOptions)
         assert [i.key for i in storage.scan()] == ["d3"]  # arg-less, no TypeError
 
+    def test_transfer_source_receives_the_backends_own_type(self) -> None:
+        # The transfer engine (walk_source_scan_options), not only arg-less scan(),
+        # hands a custom source backend its own scan_options_type - else a backend
+        # that requires its subclass would TypeError mid-transfer.
+        from boto3_s3.producers import walk_source_scan_options
+
+        @dataclass(frozen=True, slots=True, kw_only=True)
+        class MyScanOptions(ScanOptions):
+            depth: int = 7
+
+        class Strict(_Stub):
+            scan_options_type: ClassVar[type[ScanOptions]] = MyScanOptions
+
+        opts = walk_source_scan_options(
+            Strict(),
+            recursive=True,
+            follow_symlinks=True,
+            detect_symlink_loops=False,
+            on_warning=None,
+            item_filter=None,
+        )
+        assert isinstance(opts, MyScanOptions)  # own type, not a base ScanOptions
+        assert opts.recursive is True  # common knob overlaid
+        assert opts.depth == 7  # own default kept
+
+        # A base-options backend still gets a plain ScanOptions.
+        base_opts = walk_source_scan_options(
+            _Stub(),
+            recursive=False,
+            follow_symlinks=True,
+            detect_symlink_loops=False,
+            on_warning=None,
+            item_filter=None,
+        )
+        assert type(base_opts) is ScanOptions
+
 
 class TestAutoBitLayout:
     def test_members_are_successive_powers_of_two(self) -> None:

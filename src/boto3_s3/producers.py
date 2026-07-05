@@ -20,6 +20,7 @@ producers need all of them. Like the planner, importing this module reaches
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from boto3_s3 import requestparams, transferplan
@@ -59,10 +60,13 @@ def walk_source_scan_options(
     """Scan options for a walkable transfer source (upload / sync side).
 
     A ``LocalStorage`` source gets a :class:`LocalScanOptions` (the symlink knobs
-    honored); a custom source backend gets the common :class:`ScanOptions` (the
-    symlink knobs are ``LocalStorage``-specific - a custom backend carries any
-    walk knobs on its own instance). An S3 source never comes here (it lists
-    through :func:`scan_s3_source`).
+    honored); a custom source backend gets **its own**
+    :attr:`~boto3_s3.storage.Storage.scan_options_type` (its
+    ``default_scan_options`` with the common knobs overlaid), so a backend whose
+    ``scan_pages`` requires its subclass receives it here too - not only from an
+    arg-less ``scan()``. The symlink knobs are ``LocalStorage``-specific (a custom
+    backend carries any walk knobs on its own instance). An S3 source never comes
+    here (it lists through :func:`scan_s3_source`).
     """
     if isinstance(storage, LocalStorage):
         return LocalScanOptions(
@@ -73,7 +77,13 @@ def walk_source_scan_options(
             on_warning=on_warning,
             filter=item_filter,
         )
-    return ScanOptions(recursive=recursive, sort=sort, on_warning=on_warning, filter=item_filter)
+    return replace(
+        storage.default_scan_options(),
+        recursive=recursive,
+        sort=sort,
+        on_warning=on_warning,
+        filter=item_filter,
+    )
 
 
 # S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
