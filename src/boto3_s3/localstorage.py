@@ -196,14 +196,17 @@ def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
     return st.st_size, mtime
 
 
-def get_file_stat(path: str) -> tuple[int, datetime | None]:
+def get_file_stat(path: str, st: os.stat_result | None = None) -> tuple[int, datetime | None]:
     """Size and tz-aware mtime for a path (aws-cli's ``get_file_stat``).
 
-    ``OSError`` from ``os.stat`` propagates (the caller runs the warning
-    battery); an unrepresentable timestamp returns ``None`` for the caller's
-    epoch fallback (see :func:`_size_mtime`).
+    ``st`` reuses a stat already taken for ``path`` (the single-path
+    :meth:`LocalStorage.get_fileinfo` holds one snapshot and derives everything
+    from it - no re-stat); with it ``path`` is unused. Without it,
+    ``os.stat(path)`` is taken here and its ``OSError`` propagates (the caller
+    runs the warning battery). An unrepresentable timestamp returns ``None`` for
+    the caller's epoch fallback (see :func:`_size_mtime`).
     """
-    return _size_mtime(os.stat(path))
+    return _size_mtime(st if st is not None else os.stat(path))
 
 
 def _stat_key(path: str) -> tuple[int, int] | None:
@@ -979,40 +982,41 @@ class LocalStorage(Storage):
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
-        The info carries the followed ``stat_result`` and the ``is_symlink`` flag,
-        as the walk does (this is the single-path form, so the extra stat is not on
-        any hot loop).
+
+        One ``os.stat`` is taken and **reused** for the size / mtime, the
+        special-file mode check, and the info's ``stat_result`` - no re-stat, so
+        the checks and the stored snapshot cannot disagree and no TOCTOU window
+        opens between them (the walk's single-stat design via
+        :meth:`entry_stat_result` / :meth:`classify_child`). The info carries that
+        one followed ``stat_result`` and the ``is_symlink`` flag.
         """
         is_symlink = os.path.islink(path)
         if not follow_symlinks and is_symlink:
             return None
         try:
-            size, mtime = get_file_stat(path)
+            st = os.stat(path)  # the one snapshot, reused below (followed)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise translate_os_error(exc, operation="get_fileinfo", key=None) from exc
-        if is_special_file(path):
+        if _is_special_mode(st.st_mode):
             notify(
                 f"Skipping file {path}. File is character special device, "
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(path):
+        if not is_readable(path, stat_module.S_ISDIR(st.st_mode)):
             notify(f"Skipping file {path}. File/Directory is not readable.")
             return None
+        size, mtime = get_file_stat(path, st)
         if mtime is None:
             notify("File has an invalid timestamp. Passing epoch time as timestamp.")
             mtime = _EPOCH
-        try:
-            stat_result: os.stat_result | None = os.stat(path)
-        except OSError:
-            stat_result = None
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
             size=size,
             mtime=mtime,
-            stat_result=stat_result,
+            stat_result=st,
             is_symlink=is_symlink,
         )
 

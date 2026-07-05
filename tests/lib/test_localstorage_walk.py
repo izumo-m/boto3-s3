@@ -434,6 +434,30 @@ class TestGetFileinfo:
         assert info.size == 5
         assert info.mtime is not None and info.mtime.tzinfo is not None
 
+    def test_stats_once_and_reuses_the_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One os.stat, reused for size/mtime, the special-file check, and
+        # stat_result - no re-stat, so no TOCTOU window and no snapshot mismatch
+        # (os.path.islink is an lstat, not counted here).
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"12345")
+        storage = LocalStorage(str(target))  # abspath computed before we count
+        real_stat = os.stat
+        calls = 0
+
+        def counting_stat(*args: object, **kwargs: object) -> os.stat_result:
+            nonlocal calls
+            calls += 1
+            return real_stat(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", counting_stat)
+        info = storage.get_fileinfo()
+        assert info is not None
+        assert calls == 1  # a single content stat, reused
+        assert info.stat_result is not None  # always populated (the reused snapshot)
+        assert info.size == 5
+
     def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
         # aws parity: no type check, so a directory source yields a FileInfo and
         # fails later at open ([Errno 21], rc 1).
