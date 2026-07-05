@@ -127,29 +127,21 @@ class S3FileInfo(FileInfo):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ScanOptions:
-    """Bundle of ``Storage.scan`` / ``Storage.scan_pages`` knobs, passed as one value.
+    """Backend-agnostic ``Storage.scan`` / ``Storage.scan_pages`` knobs, one value.
 
     Carrying a single immutable object - rather than re-threading keyword
     arguments through ``scan`` -> ``scan_pages`` and every override - keeps the
-    enumeration seam tidy and lets ``sync`` build one set of options and apply it
-    to both sides. ``page_size`` / ``request_payer`` / ``fetch_owner`` are S3
-    listing knobs ignored by non-S3 backends. (Bucket *listing* - the S3 service
-    root - is a separate operation with its own params, ``S3Storage.list_buckets``
-    / ``S3.ls``, not a ``scan`` knob: ``scan`` enumerates openable entities.)
-    Values are not validated here: like aws-cli, they pass
-    through to the service, which decides (``page_size=0`` lists nothing,
-    negative values fail the call with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both). ``follow_symlinks`` /
-    ``detect_symlink_loops`` / ``on_warning`` are local-walk knobs (ignored by
-    S3, like the listing knobs above): ``follow_symlinks=False`` skips symlinks;
-    ``on_warning`` receives the aws-cli-worded skip messages (a broken symlink,
-    an unreadable or special file) that the transfer rolls up - without it those
-    entries are dropped silently. ``detect_symlink_loops`` (default ``False``, a
-    library extension - ``aws s3`` has none, so off keeps parity) guards the
-    recursive walk against symlink cycles: with it (and ``follow_symlinks``) a
-    directory that resolves to one of its own ancestors is skipped with a
-    ``Symbolic link loop detected`` warning instead of recursing until
-    ``RecursionError``. Off is zero extra cost (no per-directory ``stat``).
+    enumeration seam tidy. This base holds only the knobs **every** backend
+    honors; backend-specific knobs live on subclasses (:class:`S3ScanOptions` /
+    :class:`LocalScanOptions`) so one backend's options never leak into another's
+    code. A backend builds its own subclass via
+    :meth:`~boto3_s3.storage.Storage.default_scan_options` and the built-ins
+    reject a foreign options type, so ``sync`` builds one subclass per side (an
+    S3 side gets :class:`S3ScanOptions`, a local side :class:`LocalScanOptions`).
+    A custom backend uses this base plus its own instance state, or defines its
+    own ``ScanOptions`` subclass. (Bucket *listing* - the S3 service root - is a
+    separate operation with its own params, ``S3Storage.list_buckets`` / ``S3.ls``,
+    not a ``scan`` knob: ``scan`` enumerates openable entities.)
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     each ``Storage.scan_pages`` producer, which returns already-filtered pages
@@ -174,26 +166,58 @@ class ScanOptions:
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
 
-    ``prefix`` overrides the S3 listing anchor: the built-in S3 backend lists under
-    it (as the ``ListObjectsV2`` ``Prefix``, relativizing ``compare_key`` to it)
-    instead of the storage's own key. A transfer sets it when its normalized
-    listing prefix differs from the raw source key (a recursive ``cp`` / ``mv`` /
-    ``sync`` / ``rm`` source, where the plan appends a trailing ``/``), so the
-    *passed* storage instance is scanned rather than rebuilt from a URI - a custom
-    ``S3Storage`` subclass (and its ``scan_pages`` override) survives. ``None``
-    uses the storage's key; non-S3 backends ignore it (another S3 listing knob).
+    ``on_warning`` receives the aws-cli-worded skip messages (a broken symlink,
+    an unreadable or special file) a backend's enumeration emits; the transfer
+    rolls them up (see ``on_warning`` wiring in producers). Common because any
+    backend may warn - without it those entries are dropped silently.
     """
 
     recursive: bool = False
     sort: bool = False
+    filter: Callable[[FileInfo], bool] | None = None
+    on_warning: Callable[[str], None] | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class S3ScanOptions(ScanOptions):
+    """S3 ``ListObjectsV2`` knobs - the S3 backend's :class:`ScanOptions`.
+
+    ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
+    like aws-cli, they pass through to the service, which decides (``page_size=0``
+    lists nothing, negative values fail with ``InvalidArgument`` - the exit-code
+    charter requires reproducing both). ``fetch_owner`` sends ``FetchOwner=True``
+    to populate ``S3FileInfo.owner``.
+
+    ``prefix`` overrides the listing anchor: the backend lists under it (as the
+    ``Prefix``, relativizing ``compare_key`` to it) instead of the storage's own
+    key. A transfer sets it when its normalized listing prefix differs from the
+    raw source key (a recursive ``cp`` / ``mv`` / ``sync`` / ``rm`` source, where
+    the plan appends a trailing ``/``), so the *passed* storage instance is
+    scanned rather than rebuilt from a URI - a custom ``S3Storage`` subclass (and
+    its ``scan_pages`` override) survives. ``None`` uses the storage's key.
+    """
+
     page_size: int = 1000
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
-    filter: Callable[[FileInfo], bool] | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LocalScanOptions(ScanOptions):
+    """Local-walk knobs - the ``LocalStorage`` backend's :class:`ScanOptions`.
+
+    ``follow_symlinks=False`` skips symlinks. ``detect_symlink_loops`` (default
+    ``False``, a library extension - ``aws s3`` has none, so off keeps parity)
+    guards the recursive walk against symlink cycles: with it (and
+    ``follow_symlinks``) a directory that resolves to one of its own ancestors is
+    skipped with a ``Symbolic link loop detected`` warning (via ``on_warning``)
+    instead of recursing until ``RecursionError``. Off is zero extra cost (no
+    per-directory ``stat``).
+    """
+
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
-    on_warning: Callable[[str], None] | None = None
 
 
 class TransferType(enum.Enum):
@@ -381,11 +405,13 @@ __all__ = [
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
+    "LocalScanOptions",
     "OpOutcome",
     "OpResult",
     "ProgressCallback",
     "ResultCallback",
     "S3FileInfo",
+    "S3ScanOptions",
     "ScanOptions",
     "TransferOptions",
     "TransferProgress",

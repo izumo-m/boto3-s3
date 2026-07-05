@@ -542,6 +542,18 @@ class TestNonTransferOutcomes:
         assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
         assert results[0].transfer_type is TransferType.DOWNLOAD
 
+    def test_warner_sink_is_exposed_and_counts_into_the_rollup(self) -> None:
+        # A backend walk's ScanOptions.on_warning targets transferrer.warner.warn
+        # (the shared sink) directly, not a Transferrer method; it still emits a
+        # WARNED record and counts into the rollup exposed on the Transferrer.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.", key="x")
+        assert transferrer.warned == 1
+        assert [result.outcome for result in results] == [OpOutcome.WARNED]
+        assert results[0].transfer_type is TransferType.UPLOAD
+
     def test_progress_events_accumulate(self, tmp_path: Path) -> None:
         # Driven through a download: the canned GetObject Body is genuinely
         # read by s3transfer's I/O loop, which is what fires progress deltas

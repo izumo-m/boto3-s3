@@ -53,7 +53,14 @@ declared capabilities promise:
   container one page of `FileInfo` at a time, **applying `options.filter`**
   (return already-filtered pages: push it to the source, or wrap raw pages with
   `storage.sieve_pages`; the base `scan()` only flattens + prefetches). Honour
-  `options.sort` when `SORTED_SCAN` is declared.
+  `options.sort` when `SORTED_SCAN` is declared. `options` carries only the
+  backend-agnostic knobs (`recursive` / `sort` / `filter` / `on_warning`);
+  backend-specific knobs live on a `ScanOptions` subclass so one backend's
+  options never leak into another's (`S3ScanOptions` = the `ListObjectsV2` knobs
+  `page_size` / `request_payer` / `fetch_owner` / `prefix`; `LocalScanOptions` =
+  `follow_symlinks` / `detect_symlink_loops`). The built-ins reject a foreign
+  options type; a custom backend reads its own knobs from its own subclass or
+  from its instance state, and takes the common base otherwise.
 - **`get_fileinfo(key="", *, follow_symlinks=True, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry
@@ -64,8 +71,14 @@ declared capabilities promise:
   none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
   response.
 
-Two more members come with working defaults a custom backend normally keeps:
+Three more members come with working defaults a custom backend normally keeps:
 
+- **`default_scan_options() -> ScanOptions`** — this backend's own `ScanOptions`
+  type, with defaults; `scan()` uses it when called with no options, so a backend
+  whose `scan_pages` requires its own subclass still works arg-less. The base
+  returns a plain `ScanOptions`; override it only if the backend defines its own
+  subclass (`S3Storage` / `LocalStorage` return `S3ScanOptions` /
+  `LocalScanOptions`).
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.

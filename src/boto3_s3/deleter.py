@@ -76,7 +76,7 @@ class S3Deleter:
     DIRECTORY (``CommonPrefixes``) entries, which are not object keys::
 
         with S3Deleter(storage, on_result=cb) as deleter:
-            for info in storage.scan(ScanOptions(recursive=True)):
+            for info in storage.scan(S3ScanOptions(recursive=True)):
                 deleter.submit(info)
     """
 

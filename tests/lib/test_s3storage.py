@@ -25,6 +25,7 @@ from boto3_s3 import (
     LocalStorage,
     NotFoundError,
     S3FileInfo,
+    S3ScanOptions,
     S3Storage,
     ScanOptions,
     TransportError,
@@ -152,7 +153,7 @@ class TestScanRecursive:
             {"Contents": [_obj("prefix/c.txt")]},
         ]
         storage, client = _storage(pages)
-        results = list(storage.scan(ScanOptions(recursive=True)))
+        results = list(storage.scan(S3ScanOptions(recursive=True)))
 
         assert "Delimiter" not in client.calls[0]
         assert all(isinstance(r, S3FileInfo) for r in results)
@@ -166,7 +167,7 @@ class TestScanRecursive:
         # nor trips over a None compare_key.
         pages = [{"Contents": [_obj("prefix/keep/a.txt"), _obj("prefix/drop/b.txt")]}]
         storage, _ = _storage(pages)
-        options = ScanOptions(
+        options = S3ScanOptions(
             recursive=True, filter=lambda info: (info.compare_key or "").startswith("keep/")
         )
         results = list(storage.scan(options))
@@ -177,7 +178,7 @@ class TestScanRecursive:
 class TestScanOptionForwarding:
     def test_page_size_and_request_payer_forwarded(self) -> None:
         storage, client = _storage([])
-        list(storage.scan(ScanOptions(page_size=42, request_payer="requester")))
+        list(storage.scan(S3ScanOptions(page_size=42, request_payer="requester")))
         assert client.calls[0]["PaginationConfig"] == {"PageSize": 42}
         assert client.calls[0]["RequestPayer"] == "requester"
 
@@ -188,7 +189,7 @@ class TestScanOptionForwarding:
 
     def test_fetch_owner_forwarded(self) -> None:
         storage, client = _storage([])
-        list(storage.scan(ScanOptions(fetch_owner=True)))
+        list(storage.scan(S3ScanOptions(fetch_owner=True)))
         assert client.calls[0]["FetchOwner"] is True
 
     def test_fetch_owner_omitted_by_default(self) -> None:
@@ -204,7 +205,7 @@ class TestScanPages:
             {"Contents": [_obj("c.txt")]},
         ]
         storage, _ = _storage(pages)
-        result = list(storage.scan_pages(ScanOptions(recursive=True)))
+        result = list(storage.scan_pages(S3ScanOptions(recursive=True)))
         assert [[fi.key for fi in page] for page in result] == [["a.txt", "b.txt"], ["c.txt"]]
 
     def test_override_filters_entries_through_scan(self) -> None:
@@ -218,7 +219,7 @@ class TestScanPages:
 
         client = _FakeS3Client(pages=[{"Contents": [_obj("d/.hidden"), _obj("d/seen.txt")]}])
         storage = NoDotfiles("s3://bucket/d/", client=client)
-        assert [fi.key for fi in storage.scan(ScanOptions(recursive=True))] == ["d/seen.txt"]
+        assert [fi.key for fi in storage.scan(S3ScanOptions(recursive=True))] == ["d/seen.txt"]
 
 
 class TestScanPrefixOverride:
@@ -232,7 +233,7 @@ class TestScanPrefixOverride:
     def test_prefix_overrides_key_as_listing_anchor(self) -> None:
         pages = [{"Contents": [_obj("data/a.txt"), _obj("data/sub/b.txt")]}]
         storage, client = _storage(pages, url="s3://bucket/data")  # key == "data"
-        results = list(storage.scan(ScanOptions(recursive=True, prefix="data/")))
+        results = list(storage.scan(S3ScanOptions(recursive=True, prefix="data/")))
         # Listed under the prefix, not the storage's own key.
         assert client.calls[0]["Prefix"] == "data/"
         # compare_key is relative to the prefix ("data/"), not "data".
@@ -240,7 +241,7 @@ class TestScanPrefixOverride:
 
     def test_prefix_none_uses_the_storage_key(self) -> None:
         storage, client = _storage([], url="s3://bucket/data")
-        list(storage.scan(ScanOptions(recursive=True)))
+        list(storage.scan(S3ScanOptions(recursive=True)))
         assert client.calls[0]["Prefix"] == "data"
 
     def test_subclass_scan_pages_override_survives_a_prefix_reanchor(self) -> None:
@@ -255,9 +256,22 @@ class TestScanPrefixOverride:
 
         client = _FakeS3Client(pages=[{"Contents": [_obj("data/a.txt")]}])
         storage = Tagged("s3://bucket/data", client=client)  # key == "data"
-        results = list(storage.scan(ScanOptions(recursive=True, prefix="data/")))
+        results = list(storage.scan(S3ScanOptions(recursive=True, prefix="data/")))
         assert client.calls[0]["Prefix"] == "data/"  # re-anchored on the instance
         assert results[0].compare_key == "TAG/a.txt"  # the override ran
+
+
+class TestScanOptionsType:
+    def test_scan_rejects_a_foreign_scan_options(self) -> None:
+        # S3Storage.scan requires its own S3ScanOptions; a bare ScanOptions is
+        # rejected rather than silently listing with S3 defaults.
+        storage, _ = _storage([])
+        with pytest.raises(TypeError, match="S3ScanOptions"):
+            list(storage.scan(ScanOptions(recursive=True)))
+
+    def test_default_scan_options_is_s3(self) -> None:
+        storage, _ = _storage([])
+        assert isinstance(storage.default_scan_options(), S3ScanOptions)
 
 
 class TestScanFilter:
@@ -270,13 +284,13 @@ class TestScanFilter:
             {"Contents": [_obj("prefix/c.txt")]},
         ]
         storage, _ = _storage(pages)
-        options = ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
+        options = S3ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         assert [fi.key for fi in storage.scan(options)] == ["prefix/a.txt", "prefix/c.txt"]
 
     def test_none_filter_keeps_everything(self) -> None:
         pages = [{"Contents": [_obj("prefix/a"), _obj("prefix/b")]}]
         storage, _ = _storage(pages)
-        assert [fi.key for fi in storage.scan(ScanOptions(recursive=True))] == [
+        assert [fi.key for fi in storage.scan(S3ScanOptions(recursive=True))] == [
             "prefix/a",
             "prefix/b",
         ]
@@ -286,12 +300,14 @@ class TestScanFilter:
         # a page emptied by the filter is dropped, not yielded empty.
         pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.log")]}]
         storage, _ = _storage(pages)
-        options = ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
+        options = S3ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         result = list(storage.scan_pages(options))
         assert [[fi.key for fi in page] for page in result] == [["prefix/a.txt"]]
         # a filter excluding everything yields no pages at all
         storage2, _ = _storage(pages)
-        assert list(storage2.scan_pages(ScanOptions(recursive=True, filter=lambda _i: False))) == []
+        assert (
+            list(storage2.scan_pages(S3ScanOptions(recursive=True, filter=lambda _i: False))) == []
+        )
 
     def test_sieve_drops_emptied_pages(self) -> None:
         # sieve_pages (the helper a producer wraps its raw pages with): a page
@@ -310,7 +326,7 @@ class TestScanFilter:
 
         pages = [{"Contents": [_obj("prefix/a"), _obj("prefix/b")]}]
         storage, _ = _storage(pages)
-        list(storage.scan(ScanOptions(recursive=True, filter=keep)))
+        list(storage.scan(S3ScanOptions(recursive=True, filter=keep)))
         assert threads == {"boto3-s3-prefetch"}
 
     def test_predicate_error_surfaces_on_the_consumer_pull(self) -> None:
@@ -320,7 +336,7 @@ class TestScanFilter:
         pages = [{"Contents": [_obj("prefix/a")]}]
         storage, _ = _storage(pages)
         with pytest.raises(RuntimeError, match="predicate failed"):
-            list(storage.scan(ScanOptions(recursive=True, filter=boom)))
+            list(storage.scan(S3ScanOptions(recursive=True, filter=boom)))
 
 
 def _client_error(code: str, status: int) -> ClientError:

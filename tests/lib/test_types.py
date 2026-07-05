@@ -11,7 +11,15 @@ import boto3_s3.types as t
 
 DT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
-TYPE_NAMES = ["FileInfo", "FileKind", "LocalFileInfo", "S3FileInfo", "ScanOptions"]
+TYPE_NAMES = [
+    "FileInfo",
+    "FileKind",
+    "LocalFileInfo",
+    "LocalScanOptions",
+    "S3FileInfo",
+    "S3ScanOptions",
+    "ScanOptions",
+]
 
 
 class TestFileInfo:
@@ -100,13 +108,14 @@ class TestS3FileInfo:
 
 
 class TestScanOptions:
-    def test_defaults(self) -> None:
+    """The backend-agnostic base: only the knobs every backend honors."""
+
+    def test_common_defaults(self) -> None:
         opts = t.ScanOptions()
         assert opts.recursive is False
-        assert opts.page_size == 1000
-        assert opts.request_payer is None
-        assert opts.fetch_owner is False
+        assert opts.sort is False
         assert opts.filter is None
+        assert opts.on_warning is None
 
     def test_filter_carries_a_predicate(self) -> None:
         def keep(info: t.FileInfo) -> bool:
@@ -114,27 +123,62 @@ class TestScanOptions:
 
         assert t.ScanOptions(filter=keep).filter is keep
 
-    def test_carries_all_values(self) -> None:
-        opts = t.ScanOptions(
-            recursive=True, page_size=50, request_payer="requester", fetch_owner=True
-        )
-        assert (opts.recursive, opts.page_size, opts.request_payer, opts.fetch_owner) == (
-            True,
-            50,
-            "requester",
-            True,
-        )
-
     def test_is_frozen(self) -> None:
         opts = t.ScanOptions()
         with pytest.raises(AttributeError):
             opts.recursive = True  # pyright: ignore[reportAttributeAccessIssue]
 
+
+class TestS3ScanOptions:
+    def test_defaults_and_inherits_common(self) -> None:
+        opts = t.S3ScanOptions()
+        assert isinstance(opts, t.ScanOptions)  # a ScanOptions subclass
+        assert (opts.page_size, opts.request_payer, opts.fetch_owner, opts.prefix) == (
+            1000,
+            None,
+            False,
+            None,
+        )
+        assert opts.recursive is False  # inherited common field
+
+    def test_carries_all_values(self) -> None:
+        opts = t.S3ScanOptions(
+            recursive=True,
+            page_size=50,
+            request_payer="requester",
+            fetch_owner=True,
+            prefix="p/",
+        )
+        assert (
+            opts.recursive,
+            opts.page_size,
+            opts.request_payer,
+            opts.fetch_owner,
+            opts.prefix,
+        ) == (True, 50, "requester", True, "p/")
+
     def test_page_size_passes_through_unvalidated(self) -> None:
         # aws-cli parity (exit-code charter): out-of-range values reach the
         # server, which decides (0 lists nothing, negative -> InvalidArgument).
-        assert t.ScanOptions(page_size=0).page_size == 0
-        assert t.ScanOptions(page_size=-1).page_size == -1
+        assert t.S3ScanOptions(page_size=0).page_size == 0
+        assert t.S3ScanOptions(page_size=-1).page_size == -1
+
+
+class TestLocalScanOptions:
+    def test_defaults_and_inherits_common(self) -> None:
+        opts = t.LocalScanOptions()
+        assert isinstance(opts, t.ScanOptions)
+        assert opts.follow_symlinks is True
+        assert opts.detect_symlink_loops is False
+        assert opts.sort is False  # inherited common field
+
+    def test_carries_all_values(self) -> None:
+        opts = t.LocalScanOptions(recursive=True, follow_symlinks=False, detect_symlink_loops=True)
+        assert (opts.recursive, opts.follow_symlinks, opts.detect_symlink_loops) == (
+            True,
+            False,
+            True,
+        )
 
 
 class TestPublicReExport:

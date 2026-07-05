@@ -100,7 +100,7 @@ from boto3_s3.exceptions import (
     TransportError,
 )
 from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, ScanOptions
+from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -333,7 +333,7 @@ class LocalFileGenerator:
     #: The stamp for an unrepresentable mtime (aws-cli's ``EPOCH_TIME``).
     EPOCH_TIME: ClassVar[datetime] = _EPOCH
 
-    def list_files(self, root: str, options: ScanOptions) -> Iterator[LocalFileInfo]:
+    def list_files(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
         """Yield every file under ``root`` (recursively) in aws-cli byte order.
 
         aws-cli's ``FileGenerator.list_files`` (the ``dir_op=True`` branch): the
@@ -346,7 +346,9 @@ class LocalFileGenerator:
         for page in self.list_file_pages(root, options):
             yield from page
 
-    def list_file_pages(self, root: str, options: ScanOptions) -> Iterator[list[LocalFileInfo]]:
+    def list_file_pages(
+        self, root: str, options: LocalScanOptions
+    ) -> Iterator[list[LocalFileInfo]]:
         """Yield the files under ``root`` (recursively) as byte-order pages.
 
         The paged form driving :meth:`Storage.scan_pages`: one page per directory
@@ -364,9 +366,9 @@ class LocalFileGenerator:
         :meth:`finalize_children` can already filter on it) - the axis
         ``options.filter`` matches.
 
-        Reads the local-walk fields of ``options`` (the same bundle
-        ``Storage.scan_pages`` receives, so a custom walker sees the full scan
-        context; the S3 / paging fields are ignored, as ``ScanOptions`` intends):
+        Reads the local-walk fields of ``options`` (a :class:`LocalScanOptions`,
+        this backend's option type, so a custom walker sees the full scan
+        context):
         ``on_warning`` (warnings carry the aws-cli message bodies, dropped when
         ``None``); ``follow_symlinks`` (``False`` skips symlinks silently);
         ``detect_symlink_loops`` (with ``follow_symlinks``, skips a directory that
@@ -408,7 +410,7 @@ class LocalFileGenerator:
     def walk_dir(
         self,
         dir_path: str,
-        options: ScanOptions,
+        options: LocalScanOptions,
         *,
         strip: int,
         notify: Callable[[str], None],
@@ -869,6 +871,10 @@ class LocalStorage(Storage):
         return full_path, False
 
     @override
+    def default_scan_options(self) -> LocalScanOptions:
+        """This backend's :class:`ScanOptions` type (:meth:`Storage.default_scan_options`)."""
+        return LocalScanOptions()
+
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path`, one directory read (``os.scandir``) per page.
 
@@ -887,10 +893,16 @@ class LocalStorage(Storage):
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``) as a single page, anchored at the absolutized path
-        (``self._abspath``) so ``FileInfo.key`` is absolute. The S3 listing knobs
-        on ``options`` (``page_size`` / ``request_payer`` / ...) are ignored here
-        (docs on ``ScanOptions``).
+        (``self._abspath``) so ``FileInfo.key`` is absolute.
+
+        Requires a :class:`LocalScanOptions` (this backend's option type); a
+        foreign ``ScanOptions`` is rejected rather than silently walking with
+        defaults.
         """
+        if not isinstance(options, LocalScanOptions):
+            raise TypeError(
+                f"LocalStorage.scan requires LocalScanOptions, got {type(options).__name__}"
+            )
         if options.recursive:
             yield from self._walker.list_file_pages(self._abspath + os.sep, options)
             return
@@ -922,14 +934,14 @@ class LocalStorage(Storage):
         # construction. list_files stamps compare_key (key relative to root).
         yield from self._walker.list_files(
             self._abspath + os.sep,
-            ScanOptions(
+            LocalScanOptions(
                 follow_symlinks=follow_symlinks,
                 detect_symlink_loops=detect_loops,
                 on_warning=on_warning,
             ),
         )
 
-    def _scan_one_level(self, root: str, options: ScanOptions) -> Iterator[FileInfo]:
+    def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[FileInfo]:
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )

@@ -51,7 +51,7 @@ from boto3_s3.types import (
     ProgressCallback,
     ResultCallback,
     S3FileInfo,
-    ScanOptions,
+    S3ScanOptions,
     TransferOptions,
     TransferType,
     strip_response_metadata,
@@ -582,7 +582,7 @@ class S3:
                 page_size=page_size, name_prefix=bucket_name_prefix, region=bucket_region
             )
         return storage.scan(
-            ScanOptions(recursive=recursive, page_size=page_size, request_payer=request_payer)
+            S3ScanOptions(recursive=recursive, page_size=page_size, request_payer=request_payer)
         )
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
@@ -1398,10 +1398,10 @@ class S3:
 
         # Enumerating paths: full recursive delete, or the keyless
         # non-recursive folder-marker sweep. Both list without Delimiter.
-        # ScanOptions.prefix re-anchors the listing at the normalized prefix on
+        # S3ScanOptions.prefix re-anchors the listing at the normalized prefix on
         # the passed storage itself (client shared), so a custom S3Storage
         # subclass and its scan_pages override survive.
-        options = ScanOptions(
+        options = S3ScanOptions(
             recursive=True,
             page_size=page_size,
             request_payer=request_payer,

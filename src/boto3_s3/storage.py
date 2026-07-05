@@ -158,6 +158,18 @@ class Storage(abc.ABC):
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
 
+    def default_scan_options(self) -> ScanOptions:
+        """This backend's own :class:`ScanOptions` type, with defaults.
+
+        ``scan()`` uses it when called with no options, so a backend whose
+        ``scan_pages`` requires its own subclass (the built-ins reject a foreign
+        options type) still works arg-less. The base returns a plain
+        :class:`ScanOptions`; ``S3Storage`` / ``LocalStorage`` return their
+        :class:`~boto3_s3.types.S3ScanOptions` / :class:`~boto3_s3.types.LocalScanOptions`.
+        A custom backend that defines its own subclass overrides this too.
+        """
+        return ScanOptions()
+
     def scan(self, options: ScanOptions | None = None) -> Iterator[FileInfo]:
         """Yield the entries under this storage as a flat ``FileInfo`` stream.
 
@@ -173,7 +185,7 @@ class Storage(abc.ABC):
         not this method. Used by ``ls`` and the recursive forms of ``cp`` /
         ``rm`` / ``sync``.
         """
-        opts = options if options is not None else ScanOptions()
+        opts = options if options is not None else self.default_scan_options()
         with prefetch(self.scan_pages(opts), queue_size=self._scan_prefetch_pages) as items:
             yield from items
 

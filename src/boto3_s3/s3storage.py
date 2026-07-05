@@ -49,7 +49,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.storage import Storage, StorageCapability, sieve_pages
-from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
+from boto3_s3.types import FileInfo, FileKind, S3FileInfo, S3ScanOptions, ScanOptions
 
 if TYPE_CHECKING:
     from typing import BinaryIO
@@ -549,6 +549,10 @@ class S3Storage(Storage):
             self._client = None
 
     @override
+    def default_scan_options(self) -> S3ScanOptions:
+        """This backend's :class:`ScanOptions` type (:meth:`Storage.default_scan_options`)."""
+        return S3ScanOptions()
+
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
@@ -574,13 +578,18 @@ class S3Storage(Storage):
         ``super().scan_pages(options)``; the work runs on :meth:`Storage.scan`'s
         prefetch worker so it overlaps consumption. Fetch-time botocore errors are
         translated to ``Boto3S3Error`` here and surface on the consumer's pull.
+
+        Requires an :class:`S3ScanOptions` (this backend's option type); a foreign
+        ``ScanOptions`` is rejected rather than silently listing with defaults.
         """
+        if not isinstance(options, S3ScanOptions):
+            raise TypeError(f"S3Storage.scan requires S3ScanOptions, got {type(options).__name__}")
         raw = self._scan_object_pages(options)
         if options.filter is not None:
             raw = sieve_pages(raw, options.filter)
         yield from raw
 
-    def _scan_object_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
+    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
 
         ``options.prefix`` overrides the storage's own key as the listing anchor

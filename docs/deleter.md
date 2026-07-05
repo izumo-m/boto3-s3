@@ -15,10 +15,10 @@ never reaches the deleter.
 ## 1. API
 
 ```python
-from boto3_s3 import S3Deleter, ScanOptions
+from boto3_s3 import S3Deleter, S3ScanOptions
 
 with S3Deleter(storage, on_result=cb) as deleter:
-    for info in storage.scan(ScanOptions(recursive=True)):
+    for info in storage.scan(S3ScanOptions(recursive=True)):
         deleter.submit(info)
 ```
 

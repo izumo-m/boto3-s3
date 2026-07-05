@@ -380,6 +380,57 @@ class _ResponseCapture:
             return self._store.pop((bucket, key), None)
 
 
+class Warner:
+    """The op-level warning sink: a message body -> a WARNED ``OpResult``.
+
+    A single place that turns a warning into an ``OpResult`` and reports it, so
+    both a backend enumeration (``ScanOptions.on_warning``) and the transfer
+    engine funnel their warnings through the same emitter instead of the walk
+    reaching into the transfer engine for one. Warnings count independently of
+    files (``warned > 0`` alone maps to exit code 2, aws rc model); the count is
+    thread-safe because a walk worker and a transfer worker can warn at once.
+    The transfer run's :class:`Transferrer` builds one from its result context
+    and exposes it as :attr:`Transferrer.warner`.
+    """
+
+    def __init__(
+        self,
+        *,
+        transfer_type: TransferType,
+        src_storage: Storage | None,
+        dest_storage: Storage | None,
+        operation: str,
+        on_result: ResultCallback | None,
+    ) -> None:
+        self._transfer_type = transfer_type
+        self._src_storage = src_storage
+        self._dest_storage = dest_storage
+        self._operation = operation
+        self._on_result = on_result
+        self._warned = 0
+        self._lock = threading.Lock()
+
+    @property
+    def warned(self) -> int:
+        return self._warned
+
+    def warn(self, body: str, *, key: str = "") -> None:
+        """Record a warning (aws-cli message body, no ``warning: `` prefix)."""
+        with self._lock:
+            self._warned += 1
+        if self._on_result is not None:
+            self._on_result(
+                OpResult(
+                    transfer_type=self._transfer_type,
+                    key=key,
+                    outcome=OpOutcome.WARNED,
+                    error=Boto3S3Error(body, operation=self._operation),
+                    src_storage=self._src_storage,
+                    dest_storage=self._dest_storage,
+                )
+            )
+
+
 class Transferrer:
     """Submit transfer items of one kind and aggregate their outcomes.
 
@@ -464,9 +515,18 @@ class Transferrer:
         self._lock = threading.Lock()
         self._succeeded = 0
         self._failed = 0
-        self._warned = 0
         self._skipped = 0
         self._first_error: Boto3S3Error | None = None
+        # The shared warning sink: the walk (ScanOptions.on_warning) and this
+        # engine both report through it, so a warning never routes into the
+        # engine itself. It owns the warned count (rolled into the rc).
+        self._warner = Warner(
+            transfer_type=self._result_transfer_type,
+            src_storage=src_storage,
+            dest_storage=dest_storage,
+            operation=operation,
+            on_result=on_result,
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -508,7 +568,12 @@ class Transferrer:
 
     @property
     def warned(self) -> int:
-        return self._warned
+        return self._warner.warned
+
+    @property
+    def warner(self) -> Warner:
+        """The run's warning sink - what a walk's ``ScanOptions.on_warning`` targets."""
+        return self._warner
 
     @property
     def skipped(self) -> int:
@@ -521,24 +586,14 @@ class Transferrer:
     # -- non-transfer outcomes ----------------------------------------------
 
     def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning (aws-cli message body, no ``warning: `` prefix).
+        """Record a warning through the shared sink (:attr:`warner`).
 
-        Warnings count independently of files: a transfer that succeeds but
-        fails its mtime stamp produces both a SUCCEEDED and a WARNED record,
-        and ``warned > 0`` alone maps to exit code 2 (aws rc model).
+        A transfer that succeeds but fails its mtime stamp produces both a
+        SUCCEEDED and a WARNED record, and ``warned > 0`` alone maps to exit code
+        2 (aws rc model). This engine's own warnings go here; a backend walk
+        reports directly through :attr:`warner`.
         """
-        with self._lock:
-            self._warned += 1
-        self._emit(
-            OpResult(
-                transfer_type=self._result_transfer_type,
-                key=key,
-                outcome=OpOutcome.WARNED,
-                error=Boto3S3Error(body, operation=self._operation),
-                src_storage=self._src_storage,
-                dest_storage=self._dest_storage,
-            )
-        )
+        self._warner.warn(body, key=key)
 
     def skip(self, item: TransferItem) -> None:
         """Record a silent, non-warning skip (no exit-code effect)."""

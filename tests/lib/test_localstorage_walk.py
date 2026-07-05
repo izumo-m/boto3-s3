@@ -26,7 +26,7 @@ from boto3_s3.localstorage import (
     WalkChild,
     to_native_path,
 )
-from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, ScanOptions
+from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
@@ -199,7 +199,7 @@ class TestSymlinkLoopDetection:
         baseline = list(detector._ancestors)  # pyright: ignore[reportPrivateUsage]  # just the root
         strip = len(root.replace(os.sep, "/"))
         gen = walker.walk_dir(
-            root, ScanOptions(), strip=strip, notify=lambda _b: None, detector=detector
+            root, LocalScanOptions(), strip=strip, notify=lambda _b: None, detector=detector
         )
         first = next(gen)  # [a.txt], flushed before descending into sub/
         assert [os.path.basename(i.key) for i in first] == ["a.txt"]
@@ -234,7 +234,7 @@ class TestWalkIsCustomizable:
                 return super().should_ignore_entry(entry, full, dir_fd, st, notify=notify)
 
         storage = LocalStorage(str(tmp_path), walker=_NoTmp())
-        keys = [info.compare_key for info in storage.scan(ScanOptions(recursive=True))]
+        keys = [info.compare_key for info in storage.scan(LocalScanOptions(recursive=True))]
         assert keys == ["keep.txt"]  # the override pruned skip.tmp
 
     def test_stat_info_override_can_rewrite_entries(self, tmp_path: Path) -> None:
@@ -401,7 +401,7 @@ class TestScanPagesAreScandirAligned:
         _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
         pages = [
             [info.compare_key for info in page]
-            for page in LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=True))
+            for page in LocalStorage(str(tmp_path)).scan_pages(LocalScanOptions(recursive=True))
         ]
         assert pages == [["a.txt"], ["sub/b.txt"], ["z.txt"]]
 
@@ -410,13 +410,13 @@ class TestScanPagesAreScandirAligned:
         _make_tree(tmp_path, "a.txt", "b.txt", "c.txt")
         pages = [
             [info.compare_key for info in page]
-            for page in LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=True))
+            for page in LocalStorage(str(tmp_path)).scan_pages(LocalScanOptions(recursive=True))
         ]
         assert pages == [["a.txt", "b.txt", "c.txt"]]
 
     def test_non_recursive_level_is_one_page(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt", "sub/b.txt")
-        pages = list(LocalStorage(str(tmp_path)).scan_pages(ScanOptions(recursive=False)))
+        pages = list(LocalStorage(str(tmp_path)).scan_pages(LocalScanOptions(recursive=False)))
         assert len(pages) == 1
         assert [info.compare_key for info in pages[0]] == ["a.txt", "sub/"]
 
@@ -506,7 +506,7 @@ class TestGetFileinfo:
 class TestLocalStorageScan:
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
-        infos = list(LocalStorage(tmp_path).scan(ScanOptions(recursive=True)))
+        infos = list(LocalStorage(tmp_path).scan(LocalScanOptions(recursive=True)))
         prefix = str(tmp_path).replace(os.sep, "/")
         assert [info.key for info in infos] == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
         # scan stamps the root-relative compare_key on every entry.
@@ -523,7 +523,7 @@ class TestLocalStorageScan:
 
     def test_scan_filter_applies(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt", "b.bin")
-        options = ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
+        options = LocalScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         keys = [info.key for info in LocalStorage(tmp_path).scan(options)]
         assert keys == [str(tmp_path).replace(os.sep, "/") + "/a.txt"]
 
@@ -568,7 +568,7 @@ class TestStatResultAndSymlink:
             seen.append(f"{info.compare_key}:{info.stat_result.st_size}")
             return True
 
-        options = ScanOptions(recursive=True, filter=use_stat)
+        options = LocalScanOptions(recursive=True, filter=use_stat)
         infos = list(LocalStorage(str(tmp_path)).scan(options))
         assert len(infos) == 2
         assert sorted(seen) == ["keep.txt:3", "sub/inner.txt:3"]
@@ -576,7 +576,7 @@ class TestStatResultAndSymlink:
     def test_non_recursive_populates_files_and_directories(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt", "sub/inner.txt")
         by_key = {
-            info.compare_key: info for info in LocalStorage(str(tmp_path)).scan(ScanOptions())
+            info.compare_key: info for info in LocalStorage(str(tmp_path)).scan(LocalScanOptions())
         }
         assert isinstance(by_key["a.txt"], LocalFileInfo)
         assert by_key["a.txt"].stat_result is not None and by_key["a.txt"].is_symlink is False

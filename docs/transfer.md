@@ -263,7 +263,10 @@ dest-existence check for download. We ported the same three faces:
 - **>48.8 TiB warning** (upload): as in aws-cli, **it only warns and still
   attempts the transfer** (to show S3's EntityTooLarge).
 - walk warnings (unreadable / special file / broken symlink / invalid mtime) go
-  from `walk_local`'s `on_warning` to `Transferrer.warn` (aws-cli's wording).
+  from a walk's `ScanOptions.on_warning` to the run's shared warning sink
+  (`Transferrer.warner`, a `Warner`), the same sink the engine's own warnings use
+  (aws-cli's wording) - so the walk reports a warning without reaching into the
+  transfer engine.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
   off, a symlink cycle recurses until `RecursionError`, exactly like aws-cli; on
