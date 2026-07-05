@@ -134,6 +134,23 @@ def is_anchored(pattern: str) -> bool:
     return os.path.isabs(pattern)
 
 
+def _normalize_sep(pattern: str) -> str:
+    """Fold the host path separator to ``/`` in a pattern (host-aware).
+
+    boto3-s3 matches in ``/``-folded key space (``compare_key`` / ``full_key``
+    are ``/``-separated on every OS), so a pattern's native separator must fold
+    to ``/`` too. This reproduces aws-cli's per-side normalization in
+    ``filters._match_pattern`` (local: ``pattern.replace('/', os.sep)`` matched
+    against native paths; S3: ``pattern.replace(os.sep, '/')``), collapsed to one
+    step because boto3-s3 already works in ``/`` space: on **Windows** ``\\``
+    becomes a separator (a filename never contains one there, so it is always a
+    separator), so ``--exclude "logs\\*.txt"`` matches ``logs/x.txt``; on
+    **POSIX** ``os.sep`` is already ``/`` so it is a no-op and ``\\`` stays a
+    literal (aws-cli-faithful there too).
+    """
+    return pattern if os.sep == "/" else pattern.replace(os.sep, "/")
+
+
 # ----- runtime protocols ---------------------------------------------------
 
 
@@ -386,6 +403,13 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
     pats = tuple(patterns)
     if not pats:
         return AlwaysInclude()
+
+    # Fold the host separator to '/' once, up front: keys match in '/' space, so
+    # a Windows '\' in a pattern must become a separator (relative patterns as
+    # well as the anchored ones, which the Anchored matcher already folds). No-op
+    # on POSIX. See _normalize_sep for the aws-cli parity rationale.
+    if os.sep != "/":
+        pats = tuple(GlobPattern(p.kind, _normalize_sep(p.pattern)) for p in pats)
 
     if any(is_anchored(p.pattern) for p in pats):
         return Anchored(

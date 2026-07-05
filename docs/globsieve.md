@@ -75,6 +75,15 @@ matching aws-cli (its s3 paths carry no anchor). This is what lets the **single*
 matches the local source's full path but not the S3 destination's anchorless key.
 A relative pattern keeps matching `compare_key`, which is symmetric across sides.
 
+**Host separator folding**: keys match in `/`-folded space (`compare_key` /
+`full_key` are `/`-separated on every OS), so `compile` folds each pattern's host
+separator to `/` up front (aws-cli's per-side `replace` in
+`filters._match_pattern`, collapsed to one step because boto3-s3 already matches
+in `/` space). On **Windows** a `\` in a pattern is therefore a separator
+(`--exclude "logs\*.txt"` matches `logs/x.txt`, a filename never contains a `\`
+there); on **POSIX** `os.sep` is already `/`, so folding is a no-op and `\` stays
+a literal - aws-cli-faithful on both.
+
 ## 2. Compile-time optimization
 
 `compile` detects the **macro shape** of the pattern sequence and picks the
