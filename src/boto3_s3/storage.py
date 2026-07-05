@@ -158,17 +158,23 @@ class Storage(abc.ABC):
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
 
-    def default_scan_options(self) -> ScanOptions:
-        """This backend's own :class:`ScanOptions` type, with defaults.
+    #: This backend's :class:`~boto3_s3.types.ScanOptions` type. ``scan()`` with no
+    #: options builds it (via :meth:`default_scan_options`), so a backend whose
+    #: ``scan_pages`` requires its own subclass still works arg-less. The base is a
+    #: plain :class:`~boto3_s3.types.ScanOptions`; ``S3Storage`` / ``LocalStorage``
+    #: set :class:`~boto3_s3.types.S3ScanOptions` / :class:`~boto3_s3.types.LocalScanOptions`.
+    #: A custom backend that defines its own subclass just sets this one attribute -
+    #: no method to override. (A backend that takes the base ``ScanOptions`` needs
+    #: nothing here.)
+    scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
-        ``scan()`` uses it when called with no options, so a backend whose
-        ``scan_pages`` requires its own subclass (the built-ins reject a foreign
-        options type) still works arg-less. The base returns a plain
-        :class:`ScanOptions`; ``S3Storage`` / ``LocalStorage`` return their
-        :class:`~boto3_s3.types.S3ScanOptions` / :class:`~boto3_s3.types.LocalScanOptions`.
-        A custom backend that defines its own subclass overrides this too.
+    def default_scan_options(self) -> ScanOptions:
+        """This backend's own :class:`ScanOptions`, with defaults (used by arg-less ``scan()``).
+
+        Builds :attr:`scan_options_type`; override only for a *dynamic* default
+        (most backends set the class attribute instead - nothing to override).
         """
-        return ScanOptions()
+        return self.scan_options_type()
 
     def scan(self, options: ScanOptions | None = None) -> Iterator[FileInfo]:
         """Yield the entries under this storage as a flat ``FileInfo`` stream.

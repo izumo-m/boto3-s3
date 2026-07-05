@@ -73,12 +73,14 @@ declared capabilities promise:
 
 Three more members come with working defaults a custom backend normally keeps:
 
-- **`default_scan_options() -> ScanOptions`** — this backend's own `ScanOptions`
-  type, with defaults; `scan()` uses it when called with no options, so a backend
-  whose `scan_pages` requires its own subclass still works arg-less. The base
-  returns a plain `ScanOptions`; override it only if the backend defines its own
-  subclass (`S3Storage` / `LocalStorage` return `S3ScanOptions` /
-  `LocalScanOptions`).
+- **`scan_options_type: ClassVar[type[ScanOptions]]`** — this backend's
+  `ScanOptions` type (default `ScanOptions`). Arg-less `scan()` builds it (via
+  `default_scan_options()`), so a backend whose `scan_pages` requires its own
+  subclass still works with no options. `S3Storage` / `LocalStorage` set
+  `S3ScanOptions` / `LocalScanOptions`; **a custom backend that defines its own
+  subclass just sets this one class attribute — no method to override** — and one
+  that takes the base `ScanOptions` sets nothing. (Override `default_scan_options()`
+  only for a *dynamic* default.)
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.

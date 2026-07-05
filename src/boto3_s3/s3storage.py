@@ -271,8 +271,10 @@ def _page_to_infos(
 def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
-    Runs on the prefetch worker thread. Each bucket becomes an ``S3FileInfo``
-    whose ``key`` is the bucket name and whose ``mtime`` is the bucket's
+    Runs on the consumer's iteration thread - ``S3.ls`` iterates
+    :meth:`list_buckets` directly, not through ``scan``'s prefetch worker. Each
+    bucket becomes an ``S3FileInfo`` whose ``key`` is the bucket name and whose
+    ``mtime`` is the bucket's
     ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
     root has no prefix, so ``compare_key`` is the bucket name itself.
     """
@@ -326,6 +328,9 @@ class S3Storage(Storage):
         | StorageCapability.SORTED_SCAN
         | StorageCapability.DELETE
     )
+    #: The S3 listing option type (:attr:`Storage.scan_options_type`): arg-less
+    #: ``scan()`` builds an :class:`S3ScanOptions`, which :meth:`scan_pages` requires.
+    scan_options_type: ClassVar[type[ScanOptions]] = S3ScanOptions
 
     # -- S3 path grammar (aws-cli string rules; no client, no validation) ----
 
@@ -547,11 +552,6 @@ class S3Storage(Storage):
         if self._owns_client and self._client is not None:
             self._client.close()
             self._client = None
-
-    @override
-    def default_scan_options(self) -> S3ScanOptions:
-        """This backend's :class:`ScanOptions` type (:meth:`Storage.default_scan_options`)."""
-        return S3ScanOptions()
 
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).

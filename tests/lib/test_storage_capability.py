@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import io
 from collections.abc import Callable, Iterator, Sequence
-from typing import BinaryIO, Literal
+from dataclasses import dataclass
+from typing import BinaryIO, ClassVar, Literal
 
 from typing_extensions import override
 
@@ -58,6 +59,43 @@ class _Stub(Storage):
     @override
     def as_text(self) -> str:
         return "stub"
+
+
+class TestCustomBackendScanOptions:
+    """A custom backend scans arg-less without overriding ``default_scan_options``:
+    it either takes the base ``ScanOptions`` (nothing to declare) or names its own
+    type with the one-line ``scan_options_type`` class attribute."""
+
+    def test_base_options_backend_scans_argless_with_no_declaration(self) -> None:
+        # Reads the base ScanOptions -> no scan_options_type, no override needed.
+        class Plain(_Stub):
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield [FileInfo(key="a", compare_key="a")]
+
+        storage = Plain()
+        assert isinstance(storage.default_scan_options(), ScanOptions)
+        assert [i.key for i in storage.scan()] == ["a"]  # arg-less scan() just works
+
+    def test_own_type_backend_needs_only_the_class_attr(self) -> None:
+        # Requires its own ScanOptions subclass and rejects a foreign one, yet sets
+        # only scan_options_type - arg-less scan() builds it, no method override.
+        @dataclass(frozen=True, slots=True, kw_only=True)
+        class MyScanOptions(ScanOptions):
+            depth: int = 3
+
+        class Strict(_Stub):
+            scan_options_type: ClassVar[type[ScanOptions]] = MyScanOptions
+
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                if not isinstance(options, MyScanOptions):
+                    raise TypeError("Strict requires MyScanOptions")
+                yield [FileInfo(key=f"d{options.depth}", compare_key="x")]
+
+        storage = Strict()
+        assert isinstance(storage.default_scan_options(), MyScanOptions)
+        assert [i.key for i in storage.scan()] == ["d3"]  # arg-less, no TypeError
 
 
 class TestAutoBitLayout:

@@ -804,6 +804,9 @@ class LocalStorage(Storage):
         | StorageCapability.SORTED_SCAN
         | StorageCapability.DELETE
     )
+    #: The local-walk option type (:attr:`Storage.scan_options_type`): arg-less
+    #: ``scan()`` builds a :class:`LocalScanOptions`, which :meth:`scan_pages` requires.
+    scan_options_type: ClassVar[type[ScanOptions]] = LocalScanOptions
 
     @staticmethod
     def relative_path(filename: str, start: str = os.path.curdir) -> str:
@@ -872,11 +875,6 @@ class LocalStorage(Storage):
         if self._path.endswith(os.sep):
             return full_path + os.sep, True
         return full_path, False
-
-    @override
-    def default_scan_options(self) -> LocalScanOptions:
-        """This backend's :class:`ScanOptions` type (:meth:`Storage.default_scan_options`)."""
-        return LocalScanOptions()
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path`, one directory read (``os.scandir``) per page.
