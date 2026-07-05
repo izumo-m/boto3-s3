@@ -219,18 +219,19 @@ class TestSyncCommand:
         result, calls = _run_cmd(
             [
                 {
+                    # Byte-ordered, as a real ListObjectsV2 page is (bar < foo).
                     "Contents": [
-                        {
-                            "Key": "foo",
-                            "Size": 100,
-                            "LastModified": _TIME_UTC,
-                            "StorageClass": "GLACIER",
-                        },
                         {
                             "Key": "bar",
                             "Size": 100,
                             "LastModified": _TIME_UTC,
                             "StorageClass": "DEEP_ARCHIVE",
+                        },
+                        {
+                            "Key": "foo",
+                            "Size": 100,
+                            "LastModified": _TIME_UTC,
+                            "StorageClass": "GLACIER",
                         },
                     ]
                 }
@@ -250,18 +251,19 @@ class TestSyncCommand:
         result, calls = _run_cmd(
             [
                 {
+                    # Byte-ordered, as a real ListObjectsV2 page is (bar < foo).
                     "Contents": [
-                        {
-                            "Key": "foo",
-                            "Size": 100,
-                            "LastModified": _TIME_UTC,
-                            "StorageClass": "GLACIER",
-                        },
                         {
                             "Key": "bar",
                             "Size": 100,
                             "LastModified": _TIME_UTC,
                             "StorageClass": "DEEP_ARCHIVE",
+                        },
+                        {
+                            "Key": "foo",
+                            "Size": 100,
+                            "LastModified": _TIME_UTC,
+                            "StorageClass": "GLACIER",
                         },
                     ]
                 }
@@ -666,7 +668,7 @@ class TestSyncCommand:
         _, calls = _run_cmd(
             [
                 list_objects_response(["new_file.txt"]),
-                list_objects_response(["new_file.txt", "file1.txt"]),
+                list_objects_response(["file1.txt", "new_file.txt"]),  # byte-ordered, as real S3
             ],
             ["sync", "s3://bucket/", "s3://bucket2/", "--no-overwrite"],
         )

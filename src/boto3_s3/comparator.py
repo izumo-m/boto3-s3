@@ -111,6 +111,29 @@ class ParallelCompare:
             raise ValueError(f"ParallelCompare workers must be >= 1, got {self.workers}")
 
 
+def _byte_ordered(
+    entries: Iterable[tuple[str, FileInfo]], side: str
+) -> Iterator[tuple[str, FileInfo]]:
+    """Dev-only pass-through that asserts a side ascends by ``compare_key``.
+
+    :meth:`Comparator.compare`'s merge-join assumes both sides arrive in UTF-8
+    byte order (what a ``SORTED_SCAN`` backend promises; ``str`` order is code-point
+    = byte order). A custom backend that declares ``SORTED_SCAN`` but yields out of
+    order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
+    ``--delete`` the deletion of files present on both sides. This trips a loud
+    ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call
+    site, so it is compiled out entirely under ``-O`` (zero production cost).
+    """
+    prev: str | None = None
+    for key, info in entries:
+        assert prev is None or key >= prev, (
+            f"{side} sync stream is not byte-ordered by compare_key "
+            f"({prev!r} then {key!r}); a SORTED_SCAN backend must yield ascending keys"
+        )
+        prev = key
+        yield key, info
+
+
 @dataclass(frozen=True)
 class Comparator:
     """Merge-join two key-ordered listing streams into :class:`SyncPair`s.
@@ -144,6 +167,9 @@ class Comparator:
         """
         transfer_type = self.transfer_type
         sstore, dstore = self.src_storage, self.dest_storage
+        if __debug__:  # dev guard: catch an unsorted SORTED_SCAN side (compiled out under -O)
+            src_entries = _byte_ordered(src_entries, "source")
+            dest_entries = _byte_ordered(dest_entries, "destination")
         src_iter = iter(src_entries)
         dest_iter = iter(dest_entries)
         src = next(src_iter, None)
