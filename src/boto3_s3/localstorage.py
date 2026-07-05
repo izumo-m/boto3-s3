@@ -795,13 +795,13 @@ class LocalStorage(Storage):
     #: forms), unlike every other backend's ``/`` space.
     sep: ClassVar[str] = os.sep
     #: The local filesystem supports every transfer operation: byte I/O both
-    #: ways, single-entry stat, a sorted walk (so ``SORTED_SCAN``), and delete.
+    #: ways, single-entry stat, a sorted walk (so ``SORTABLE_SCAN``), and delete.
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ
         | StorageCapability.OPEN_WRITE
         | StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
-        | StorageCapability.SORTED_SCAN
+        | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
     #: The local-walk option type (:attr:`Storage.scan_options_type`): arg-less

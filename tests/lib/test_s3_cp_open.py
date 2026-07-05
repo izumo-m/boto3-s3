@@ -114,7 +114,7 @@ class _MemStorage(Storage):
     capabilities = (
         StorageCapability.OPEN_READ
         | StorageCapability.OPEN_WRITE
-        | StorageCapability.SORTED_SCAN
+        | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
 
@@ -194,7 +194,7 @@ class _NoDeleteMem(_MemStorage):
     """Readable/writable but not deletable - an mv *source* trips the gate (DELETE)."""
 
     capabilities = (
-        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE | StorageCapability.SORTED_SCAN
+        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE | StorageCapability.SORTABLE_SCAN
     )
 
 

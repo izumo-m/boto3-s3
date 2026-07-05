@@ -117,8 +117,8 @@ def _byte_ordered(
     """Dev-only pass-through that asserts a side ascends by ``compare_key``.
 
     :meth:`Comparator.compare`'s merge-join assumes both sides arrive in UTF-8
-    byte order (what a ``SORTED_SCAN`` backend promises; ``str`` order is code-point
-    = byte order). A custom backend that declares ``SORTED_SCAN`` but yields out of
+    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str`` order is code-point
+    = byte order). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
     order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
     ``--delete`` the deletion of files present on both sides. This trips a loud
     ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call
@@ -128,7 +128,7 @@ def _byte_ordered(
     for key, info in entries:
         assert prev is None or key >= prev, (
             f"{side} sync stream is not byte-ordered by compare_key "
-            f"({prev!r} then {key!r}); a SORTED_SCAN backend must yield ascending keys"
+            f"({prev!r} then {key!r}); a SORTABLE_SCAN backend must yield ascending keys"
         )
         prev = key
         yield key, info
@@ -167,7 +167,7 @@ class Comparator:
         """
         transfer_type = self.transfer_type
         sstore, dstore = self.src_storage, self.dest_storage
-        if __debug__:  # dev guard: catch an unsorted SORTED_SCAN side (compiled out under -O)
+        if __debug__:  # dev guard: catch an unsorted SORTABLE_SCAN side (compiled out under -O)
             src_entries = _byte_ordered(src_entries, "source")
             dest_entries = _byte_ordered(dest_entries, "destination")
         src_iter = iter(src_entries)

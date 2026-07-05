@@ -616,7 +616,7 @@ def require_open_sync_capabilities(
     """Reject an open-route custom side that cannot back a ``sync``.
 
     ``sync`` merge-joins two byte-ordered listings, so a custom side must
-    declare ``SORTED_SCAN`` (an unsorted side would manufacture phantom
+    declare ``SORTABLE_SCAN`` (an unsorted side would manufacture phantom
     new/delete pairs - with ``--delete``, destination corruption). On top of
     that: an ``opens3`` source needs ``OPEN_READ``; an ``s3open`` destination
     needs ``OPEN_WRITE`` plus ``DELETE`` when ``delete`` removes orphans (the
@@ -624,10 +624,10 @@ def require_open_sync_capabilities(
     """
     if plan.paths_type == "opens3":
         custom: Storage = plan.src
-        needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_READ
+        needed = StorageCapability.SORTABLE_SCAN | StorageCapability.OPEN_READ
     elif plan.paths_type == "s3open":
         custom = plan.dest
-        needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_WRITE
+        needed = StorageCapability.SORTABLE_SCAN | StorageCapability.OPEN_WRITE
         if delete:
             needed |= StorageCapability.DELETE
     else:

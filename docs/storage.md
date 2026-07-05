@@ -53,7 +53,7 @@ declared capabilities promise:
   container one page of `FileInfo` at a time, **applying `options.filter`**
   (return already-filtered pages: push it to the source, or wrap raw pages with
   `storage.sieve_pages`; the base `scan()` only flattens + prefetches). Honour
-  `options.sort` when `SORTED_SCAN` is declared. `options` carries only the
+  `options.sort` when `SORTABLE_SCAN` is declared. `options` carries only the
   backend-agnostic knobs (`recursive` / `sort` / `filter` / `on_warning`);
   backend-specific knobs live on a `ScanOptions` subclass so one backend's
   options never leak into another's (`S3ScanOptions` = the `ListObjectsV2` knobs
@@ -122,12 +122,12 @@ of deep inside the run:
 | `OPEN_WRITE` | `open(key, "wb")` | an `s3open` destination |
 | `GET_FILEINFO` | `get_fileinfo` | a single-entry source / existence check |
 | `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) side |
-| `SORTED_SCAN` | byte-ordered `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
+| `SORTABLE_SCAN` | byte-ordered `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
 | `DELETE` | `delete(info)` | an `mv` source / a `sync --delete` destination |
 
-The reading members form a lattice: `SORTED_SCAN` implies `SCAN` implies
+The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
-custom `sync` side **must** declare `SORTED_SCAN` — an unsorted listing would
+custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
 manufacture phantom pairs and, with `--delete`, corrupt the destination.
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
@@ -160,7 +160,7 @@ class DictStorage(Storage):
     scheme: ClassVar[str] = "dict"
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
-        | StorageCapability.SORTED_SCAN | StorageCapability.DELETE
+        | StorageCapability.SORTABLE_SCAN | StorageCapability.DELETE
     )
 
     def __init__(self, store: dict[str, bytes], *, root: str = "dict://store"):

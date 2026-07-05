@@ -183,7 +183,7 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
 - opens3 / s3open (a custom backend on one side, the other always S3 - the open
-  route, transfer.md section 12): the custom side must declare `SORTED_SCAN`
+  route, transfer.md section 12): the custom side must declare `SORTABLE_SCAN`
   (the merge-join needs both listings byte-ordered) plus the route's I/O
   (`OPEN_READ` source / `OPEN_WRITE` dest) and `DELETE` for an `s3open` `--delete`
   destination; a dedicated gate rejects a backend short of that *before* any

@@ -4,7 +4,7 @@ The capability vocabulary is the structural pre-check a transfer runs on a custo
 (``open``-routed) side: a declarative, class-level statement of which contract
 methods a backend actually implements, distinct from runtime permission. These
 goldens pin the ``auto()`` bit layout, the reading lattice
-(``SORTED_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``), the fail-closed default, and
+(``SORTABLE_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``), the fail-closed default, and
 each built-in's honest declaration - notably that ``S3Storage`` resolves a single
 object yet declares no ``OPEN_*`` because ``open`` is unimplemented.
 """
@@ -143,11 +143,11 @@ class TestAutoBitLayout:
 class TestBuiltinDeclarations:
     def test_s3_declares_no_open(self) -> None:
         # open() is unimplemented, so honesty requires omitting OPEN_*.
-        assert S3Storage.capabilities == C.GET_FILEINFO | C.SCAN | C.SORTED_SCAN | C.DELETE
+        assert S3Storage.capabilities == C.GET_FILEINFO | C.SCAN | C.SORTABLE_SCAN | C.DELETE
 
     def test_local_is_fully_capable(self) -> None:
         assert LocalStorage.capabilities == (
-            C.OPEN_READ | C.OPEN_WRITE | C.GET_FILEINFO | C.SCAN | C.SORTED_SCAN | C.DELETE
+            C.OPEN_READ | C.OPEN_WRITE | C.GET_FILEINFO | C.SCAN | C.SORTABLE_SCAN | C.DELETE
         )
 
     def test_iostorage_is_byte_io_only(self) -> None:
@@ -172,14 +172,14 @@ class TestSupports:
 
 
 class TestLattice:
-    def test_sorted_scan_implies_scan_and_get_fileinfo(self) -> None:
+    def test_sortable_scan_implies_scan_and_get_fileinfo(self) -> None:
         class _SortedOnly(_Stub):
-            capabilities = C.SORTED_SCAN
+            capabilities = C.SORTABLE_SCAN
 
         s = _SortedOnly()
         assert s.supports(C.SCAN)
         assert s.supports(C.GET_FILEINFO)
-        assert s.supports(C.SORTED_SCAN | C.SCAN | C.GET_FILEINFO)
+        assert s.supports(C.SORTABLE_SCAN | C.SCAN | C.GET_FILEINFO)
 
     def test_scan_implies_get_fileinfo_but_not_sorted(self) -> None:
         class _ScanOnly(_Stub):
@@ -187,7 +187,7 @@ class TestLattice:
 
         s = _ScanOnly()
         assert s.supports(C.GET_FILEINFO)
-        assert not s.supports(C.SORTED_SCAN)
+        assert not s.supports(C.SORTABLE_SCAN)
 
 
 class TestMissingCapabilities:

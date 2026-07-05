@@ -468,9 +468,9 @@ and outside aws parity.
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
   failed writer commit - leaves the source in place.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
-  custom side must declare `SORTED_SCAN` - an unsorted listing would manufacture
+  custom side must declare `SORTABLE_SCAN` - an unsorted listing would manufacture
   phantom new/delete pairs and, with `--delete`, corrupt the destination. A
-  dedicated gate (`producers.require_open_sync_capabilities`) requires `SORTED_SCAN` +
+  dedicated gate (`producers.require_open_sync_capabilities`) requires `SORTABLE_SCAN` +
   `OPEN_READ` (an `opens3` source) / `OPEN_WRITE` (an `s3open` destination), plus
   `DELETE` when `--delete` removes orphans from an `s3open` custom destination
   (`opens3` orphans are S3, deleted without the custom side). `sync` passes

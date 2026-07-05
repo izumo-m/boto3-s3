@@ -1,7 +1,7 @@
 """``S3.sync`` over the open route: a custom ``Storage`` backend paired with S3.
 
 sync merge-joins two byte-ordered listings, so a custom side must declare
-``SORTED_SCAN`` (gated up front - an unsorted side would manufacture phantom
+``SORTABLE_SCAN`` (gated up front - an unsorted side would manufacture phantom
 new/delete pairs and, with ``--delete``, corrupt the destination). ``opens3``
 syncs a custom source up to S3 (uploads via ``open("rb")``; orphan S3 keys
 deleted with ``DeleteObjects``); ``s3open`` syncs an S3 source down into a custom
@@ -83,13 +83,13 @@ class TestSyncOpens3Upload:
         assert keys == ["dest/orphan.txt"]
 
     def test_unsorted_source_is_rejected(self) -> None:
-        # No SORTED_SCAN -> the merge-join cannot trust the order, so reject up
+        # No SORTABLE_SCAN -> the merge-join cannot trust the order, so reject up
         # front (an unsorted --delete sync could otherwise corrupt the dest).
         src = _ReadOnlyMem({"a.txt": b"x"}, location="mem://data/")
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(src, S3Storage("s3://b/dest/", client=client), transfer_config=_SERIAL)
-        assert "SORTED_SCAN" in str(excinfo.value)
+        assert "SORTABLE_SCAN" in str(excinfo.value)
         assert calls == []
 
 

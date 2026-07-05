@@ -129,7 +129,7 @@ def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: b
 
 
 class TestComparatorOrderGuard:
-    """Dev-only guard: an unsorted ``SORTED_SCAN`` side trips a loud
+    """Dev-only guard: an unsorted ``SORTABLE_SCAN`` side trips a loud
     ``AssertionError`` instead of silently mis-pairing (and, with ``--delete``,
     deleting files present on both sides)."""
 

@@ -325,7 +325,7 @@ class S3Storage(Storage):
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
-        | StorageCapability.SORTED_SCAN
+        | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
     #: The S3 listing option type (:attr:`Storage.scan_options_type`): arg-less

@@ -160,7 +160,7 @@ class ScanOptions:
     ``sync`` sets it (its merge-join needs both sides ascending), while ``cp`` /
     ``mv`` / ``ls`` / ``rm`` leave it ``False`` (order is immaterial - each entry
     transfers / lists / deletes independently). A backend declaring
-    :attr:`~boto3_s3.storage.StorageCapability.SORTED_SCAN` MUST honor
+    :attr:`~boto3_s3.storage.StorageCapability.SORTABLE_SCAN` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
     byte-ordered, the local walk sorts for aws parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when

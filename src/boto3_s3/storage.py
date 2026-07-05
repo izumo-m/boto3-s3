@@ -31,7 +31,7 @@ stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 object into an ``open("wb")`` whose ``close`` commits it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
 (``Storage.capabilities``), an ``mv`` removes a custom source through its own
-``delete``, and ``sync`` works when the custom side declares ``SORTED_SCAN`` (its
+``delete``, and ``sync`` works when the custom side declares ``SORTABLE_SCAN`` (its
 merge-join needs both listings byte-ordered) (transfer.md section 12).
 ``S3Storage.open`` stays unimplemented by design - the S3 side always rides
 ``s3transfer``, never ``open``. None of this affects CLI / ``aws s3`` parity (the
@@ -86,13 +86,13 @@ class StorageCapability(Flag):
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
     - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
     - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
-    - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
+    - ``SORTABLE_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
       (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,
       and gates on this capability for a custom side
     - ``DELETE`` - ``delete(info)`` (``rm`` / ``mv`` source / ``sync --delete``)
 
     The reading members form a lattice (expanded by :func:`_implied`):
-    ``SORTED_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration
+    ``SORTABLE_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration
     implies enumeration implies single-entry resolution), so a backend need only
     declare its strongest one.
     """
@@ -101,18 +101,18 @@ class StorageCapability(Flag):
     OPEN_WRITE = auto()
     GET_FILEINFO = auto()
     SCAN = auto()
-    SORTED_SCAN = auto()
+    SORTABLE_SCAN = auto()
     DELETE = auto()
 
 
 def _implied(caps: StorageCapability) -> StorageCapability:
     """Expand :class:`StorageCapability`'s reading lattice for a containment test.
 
-    ``SORTED_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``, so a backend that declares
+    ``SORTABLE_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``, so a backend that declares
     only its strongest reading capability still satisfies a check for a weaker
     one. Applied wherever capabilities are tested, never to the stored value.
     """
-    if caps & StorageCapability.SORTED_SCAN:
+    if caps & StorageCapability.SORTABLE_SCAN:
         caps |= StorageCapability.SCAN
     if caps & StorageCapability.SCAN:
         caps |= StorageCapability.GET_FILEINFO
@@ -216,7 +216,7 @@ class Storage(abc.ABC):
         kind, no directory grouping); non-recursive yields the immediate entries
         plus one ``DIRECTORY``-kind ``FileInfo`` per sub-"directory" (S3
         ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
-        ``compare_key``): a backend declaring ``SORTED_SCAN`` MUST honor it, so
+        ``compare_key``): a backend declaring ``SORTABLE_SCAN`` MUST honor it, so
         two recursive streams can be merge-joined (what ``sync`` relies on) after
         each is relativized to its scan root; when ``sort`` is ``False`` (``cp`` /
         ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper natural order.
@@ -343,7 +343,7 @@ class Storage(abc.ABC):
         """Whether this storage implements every capability in ``needed``.
 
         The capability lattice is applied first (see :class:`StorageCapability`),
-        so e.g. a backend declaring ``SORTED_SCAN`` ``supports(SCAN)``. This is
+        so e.g. a backend declaring ``SORTABLE_SCAN`` ``supports(SCAN)``. This is
         the structural pre-check a transfer runs on a custom (``open``-routed)
         side; a built-in S3 / local side rides ``s3transfer`` and is not gated.
         """
