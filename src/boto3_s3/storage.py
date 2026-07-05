@@ -168,6 +168,19 @@ class Storage(abc.ABC):
     #: nothing here.)
     scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
+    #: Whether this backend's ``scan_pages`` already applies ``options.filter``
+    #: itself. When ``False`` (default), :meth:`scan` applies it as a safety net
+    #: after ``scan_pages`` (on the prefetch worker), so a custom backend that
+    #: forgets to filter cannot silently leak excluded entries into ``--exclude`` /
+    #: ``--include`` and, on a ``sync --delete`` destination, into deletion. The
+    #: built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
+    #: ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that
+    #: still warns on excluded files, or early in a custom ``LocalFileGenerator``'s
+    #: ``finalize_children``). A backend that filters at its source, or prunes early
+    #: by calling ``options.filter`` itself, sets ``True`` to skip the redundant
+    #: re-filter without re-implementing :meth:`scan`.
+    scan_pages_filters: ClassVar[bool] = False
+
     def default_scan_options(self) -> ScanOptions:
         """This backend's own :class:`ScanOptions`, with defaults (used by arg-less ``scan()``).
 
@@ -183,16 +196,21 @@ class Storage(abc.ABC):
         producer and overlaps it with a background :func:`prefetch` worker, so the
         next page's I/O (an S3 ``ListObjectsV2`` round-trip, a local ``stat``
         batch) runs while the consumer handles the current page; a producer error
-        surfaces on the consumer's pull. ``options.filter`` is *not* applied here -
-        it is :meth:`scan_pages`'s job (so a backend can push the predicate to the
-        source, e.g. a REST listing that filters server-side), and its output is
-        already filtered. Pass ``options`` to control the walk (defaults to
-        ``ScanOptions()``). To customize the entries, override :meth:`scan_pages`,
-        not this method. Used by ``ls`` and the recursive forms of ``cp`` /
-        ``rm`` / ``sync``.
+        surfaces on the consumer's pull. ``options.filter`` is applied here as a
+        safety net (on the prefetch worker) **unless** the backend declares
+        :attr:`scan_pages_filters` - so a custom backend that does not filter in
+        ``scan_pages`` cannot silently leak excluded entries; a backend that
+        filters at its source or prunes early declares the flag to skip the
+        redundant re-filter. Pass ``options`` to control the walk (defaults to
+        :meth:`default_scan_options`). To customize the entries, override
+        :meth:`scan_pages`, not this method. Used by ``ls`` and the recursive forms
+        of ``cp`` / ``rm`` / ``sync``.
         """
         opts = options if options is not None else self.default_scan_options()
-        with prefetch(self.scan_pages(opts), queue_size=self._scan_prefetch_pages) as items:
+        pages = self.scan_pages(opts)
+        if opts.filter is not None and not self.scan_pages_filters:
+            pages = sieve_pages(pages, opts.filter)
+        with prefetch(pages, queue_size=self._scan_prefetch_pages) as items:
             yield from items
 
     @abc.abstractmethod

@@ -134,6 +134,47 @@ class TestCustomBackendScanOptions:
         assert type(base_opts) is ScanOptions
 
 
+class TestScanFilterSafetyNet:
+    """``scan()`` applies ``options.filter`` as a safety net unless the backend
+    declares ``scan_pages_filters`` - so a custom backend that forgets to filter in
+    ``scan_pages`` cannot silently leak excluded entries (``--exclude`` / ``--delete``)."""
+
+    @staticmethod
+    def _two_pages_unfiltered(options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+        # Deliberately ignores options.filter, to prove where filtering happens.
+        yield [
+            FileInfo(key="keep.txt", compare_key="keep.txt"),
+            FileInfo(key="drop.log", compare_key="drop.log"),
+        ]
+
+    def test_default_backend_is_filtered_at_scan(self) -> None:
+        class Unfiltered(_Stub):
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+
+        opts = ScanOptions(filter=lambda i: i.key.endswith(".txt"))
+        assert [i.key for i in Unfiltered().scan(opts)] == ["keep.txt"]  # scan() filtered
+
+    def test_declaring_backend_is_trusted_and_not_re_filtered(self) -> None:
+        class SelfFiltered(_Stub):
+            scan_pages_filters: ClassVar[bool] = True
+
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+
+        opts = ScanOptions(filter=lambda i: i.key.endswith(".txt"))
+        # Declares it filters itself, so scan() does not re-apply -> the unfiltered
+        # ".log" survives (proving the safety net is off, not that filtering is lost).
+        assert [i.key for i in SelfFiltered().scan(opts)] == ["keep.txt", "drop.log"]
+
+    def test_builtins_declare_the_flag(self) -> None:
+        assert S3Storage.scan_pages_filters is True
+        assert LocalStorage.scan_pages_filters is True
+        assert Storage.scan_pages_filters is False  # the safe default
+
+
 class TestAutoBitLayout:
     def test_members_are_successive_powers_of_two(self) -> None:
         # auto() on a Flag assigns distinct single bits, in declaration order.

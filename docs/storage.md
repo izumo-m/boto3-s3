@@ -50,9 +50,14 @@ declared capabilities promise:
   returns a readable stream; `"wb"` a writable one whose `close()` commits the
   write. `size` is an optional total-length hint for writes.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
-  container one page of `FileInfo` at a time, **applying `options.filter`**
-  (return already-filtered pages: push it to the source, or wrap raw pages with
-  `storage.sieve_pages`; the base `scan()` only flattens + prefetches). Honour
+  container one page of `FileInfo` at a time. `options.filter` (the
+  `--exclude`/`--include` predicate) is applied by **`scan()` as a safety net** by
+  default, so a `scan_pages` that forgets it cannot silently leak excluded entries
+  into `--exclude`/`--include` or, on a `sync --delete` destination, into deletion.
+  A backend that filters at its source, or prunes early (e.g. a custom
+  `LocalFileGenerator.finalize_children` calling `options.filter`), applies it in
+  `scan_pages` and declares **`scan_pages_filters = True`** to skip the redundant
+  re-filter (`storage.sieve_pages` is the helper). Honour
   `options.sort` when `SORTABLE_SCAN` is declared. `options` carries only the
   backend-agnostic knobs (`recursive` / `sort` / `filter` / `on_warning`);
   backend-specific knobs live on a `ScanOptions` subclass so one backend's

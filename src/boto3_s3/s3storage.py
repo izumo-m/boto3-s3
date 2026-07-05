@@ -331,6 +331,9 @@ class S3Storage(Storage):
     #: The S3 listing option type (:attr:`Storage.scan_options_type`): arg-less
     #: ``scan()`` builds an :class:`S3ScanOptions`, which :meth:`scan_pages` requires.
     scan_options_type: ClassVar[type[ScanOptions]] = S3ScanOptions
+    #: ``scan_pages`` sieves each page (:attr:`Storage.scan_pages_filters`), so
+    #: ``scan`` does not re-apply ``options.filter``.
+    scan_pages_filters: ClassVar[bool] = True
 
     # -- S3 path grammar (aws-cli string rules; no client, no validation) ----
 

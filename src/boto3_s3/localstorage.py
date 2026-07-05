@@ -807,6 +807,10 @@ class LocalStorage(Storage):
     #: The local-walk option type (:attr:`Storage.scan_options_type`): arg-less
     #: ``scan()`` builds a :class:`LocalScanOptions`, which :meth:`scan_pages` requires.
     scan_options_type: ClassVar[type[ScanOptions]] = LocalScanOptions
+    #: The walk applies ``options.filter`` (:attr:`Storage.scan_pages_filters`) -
+    #: the default walker late (after vetting/warnings), a custom
+    #: ``LocalFileGenerator`` possibly early - so ``scan`` does not re-apply it.
+    scan_pages_filters: ClassVar[bool] = True
 
     @staticmethod
     def relative_path(filename: str, start: str = os.path.curdir) -> str:
