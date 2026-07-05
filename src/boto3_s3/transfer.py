@@ -1188,11 +1188,11 @@ class _CloseFileobj:
 
     The transfer owns every fileobj a ``Storage.open`` hands it (the file
     protocol the open route relies on): a real backend's ``close`` releases a
-    reader or *commits* a writer (``Storage.open``'s contract), while a
-    caller-supplied stream (``IOStorage``) hands back a close-suppressing view,
-    so this is a harmless flush there. Sits before ``_DeleteSource`` /
-    ``_Completion`` so a writer's commit failure flips the settled future to a
-    failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
+    reader or flushes a writer's buffered writes (``Storage.open``'s contract),
+    while a caller-supplied stream (``IOStorage``) hands back a close-suppressing
+    view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    ``_Completion`` so a writer's ``close`` (flush) failure flips the settled
+    future to a failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
     then sees the failure and skips its delete). A transfer that already failed
     still closes - to release the resource - but never lets a close error
     overwrite the original failure.

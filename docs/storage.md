@@ -21,7 +21,7 @@ S3**. Its bytes move through `open()` while the S3 side keeps riding
 - **custom → S3** (`opens3`): the backend is the source; each entry is uploaded
   from its `open("rb")`.
 - **S3 → custom** (`s3open`): the backend is the destination; each object is
-  downloaded into its `open("wb")` (whose `close()` is the write's commit).
+  downloaded into its `open("wb")` (whose `close()` flushes the write).
 
 So `cp` / `mv` / `sync` are the only operations a custom backend joins, and never
 custom↔custom. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
@@ -47,8 +47,8 @@ declared capabilities promise:
 - **`as_text() -> str`** (and `str(storage)`) — how this side renders in results
   / progress (its canonical path token).
 - **`open(key, mode, *, size=None) -> BinaryIO`** — per-object byte I/O. `"rb"`
-  returns a readable stream; `"wb"` a writable one whose `close()` commits the
-  write. `size` is an optional total-length hint for writes.
+  returns a readable stream; `"wb"` a writable one whose `close()` flushes buffered
+  writes (standard file semantics). `size` is an optional total-length hint for writes.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
   container one page of `FileInfo` at a time. `options.filter` (the
   `--exclude`/`--include` predicate) is applied by **`scan()` as a safety net** by

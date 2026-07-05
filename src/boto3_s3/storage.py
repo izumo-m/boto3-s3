@@ -28,7 +28,7 @@ backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
-object into an ``open("wb")`` whose ``close`` commits it) while the S3 side rides
+object into an ``open("wb")`` whose ``close`` flushes it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
 (``Storage.capabilities``), an ``mv`` removes a custom source through its own
 ``delete``, and ``sync`` works when the custom side declares ``SORTABLE_SCAN`` (its
@@ -249,15 +249,18 @@ class Storage(abc.ABC):
         """Open the object at ``key`` as a binary stream.
 
         ``"rb"`` returns a readable stream; ``"wb"`` a writable one whose
-        ``close()`` commits the write. ``size`` is an optional total-length hint
+        ``close()`` flushes any buffered writes (standard file semantics).
+        ``size`` is an optional total-length hint
         for writes (lets S3 choose single-part vs multipart up front). This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path a custom backend
         (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
         non-built-in side of an open-route transfer (``opens3`` / ``s3open``,
         transfer.md section 12), handing the returned fileobj to ``s3transfer``
-        and ``close``-ing it when done - a ``"wb"`` ``close`` is the write's
-        commit point. ``LocalStorage`` and the stream Storages (``IOStorage`` /
+        and ``close``-ing it when done - a ``"wb"`` ``close`` flushes buffered
+        writes like any file object (whether the backend persists per write or
+        defers to the flush - write-through vs write-back - is its own choice).
+        ``LocalStorage`` and the stream Storages (``IOStorage`` /
         ``StdioStorage``) implement it; ``S3Storage.open`` stays unimplemented by
         design (the S3 side always rides ``s3transfer``, never ``open``).
         """

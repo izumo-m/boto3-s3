@@ -419,8 +419,8 @@ and outside aws parity.
   the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
   fileobj from `plan.dest.open(key, "wb")` to download into. The transfer
   **closes every fileobj `open` returns** (`transfer._CloseFileobj`): for a
-  writer that `close` is the commit (`Storage.open`'s contract), and a commit
-  failure flips the settled future via `set_exception` (a failed transfer).
+  writer that `close` flushes buffered writes (`Storage.open`'s contract), and a
+  `close` (flush) failure flips the settled future via `set_exception` (a failed transfer).
   `s3transfer` itself never closes a caller fileobj (`CompleteDownloadNOOPTask`),
   so this is the sole close. An `IOStorage` hands back a close-suppressing view,
   so the caller's own stream is never closed (section 6).
@@ -466,7 +466,7 @@ and outside aws parity.
   backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
   download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
-  failed writer commit - leaves the source in place.
+  failed writer `close` (flush) - leaves the source in place.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
   custom side must declare `SORTABLE_SCAN` - an unsorted listing would manufacture
   phantom new/delete pairs and, with `--delete`, corrupt the destination. A
