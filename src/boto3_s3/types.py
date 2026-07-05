@@ -80,18 +80,28 @@ class LocalFileInfo(FileInfo):
 
     Its ``key`` is the **absolute** path with ``os.sep`` normalized to ``/``
     (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
-    turns it back into a host path for I/O.
+    turns it back into a host path for I/O. ``key`` keeps the path *as walked* -
+    a symlinked directory or file stays under its link name, never resolved to
+    the target (``follow_symlinks=True`` only follows to descend / stat, matching
+    aws-cli).
 
-    ``entry`` is the ``os.DirEntry`` the walk saw for this file, so a ``filter``
-    or ``on_result`` callback can reuse its cached ``stat()`` and its
-    ``is_dir`` / ``is_symlink`` without a fresh syscall. It is populated only
-    when the scan opts in with ``ScanOptions.capture_entry`` (that mode scans by
-    path so the entry stays usable after the walk moves on - its ``.path`` is the
-    full path and it re-stats on demand); the default fast walk and the
-    single-path point op (``get_fileinfo``) leave it ``None``.
+    ``stat_result`` is the entry's **followed** ``os.stat`` (the same one the
+    walk's vetting battery computes - so carrying it costs no extra syscall), a
+    plain immutable snapshot a ``filter`` or ``on_result`` callback can read
+    (``st_mode`` / ``st_uid`` / ``st_size`` / ... - ``size`` and ``mtime`` are
+    derived from it) without re-stat'ing. Because it is a value, not an
+    ``os.DirEntry`` handle, the walk keeps its ``dir_fd`` fast path even while
+    populating it. ``is_symlink`` records whether the entry itself was a symbolic
+    link (from the walk's ``d_type`` / cached ``lstat`` - free); with
+    ``follow_symlinks=True`` a link to a file still surfaces here as
+    ``is_symlink=True`` while its ``stat_result`` describes the target.
+    ``LocalStorage`` populates both on every entry it lists (the walk and the
+    single-path ``get_fileinfo``); a ``FileInfo`` built by hand leaves them at
+    their defaults.
     """
 
-    entry: os.DirEntry[str] | None = None
+    stat_result: os.stat_result | None = None
+    is_symlink: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -141,16 +151,6 @@ class ScanOptions:
     ``Symbolic link loop detected`` warning instead of recursing until
     ``RecursionError``. Off is zero extra cost (no per-directory ``stat``).
 
-    ``capture_entry`` (default ``False``, local walk only) fills
-    :attr:`LocalFileInfo.entry` with each entry's ``os.DirEntry`` so a ``filter``
-    or ``on_result`` callback can reuse its cached ``stat`` and type without a
-    fresh syscall. It is opt-in because carrying a usable entry forces the walk
-    to scan by path rather than through a directory fd (a fd-relative entry
-    breaks once the walk closes the fd): with it the walk keeps ``os.scandir``'s
-    per-entry-stat savings but gives up the dir-relative ``fstatat``, so leave it
-    off unless a callback needs the entry. Ignored by non-local backends (S3
-    entries have no ``DirEntry``).
-
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     each ``Storage.scan_pages`` producer, which returns already-filtered pages
     (``scan`` flattens + prefetches them, it no longer sieves). A backend may
@@ -183,7 +183,6 @@ class ScanOptions:
     filter: Callable[[FileInfo], bool] | None = None
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
-    capture_entry: bool = False
     on_warning: Callable[[str], None] | None = None
 
 

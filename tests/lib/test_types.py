@@ -14,17 +14,6 @@ DT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 TYPE_NAMES = ["FileInfo", "FileKind", "LocalFileInfo", "S3FileInfo", "ScanOptions"]
 
 
-def _dir_entry(tmp_path: Path) -> os.DirEntry[str]:
-    """Return a real os.DirEntry for a file inside tmp_path."""
-    target = tmp_path / "file.txt"
-    target.write_text("x")
-    with os.scandir(tmp_path) as it:
-        for entry in it:
-            if entry.name == "file.txt":
-                return entry
-    raise AssertionError("scandir did not yield the created file")
-
-
 class TestFileInfo:
     def test_construct_with_all_required_fields(self) -> None:
         fi = t.FileInfo(key="dir/file.txt", size=1024, mtime=DT)
@@ -58,16 +47,22 @@ class TestFileInfo:
 
 
 class TestLocalFileInfo:
-    def test_construct_with_directory_entry(self, tmp_path: Path) -> None:
-        de = _dir_entry(tmp_path)
-        lfi = t.LocalFileInfo(key="d/f", size=10, mtime=DT, entry=de)
-        assert lfi.entry is de
+    def test_construct_with_stat_result_and_symlink_flag(self, tmp_path: Path) -> None:
+        st = os.stat(tmp_path)
+        lfi = t.LocalFileInfo(key="d/f", size=10, mtime=DT, stat_result=st, is_symlink=True)
+        assert lfi.stat_result is st
+        assert lfi.is_symlink is True
         assert lfi.key == "d/f"
         assert lfi.size == 10
         assert lfi.mtime == DT
 
-    def test_is_a_file_info(self, tmp_path: Path) -> None:
-        lfi = t.LocalFileInfo(key="d/f", size=10, mtime=DT, entry=_dir_entry(tmp_path))
+    def test_defaults_leave_stat_result_none_and_not_symlink(self) -> None:
+        lfi = t.LocalFileInfo(key="d/f", size=10, mtime=DT)
+        assert lfi.stat_result is None
+        assert lfi.is_symlink is False
+
+    def test_is_a_file_info(self) -> None:
+        lfi = t.LocalFileInfo(key="d/f", size=10, mtime=DT)
         assert isinstance(lfi, t.FileInfo)
 
 

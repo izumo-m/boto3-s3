@@ -276,13 +276,15 @@ class TestSyncCommand:
     ) -> None:
         (tmp_path / "foo.txt").write_text("mycontent")
 
-        # Patch the walk's stat reader to return a value indicating that an
-        # invalid timestamp was loaded (impossible to set on all OSes; aws-cli
-        # patches get_file_stat the same way).
-        def invalid_stat(_entry: os.DirEntry[str]) -> tuple[None, None]:
-            return (None, None)
+        # Patch the walk's single stat accessor to report an out-of-range mtime
+        # (impossible to set on all OSes; aws-cli patches get_file_stat the same
+        # way). st_mtime overflows datetime -> the epoch-fallback path.
+        def invalid_stat(_self: object, _entry: os.DirEntry[str]) -> os.stat_result:
+            return os.stat_result((0o100644, 0, 0, 1, 0, 0, 9, 0, 10**30, 0))
 
-        monkeypatch.setattr("boto3_s3.localstorage.entry_stat", invalid_stat)
+        monkeypatch.setattr(
+            "boto3_s3.localstorage.LocalFileGenerator.entry_stat_result", invalid_stat
+        )
         _, calls = _run_cmd(
             [
                 {"CommonPrefixes": [], "Contents": []},
@@ -309,21 +311,22 @@ class TestSyncCommand:
         assert _operations(calls) == ["ListObjectsV2"]
         assert not full_path.exists()
 
-    # When a file has been deleted after listing, the stat may raise either
-    # an OSError or a ValueError depending on the environment; both skip the
-    # file with a warning.
-    @pytest.mark.parametrize("error", [ValueError, OSError])
     def test_sync_skips_over_files_deleted_between_listing_and_transfer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         full_path = tmp_path / "foo.txt"
         full_path.write_text("mycontent")
 
-        def side_effect(_entry: os.DirEntry[str]) -> tuple[int, Any]:
+        # A file deleted mid-walk: the stat accessor finds it gone (the default
+        # returns None on OSError), so the entry is skipped with a "does not
+        # exist" warning (rc 2) rather than transferred.
+        def side_effect(_self: object, _entry: os.DirEntry[str]) -> None:
             os.remove(full_path)
-            raise error()
+            return None
 
-        monkeypatch.setattr("boto3_s3.localstorage.entry_stat", side_effect)
+        monkeypatch.setattr(
+            "boto3_s3.localstorage.LocalFileGenerator.entry_stat_result", side_effect
+        )
         _, calls = _run_cmd(
             [{"CommonPrefixes": [], "Contents": []}],
             ["sync", str(tmp_path), "s3://bucket/"],

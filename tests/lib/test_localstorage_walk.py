@@ -197,7 +197,10 @@ class TestSymlinkLoopDetection:
         root = str(tmp_path) + os.sep
         detector = LoopDetector(root)
         baseline = list(detector._ancestors)  # pyright: ignore[reportPrivateUsage]  # just the root
-        gen = walker.walk_dir(root, ScanOptions(), notify=lambda _b: None, detector=detector)
+        strip = len(root.replace(os.sep, "/"))
+        gen = walker.walk_dir(
+            root, ScanOptions(), strip=strip, notify=lambda _b: None, detector=detector
+        )
         first = next(gen)  # [a.txt], flushed before descending into sub/
         assert [os.path.basename(i.key) for i in first] == ["a.txt"]
         gen.close()  # abandon before sub/ is consumed
@@ -222,15 +225,13 @@ class TestWalkIsCustomizable:
                 entry: os.DirEntry[str],
                 full: str,
                 dir_fd: int | None,
+                st: os.stat_result,
                 *,
-                follow_symlinks: bool,
                 notify: Callable[[str], None],
             ) -> bool:
                 if full.endswith(".tmp"):
                     return True
-                return super().should_ignore_entry(
-                    entry, full, dir_fd, follow_symlinks=follow_symlinks, notify=notify
-                )
+                return super().should_ignore_entry(entry, full, dir_fd, st, notify=notify)
 
         storage = LocalStorage(str(tmp_path), walker=_NoTmp())
         keys = [info.compare_key for info in storage.scan(ScanOptions(recursive=True))]
@@ -241,11 +242,14 @@ class TestWalkIsCustomizable:
 
         class _Tagged(LocalFileGenerator):
             def stat_info(
-                self, entry: os.DirEntry[str], full: str, notify: Callable[[str], None]
-            ) -> LocalFileInfo | None:
-                info = super().stat_info(entry, full, notify)
-                if info is not None:
-                    info.size = 999
+                self,
+                entry: os.DirEntry[str],
+                full: str,
+                st: os.stat_result,
+                notify: Callable[[str], None],
+            ) -> LocalFileInfo:
+                info = super().stat_info(entry, full, st, notify)
+                info.size = 999
                 return info
 
         infos = list(LocalStorage(str(tmp_path), walker=_Tagged()).walk_local())
@@ -264,7 +268,6 @@ class TestWalkIsCustomizable:
                 *,
                 follow_symlinks: bool,
                 notify: Callable[[str], None],
-                capture_entry: bool,
             ) -> WalkChild | None:
                 if entry.name.endswith(".me"):
                     return None  # skip decided here, not in should_ignore_entry
@@ -274,7 +277,6 @@ class TestWalkIsCustomizable:
                     dir_fd,
                     follow_symlinks=follow_symlinks,
                     notify=notify,
-                    capture_entry=capture_entry,
                 )
 
         keys = [
@@ -293,20 +295,23 @@ class TestWalkIsCustomizable:
                 self,
                 dir_path: str,
                 *,
+                strip: int,
                 follow_symlinks: bool,
                 notify: Callable[[str], None],
-                capture_entry: bool,
             ) -> list[WalkChild]:
                 children = super().scan_children(
                     dir_path,
+                    strip=strip,
                     follow_symlinks=follow_symlinks,
                     notify=notify,
-                    capture_entry=capture_entry,
                 )
+                # An injected child stamps its own compare_key (info.key[strip:]).
+                key = (dir_path + "_synthetic").replace(os.sep, "/")
                 extra = WalkChild(
                     "_synthetic",
                     LocalFileInfo(
-                        key=(dir_path + "_synthetic").replace(os.sep, "/"),
+                        key=key,
+                        compare_key=key[strip:],
                         size=0,
                         mtime=datetime(2020, 1, 1, tzinfo=timezone.utc),
                     ),
@@ -334,12 +339,15 @@ class TestWalkIsCustomizable:
                 dir_path: str,
                 options: ScanOptions,
                 *,
+                strip: int,
                 notify: Callable[[str], None],
                 detector: LoopDetector | None,
             ) -> Iterator[list[LocalFileInfo]]:
                 if os.path.basename(dir_path.rstrip(os.sep)) == "skip":
                     return  # do not descend into any 'skip' directory
-                yield from super().walk_dir(dir_path, options, notify=notify, detector=detector)
+                yield from super().walk_dir(
+                    dir_path, options, strip=strip, notify=notify, detector=detector
+                )
 
         keys = [
             info.compare_key
@@ -347,6 +355,40 @@ class TestWalkIsCustomizable:
         ]
         # every 'skip/' subtree is pruned at any depth (top-level and nested)
         assert keys == ["a.txt", "keep/b.txt"]
+
+    def test_finalize_children_prunes_registers_and_strips(self, tmp_path: Path) -> None:
+        # The finalize_children seam, backup-style: prune an excluded dir by
+        # compare_key (pre-sort, so its subtree is never walked), then - on the
+        # sorted survivors - register directories / symlinks and strip the raw
+        # symlinks from the transfer stream. Registration is post-sort, so the
+        # catalog comes out in byte order (sequential re-compare next run).
+        _make_tree(tmp_path, "keep.txt", "skip/inner.txt", "sub/nested.txt")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "keep.txt")
+        registered: list[str] = []
+
+        class _Backup(LocalFileGenerator):
+            def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
+                return entry.stat(follow_symlinks=False)  # lstat -> symlinks are FILE-kind
+
+            def finalize_children(self, children: list[WalkChild]) -> list[WalkChild]:
+                assert all(c.info.compare_key is not None for c in children)  # stamped already
+                # 1. prune the excluded 'skip' dir (pre-sort -> subtree not walked)
+                kept = [c for c in children if c.info.compare_key.rstrip("/") != "skip"]  # pyright: ignore[reportOptionalMemberAccess]
+                kept = self.normalize_sort(kept)  # 2. sort
+                out: list[WalkChild] = []
+                for c in kept:  # 3. register (post-sort) + 4. strip symlinks
+                    if c.info.kind is FileKind.DIRECTORY or c.info.is_symlink:
+                        registered.append(c.info.compare_key)  # pyright: ignore[reportArgumentType]
+                    if not c.info.is_symlink:
+                        out.append(c)
+                return out
+
+        infos = list(LocalStorage(str(tmp_path), walker=_Backup()).walk_local())
+        keys = [i.compare_key for i in infos]
+        # 'skip/' subtree pruned; link.txt stripped; real files (dirs recursed) remain
+        assert keys == ["keep.txt", "sub/nested.txt"]
+        # dir + symlink registered in byte order; the excluded dir is not registered
+        assert registered == ["link.txt", "sub/"]
 
 
 class TestScanPagesAreScandirAligned:
@@ -486,66 +528,100 @@ class TestLocalStorageScan:
         assert keys == [str(tmp_path).replace(os.sep, "/") + "/a.txt"]
 
 
-class TestCaptureEntry:
-    """``capture_entry`` fills ``LocalFileInfo.entry`` with a usable ``os.DirEntry``."""
+class TestStatResultAndSymlink:
+    """Every listed ``LocalFileInfo`` carries its followed ``stat_result`` and
+    ``is_symlink`` flag - no opt-in, and the walk keeps its ``dir_fd`` fast path
+    (a ``stat_result`` is a plain value, not an fd-relative ``os.DirEntry``)."""
 
-    def test_default_leaves_entry_none(self, tmp_path: Path) -> None:
+    def test_walk_populates_stat_result_and_flag_on_every_file(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt", "sub/b.txt")
         infos = list(LocalStorage(str(tmp_path)).walk_local())
-        assert infos and all(info.entry is None for info in infos)
-
-    def test_capture_populates_and_matches_the_info(self, tmp_path: Path) -> None:
-        _make_tree(tmp_path, "a.txt", "sub/b.txt")
-        infos = list(LocalStorage(str(tmp_path)).walk_local(capture_entry=True))
         assert {info.compare_key for info in infos} == {"a.txt", "sub/b.txt"}
         for info in infos:
-            assert info.entry is not None
-            # the entry describes the same file the info does
-            assert info.key.endswith(info.entry.name)
-            assert info.entry.stat().st_size == info.size
-            assert info.entry.is_dir() is False
+            assert info.stat_result is not None
+            # the stat describes the same file the info does
+            assert info.stat_result.st_size == info.size
+            assert info.is_symlink is False
 
-    def test_captured_entry_is_usable_after_the_walk(self, tmp_path: Path) -> None:
-        # The reason capture_entry scans by path, not a dir_fd: the entry must
-        # survive being used once the walk has closed the directory. A symlink is
-        # the case a fd-form entry would fail (uncached lstat -> Bad file
-        # descriptor); the path-form entry re-stats on demand.
-        _make_tree(tmp_path, "real.txt")
+    def test_symlink_flag_true_with_followed_stat_and_link_key(self, tmp_path: Path) -> None:
+        # follow_symlinks=True (default): a link to a file surfaces under its link
+        # name (key not resolved to the target) with is_symlink=True, while its
+        # stat_result describes the target it was followed to.
+        _make_tree(tmp_path, "real.txt")  # 3 bytes
         (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
-        # Fully drain the walk first, then touch the retained entries.
-        infos = list(LocalStorage(str(tmp_path)).walk_local(capture_entry=True))
-        by_key = {info.compare_key: info for info in infos}
-        link = by_key["link.txt"].entry
-        assert link is not None
-        assert os.path.isabs(link.path) and os.path.exists(link.path)  # full path, not basename
-        assert link.is_symlink() is True
-        assert link.stat(follow_symlinks=True).st_size == 3  # follows to real.txt (b"x"*3)
-        assert link.stat(follow_symlinks=False).st_size != 3  # the link's own lstat, uncached
+        by_key = {info.compare_key: info for info in LocalStorage(str(tmp_path)).walk_local()}
+        assert by_key["real.txt"].is_symlink is False
+        link = by_key["link.txt"]
+        assert link.is_symlink is True
+        assert link.key.endswith("/link.txt")  # kept the link name, not real.txt
+        assert link.stat_result is not None
+        assert link.stat_result.st_size == 3  # the followed target's size
+        assert link.size == 3
 
-    def test_capture_through_scan_options_reaches_a_filter(self, tmp_path: Path) -> None:
+    def test_filter_reads_stat_result_without_a_fresh_syscall(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "keep.txt", "sub/inner.txt")
         seen: list[str] = []
 
-        def use_entry(info: FileInfo) -> bool:
-            # A filter that reuses the entry's cached stat (no fresh syscall).
+        def use_stat(info: FileInfo) -> bool:
             assert isinstance(info, LocalFileInfo)
-            assert info.entry is not None
-            seen.append(f"{info.compare_key}:{info.entry.stat().st_size}")
+            assert info.stat_result is not None
+            seen.append(f"{info.compare_key}:{info.stat_result.st_size}")
             return True
 
-        options = ScanOptions(recursive=True, capture_entry=True, filter=use_entry)
+        options = ScanOptions(recursive=True, filter=use_stat)
         infos = list(LocalStorage(str(tmp_path)).scan(options))
         assert len(infos) == 2
         assert sorted(seen) == ["keep.txt:3", "sub/inner.txt:3"]
 
-    def test_non_recursive_captures_entry_on_files_and_directories(self, tmp_path: Path) -> None:
+    def test_non_recursive_populates_files_and_directories(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt", "sub/inner.txt")
-        infos = list(LocalStorage(str(tmp_path)).scan(ScanOptions(capture_entry=True)))
-        by_key = {info.compare_key: info for info in infos}
-        assert by_key["a.txt"].entry is not None and by_key["a.txt"].entry.is_dir() is False
-        # a directory entry from the one-level listing is captured too
+        by_key = {
+            info.compare_key: info for info in LocalStorage(str(tmp_path)).scan(ScanOptions())
+        }
+        assert isinstance(by_key["a.txt"], LocalFileInfo)
+        assert by_key["a.txt"].stat_result is not None and by_key["a.txt"].is_symlink is False
+        # a directory entry from the one-level listing carries the stat too
         assert by_key["sub/"].kind is FileKind.DIRECTORY
-        assert by_key["sub/"].entry is not None and by_key["sub/"].entry.is_dir() is True
+        assert isinstance(by_key["sub/"], LocalFileInfo)
+        assert by_key["sub/"].stat_result is not None
+
+    def test_single_path_get_fileinfo_populates_both(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "only.txt")
+        info = LocalStorage(str(tmp_path / "only.txt")).get_fileinfo()
+        assert isinstance(info, LocalFileInfo)
+        assert info.stat_result is not None and info.stat_result.st_size == 3
+        assert info.is_symlink is False
+
+    def test_entry_stat_result_override_makes_the_walk_lstat_based(self, tmp_path: Path) -> None:
+        # entry_stat_result is the walk's single stat: one override re-points the
+        # whole walk at lstat, so symlinks surface as their own entries (not
+        # followed) and a symlinked directory is not descended - a backup walk.
+        _make_tree(tmp_path, "reg.txt", "realdir/inner.txt")
+        (tmp_path / "linkfile").symlink_to(tmp_path / "reg.txt")
+        (tmp_path / "linkdir").symlink_to(tmp_path / "realdir")
+
+        class LstatWalker(LocalFileGenerator):
+            def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
+                try:
+                    return entry.stat(follow_symlinks=False)  # lstat, not followed
+                except OSError:
+                    return None
+
+        by_key = {
+            info.compare_key: info
+            for info in LocalStorage(str(tmp_path), walker=LstatWalker()).walk_local()
+        }
+        # the symlinked directory is its own entry, not descended into
+        assert "linkdir" in by_key and "linkdir/inner.txt" not in by_key
+        assert by_key["linkdir"].is_symlink is True
+        # the symlink-to-file is its own lstat entry, not followed to reg.txt
+        link = by_key["linkfile"]
+        assert link.is_symlink is True
+        assert link.stat_result is not None
+        assert link.stat_result.st_size == os.lstat(tmp_path / "linkfile").st_size
+        # real file / real directory are unaffected (still descended / followed)
+        assert by_key["reg.txt"].is_symlink is False
+        assert "realdir/inner.txt" in by_key
 
 
 class TestLocalStorageIO:

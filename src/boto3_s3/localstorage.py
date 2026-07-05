@@ -23,13 +23,15 @@ exists (``list_files`` / ``should_ignore_file`` / ``triggers_warning`` /
 ``os.scandir`` engine and its extensions - keep boto3-s3 names
 (:meth:`~LocalFileGenerator.scan_children` / :meth:`~LocalFileGenerator.classify_child`
 / :meth:`~LocalFileGenerator.dir_child` / :class:`WalkChild` /
-``have_dir_fd`` / ``capture_entry`` / ``detect_loops`` / :class:`LoopDetector`).
+``have_dir_fd`` / ``detect_loops`` / :class:`LoopDetector`).
 
 Performance (the reason for the ``os.scandir`` engine, not aws-cli's ``listdir``
 + per-name ``os.path.isdir`` / ``os.stat`` restat): ``os.scandir`` carries each
-entry's type (``d_type``) so ``is_dir`` / ``is_symlink`` cost no syscall, and
-caches one followed ``stat`` per entry that the vetting battery and the
-``LocalFileInfo`` build both read. Where the platform supports it
+entry's type (``d_type``) so ``is_symlink`` costs no syscall, and caches one
+``stat`` per entry that the vetting battery, the file/dir classification, and the
+``LocalFileInfo`` build all read through
+:meth:`~LocalFileGenerator.entry_stat_result` (one accessor, so overriding it -
+e.g. to lstat - re-points the whole walk at once). Where the platform supports it
 (:data:`LocalFileGenerator.have_dir_fd`, i.e. POSIX), the directory is opened
 once and scanned through its file descriptor, so every per-entry ``stat`` /
 readability probe is ``dir_fd``-relative (``fstatat`` - no kernel path re-walk);
@@ -37,36 +39,49 @@ on Windows those APIs are absent, and the same code path falls back to a
 path-based scan whose ``FindNextFile`` data already supplies the attributes for
 free. The net effect is one ``stat`` per surviving entry (zero for a plain
 directory) plus aws-cli's one readability ``open`` per entry, versus the ~5
-restats per entry a naive port makes. The opt-in ``ScanOptions.capture_entry``
-also forces the path-based scan (a ``dir_fd`` entry breaks once the fd closes, so
-an entry a callback keeps must be path-form) and stamps each
-``LocalFileInfo.entry`` with its ``os.DirEntry``.
+restats per entry a naive port makes. Every surviving :class:`LocalFileInfo`
+carries that followed ``stat`` as :attr:`~boto3_s3.types.LocalFileInfo.stat_result`
+and its ``d_type`` symlink flag as
+:attr:`~boto3_s3.types.LocalFileInfo.is_symlink` - both already in hand from the
+vetting battery, so a ``filter`` / ``on_result`` callback reads them free, and
+because a ``stat_result`` is a plain value (not a ``dir_fd``-relative
+``os.DirEntry``) the fast path keeps scanning through the directory fd.
 
 The override seams, finest first - extend at the smallest layer that fits:
 
-- :meth:`LocalFileGenerator.should_ignore_entry` - the symlink-skip + warning
-  battery on one ``os.DirEntry`` (aws-cli ``should_ignore_file``, DirEntry form);
+- :meth:`LocalFileGenerator.should_ignore_entry` - the special-file + readability
+  battery on one entry's stat (the DirEntry form of ``triggers_warning``; the
+  symlink-skip and "does not exist" cases are :meth:`~LocalFileGenerator.classify_child`'s);
+- :meth:`LocalFileGenerator.entry_stat_result` - the one stat snapshot per entry
+  (``classify_child`` takes it once and threads it to vetting / kind / size /
+  mtime / loop key / ``stat_result``; override to lstat for a non-following /
+  backup walk);
 - :meth:`LocalFileGenerator.stat_info` - one file entry's ``LocalFileInfo`` from
-  its cached stat (aws-cli ``_safely_get_file_stats``), and
+  that stat (aws-cli ``_safely_get_file_stats``), and
   :meth:`LocalFileGenerator.dir_child` its directory counterpart;
 - :meth:`LocalFileGenerator.classify_child` - one ``os.DirEntry`` -> a
-  :class:`WalkChild` or a skip, the natural per-entry override point;
-- :meth:`LocalFileGenerator.scan_children` - one directory enumerated and sorted
-  (override to change *how* a directory is read, reusing ``classify_child`` /
-  ``dir_child`` / :meth:`~LocalFileGenerator.normalize_sort`);
+  :class:`WalkChild` or a skip, the natural per-entry override point (owns the
+  single stat: the no-follow / "does not exist" skips and the kind decision);
+- :meth:`LocalFileGenerator.finalize_children` - a directory's ``compare_key``-
+  stamped children as a whole, before the walk consumes them (default: just
+  :meth:`~LocalFileGenerator.normalize_sort`; override to prune / harvest /
+  strip - dropping a directory prunes its subtree);
+- :meth:`LocalFileGenerator.scan_children` - one directory enumerated, its children
+  ``compare_key``-stamped, then ``finalize_children``\\ d (override to change *how*
+  a directory is read, reusing ``classify_child`` / ``dir_child`` / the two above);
 - :meth:`LocalFileGenerator.walk_dir` - the depth-first recursion yielding one
   page per directory file-run (override to prune a subtree or otherwise
   customize how the tree is descended);
 - :meth:`LocalFileGenerator.list_file_pages` - the entry point: root vetting,
-  then ``walk_dir`` with ``compare_key`` stamping and ``ScanOptions.filter``, in
+  then ``walk_dir`` (which stamps ``compare_key``) with ``ScanOptions.filter``, in
   ``os.scandir``-aligned pages (what ``Storage.scan_pages`` returns);
 - :meth:`LocalFileGenerator.list_files` - that flattened to a flat per-file
   stream (aws-cli's ``FileGenerator.list_files``).
 
 The module-level helpers are public where an override needs them
-(:func:`is_special_file` / :func:`is_readable` / :func:`get_file_stat` /
-:func:`entry_stat`, and :class:`LoopDetector` / :class:`WalkChild`);
-``LocalStorage.get_fileinfo`` (the single-path point op) reuses them too.
+(:func:`is_special_file` / :func:`is_readable` / :func:`get_file_stat`, and
+:class:`LoopDetector` / :class:`WalkChild`); ``LocalStorage.get_fileinfo`` (the
+single-path point op) reuses them too.
 """
 
 from __future__ import annotations
@@ -167,38 +182,28 @@ def _is_readable_child(name: str, full: str, dir_fd: int | None, *, is_dir: bool
     return True
 
 
-def get_file_stat(path: str) -> tuple[int, datetime | None]:
-    """Size and tz-aware mtime for a path (aws-cli's ``get_file_stat``).
+def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
+    """Size and tz-aware UTC mtime from a stat result (the shared derivation).
 
-    ``OSError`` from ``os.stat`` propagates (the caller runs the warning
-    battery); an unrepresentable timestamp returns ``None`` for the caller's
-    epoch fallback. The instant is the file's mtime; it is represented in UTC
-    per the ``FileInfo.mtime`` contract (aws-cli uses the local zone - same
-    instant either way).
+    An unrepresentable timestamp returns ``None`` for mtime - the caller's cue
+    for the epoch fallback. Represented in UTC per the ``FileInfo.mtime``
+    contract (aws-cli uses the local zone - same instant either way).
     """
-    stats = os.stat(path)
-    try:
-        mtime: datetime | None = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc)
-    except (ValueError, OSError, OverflowError):
-        mtime = None
-    return stats.st_size, mtime
-
-
-def entry_stat(entry: os.DirEntry[str]) -> tuple[int, datetime | None]:
-    """Size and tz-aware mtime for a walk entry (the ``os.DirEntry`` fast path).
-
-    The :class:`os.DirEntry` analog of :func:`get_file_stat`, reading the entry's
-    followed stat (cached by the ``DirEntry`` - shared with the vetting battery,
-    so one ``fstatat`` covers both). ``OSError`` propagates (the caller runs the
-    warning battery); an unrepresentable timestamp returns ``None`` for the
-    caller's epoch fallback.
-    """
-    st = entry.stat(follow_symlinks=True)
     try:
         mtime: datetime | None = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         mtime = None
     return st.st_size, mtime
+
+
+def get_file_stat(path: str) -> tuple[int, datetime | None]:
+    """Size and tz-aware mtime for a path (aws-cli's ``get_file_stat``).
+
+    ``OSError`` from ``os.stat`` propagates (the caller runs the warning
+    battery); an unrepresentable timestamp returns ``None`` for the caller's
+    epoch fallback (see :func:`_size_mtime`).
+    """
+    return _size_mtime(os.stat(path))
 
 
 def _stat_key(path: str) -> tuple[int, int] | None:
@@ -305,7 +310,7 @@ class LocalFileGenerator:
     aws-cli name mapping. The default instance is the fast ``os.scandir`` walk.
 
     The class is stateless across a walk: the per-walk knobs (``follow_symlinks``
-    / ``detect_loops`` / ``capture_entry`` / ``notify``) are passed to
+    / ``detect_loops`` / ``notify``) are passed to
     :meth:`list_files` (aws-cli carries them on the instance instead, but here one
     walker serves every scan the owning ``LocalStorage`` makes).
     """
@@ -354,8 +359,10 @@ class LocalFileGenerator:
         read on a network-mounted path, the reason the walk is paged at all. The
         pages concatenate to :meth:`list_files`'s flat stream. ``root`` is an
         absolute path with a trailing ``os.sep``; each ``LocalFileInfo.key`` is the
-        absolute path (``os.sep`` folded to ``/``) and ``compare_key`` is stamped
-        here as the key relative to ``root`` (what ``options.filter`` matches).
+        absolute path (``os.sep`` folded to ``/``) and ``compare_key`` is the key
+        relative to ``root``, stamped in :meth:`scan_children` (so a custom
+        :meth:`finalize_children` can already filter on it) - the axis
+        ``options.filter`` matches.
 
         Reads the local-walk fields of ``options`` (the same bundle
         ``Storage.scan_pages`` receives, so a custom walker sees the full scan
@@ -365,12 +372,12 @@ class LocalFileGenerator:
         ``detect_symlink_loops`` (with ``follow_symlinks``, skips a directory that
         resolves to one of its own ancestors with a ``Symbolic link loop
         detected`` warning - a library extension, off = ``aws s3`` behaviour, no
-        extra ``stat``); ``capture_entry`` (stamps each ``LocalFileInfo.entry``
-        with its ``os.DirEntry``, scanning by path so the entry stays usable
-        afterwards); and ``filter`` (drops entries it rejects - applied *after*
-        the aws-cli vetting so an excluded file still emits the warnings aws-cli
-        would, and yielding only survivors saves paging them downstream). The root
-        is vetted with :meth:`should_ignore_file`; its children per entry in
+        extra ``stat``); and ``filter`` (drops entries it rejects - applied
+        *after* the aws-cli vetting so an excluded file still emits the warnings
+        aws-cli would, and yielding only survivors saves paging them downstream;
+        the predicate can read each ``LocalFileInfo``'s ``stat_result`` /
+        ``is_symlink``, stamped for free from the walk). The root is vetted with
+        :meth:`should_ignore_file`; its children per entry in
         :meth:`scan_children`.
         """
         notify: Callable[[str], None] = (
@@ -383,15 +390,18 @@ class LocalFileGenerator:
         # symlink); None then costs no per-directory stat.
         detector = LoopDetector(root) if options.detect_symlink_loops and follow_symlinks else None
         # root ends in os.sep, so the normalized root ends in "/" and the slice
-        # never leaves a leading separator; compare_key is the key relative to root.
+        # (in scan_children) never leaves a leading separator; compare_key is the
+        # key relative to root.
         strip = len(root.replace(os.sep, "/"))
         item_filter = options.filter
-        for page in self.walk_dir(root, options, notify=notify, detector=detector):
-            kept: list[LocalFileInfo] = []
-            for info in page:
-                info.compare_key = info.key[strip:]
-                if item_filter is None or item_filter(info):
-                    kept.append(info)
+        for page in self.walk_dir(root, options, strip=strip, notify=notify, detector=detector):
+            # compare_key is already stamped (scan_children, before finalize_children);
+            # here only the visibility filter runs. No filter (or a custom
+            # finalize_children that already pruned) -> the page passes untouched.
+            if item_filter is None:
+                yield page
+                continue
+            kept = [info for info in page if item_filter(info)]
             if kept:
                 yield kept
 
@@ -400,6 +410,7 @@ class LocalFileGenerator:
         dir_path: str,
         options: ScanOptions,
         *,
+        strip: int,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
     ) -> Iterator[list[LocalFileInfo]]:
@@ -413,20 +424,22 @@ class LocalFileGenerator:
         interleaving with the sub-directories' pages in byte order. ``dir_path``
         was already vetted (the root by :meth:`list_file_pages`, a child in its
         parent's :meth:`scan_children`); ``detector`` guards symlink cycles.
+        ``strip`` is the root prefix length :meth:`scan_children` uses to stamp
+        ``compare_key`` - constant across the recursion, threaded through unchanged.
 
         This is where recursion is customizable: override it and return early for a
         directory to prune its subtree (before ``super().walk_dir`` for the rest),
         or re-implement the loop to cap depth or change traversal - preserving the
-        depth-first byte order that sync's merge-join relies on. ``compare_key``
-        stamping and ``ScanOptions.filter`` are :meth:`list_file_pages`'s job on
-        the yielded pages, not this method's.
+        depth-first byte order that sync's merge-join relies on. ``compare_key`` is
+        stamped in :meth:`scan_children`; ``ScanOptions.filter`` is
+        :meth:`list_file_pages`'s job on the yielded pages, not this method's.
         """
         run: list[LocalFileInfo] = []
         for sort_name, info, loop_key in self.scan_children(
             dir_path,
+            strip=strip,
             follow_symlinks=options.follow_symlinks,
             notify=notify,
-            capture_entry=options.capture_entry,
         ):
             if info.kind != FileKind.DIRECTORY:
                 run.append(info)
@@ -447,11 +460,15 @@ class LocalFileGenerator:
                     notify(f"Skipping file {sub.rstrip(os.sep)}. Symbolic link loop detected.")
                     continue
                 try:
-                    yield from self.walk_dir(sub, options, notify=notify, detector=detector)
+                    yield from self.walk_dir(
+                        sub, options, strip=strip, notify=notify, detector=detector
+                    )
                 finally:
                     detector.leave()
             else:
-                yield from self.walk_dir(sub, options, notify=notify, detector=detector)
+                yield from self.walk_dir(
+                    sub, options, strip=strip, notify=notify, detector=detector
+                )
         if run:
             yield run
 
@@ -459,39 +476,40 @@ class LocalFileGenerator:
         self,
         dir_path: str,
         *,
+        strip: int,
         follow_symlinks: bool,
         notify: Callable[[str], None],
-        capture_entry: bool,
     ) -> list[WalkChild]:
-        """One directory's vetted children as sorted :class:`WalkChild`\\ s.
+        """One directory's vetted children as final :class:`WalkChild`\\ s.
 
         The enumeration layer (no aws-cli counterpart - aws-cli uses ``listdir``):
         it scans ``dir_path`` once with :func:`os.scandir`, turns each entry into
         a :class:`WalkChild` via :meth:`classify_child` (skips return ``None``),
-        and orders them with :meth:`normalize_sort`. A directory that cannot be
-        opened or scanned (a race after its parent vetted it readable) yields an
-        empty list.
+        stamps each child's ``compare_key`` (the key with the ``strip``-long root
+        prefix removed, aws-cli's ``src_path[len(root):]``), then hands the list to
+        :meth:`finalize_children` (which sorts, and is the override point for
+        pruning / registration). A directory that cannot be opened or scanned (a
+        race after its parent vetted it readable) yields an empty list.
 
-        The default fast path scans through the directory's own fd where the
-        platform allows (:data:`have_dir_fd`), so each entry's stat and
-        readability probe are dir-relative (``fstatat`` - no path re-walk). With
-        ``capture_entry`` the scan runs by path (no fd): a fd-relative entry
-        breaks once the fd is closed, so an entry a callback may keep past the
-        walk must be path-form (full ``.path``, re-stats on demand).
+        The fast path scans through the directory's own fd where the platform
+        allows (:data:`have_dir_fd`), so each entry's stat and readability probe
+        are dir-relative (``fstatat`` - no path re-walk); the followed stat each
+        :class:`LocalFileInfo` carries as ``stat_result`` is a plain value, so it
+        keeps this fast path (unlike an ``os.DirEntry``, which would break once
+        the fd closes).
 
         Override this to change how a directory is enumerated - e.g. to inject
         synthetic entries or read a different source - reusing
         :meth:`classify_child` / :meth:`dir_child` / :meth:`normalize_sort` so the
-        sort key and directory-info shape need not be reproduced. For a smaller
-        change, override :meth:`classify_child` (or :meth:`should_ignore_entry` /
-        :meth:`stat_info`) instead.
+        sort key and directory-info shape need not be reproduced (an injected
+        child still needs its ``compare_key`` stamped - ``info.key[strip:]``). To
+        prune / register / re-order after the fact, override the finer
+        :meth:`finalize_children` instead; for a per-entry change,
+        :meth:`classify_child` (or :meth:`should_ignore_entry` / :meth:`stat_info`).
         """
         children: list[WalkChild] = []
         dir_fd: int | None = None
-        # Capturing an entry a callback may keep forces path-form scanning (a
-        # dir_fd entry breaks once the fd is closed); otherwise scan through the
-        # fd for dir-relative stats where the platform supports it.
-        use_fd = self.have_dir_fd and not capture_entry
+        use_fd = self.have_dir_fd
         try:
             if use_fd:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
@@ -514,14 +532,42 @@ class LocalFileGenerator:
                         dir_fd,
                         follow_symlinks=follow_symlinks,
                         notify=notify,
-                        capture_entry=capture_entry,
                     )
                     if child is not None:
                         children.append(child)
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
-        return self.normalize_sort(children)
+        for child in children:
+            child.info.compare_key = child.info.key[strip:]
+        return self.finalize_children(children)
+
+    def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
+        """The single stat snapshot for one entry (an override seam), or ``None``.
+
+        The walk's **one** stat per entry: :meth:`classify_child` calls this once
+        and threads the result through everything downstream - the special /
+        readable vetting (:meth:`should_ignore_entry`), the file-vs-directory
+        decision, the ``size`` / ``mtime`` (:meth:`stat_info`), the loop key
+        (:meth:`dir_child`), and :attr:`LocalFileInfo.stat_result`. The default
+        reads the ``os.DirEntry``'s cache, one ``fstatat`` for the whole entry.
+
+        Default: the **followed** stat (``follow_symlinks=True``), so the walk
+        follows symlinks like ``aws s3``. Override to return the link's own lstat
+        (``entry.stat(follow_symlinks=False)``) to turn the walk lstat-based in
+        one place, still one syscall: then a symlink surfaces as its own entry
+        instead of being followed, a symlinked directory is not descended (its
+        ``st_mode`` is not ``S_IFDIR``), and ``size`` / ``mtime`` / ``stat_result``
+        all describe the link - the building block for a backup-style walk. (The
+        readability probe in :meth:`should_ignore_entry` still opens through the
+        link, so pair this with a ``should_ignore_entry`` override to also admit
+        broken links.) ``None`` (an ``OSError``) makes the caller treat the entry
+        as gone (the "does not exist" skip).
+        """
+        try:
+            return entry.stat(follow_symlinks=True)
+        except OSError:
+            return None
 
     def classify_child(
         self,
@@ -531,49 +577,71 @@ class LocalFileGenerator:
         *,
         follow_symlinks: bool,
         notify: Callable[[str], None],
-        capture_entry: bool,
     ) -> WalkChild | None:
         """One ``os.DirEntry`` -> a :class:`WalkChild`, or ``None`` to skip it.
 
-        The per-entry decision, the natural place to customize the walk without
-        touching the scan loop: it vets via :meth:`should_ignore_entry`, then
-        builds a file's :meth:`stat_info` info or a sub-directory's
-        :meth:`dir_child`. ``full`` is the entry's absolute path, ``dir_fd`` the
-        owning directory fd (``None`` off POSIX / when capturing). With
-        ``capture_entry`` the file info also carries its ``os.DirEntry``.
+        The per-entry decision, and the walk's single stat: it takes the entry's
+        :meth:`entry_stat_result` **once** and threads that one value through the
+        rest (so nothing below re-stats or re-checks for ``None``). A no-follow
+        symlink is skipped first - a free ``d_type`` test, before any stat; a stat
+        that comes back ``None`` (a broken symlink followed, or the entry raced
+        away between the scan and here) is the "does not exist" skip; then
+        :meth:`should_ignore_entry` vets that valid stat, and the kind is keyed on
+        its ``st_mode`` (``S_IFDIR`` = descend via :meth:`dir_child`, else a file
+        via :meth:`stat_info`). Keying on that same stat - rather than a fresh
+        ``entry.is_dir`` - keeps the whole entry on one stat and lets an lstat
+        override classify a symlinked directory as a non-descended entry. ``full``
+        is the entry's absolute path, ``dir_fd`` the owning directory fd (``None``
+        off POSIX).
         """
-        if self.should_ignore_entry(
-            entry, full, dir_fd, follow_symlinks=follow_symlinks, notify=notify
-        ):
+        if not follow_symlinks and entry.is_symlink():
             return None
-        if entry.is_dir(follow_symlinks=True):
-            return self.dir_child(entry, full, capture_entry=capture_entry)
-        info = self.stat_info(entry, full, notify)
-        if info is None:
+        st = self.entry_stat_result(entry)
+        if st is None:
+            notify(f"Skipping file {full}. File does not exist.")
             return None
-        if capture_entry:
-            info.entry = entry
-        return WalkChild(entry.name, info, None)
+        if self.should_ignore_entry(entry, full, dir_fd, st, notify=notify):
+            return None
+        if stat_module.S_ISDIR(st.st_mode):
+            return self.dir_child(entry, full, st)
+        return WalkChild(entry.name, self.stat_info(entry, full, st, notify), None)
 
-    def dir_child(self, entry: os.DirEntry[str], full: str, *, capture_entry: bool) -> WalkChild:
+    def dir_child(self, entry: os.DirEntry[str], full: str, st: os.stat_result) -> WalkChild:
         """A sub-directory's :class:`WalkChild` - its ``DIRECTORY`` info and loop key.
 
         ``sort_name`` and the info key carry a trailing ``os.sep`` (so the
         directory sorts after a sibling file of the same stem); ``loop_key`` is
-        ``(st_dev, st_ino)`` from the entry's cached stat (``None`` to fail open).
+        ``(st_dev, st_ino)`` from ``st`` (``None`` to fail open on the ``st_ino ==
+        0`` some FAT / exFAT / FUSE volumes report). ``st`` is the one stat
+        :meth:`classify_child` took; the info carries it and the entry's
+        ``is_symlink`` flag.
         """
-        try:
-            # Cached by should_ignore_entry's stat - no syscall here.
-            st = entry.stat(follow_symlinks=True)
-            loop_key = (st.st_dev, st.st_ino) if st.st_ino else None
-        except OSError:
-            loop_key = None
+        loop_key = (st.st_dev, st.st_ino) if st.st_ino else None
         info = LocalFileInfo(
             key=(full + os.sep).replace(os.sep, "/"),
             kind=FileKind.DIRECTORY,
-            entry=entry if capture_entry else None,
+            stat_result=st,
+            is_symlink=entry.is_symlink(),
         )
         return WalkChild(entry.name + os.sep, info, loop_key)
+
+    def finalize_children(self, children: list[WalkChild]) -> list[WalkChild]:
+        """Produce a directory's final child list from its vetted, ``compare_key``-
+        stamped children (an override seam; default: just :meth:`normalize_sort`).
+
+        The last step of :meth:`scan_children`, the seam for shaping a directory's
+        children as a whole before the walk consumes them - each child's
+        ``compare_key`` is already stamped, so an override can prune by it, harvest
+        (register directories / symlinks a plain transfer would not surface),
+        strip entries it does not want transferred, or re-order. It receives the
+        children *unsorted*, so pruning here happens before the sort; call
+        ``super().finalize_children`` (or :meth:`normalize_sort`) for aws-cli byte
+        order. Dropping a ``DIRECTORY`` child prunes its whole subtree (the walk
+        never descends what this does not return) - a speedup ``aws s3`` cannot do
+        (it vets every file), so it is the right place for a non-parity backup
+        walk, not the default. The default returns the sorted list unchanged.
+        """
+        return self.normalize_sort(children)
 
     def normalize_sort(self, children: list[WalkChild]) -> list[WalkChild]:
         """Sort children into aws-cli byte order (aws-cli's ``normalize_sort``).
@@ -632,27 +700,22 @@ class LocalFileGenerator:
         entry: os.DirEntry[str],
         full: str,
         dir_fd: int | None,
+        st: os.stat_result,
         *,
-        follow_symlinks: bool,
         notify: Callable[[str], None],
     ) -> bool:
-        """:meth:`should_ignore_file` on one ``os.DirEntry`` (the DirEntry fast path).
+        """The special-file + readability battery on one entry's stat (the DirEntry
+        form of :meth:`triggers_warning`).
 
-        ``is_symlink`` is the free ``d_type`` test, and the exists / special
-        checks read the entry's followed stat (``os.DirEntry.stat`` - one
-        ``fstatat`` through ``dir_fd`` where the platform allows, cached so the
-        later ``is_dir`` / :meth:`stat_info` add no syscall). ``full`` is the
-        entry's absolute path (warning wording and the info key); ``dir_fd`` is
-        the owning directory fd (``None`` off POSIX) for the dir-relative
-        readability probe. Same order / wording as :meth:`triggers_warning`.
+        Runs on the valid stat :meth:`classify_child` already took (``st``) - the
+        no-follow symlink skip and the "does not exist" / ``None`` case are
+        classify_child's, so this only decides whether a *present* entry is
+        ignorable: a character/block/FIFO/socket special file, or one the process
+        cannot read. The readability probe is dir-relative (``openat`` through
+        ``dir_fd`` where the platform allows, ``None`` off POSIX). ``full`` is the
+        entry's absolute path (warning wording). Same order / wording as
+        :meth:`triggers_warning`.
         """
-        if not follow_symlinks and entry.is_symlink():
-            return True
-        try:
-            st = entry.stat(follow_symlinks=True)
-        except OSError:
-            notify(f"Skipping file {full}. File does not exist.")
-            return True
         if _is_special_mode(st.st_mode):
             notify(
                 f"Skipping file {full}. File is character special device, "
@@ -665,27 +728,29 @@ class LocalFileGenerator:
         return False
 
     def stat_info(
-        self, entry: os.DirEntry[str], full: str, notify: Callable[[str], None]
-    ) -> LocalFileInfo | None:
-        """One file entry's ``LocalFileInfo`` from its cached stat (aws-cli's
+        self, entry: os.DirEntry[str], full: str, st: os.stat_result, notify: Callable[[str], None]
+    ) -> LocalFileInfo:
+        """One file entry's ``LocalFileInfo`` from its stat (aws-cli's
         ``_safely_get_file_stats``).
 
-        ``entry`` has passed :meth:`should_ignore_entry`, so its stat is cached
-        and :func:`entry_stat` adds no syscall. On a race (the entry vanished
-        since vetting) the path-based :meth:`triggers_warning` runs, warning like
-        aws-cli; an unrepresentable mtime keeps the file, stamped with
-        :data:`EPOCH_TIME` (aws-cli's ``skip_file=False``).
+        ``st`` is the valid stat :meth:`classify_child` took (the race / ``None``
+        case is handled there), so this never fails: an unrepresentable mtime
+        keeps the file, stamped with :data:`EPOCH_TIME` (aws-cli's
+        ``skip_file=False``). The info carries ``st`` and the entry's
+        ``is_symlink`` flag.
         """
-        try:
-            size, mtime = entry_stat(entry)
-        except (OSError, ValueError):
-            self.triggers_warning(full, notify)
-            return None
+        size, mtime = _size_mtime(st)
         if mtime is None:
             # skip_file=False in aws-cli: warn but keep the file, stamped epoch.
             notify("File has an invalid timestamp. Passing epoch time as timestamp.")
             mtime = self.EPOCH_TIME
-        return LocalFileInfo(key=full.replace(os.sep, "/"), size=size, mtime=mtime)
+        return LocalFileInfo(
+            key=full.replace(os.sep, "/"),
+            size=size,
+            mtime=mtime,
+            stat_result=st,
+            is_symlink=entry.is_symlink(),
+        )
 
 
 def translate_os_error(
@@ -813,11 +878,12 @@ class LocalStorage(Storage):
         just before the walk descends into its next sub-directory) so a page maps
         to one scandir - the unit a prefetch consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
-        ``options.on_warning`` / ``options.capture_entry`` / ``options.filter``
-        are threaded into it - a symlink skip, the cycle guard, the aws-cli-worded
-        warning channel a transfer needs, the opt-in ``LocalFileInfo.entry``
-        capture, and the per-entry filter (applied in the walk, after vetting -
-        :meth:`Storage.scan_pages`'s "return filtered pages" contract).
+        ``options.on_warning`` / ``options.filter`` are threaded into it - a
+        symlink skip, the cycle guard, the aws-cli-worded warning channel a
+        transfer needs, and the per-entry filter (applied in the walk, after
+        vetting - :meth:`Storage.scan_pages`'s "return filtered pages" contract).
+        Every listed ``LocalFileInfo`` carries its followed ``stat_result`` and
+        ``is_symlink`` flag for a filter / ``on_result`` to read.
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``) as a single page, anchored at the absolutized path
@@ -838,7 +904,6 @@ class LocalStorage(Storage):
         follow_symlinks: bool = True,
         detect_loops: bool = False,
         on_warning: Callable[[str], None] | None = None,
-        capture_entry: bool = False,
     ) -> Iterator[LocalFileInfo]:
         """Yield every file under :attr:`path` (recursively) in aws-cli's byte order.
 
@@ -860,7 +925,6 @@ class LocalStorage(Storage):
             ScanOptions(
                 follow_symlinks=follow_symlinks,
                 detect_symlink_loops=detect_loops,
-                capture_entry=capture_entry,
                 on_warning=on_warning,
             ),
         )
@@ -877,15 +941,16 @@ class LocalStorage(Storage):
             if info is not None and (item_filter is None or item_filter(info)):
                 yield info
             return
-        for sort_name, info, _loop_key in self._walker.scan_children(
+        # scan_children stamps compare_key as info.key[strip:]; strip is the
+        # normalized root-prefix length (os.path.join(root, "") = root + a sep, the
+        # common prefix of every child key). One level down this equals the name.
+        strip = len(os.path.join(root, "").replace(os.sep, "/"))
+        for _sort_name, info, _loop_key in self._walker.scan_children(
             root,
+            strip=strip,
             follow_symlinks=options.follow_symlinks,
             notify=notify,
-            capture_entry=options.capture_entry,
         ):
-            # One level down: the entry name itself is the root-relative key (a
-            # directory's sort_name / key already carry a trailing separator).
-            info.compare_key = sort_name.replace(os.sep, "/")
             if item_filter is None or item_filter(info):
                 yield info
 
@@ -902,8 +967,12 @@ class LocalStorage(Storage):
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
+        The info carries the followed ``stat_result`` and the ``is_symlink`` flag,
+        as the walk does (this is the single-path form, so the extra stat is not on
+        any hot loop).
         """
-        if not follow_symlinks and os.path.islink(path):
+        is_symlink = os.path.islink(path)
+        if not follow_symlinks and is_symlink:
             return None
         try:
             size, mtime = get_file_stat(path)
@@ -923,7 +992,17 @@ class LocalStorage(Storage):
         if mtime is None:
             notify("File has an invalid timestamp. Passing epoch time as timestamp.")
             mtime = _EPOCH
-        return LocalFileInfo(key=path.replace(os.sep, "/"), size=size, mtime=mtime)
+        try:
+            stat_result: os.stat_result | None = os.stat(path)
+        except OSError:
+            stat_result = None
+        return LocalFileInfo(
+            key=path.replace(os.sep, "/"),
+            size=size,
+            mtime=mtime,
+            stat_result=stat_result,
+            is_symlink=is_symlink,
+        )
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
@@ -1005,7 +1084,6 @@ __all__ = [
     "LocalStorage",
     "LoopDetector",
     "WalkChild",
-    "entry_stat",
     "get_file_stat",
     "is_readable",
     "is_special_file",

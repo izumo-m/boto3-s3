@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bucket_name_prefix` / `bucket_region`. `ls` behaviour is unchanged.
 - `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator` -
   subclass its public seams and inject via `LocalStorage(path, walker=...)`.
-- New `ScanOptions.capture_entry`: exposes each local entry's `os.DirEntry` on
-  `LocalFileInfo.entry`, for a `filter` / `on_result` to reuse.
+- Each local entry carries its followed `stat_result` and an `is_symlink` flag on
+  `LocalFileInfo`, for a `filter` / `on_result` to read.
 
 ## [0.4.0] - 2026-07-03
 
