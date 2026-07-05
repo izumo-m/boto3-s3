@@ -4,7 +4,8 @@
 ``set_stream_logger`` is the boto3-faithful entry that attaches a stream handler
 (carrying the masking filter, when ``mask_secrets``) so a caller enabling debug
 output never leaks signatures, access keys, session tokens, SSO bearer /
-sso-oidc tokens, SSE-C keys, STS-response credentials, or proxy credentials. The
+sso-oidc tokens, SSE-C keys, STS-response credentials, the hex byte-dumps a
+signature-mismatch error body echoes, or proxy credentials. The
 module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
 - so the CLI can import it on the ``--debug`` path without breaking the import
 contract (docs/imports.md).
@@ -153,6 +154,17 @@ _STS_BODY_JSON_CRED_RE = re.compile(
     r'(?P<key>"(?:SecretAccessKey|SessionToken)"\s*:\s*")(?P<val>[^"]+)', re.IGNORECASE
 )
 
+# Hex byte-dumps in an error response body (full mask). A ``SignatureDoesNotMatch``
+# (HTTP 403) response echoes the request's canonical form back as
+# ``<CanonicalRequestBytes>`` / ``<StringToSignBytes>`` - a space-separated hex
+# dump that ``bytes.fromhex`` reconstructs verbatim, INCLUDING the
+# ``x-amz-security-token`` / ``x-amz-server-side-encryption-customer-key`` header
+# lines. The text-form masks above never see the hex twin, so mask the whole dump
+# (botocore.parsers logs error bodies at DEBUG too, not just 2xx).
+_BYTE_DUMP_RE = re.compile(
+    r"(?P<key><(?:CanonicalRequestBytes|StringToSignBytes)>)(?P<val>[^<]*)", re.IGNORECASE
+)
+
 # Proxy URL credentials (``scheme://user:pass@host`` -> ``scheme://***:***@host``),
 # the exact shape ``botocore.httpsession.mask_proxy_url`` masks. The scheme body
 # is length-capped ({0,31}): an unbounded greedy run backtracks O(n^2) over any
@@ -201,6 +213,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_JSON_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
     # Before _ACCESS_KEY_ID_RE so the kept ``AWS <id>:`` prefix is tail-revealed.
     text = _SIGV2_AUTH_HEADER_RE.sub(lambda m: m.group("key") + MASK, text)
@@ -221,11 +234,18 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     return text
 
 
+# Default formatter, reused only to render an exception traceback to text (its
+# ``formatException`` is the same one every stdlib handler uses) so the filter can
+# mask it before a handler appends the raw form.
+_EXC_FORMATTER = logging.Formatter()
+
+
 class SecretMaskingFilter(logging.Filter):
     """``logging.Filter`` that masks credential-bearing text in log records.
 
-    Rewrites each record's final formatted message via :func:`mask_text` and
-    clears its args so the masked text is not re-formatted. Belongs on the
+    Rewrites each record's final formatted message via :func:`mask_text` (and,
+    when the record carries one, its exception traceback) and clears its args so
+    the masked text is not re-formatted. Belongs on the
     *handler* (not the logger): records propagated up from child loggers such as
     ``botocore.auth`` reach an ancestor only through its handlers, so a
     handler-level filter is the one that sees them. Always admits the record
@@ -244,6 +264,14 @@ class SecretMaskingFilter(logging.Filter):
             return True
         record.msg = mask_text(message, extra_secrets=self._extra_secrets)
         record.args = ()
+        # An attached exception is appended by the handler's formatter from
+        # record.exc_text (derived from exc_info if unset), a channel mask_text
+        # never sees otherwise. Pre-derive and mask it, so a secret embedded in an
+        # exception message is redacted too. Formatters reuse a non-empty exc_text.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = _EXC_FORMATTER.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = mask_text(record.exc_text, extra_secrets=self._extra_secrets)
         return True
 
 

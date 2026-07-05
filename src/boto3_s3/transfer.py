@@ -1065,10 +1065,15 @@ class _Progress:
         self._fire(0)
 
     def on_progress(self, future: Any, bytes_transferred: int, **kwargs: Any) -> None:
+        # Fire inside the lock: accumulate-and-deliver must be atomic, else two
+        # multipart workers can deliver their snapshots out of order (a later,
+        # larger `done` before an earlier one) and `bytes_done` moves backward -
+        # the monotonicity this class promises. The callback is fast (enqueue /
+        # throttled paint), and the lock is per-item, so this serializes only one
+        # object's part callbacks.
         with self._lock:
             self._done += bytes_transferred
-            done = self._done
-        self._fire(done)
+            self._fire(self._done)
 
 
 class _DirectoryCreator:

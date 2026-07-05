@@ -103,6 +103,17 @@ class TestMainExitCodes:
         assert "Unknown options" in err
         assert "--extra-argument-foo" in err
 
+    def test_unknown_options_joined_with_comma_no_space(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws s3 joins multiple unknown options with "," and NO space (the
+        # customizations command layer; verified against real aws 2.35.5), not
+        # ", ". Both option positions share this wording.
+        assert cli.main(["cp", "a.txt", "s3://b/", "--foo", "--bar"]) == 252
+        assert "Unknown options: --foo,--bar" in capsys.readouterr().err
+        assert cli.main(["--foo", "--bar", "cp", "a.txt", "s3://b/"]) == 252
+        assert "Unknown options: --foo,--bar" in capsys.readouterr().err
+
     def test_extra_positional_exits_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["ls", "s3://bucket/p/", "stray"])
         err = capsys.readouterr().err
