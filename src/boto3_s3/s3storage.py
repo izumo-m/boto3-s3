@@ -581,10 +581,17 @@ class S3Storage(Storage):
         yield from raw
 
     def _scan_object_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter)."""
+        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
+
+        ``options.prefix`` overrides the storage's own key as the listing anchor
+        (a transfer's normalized prefix) - both the ``Prefix`` and the
+        ``compare_key`` relativization use it - so this instance lists under it
+        without being rebuilt.
+        """
+        prefix = options.prefix if options.prefix is not None else self._key
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
-            "Prefix": self._key,
+            "Prefix": prefix,
             "PaginationConfig": {"PageSize": options.page_size},
         }
         if not options.recursive:
@@ -598,7 +605,7 @@ class S3Storage(Storage):
         with s3_errors(operation="ls", bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
+                yield _page_to_infos(page, recursive=options.recursive, prefix=prefix)
 
     def list_buckets(
         self,

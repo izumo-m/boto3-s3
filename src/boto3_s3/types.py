@@ -173,6 +173,15 @@ class ScanOptions:
     byte-ordered, the local walk sorts for aws parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
+
+    ``prefix`` overrides the S3 listing anchor: the built-in S3 backend lists under
+    it (as the ``ListObjectsV2`` ``Prefix``, relativizing ``compare_key`` to it)
+    instead of the storage's own key. A transfer sets it when its normalized
+    listing prefix differs from the raw source key (a recursive ``cp`` / ``mv`` /
+    ``sync`` / ``rm`` source, where the plan appends a trailing ``/``), so the
+    *passed* storage instance is scanned rather than rebuilt from a URI - a custom
+    ``S3Storage`` subclass (and its ``scan_pages`` override) survives. ``None``
+    uses the storage's key; non-S3 backends ignore it (another S3 listing knob).
     """
 
     recursive: bool = False
@@ -180,6 +189,7 @@ class ScanOptions:
     page_size: int = 1000
     request_payer: str | None = None
     fetch_owner: bool = False
+    prefix: str | None = None
     filter: Callable[[FileInfo], bool] | None = None
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False

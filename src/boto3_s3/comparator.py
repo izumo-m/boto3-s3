@@ -41,9 +41,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
-from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
+from boto3_s3.types import FileInfo, S3FileInfo, TransferType
+
+if TYPE_CHECKING:
+    from boto3_s3.storage import Storage
 
 _T = TypeVar("_T")
 
@@ -63,12 +66,19 @@ class SyncPair:
     - both set: the key exists on both sides (copy is an *update*),
     - ``dest`` is ``None``: source-only (copy is a *new* transfer),
     - ``src`` is ``None``: destination-only (the delete candidate).
+
+    ``src_storage`` / ``dest_storage`` are the backends the two sides were listed
+    from (constant across a sync, stamped by :class:`Comparator`). A content
+    ``compare=`` strategy reads the non-S3 side's bytes through its ``Storage.open``
+    - so content comparison works for any backend, not just a local filesystem.
     """
 
     key: str
     transfer_type: TransferType
     src: FileInfo | None = None
     dest: FileInfo | None = None
+    src_storage: Storage | None = None
+    dest_storage: Storage | None = None
 
 
 PairFilter = Callable[[SyncPair], bool]
@@ -112,10 +122,14 @@ class Comparator:
     ordering contract (S3 byte order; the local walk sorts to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
     to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
-    stamped onto every emitted pair - context, not a judgment.
+    stamped onto every emitted pair - context, not a judgment. ``src_storage`` /
+    ``dest_storage`` are stamped alongside it (the two sides' backends), so a
+    content ``compare=`` strategy can open the non-S3 side of any pair.
     """
 
     transfer_type: TransferType
+    src_storage: Storage | None = None
+    dest_storage: Storage | None = None
 
     def compare(
         self,
@@ -129,26 +143,58 @@ class Comparator:
         without materializing either side.
         """
         transfer_type = self.transfer_type
+        sstore, dstore = self.src_storage, self.dest_storage
         src_iter = iter(src_entries)
         dest_iter = iter(dest_entries)
         src = next(src_iter, None)
         dest = next(dest_iter, None)
         while src is not None and dest is not None:
             if src[0] < dest[0]:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
+                yield SyncPair(
+                    key=src[0],
+                    transfer_type=transfer_type,
+                    src=src[1],
+                    src_storage=sstore,
+                    dest_storage=dstore,
+                )
                 src = next(src_iter, None)
             elif src[0] > dest[0]:
-                yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                yield SyncPair(
+                    key=dest[0],
+                    transfer_type=transfer_type,
+                    dest=dest[1],
+                    src_storage=sstore,
+                    dest_storage=dstore,
+                )
                 dest = next(dest_iter, None)
             else:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
+                yield SyncPair(
+                    key=src[0],
+                    transfer_type=transfer_type,
+                    src=src[1],
+                    dest=dest[1],
+                    src_storage=sstore,
+                    dest_storage=dstore,
+                )
                 src = next(src_iter, None)
                 dest = next(dest_iter, None)
         while src is not None:
-            yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
+            yield SyncPair(
+                key=src[0],
+                transfer_type=transfer_type,
+                src=src[1],
+                src_storage=sstore,
+                dest_storage=dstore,
+            )
             src = next(src_iter, None)
         while dest is not None:
-            yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            yield SyncPair(
+                key=dest[0],
+                transfer_type=transfer_type,
+                dest=dest[1],
+                src_storage=sstore,
+                dest_storage=dstore,
+            )
             dest = next(dest_iter, None)
 
 
@@ -213,9 +259,15 @@ class ContentComparison:
     Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
     with their leaf digest work. What lives here is everything the two must
     agree on - the missing-source guard, the source-only always-copy, the
-    ``check_size`` size-mismatch decision, and the ``transfer_type`` dispatch
-    onto the two hooks - so the strategies cannot silently drift apart on the
-    decision shape.
+    ``check_size`` size-mismatch decision, and the split into the two hooks - so
+    the strategies cannot silently drift apart on the decision shape.
+
+    Which side is the S3 object (the stored digest to compare against) is decided
+    by **type** - the ``S3FileInfo`` side - not by the transfer direction, so the
+    other ("readable") side may be any backend: its bytes are read through the
+    ``Storage.open`` carried on the pair (:attr:`SyncPair.src_storage` /
+    ``dest_storage``), not a local filesystem path. Both sides S3 -> the s3-to-s3
+    digest compare; neither side S3 -> nothing to compare against, so copy.
     """
 
     __slots__ = ()
@@ -240,38 +292,38 @@ class ContentComparison:
         ):
             # Differing sizes mean differing content - copy without trusting the
             # stored digest (MD5 / a fixed-width CRC can collide; the size is
-            # independent evidence) and without reading the local file.
+            # independent evidence) and without reading the readable side.
             return True
-        transfer_type = pair.transfer_type
-        if transfer_type is TransferType.COPY:
+        src_is_s3 = isinstance(src, S3FileInfo)
+        dest_is_s3 = isinstance(dest, S3FileInfo)
+        if src_is_s3 and dest_is_s3:
             return self._copy_differs(src, dest)
-        if transfer_type is TransferType.UPLOAD:
-            local, remote = src, dest
-        elif transfer_type is TransferType.DOWNLOAD:
-            local, remote = dest, src
-        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
-            raise ValueError(
-                f"{self._strategy_name} cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
-            )
-        if not isinstance(local, LocalFileInfo):
-            raise ValueError(
-                f"{self._strategy_name}: no local side for pair {pair.key!r} "
-                f"(transfer_type={transfer_type.value})"
-            )
-        return self._local_remote_differ(local, remote, transfer_type)
+        if dest_is_s3 and not src_is_s3:  # upload-shaped: src is the readable side
+            return self._readable_remote_differ(pair.src_storage, src, dest, pair.transfer_type)
+        if src_is_s3 and not dest_is_s3:  # download-shaped: dest is the readable side
+            return self._readable_remote_differ(pair.dest_storage, dest, src, pair.transfer_type)
+        # Neither side is an S3 object: no stored digest to compare against -> copy.
+        return True
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: whether the two S3 sides' stored digests disagree."""
         raise NotImplementedError
 
-    def _local_remote_differ(
-        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    def _readable_remote_differ(
+        self,
+        storage: Storage | None,
+        readable: FileInfo,
+        remote: FileInfo,
+        transfer_type: TransferType,
     ) -> bool:
-        """Upload/download: whether the local content differs from the S3 side.
+        """Whether the readable side's content differs from the S3 ``remote`` side.
 
-        ``transfer_type`` tells which endpoint the remote entry belongs to
-        (UPLOAD -> the destination, DOWNLOAD -> the source) for a strategy
-        that must reach that endpoint's client.
+        ``storage`` opens the readable side (``storage.open(readable.compare_key,
+        "rb")``) - any backend, not just a local file; ``None`` (a pair built
+        without a backend) means it cannot be read, so the strategy copies.
+        ``transfer_type`` tells which endpoint ``remote`` belongs to (UPLOAD -> the
+        destination, DOWNLOAD -> the source) for a strategy that must reach that
+        endpoint's client.
         """
         raise NotImplementedError
 

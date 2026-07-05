@@ -1300,7 +1300,9 @@ class S3:
                 deletes.submit(pair)
 
             _run_sync_pairs(
-                Comparator(transfer_type).compare(src_entries, dest_entries),
+                Comparator(
+                    transfer_type, src_storage=src_storage, dest_storage=dest_storage
+                ).compare(src_entries, dest_entries),
                 decide=decide,
                 submit_copy=submit_copy,
                 submit_delete=submit_delete,
@@ -1396,20 +1398,19 @@ class S3:
 
         # Enumerating paths: full recursive delete, or the keyless
         # non-recursive folder-marker sweep. Both list without Delimiter.
-        list_storage = storage
-        if root != storage.key:
-            # Re-anchor the listing at the normalized prefix; the client is
-            # shared (and still owned by the original storage).
-            list_storage = S3Storage(f"s3://{storage.bucket}/{root}", client=storage.get_client())
+        # ScanOptions.prefix re-anchors the listing at the normalized prefix on
+        # the passed storage itself (client shared), so a custom S3Storage
+        # subclass and its scan_pages override survive.
         options = ScanOptions(
             recursive=True,
             page_size=page_size,
             request_payer=request_payer,
+            prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),
         )
 
         if dryrun:
-            for info in list_storage.scan(options):
+            for info in storage.scan(options):
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
             return
 
@@ -1420,7 +1421,7 @@ class S3:
             operation="rm",
             capture_response=capture_response,
         ) as deleter:
-            for info in list_storage.scan(options):
+            for info in storage.scan(options):
                 deleter.submit(info)
         if deleter.failed:
             raise BatchError(

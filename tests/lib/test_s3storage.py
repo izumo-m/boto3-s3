@@ -221,6 +221,45 @@ class TestScanPages:
         assert [fi.key for fi in storage.scan(ScanOptions(recursive=True))] == ["d/seen.txt"]
 
 
+class TestScanPrefixOverride:
+    """``ScanOptions.prefix`` re-anchors the listing on the storage instance itself.
+
+    A transfer whose normalized listing prefix differs from the raw source key
+    lists via ``storage.scan(prefix=...)`` instead of rebuilding a bare
+    ``S3Storage`` - so a custom subclass (and its ``scan_pages`` override) survives.
+    """
+
+    def test_prefix_overrides_key_as_listing_anchor(self) -> None:
+        pages = [{"Contents": [_obj("data/a.txt"), _obj("data/sub/b.txt")]}]
+        storage, client = _storage(pages, url="s3://bucket/data")  # key == "data"
+        results = list(storage.scan(ScanOptions(recursive=True, prefix="data/")))
+        # Listed under the prefix, not the storage's own key.
+        assert client.calls[0]["Prefix"] == "data/"
+        # compare_key is relative to the prefix ("data/"), not "data".
+        assert [r.compare_key for r in results] == ["a.txt", "sub/b.txt"]
+
+    def test_prefix_none_uses_the_storage_key(self) -> None:
+        storage, client = _storage([], url="s3://bucket/data")
+        list(storage.scan(ScanOptions(recursive=True)))
+        assert client.calls[0]["Prefix"] == "data"
+
+    def test_subclass_scan_pages_override_survives_a_prefix_reanchor(self) -> None:
+        # The transfer re-anchor fix: scanning the instance with a prefix (not
+        # rebuilding a plain S3Storage) keeps the subclass's scan_pages override.
+        class Tagged(S3Storage):
+            def scan_pages(self, options: ScanOptions) -> Any:
+                for page in super().scan_pages(options):
+                    for fi in page:
+                        fi.compare_key = "TAG/" + (fi.compare_key or "")
+                    yield page
+
+        client = _FakeS3Client(pages=[{"Contents": [_obj("data/a.txt")]}])
+        storage = Tagged("s3://bucket/data", client=client)  # key == "data"
+        results = list(storage.scan(ScanOptions(recursive=True, prefix="data/")))
+        assert client.calls[0]["Prefix"] == "data/"  # re-anchored on the instance
+        assert results[0].compare_key == "TAG/a.txt"  # the override ran
+
+
 class TestScanFilter:
     """``ScanOptions.filter`` is applied by ``scan_pages`` (which returns filtered
     pages), on the prefetch worker that drives the producer."""

@@ -7,8 +7,10 @@ comparing S3's ETag against the ETag the source would carry:
 
 - an s3-to-s3 (COPY) pair compares the two listings' ETags directly - both are
   already known, so no bytes are read;
-- an upload / download pair reconstructs the **local** file's S3-style ETag and
-  compares it to the S3 side. S3's ETag is the hex MD5 of the object for a
+- an upload / download pair reconstructs the **readable** (non-S3) side's
+  S3-style ETag - reading its bytes through ``Storage.open``, so any backend
+  works, not just a local file - and compares it to the S3 side. S3's ETag is the
+  hex MD5 of the object for a
   single-part PUT, and ``MD5(concat of each part's binary MD5) + "-<n>"`` for a
   multipart upload - so the reconstruction needs the multipart part size
   (the ``part_size`` argument, default :data:`DEFAULT_PART_SIZE`).
@@ -48,16 +50,17 @@ sizes already differ).
 from __future__ import annotations
 
 import hashlib
-import os
 from typing import TYPE_CHECKING
 
 from boto3_s3.comparator import READ_CHUNK, ContentComparison
-from boto3_s3.localstorage import to_native_path
 from boto3_s3.types import S3FileInfo
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     from boto3_s3.s3 import S3
-    from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
+    from boto3_s3.storage import Storage
+    from boto3_s3.types import FileInfo, TransferType
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024
 """Default multipart part size - boto3 ``TransferConfig.multipart_chunksize``."""
@@ -97,9 +100,12 @@ class EtagComparison(ContentComparison):
     evidence. For an upload / download it additionally avoids the local read +
     hash. ``check_size=False`` restores pure-ETag semantics.
 
-    An upload / download comparison reads the local file, so it raises ``OSError``
-    if that file is unreadable (e.g. removed between the listing and the compare);
-    the s3-to-s3 path reads nothing.
+    An upload / download comparison reads the **readable** (non-S3) side through
+    its ``Storage.open`` - any backend, not just a local file - so a read failure
+    surfaces as that backend's error (a :class:`~boto3_s3.exceptions.Boto3S3Error`
+    for a local file removed between the listing and the compare); the s3-to-s3
+    path reads nothing. A pair with no readable-side backend, or neither side an
+    S3 object, is treated as differing (copy).
     """
 
     __slots__ = ("check_size", "part_size")
@@ -122,20 +128,29 @@ class EtagComparison(ContentComparison):
         # Both sides are S3 listings: the stored ETags are directly comparable.
         return _etag_differs(_s3_etag(src), _s3_etag(dest))
 
-    def _local_remote_differ(
-        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    def _readable_remote_differ(
+        self,
+        storage: Storage | None,
+        readable: FileInfo,
+        remote: FileInfo,
+        transfer_type: TransferType,
     ) -> bool:
         del transfer_type  # the listing ETag travels on the entry; no endpoint needed
         remote_etag = _s3_etag(remote)
         if not remote_etag:
             return True
-        path = to_native_path(local.key)
+        key = readable.compare_key
+        if storage is None or key is None:
+            return True  # cannot open the readable side -> treat as differing (copy)
         if "-" in remote_etag:
-            size = os.path.getsize(path)
-            chunk = _effective_part_size(self.part_size, size)
-            computed = _multipart_etag_at(path, chunk_size=chunk)
+            if readable.size is None:
+                return True  # need the size to reconstruct the multipart part split
+            chunk = _effective_part_size(self.part_size, readable.size)
+            with storage.open(key, "rb") as fh:
+                computed = _multipart_etag_at(fh, chunk_size=chunk)
         else:
-            computed = _file_md5_hex(path)
+            with storage.open(key, "rb") as fh:
+                computed = _file_md5_hex(fh)
         return remote_etag != computed
 
 
@@ -149,46 +164,44 @@ def _etag_differs(a: str | None, b: str | None) -> bool:
     return a is None or b is None or a != b
 
 
-def _file_md5_hex(path: str) -> str:
-    """Single-part S3 ETag: the streamed hex MD5 of the whole file.
+def _file_md5_hex(fh: BinaryIO) -> str:
+    """Single-part S3 ETag: the streamed hex MD5 of the whole stream.
 
-    Raises ``OSError`` if the file cannot be read (e.g. removed between the
-    listing and this call).
+    Reads ``fh`` (the readable side's open ``Storage.open`` stream) to end;
+    ``OSError`` from a read propagates (the caller ran the listing earlier).
     """
     hasher = hashlib.md5()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(READ_CHUNK), b""):
-            hasher.update(block)
+    for block in iter(lambda: fh.read(READ_CHUNK), b""):
+        hasher.update(block)
     return hasher.hexdigest()
 
 
-def _multipart_etag_at(path: str, *, chunk_size: int) -> str:
+def _multipart_etag_at(fh: BinaryIO, *, chunk_size: int) -> str:
     """Multipart S3 ETag at an exact ``chunk_size`` (no part-size adjustment).
 
-    ``MD5(concat of each part's binary MD5).hex() + "-" + n``. A 0-byte file
-    yields ``...-0``, a value no real (always single-part) empty object carries -
-    callers reach this branch only for an ETag that already bears a ``-n``
-    suffix, so a real empty object never lands here. Raises ``OSError`` on a read
-    failure.
+    ``MD5(concat of each part's binary MD5).hex() + "-" + n`` over the stream
+    ``fh``. A 0-byte stream yields ``...-0``, a value no real (always single-part)
+    empty object carries - callers reach this branch only for an ETag that already
+    bears a ``-n`` suffix, so a real empty object never lands here. ``OSError`` on
+    a read propagates.
     """
     part_digests = bytearray()
     parts = 0
-    with open(path, "rb") as fh:
-        while True:
-            part = hashlib.md5()
-            remaining = chunk_size
-            read_any = False
-            while remaining > 0:
-                block = fh.read(min(READ_CHUNK, remaining))
-                if not block:
-                    break
-                read_any = True
-                part.update(block)
-                remaining -= len(block)
-            if not read_any:
+    while True:
+        part = hashlib.md5()
+        remaining = chunk_size
+        read_any = False
+        while remaining > 0:
+            block = fh.read(min(READ_CHUNK, remaining))
+            if not block:
                 break
-            part_digests += part.digest()
-            parts += 1
+            read_any = True
+            part.update(block)
+            remaining -= len(block)
+        if not read_any:
+            break
+        part_digests += part.digest()
+        parts += 1
     return hashlib.md5(bytes(part_digests)).hexdigest() + f"-{parts}"
 
 

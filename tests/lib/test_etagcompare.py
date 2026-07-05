@@ -32,6 +32,9 @@ from boto3_s3.etagcompare import (
     _file_md5_hex,  # pyright: ignore[reportPrivateUsage]
     _multipart_etag_at,  # pyright: ignore[reportPrivateUsage]
 )
+from boto3_s3.exceptions import Boto3S3Error
+from boto3_s3.localstorage import LocalStorage, to_native_path
+from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, LocalFileInfo, S3FileInfo, TransferType
 
 _MIB = 1024 * 1024
@@ -60,17 +63,46 @@ def _key(p: Path) -> str:
 
 
 def _local(key: str, *, size: int | None = None) -> LocalFileInfo:
-    return LocalFileInfo(key=key, size=size)
+    # compare_key is the basename: the content strategy opens it against a
+    # LocalStorage rooted at the file's parent (see _storage_for).
+    return LocalFileInfo(key=key, size=size, compare_key=key.rsplit("/", 1)[-1])
 
 
 def _s3(*, etag: str | None = None, size: int | None = None, key: str = "k") -> S3FileInfo:
     return S3FileInfo(key=key, etag=etag, size=size)
 
 
+def _storage_for(info: FileInfo | None) -> Storage | None:
+    """A LocalStorage rooted at a local side's parent dir, so ``open(compare_key)``
+    reaches the real file (the readable side the strategy hashes)."""
+    if isinstance(info, LocalFileInfo):
+        return LocalStorage(os.path.dirname(to_native_path(info.key)))
+    return None
+
+
 def _pair(
     transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
 ) -> SyncPair:
-    return SyncPair(key="k", transfer_type=transfer_type, src=src, dest=dest)
+    return SyncPair(
+        key="k",
+        transfer_type=transfer_type,
+        src=src,
+        dest=dest,
+        src_storage=_storage_for(src),
+        dest_storage=_storage_for(dest),
+    )
+
+
+def _md5_hex_of(path: Path) -> str:
+    """The single-part helper over a file (opens the stream the helper now takes)."""
+    with open(path, "rb") as fh:
+        return _file_md5_hex(fh)
+
+
+def _mp_etag_of(path: Path, chunk: int) -> str:
+    """The multipart helper over a file at ``chunk`` size."""
+    with open(path, "rb") as fh:
+        return _multipart_etag_at(fh, chunk_size=chunk)
 
 
 def _independent_single(data: bytes) -> str:
@@ -210,28 +242,24 @@ class TestNewAndMissingSides:
             EtagComparison()(_pair(transfer_type, dest=_s3(etag="abc")))
 
 
-class TestUnsupportedKindsAndSides:
-    def test_move_kind_raises(self) -> None:
-        pair = _pair(TransferType.MOVE, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
-        with pytest.raises(ValueError, match="cannot judge a 'move' pair"):
-            EtagComparison()(pair)
+class TestTypeMatchedSides:
+    """Which side is the S3 object is a *type* decision, not a direction one."""
 
-    def test_delete_kind_raises(self) -> None:
-        pair = _pair(TransferType.DELETE, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
-        with pytest.raises(ValueError, match="cannot judge a 'delete' pair"):
-            EtagComparison()(pair)
+    @pytest.mark.parametrize("transfer_type", list(TransferType))
+    def test_two_s3_sides_compare_by_etag_any_direction(self, transfer_type: TransferType) -> None:
+        # Two S3FileInfo sides -> the s3-to-s3 ETag compare, whatever the (nominal)
+        # transfer_type says (MOVE / DELETE included) - no local side is assumed.
+        differ = _pair(transfer_type, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
+        assert EtagComparison()(differ) is True
+        same = _pair(transfer_type, src=_s3(etag="a", size=10), dest=_s3(etag="a", size=10))
+        assert EtagComparison()(same) is False
 
-    def test_upload_non_local_local_side_raises(self) -> None:
-        # UPLOAD: local = src; an S3 src has no local file to hash.
-        pair = _pair(TransferType.UPLOAD, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
-        with pytest.raises(ValueError, match="no local side"):
-            EtagComparison()(pair)
-
-    def test_download_non_local_local_side_raises(self) -> None:
-        # DOWNLOAD: local = dest; an S3 dest has no local file to hash.
-        pair = _pair(TransferType.DOWNLOAD, src=_s3(etag="a", size=10), dest=_s3(etag="b", size=10))
-        with pytest.raises(ValueError, match="no local side"):
-            EtagComparison()(pair)
+    def test_neither_side_s3_copies(self) -> None:
+        # No S3 object on either side -> no stored digest to compare against -> copy.
+        pair = _pair(
+            TransferType.UPLOAD, src=FileInfo(key="k", size=10), dest=FileInfo(key="k", size=10)
+        )
+        assert EtagComparison()(pair) is True
 
 
 class TestSinglePartReconstruction:
@@ -331,8 +359,8 @@ class TestMultipartReconstruction:
         # An object hashed at a different part size will not match (the rclone
         # chunk-size constraint). Pinned at the helper layer because __call__'s
         # effective part size is clamped to >= 5 MiB.
-        p = str(_write(tmp_path, _TEN))
-        assert _multipart_etag_at(p, chunk_size=4) != _multipart_etag_at(p, chunk_size=5)
+        p = _write(tmp_path, _TEN)
+        assert _mp_etag_of(p, 4) != _mp_etag_of(p, 5)
 
 
 class TestEmptyFile:
@@ -348,7 +376,7 @@ class TestEmptyFile:
     def test_helper_empty_multipart_is_dash_zero(self, tmp_path: Path) -> None:
         # The trap the branch avoids: the multipart helper on an empty file yields
         # "...-0" (proving there is no `or [b""]` fallback).
-        assert _multipart_etag_at(str(_write(tmp_path, b"")), chunk_size=5) == _EMPTY_MP
+        assert _mp_etag_of(_write(tmp_path, b""), 5) == _EMPTY_MP
 
 
 class TestOpaqueEtag:
@@ -398,13 +426,14 @@ class TestSizeCheckToggle:
         assert EtagComparison(check_size=True)(pair) is True
 
     def test_size_check_off_reads_and_raises_on_missing(self, tmp_path: Path) -> None:
-        # check_size off: no short-circuit, so the missing file is opened -> OSError.
+        # check_size off: no short-circuit, so the missing file is opened. The read
+        # now goes through Storage.open, whose OSError is translated to a Boto3S3Error.
         pair = _pair(
             TransferType.UPLOAD,
             src=_local(_key(tmp_path / "nope"), size=10),
             dest=_s3(etag="abc", size=20),
         )
-        with pytest.raises(OSError):
+        with pytest.raises(Boto3S3Error):
             EtagComparison(check_size=False)(pair)
 
     def test_equal_size_still_hashes(self, tmp_path: Path) -> None:
@@ -430,12 +459,12 @@ class TestSizeCheckToggle:
 
 class TestHelperUnits:
     def test_file_md5_hex(self, tmp_path: Path) -> None:
-        assert _file_md5_hex(str(_write(tmp_path, _TEN))) == _TEN_SINGLE
-        assert _file_md5_hex(str(_write(tmp_path, b"", "e"))) == _EMPTY_SINGLE
+        assert _md5_hex_of(_write(tmp_path, _TEN)) == _TEN_SINGLE
+        assert _md5_hex_of(_write(tmp_path, b"", "e")) == _EMPTY_SINGLE
 
     @pytest.mark.parametrize(("chunk", "expected"), [(4, _TEN_MP4), (5, _TEN_MP5), (10, _TEN_MP10)])
     def test_multipart_etag_at(self, tmp_path: Path, chunk: int, expected: str) -> None:
-        assert _multipart_etag_at(str(_write(tmp_path, _TEN)), chunk_size=chunk) == expected
+        assert _mp_etag_of(_write(tmp_path, _TEN), chunk) == expected
 
     def test_effective_part_size_clamps_below_5mib(self) -> None:
         assert _effective_part_size(1024, 3000) == 5 * _MIB

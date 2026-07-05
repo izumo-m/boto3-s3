@@ -459,12 +459,10 @@ def scan_s3_source(
     The shared transfer-side enumeration: cp/mv scan their source here,
     and sync scans whichever of its sides is S3 (the destination too).
     Folder markers never surface; the scan stamps each entry's prefix-relative
-    ``compare_key``, which ``item_filter`` matches against.
+    ``compare_key``, which ``item_filter`` matches against. The passed ``storage``
+    instance is scanned directly (``ScanOptions.prefix`` re-anchors the listing at
+    the normalized ``key_prefix``), so a custom ``S3Storage`` subclass survives.
     """
-    bucket = storage.bucket
-    list_storage = storage
-    if key_prefix != storage.key:
-        list_storage = S3Storage(f"s3://{bucket}/{key_prefix}", client=storage.get_client())
 
     def scan_filter(info: FileInfo) -> bool:
         # Zero-byte '/'-terminated "folder marker" objects never transfer
@@ -479,9 +477,10 @@ def scan_s3_source(
         recursive=True,
         page_size=page_size,
         request_payer=options.get("request_payer"),
+        prefix=key_prefix,
         filter=scan_filter,
     )
-    return list_storage.scan(scan_options)
+    return storage.scan(scan_options)
 
 
 def head_single(
