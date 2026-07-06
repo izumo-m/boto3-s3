@@ -187,14 +187,13 @@ def _storage_for(info: FileInfo | None) -> Storage | None:
 def _pair(
     transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
 ) -> SyncPair:
-    return SyncPair(
-        key="obj",
-        transfer_type=transfer_type,
-        src=src,
-        dest=dest,
-        src_storage=_storage_for(src),
-        dest_storage=_storage_for(dest),
-    )
+    # The backend rides on each side's FileInfo; the strategy reads pair.src.storage
+    # / pair.dest.storage to open the readable (local) side.
+    if src is not None:
+        src.storage = _storage_for(src)
+    if dest is not None:
+        dest.storage = _storage_for(dest)
+    return SyncPair(key="obj", transfer_type=transfer_type, src=src, dest=dest)
 
 
 # -- construction --------------------------------------------------------------

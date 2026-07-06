@@ -336,6 +336,12 @@ class LocalFileGenerator:
     #: The stamp for an unrepresentable mtime (aws-cli's ``EPOCH_TIME``).
     EPOCH_TIME: ClassVar[datetime] = _EPOCH
 
+    #: The owning ``LocalStorage``, bound by its ``__init__`` (one walker serves one
+    #: storage). :meth:`scan_children` stamps it onto each entry's
+    #: ``FileInfo.storage`` alongside ``compare_key`` - before ``scan_pages`` filters
+    #: - so a ``ScanOptions.filter`` and ``sync``'s content compare reach the backend.
+    storage: LocalStorage | None = None
+
     def list_files(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
         """Yield every file under ``root`` (recursively) in aws-cli byte order.
 
@@ -545,6 +551,7 @@ class LocalFileGenerator:
                 os.close(dir_fd)
         for child in children:
             child.info.compare_key = child.info.key[strip:]
+            child.info.storage = self.storage
         return self.finalize_children(children)
 
     def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
@@ -839,8 +846,11 @@ class LocalStorage(Storage):
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
         self._abspath = os.path.abspath(self._path)
-        #: The directory-walk strategy (the default fast walk, or an app's).
+        #: The directory-walk strategy (the default fast walk, or an app's). Bind
+        #: the back-reference so the walk can stamp each entry's ``FileInfo.storage``
+        #: (one walker serves one storage; sharing one across storages rebinds it).
         self._walker = walker if walker is not None else LocalFileGenerator()
+        self._walker.storage = self
 
     @property
     def path(self) -> str:
@@ -1020,6 +1030,7 @@ class LocalStorage(Storage):
             mtime=mtime,
             stat_result=st,
             is_symlink=is_symlink,
+            storage=self,
         )
 
     @override

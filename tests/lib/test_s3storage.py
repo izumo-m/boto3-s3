@@ -130,9 +130,10 @@ class TestScanNonRecursive:
         assert client.calls[0]["Delimiter"] == "/"
         assert client.calls[0]["Bucket"] == "bucket"
         assert client.calls[0]["Prefix"] == "prefix/"
-        # compare_key is the prefix-relative key, stamped by scan.
+        # compare_key is the prefix-relative key, and the listing backend is
+        # stamped as storage - both by scan, before any filter.
         assert results[0] == S3FileInfo(
-            key="prefix/sub/", kind=FileKind.DIRECTORY, compare_key="sub/"
+            key="prefix/sub/", kind=FileKind.DIRECTORY, compare_key="sub/", storage=storage
         )
         info = results[1]
         assert isinstance(info, S3FileInfo)
@@ -144,6 +145,7 @@ class TestScanNonRecursive:
         assert info.etag == "abc"  # surrounding quotes stripped
         assert info.storage_class == "STANDARD"
         assert info.owner == "me"
+        assert info.storage is storage
 
 
 class TestScanRecursive:

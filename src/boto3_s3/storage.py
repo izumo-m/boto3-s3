@@ -203,15 +203,26 @@ class Storage(abc.ABC):
         filters at its source or prunes early declares the flag to skip the
         redundant re-filter. Pass ``options`` to control the walk (defaults to
         :meth:`default_scan_options`). To customize the entries, override
-        :meth:`scan_pages`, not this method. Used by ``ls`` and the recursive forms
-        of ``cp`` / ``rm`` / ``sync``.
+        :meth:`scan_pages`, not this method. Each yielded entry has its
+        ``FileInfo.storage`` set to this backend as a safety net (only when a
+        ``scan_pages`` left it ``None``); the built-ins stamp it at construction so
+        their filters see it too. Used by ``ls`` and the recursive forms of
+        ``cp`` / ``rm`` / ``sync``.
         """
         opts = options if options is not None else self.default_scan_options()
         pages = self.scan_pages(opts)
         if opts.filter is not None and not self.scan_pages_filters:
             pages = sieve_pages(pages, opts.filter)
         with prefetch(pages, queue_size=self._scan_prefetch_pages) as items:
-            yield from items
+            for info in items:
+                # Safety net: stamp the producing backend so a downstream consumer
+                # (sync's content compare via pair.src.storage, an on_result
+                # callback) can reach it even when a custom scan_pages did not set
+                # it. The built-ins stamp at construction so their filters already
+                # see it; this only fills a None left by a bespoke backend.
+                if info.storage is None:
+                    info.storage = self
+                yield info
 
     @abc.abstractmethod
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:

@@ -222,7 +222,7 @@ def s3_errors(
 
 
 def _page_to_infos(
-    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str
+    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str, storage: S3Storage
 ) -> list[FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
@@ -233,6 +233,9 @@ def _page_to_infos(
     ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
     ``Prefix``, so every object key and common-prefix starts with it, and the
     slice is the root-relative key operations and custom filters match against.
+    ``storage`` (the listing backend) is stamped on every entry alongside
+    ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
+    ``info.storage``.
     """
     infos: list[FileInfo] = []
     if not recursive:
@@ -244,6 +247,7 @@ def _page_to_infos(
                         key=dir_prefix,
                         kind=FileKind.DIRECTORY,
                         compare_key=dir_prefix[len(prefix) :],
+                        storage=storage,
                     )
                 )
     for obj in page.get("Contents", []):
@@ -263,6 +267,7 @@ def _page_to_infos(
                 storage_class=obj.get("StorageClass"),
                 owner=owner.get("ID") if owner else None,
                 compare_key=key[len(prefix) :],
+                storage=storage,
             )
         )
     return infos
@@ -617,7 +622,7 @@ class S3Storage(Storage):
         with s3_errors(operation="ls", bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive, prefix=prefix)
+                yield _page_to_infos(page, recursive=options.recursive, prefix=prefix, storage=self)
 
     def list_buckets(
         self,
@@ -731,6 +736,7 @@ class S3Storage(Storage):
             storage_class=head.get("StorageClass"),
             head=head,
             compare_key=target_key.rsplit("/", 1)[-1],
+            storage=self,
         )
 
 

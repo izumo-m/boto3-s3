@@ -65,6 +65,17 @@ class FileInfo:
     directly, without re-deriving it from ``key``. The name mirrors aws-cli's
     ``FileInfo.compare_key``. It is ``None`` only on a ``FileInfo`` built by hand
     rather than produced by ``scan``.
+
+    ``storage`` is the backend the entry was listed from - the ``Storage`` whose
+    ``scan`` (or single-key path) produced it - stamped by the producer alongside
+    ``compare_key`` (aws-cli carries the analogous ``client`` / ``source_client``
+    on its own ``FileInfo``). It lets a ``ScanOptions.filter`` predicate reach the
+    backend behind the entry (e.g. a ``HeadObject`` for a tag the listing omits),
+    and it is the handle ``sync`` reads through :attr:`SyncPair.src` /
+    :attr:`~boto3_s3.comparator.SyncPair.dest` to open a pair's non-S3 side for a
+    content compare (so ``pair.src.storage`` replaces a separately threaded
+    backend). ``None`` on a hand-built ``FileInfo``; :meth:`Storage.scan` sets it
+    as a safety net for a backend whose ``scan_pages`` did not.
     """
 
     key: str
@@ -72,6 +83,7 @@ class FileInfo:
     size: int | None = None
     mtime: datetime | None = None
     compare_key: str | None = None
+    storage: Storage | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -378,10 +390,12 @@ ResultCallback = Callable[[OpResult], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
 # visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
-# predicate over the ``FileInfo`` returning True to keep the entry. The operation stamps ``info.compare_key``
-# (the key relative to its root, aws-cli --exclude/--include space) before
-# consulting it, so a glob predicate matches ``compare_key`` while a richer
-# predicate can decide on ``size`` / ``mtime`` / ``storage_class`` / ``key``.
+# predicate over the ``FileInfo`` returning True to keep the entry. The operation
+# stamps ``info.compare_key`` (the key relative to its root, aws-cli
+# --exclude/--include space) before consulting it, so a glob predicate matches
+# ``compare_key`` while a richer predicate can decide on ``size`` / ``mtime`` /
+# ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``
+# (e.g. a HeadObject for a tag the listing omits).
 # :class:`~boto3_s3.globsieve.GlobFilter` is the ready-made glob implementation.
 FileFilter = Callable[[FileInfo], bool]
 

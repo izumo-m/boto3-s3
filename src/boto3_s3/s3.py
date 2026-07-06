@@ -1345,9 +1345,7 @@ class S3:
                 deletes.submit(pair)
 
             _run_sync_pairs(
-                Comparator(
-                    transfer_type, src_storage=src_storage, dest_storage=dest_storage
-                ).compare(src_entries, dest_entries),
+                Comparator(transfer_type).compare(src_entries, dest_entries),
                 create_decide=create_decide,
                 update_decide=update_decide,
                 submit_copy=submit_copy,
@@ -1515,7 +1513,7 @@ class S3:
         on the hand-built ``FileInfo``.
         """
         key = storage.key
-        info = S3FileInfo(key=key, compare_key=key[len(root) :])
+        info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)
         if item_filter is not None and not item_filter(info):
             return
         if dryrun:

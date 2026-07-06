@@ -70,18 +70,18 @@ class SyncPair:
     - ``dest`` is ``None``: source-only (copy is a *new* transfer),
     - ``src`` is ``None``: destination-only (the delete candidate).
 
-    ``src_storage`` / ``dest_storage`` are the backends the two sides were listed
-    from (constant across a sync, stamped by :class:`Comparator`). A content
-    ``update_filter=`` strategy reads the non-S3 side's bytes through its ``Storage.open``
-    - so content comparison works for any backend, not just a local filesystem.
+    The backend each side was listed from rides on that side's entry
+    (``pair.src.storage`` / ``pair.dest.storage``, stamped by the producing
+    ``Storage.scan``): a content ``update_filter=`` strategy reads the non-S3
+    side's bytes through its ``Storage.open`` - so content comparison works for any
+    backend, not just a local filesystem. A lane only reads the storage of a side
+    it has (the present ``FileInfo``), so a ``None`` side never needs one.
     """
 
     key: str
     transfer_type: TransferType
     src: FileInfo | None = None
     dest: FileInfo | None = None
-    src_storage: Storage | None = None
-    dest_storage: Storage | None = None
 
 
 PairFilter = Callable[[SyncPair], bool]
@@ -148,14 +148,13 @@ class Comparator:
     ordering contract (S3 byte order; the local walk sorts to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
     to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
-    stamped onto every emitted pair - context, not a judgment. ``src_storage`` /
-    ``dest_storage`` are stamped alongside it (the two sides' backends), so a
-    content ``update_filter=`` strategy can open the non-S3 side of any pair.
+    stamped onto every emitted pair - context, not a judgment. Each side's backend
+    already rides on its ``FileInfo`` (``pair.src.storage`` / ``pair.dest.storage``,
+    stamped by the producing ``Storage.scan``), so a content ``update_filter=``
+    strategy can open the non-S3 side of any pair without the merge threading it.
     """
 
     transfer_type: TransferType
-    src_storage: Storage | None = None
-    dest_storage: Storage | None = None
 
     def compare(
         self,
@@ -169,7 +168,6 @@ class Comparator:
         without materializing either side.
         """
         transfer_type = self.transfer_type
-        sstore, dstore = self.src_storage, self.dest_storage
         if __debug__:  # dev guard: catch an unsorted SORTABLE_SCAN side (compiled out under -O)
             src_entries = _byte_ordered(src_entries, "source")
             dest_entries = _byte_ordered(dest_entries, "destination")
@@ -179,51 +177,20 @@ class Comparator:
         dest = next(dest_iter, None)
         while src is not None and dest is not None:
             if src[0] < dest[0]:
-                yield SyncPair(
-                    key=src[0],
-                    transfer_type=transfer_type,
-                    src=src[1],
-                    src_storage=sstore,
-                    dest_storage=dstore,
-                )
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
             elif src[0] > dest[0]:
-                yield SyncPair(
-                    key=dest[0],
-                    transfer_type=transfer_type,
-                    dest=dest[1],
-                    src_storage=sstore,
-                    dest_storage=dstore,
-                )
+                yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
                 dest = next(dest_iter, None)
             else:
-                yield SyncPair(
-                    key=src[0],
-                    transfer_type=transfer_type,
-                    src=src[1],
-                    dest=dest[1],
-                    src_storage=sstore,
-                    dest_storage=dstore,
-                )
+                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
                 src = next(src_iter, None)
                 dest = next(dest_iter, None)
         while src is not None:
-            yield SyncPair(
-                key=src[0],
-                transfer_type=transfer_type,
-                src=src[1],
-                src_storage=sstore,
-                dest_storage=dstore,
-            )
+            yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
         while dest is not None:
-            yield SyncPair(
-                key=dest[0],
-                transfer_type=transfer_type,
-                dest=dest[1],
-                src_storage=sstore,
-                dest_storage=dstore,
-            )
+            yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
             dest = next(dest_iter, None)
 
 
@@ -298,9 +265,9 @@ class ContentComparison:
     Which side is the S3 object (the stored digest to compare against) is decided
     by **type** - the ``S3FileInfo`` side - not by the transfer direction, so the
     other ("readable") side may be any backend: its bytes are read through the
-    ``Storage.open`` carried on the pair (:attr:`SyncPair.src_storage` /
-    ``dest_storage``), not a local filesystem path. Both sides S3 -> the s3-to-s3
-    digest compare; neither side S3 -> nothing to compare against, so copy.
+    ``Storage.open`` carried on that side's entry (``pair.src.storage`` /
+    ``pair.dest.storage``), not a local filesystem path. Both sides S3 -> the
+    s3-to-s3 digest compare; neither side S3 -> nothing to compare against, so copy.
     """
 
     __slots__ = ()
@@ -332,9 +299,9 @@ class ContentComparison:
         if src_is_s3 and dest_is_s3:
             return self._copy_differs(src, dest)
         if dest_is_s3 and not src_is_s3:  # upload-shaped: src is the readable side
-            return self._readable_remote_differ(pair.src_storage, src, dest, pair.transfer_type)
+            return self._readable_remote_differ(src.storage, src, dest, pair.transfer_type)
         if src_is_s3 and not dest_is_s3:  # download-shaped: dest is the readable side
-            return self._readable_remote_differ(pair.dest_storage, dest, src, pair.transfer_type)
+            return self._readable_remote_differ(dest.storage, dest, src, pair.transfer_type)
         # Neither side is an S3 object: no stored digest to compare against -> copy.
         return True
 
