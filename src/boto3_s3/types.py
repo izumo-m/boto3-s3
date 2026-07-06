@@ -169,7 +169,10 @@ class ScanOptions:
     ``on_warning`` receives the aws-cli-worded skip messages (a broken symlink,
     an unreadable or special file) a backend's enumeration emits; the transfer
     rolls them up (see ``on_warning`` wiring in producers). Common because any
-    backend may warn - without it those entries are dropped silently.
+    backend may warn - without it those entries are dropped silently. Like
+    ``filter`` it runs on the enumeration worker, not the calling thread; and
+    because ``sync`` walks both sides through one shared sink, the two side-walks
+    can invoke it concurrently - keep it thread-safe.
     """
 
     recursive: bool = False
