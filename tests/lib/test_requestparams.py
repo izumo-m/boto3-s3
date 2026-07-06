@@ -131,6 +131,15 @@ class TestCopyObjectParams:
             "CopySourceSSECustomerKey": b"src",
         }
 
+    def test_sse_and_kms_key(self) -> None:
+        # The copy path shares _set_sse_request_params with the upload path, so a
+        # server-side copy carries SSE-KMS just like a PutObject upload does.
+        options = TransferOptions(sse="aws:kms", sse_kms_key_id="key-id")
+        assert map_copy_object_params(options) == {
+            "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": "key-id",
+        }
+
     def test_general_params_apply_to_copies(self) -> None:
         params = map_copy_object_params(TransferOptions(storage_class="GLACIER"))
         assert params == {"StorageClass": "GLACIER"}

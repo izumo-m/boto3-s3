@@ -38,13 +38,19 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 Not ported, with reasons:
 
 - ``TestCpWithCRTClient``: the CRT engine is charter exception 2.
-- ``TestAccesspointCPCommand`` / ``TestS3ExpressCpRecursive``: ARN/express
-  endpoint-resolution harnesses; ARN parsing is covered by the unit tier.
+- ``TestAccesspointCPCommand``: an ARN endpoint-resolution harness; ARN parsing
+  is covered by the unit tier (``TestS3ExpressCpRecursive`` *is* ported below).
 - ``TestCpSourceRegion``: a different aws-cli harness (``BaseS3CLIRunnerTest``);
   the client wiring is covered by ``tests/cli/unit/test_cp.py``.
 - The s3s3 SSE-C matrix (4 tests with large canned sequences): the parameter
-  mapping they pin is covered by ``tests/lib/test_requestparams.py`` and the
-  copy-source HEAD tests here.
+  mapping they pin, including the copy-source HEAD, is covered by
+  ``tests/lib/test_requestparams.py``.
+- The two s3s3 SSE-KMS *copy* tests (``test_cp_copy_with_sse_kms_and_key_id`` /
+  ``..._large_file_...``): ``map_copy_object_params`` shares
+  ``_set_sse_request_params`` with the upload path, so the mapping is pinned by
+  ``tests/lib/test_requestparams.py`` (``test_sse_and_kms_key`` on both
+  ``TestPutObjectParams`` and ``TestCopyObjectParams``); the upload SSE-KMS pair
+  is ported here.
 - Storage-class variants other than STANDARD_IA / DEEP_ARCHIVE and the
   duplicate recursive-mp prop-override cases: mechanically identical
   siblings of ported tests.

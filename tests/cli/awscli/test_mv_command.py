@@ -29,6 +29,8 @@ Not ported, with reasons:
   aws-cli ``pass`` (their threaded get/delete order is nondeterministic);
   ported here as a real test - the injected NonThreadedExecutor makes the
   per-item get-then-delete order deterministic.
+- ``TestMvRecursiveCaseConflict.test_ignore_with_case_conflicts_in_s3`` is the
+  other aws-cli ``pass`` (it pins no behavior); dropped rather than upgraded.
 """
 
 from __future__ import annotations

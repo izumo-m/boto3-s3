@@ -15,6 +15,11 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
   page-size default (rm port rule).
 - The per-algorithm checksum matrices are parametrized instead of being
   nine near-identical methods (cp port rule).
+- The aws-cli's ``_oserror`` / ``_valueerror`` file-deleted-mid-walk pair
+  collapses into one ``test_sync_skips_over_files_deleted_between_listing_and_transfer``:
+  our local walk maps a vanished entry through a single ``OSError`` -> ``None``
+  path (``localstorage`` ``entry_stat_result``), so both variants assert the
+  same skip.
 
 Not ported, with reasons:
 
