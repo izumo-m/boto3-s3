@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-07
+
 - `LocalStorage(path, fsync=True)` makes an `mv` download durable: the file (and
   its parent dir on POSIX) is fsynced before the S3 source is deleted, closing the
   crash window aws-cli leaves. Off by default (aws parity).
@@ -195,7 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.4.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.5.0...HEAD
+[0.5.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.4.0...boto3-s3-v0.5.0
 [0.4.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...boto3-s3-v0.4.0
 [0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.2.0...boto3-s3-v0.3.0
 [0.2.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.1.0...boto3-s3-v0.2.0

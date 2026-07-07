@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-07
+
+- Rebuilt on boto3-s3 0.5.0 (now the required floor).
 - The "Unknown options" error now joins multiple names exactly like
   `aws s3` (`,` with no space - the s3 command layer's form).
 - On Windows, `--exclude` / `--include` patterns written with `\` now match
@@ -74,7 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.3.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.4.0...HEAD
+[0.4.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.3.0...boto3-s3-cli-v0.4.0
 [0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.2.0...boto3-s3-cli-v0.3.0
 [0.2.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.1.1...boto3-s3-cli-v0.2.0
 [0.1.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.1.0...boto3-s3-cli-v0.1.1
