@@ -51,7 +51,6 @@ class _Stub(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         return None
@@ -113,8 +112,6 @@ class TestCustomBackendScanOptions:
         opts = walk_source_scan_options(
             Strict(),
             recursive=True,
-            follow_symlinks=True,
-            detect_symlink_loops=False,
             on_warning=None,
             item_filter=None,
         )
@@ -126,8 +123,6 @@ class TestCustomBackendScanOptions:
         base_opts = walk_source_scan_options(
             _Stub(),
             recursive=False,
-            follow_symlinks=True,
-            detect_symlink_loops=False,
             on_warning=None,
             item_filter=None,
         )

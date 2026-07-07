@@ -90,7 +90,14 @@ class SyncCommand(Command):
 
         client = ctx.client_factory(args)
         src_location, dest_location = transferargs.resolve_locations(
-            args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
+            args,
+            ctx,
+            client,
+            src,
+            dest,
+            src_type=src_type,
+            dest_type=dest_type,
+            page_size=page_size,
         )
 
         # One symmetric filter applied to both sides by S3.sync (sync.md section
@@ -110,9 +117,7 @@ class SyncCommand(Command):
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps
                 ),
                 filter=item_filter,
-                follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,
-                page_size=page_size,
                 on_progress=printer.on_progress if printer.wants_progress else None,
                 on_result=printer.on_result,
                 transfer_config=transfer_config,

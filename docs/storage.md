@@ -58,18 +58,24 @@ declared capabilities promise:
   `LocalFileGenerator.finalize_children` calling `options.filter`), applies it in
   `scan_pages` and declares **`scan_pages_filters = True`** to skip the redundant
   re-filter (`storage.sieve_pages` is the helper). Honour
-  `options.sort` when `SORTABLE_SCAN` is declared. `options` carries only the
-  backend-agnostic knobs (`recursive` / `sort` / `filter` / `on_warning`);
-  backend-specific knobs live on a `ScanOptions` subclass so one backend's
-  options never leak into another's (`S3ScanOptions` = the `ListObjectsV2` knobs
-  `page_size` / `request_payer` / `fetch_owner` / `prefix`; `LocalScanOptions` =
-  `follow_symlinks` / `detect_symlink_loops`). The built-ins reject a foreign
-  options type; a custom backend reads its own knobs from its own subclass or
-  from its instance state, and takes the common base otherwise.
-- **`get_fileinfo(key="", *, follow_symlinks=True, on_warning=None) -> FileInfo | None`**
+  `options.sort` when `SORTABLE_SCAN` is declared. `options` carries the
+  operation-inherent knobs the caller decides per invocation
+  (`recursive` / `sort` / `filter` / `on_warning`, and `S3ScanOptions`'s internal
+  `prefix`); the **source-config** knobs — how a particular source is read — are
+  configured on the storage constructor and seeded into every scan by
+  `default_scan_options()` (see below), so a `ScanOptions` subclass still carries
+  them to `scan_pages` but the caller does not pass them per operation
+  (`S3ScanOptions` = the `ListObjectsV2` knobs `page_size` / `fetch_owner`, plus
+  the operation-set `request_payer` / `prefix`; `LocalScanOptions` =
+  `follow_symlinks` / `detect_symlink_loops`). A subclass keeps one backend's knobs
+  from leaking into another's; the built-ins reject a foreign options type, and a
+  custom backend reads its own knobs from its own subclass or from its instance
+  state, taking the common base otherwise.
+- **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry
-  here".
+  here". Whether a symlink is followed is `LocalStorage`'s own `follow_symlinks`
+  config, read from the storage like every scan (not a parameter here).
 - **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
   `info.key`. Return the backend's delete response (surfaced under
   `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
@@ -84,8 +90,18 @@ Three more members come with working defaults a custom backend normally keeps:
   subclass still works with no options. `S3Storage` / `LocalStorage` set
   `S3ScanOptions` / `LocalScanOptions`; **a custom backend that defines its own
   subclass just sets this one class attribute — no method to override** — and one
-  that takes the base `ScanOptions` sets nothing. (Override `default_scan_options()`
-  only for a *dynamic* default.)
+  that takes the base `ScanOptions` sets nothing.
+- **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
+  the single place a backend seeds the **source-config it holds on the instance**.
+  The built-ins override it to inject their constructor knobs
+  (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…)`,
+  `S3Storage(page_size=…, fetch_owner=…)`); a custom backend overrides it to seed
+  its own instance state (or for any dynamic default). Every scan builds from it:
+  the high-level `cp` / `sync` / `ls` / `rm` paths take
+  `replace(storage.default_scan_options(), <operation-inherent knobs>)`, so a
+  storage's source-config — and a custom `scan_options_type` subclass — flows
+  through the operations, not only an arg-less `scan()`. This is how an app
+  configures the walk / listing once on the storage rather than per call.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
@@ -185,7 +201,7 @@ class DictStorage(Storage):
         if infos:                                               # predicate to your source;
             yield infos                                         # storage.sieve_pages wraps raw)
 
-    def get_fileinfo(self, key: str = "", *, follow_symlinks=True, on_warning=None):
+    def get_fileinfo(self, key: str = "", *, on_warning=None):
         data = self._store.get(key)
         return None if data is None else FileInfo(key=key, size=len(data), compare_key=key)
 

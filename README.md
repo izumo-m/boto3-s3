@@ -174,7 +174,7 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, recursive, page_size, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. |
+| `ls(target="s3://", *, recursive, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |

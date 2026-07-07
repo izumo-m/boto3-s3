@@ -232,7 +232,7 @@ fills it in).
 | flag | handling |
 |---|---|
 | `--recursive` | `S3.ls(recursive=True)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
-| `--page-size N` | `S3.ls(page_size=N)`. No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254. Charter compliance) |
+| `--page-size N` | `S3Storage(url, page_size=N)` (the listing page size is the storage's own config now, not an `ls` argument). No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254. Charter compliance) |
 | `--request-payer [requester]` | `S3.ls(request_payer="requester")` (ineffective in bucket listing = same as aws) |
 | `--human-readable` | Formats the size in base-2 (CLI side, the library is not involved) |
 | `--summarize` | Total Objects / Total Size at the end (CLI side) |
@@ -295,7 +295,7 @@ aws-cli's behavior):
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
 | `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it into a globsieve matcher (a relative pattern matches the root-relative key, an absolute one the full key - inert for an anchorless s3 key) and passes it to `S3.rm(filter=)` |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
-| `--page-size N` | No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
+| `--page-size N` | `S3Storage(url, page_size=N)` (storage config, as for ls). No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
 Output: stdout `delete: s3://bucket/key` / `(dryrun) delete: ...`, stderr
 `delete failed: s3://bucket/key <exc>` (a per-key failure) / `fatal error: <msg>`
@@ -429,6 +429,14 @@ does not base64-decode. Only `fileb://` reads raw bytes)
 swaps the region + discards `--endpoint-url` = aws-cli `ClientFactory`)
 `--page-size`, streaming (`-`), `--expected-size`, `--no-overwrite`,
 `--case-conflict`, `--checksum-mode`, `--checksum-algorithm`.
+
+Two of these are **source-config**, not `S3.cp` / `mv` / `sync` arguments:
+`--follow-symlinks/--no-follow-symlinks` and `--page-size` are baked into the
+`Storage` the CLI builds - `resolve_locations` returns `LocalStorage(path,
+follow_symlinks=…)` for a local side and `S3Storage(url, page_size=…)` for an S3
+side - because the library reads how a source is walked / listed from the storage
+itself (`default_scan_options`), not from a per-operation argument. `ls` / `rm`
+likewise build `S3Storage(url, page_size=…)`.
 
 **streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
 `sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In

@@ -35,7 +35,6 @@ from boto3_s3.types import (
     FileInfo,
     LocalScanOptions,
     S3FileInfo,
-    S3ScanOptions,
     ScanOptions,
     TransferOptions,
     TransferType,
@@ -52,31 +51,21 @@ def walk_source_scan_options(
     *,
     recursive: bool,
     sort: bool = False,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
 
-    A ``LocalStorage`` source gets a :class:`LocalScanOptions` (the symlink knobs
-    honored); a custom source backend gets **its own**
-    :attr:`~boto3_s3.storage.Storage.scan_options_type` (its
-    ``default_scan_options`` with the common knobs overlaid), so a backend whose
-    ``scan_pages`` requires its subclass receives it here too - not only from an
-    arg-less ``scan()``. The symlink knobs are ``LocalStorage``-specific (a custom
-    backend carries any walk knobs on its own instance). An S3 source never comes
-    here (it lists through :func:`scan_s3_source`).
+    Built from the storage's own ``default_scan_options`` - which seeds the
+    source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
+    ``detect_symlink_loops``, a custom backend's own knobs, both configured on the
+    constructor) - with only the operation-inherent knobs overlaid (``recursive`` /
+    ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
+    or any custom source backend whose ``scan_pages`` requires its own
+    ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
+    would honor it. An S3 source never comes here (it lists through
+    :func:`scan_s3_source`).
     """
-    if isinstance(storage, LocalStorage):
-        return LocalScanOptions(
-            recursive=recursive,
-            sort=sort,
-            follow_symlinks=follow_symlinks,
-            detect_symlink_loops=detect_symlink_loops,
-            on_warning=on_warning,
-            filter=item_filter,
-        )
     return replace(
         storage.default_scan_options(),
         recursive=recursive,
@@ -252,8 +241,6 @@ def upload_items(
     *,
     dest_bucket: str,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
     item_filter: FileFilter | None,
 ) -> Iterator[TransferItem]:
     """Materialize upload items from the local source (warnings -> rollup).
@@ -275,8 +262,6 @@ def upload_items(
             walk_source_scan_options(
                 plan.src,
                 recursive=True,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
             )
@@ -285,9 +270,7 @@ def upload_items(
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
         # get_fileinfo has no filter, so an excluded single source is dropped here.
-        single = plan.src.get_fileinfo(
-            follow_symlinks=follow_symlinks, on_warning=transferrer.warner.warn
-        )
+        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
@@ -334,7 +317,6 @@ def s3_source_items(
     transfer_type: TransferType,
     dest_bucket: str,
     transferrer: Transferrer,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
@@ -346,7 +328,6 @@ def s3_source_items(
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         )
@@ -496,7 +477,6 @@ def scan_s3_source(
     storage: S3Storage,
     *,
     key_prefix: str,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
 ) -> Iterator[FileInfo]:
@@ -505,9 +485,11 @@ def scan_s3_source(
     The shared transfer-side enumeration: cp/mv scan their source here,
     and sync scans whichever of its sides is S3 (the destination too).
     Folder markers never surface; the scan stamps each entry's prefix-relative
-    ``compare_key``, which ``item_filter`` matches against. The passed ``storage``
-    instance is scanned directly (``ScanOptions.prefix`` re-anchors the listing at
-    the normalized ``key_prefix``), so a custom ``S3Storage`` subclass survives.
+    ``compare_key``, which ``item_filter`` matches against. Built from the passed
+    ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
+    config and a custom ``S3Storage`` subclass survive), with the operation-inherent
+    knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
+    ``key_prefix``, and ``request_payer`` from the transfer options.
     """
 
     def scan_filter(info: FileInfo) -> bool:
@@ -519,12 +501,12 @@ def scan_s3_source(
             return True
         return item_filter(info)
 
-    scan_options = S3ScanOptions(
+    scan_options = replace(
+        storage.default_scan_options(),
         recursive=True,
-        page_size=page_size,
-        request_payer=options.get("request_payer"),
         prefix=key_prefix,
         filter=scan_filter,
+        request_payer=options.get("request_payer"),
     )
     return storage.scan(scan_options)
 
@@ -654,8 +636,6 @@ def open_upload_items(
     *,
     dest_bucket: str,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
@@ -684,16 +664,12 @@ def open_upload_items(
             walk_source_scan_options(
                 plan.src,
                 recursive=True,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
             )
         )
     else:
-        single = plan.src.get_fileinfo(
-            follow_symlinks=follow_symlinks, on_warning=transferrer.warner.warn
-        )
+        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
         if single is None:
             raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
@@ -741,7 +717,6 @@ def open_download_items(
     src_storage: S3Storage,
     *,
     transferrer: Transferrer,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
     operation: str,
@@ -764,7 +739,6 @@ def open_download_items(
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         )
@@ -863,7 +837,12 @@ def cp_case_gate(
     mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
-    # paths_type == "s3local" guarantees a LocalStorage destination here.
+    # paths_type == "s3local" guarantees a LocalStorage destination here. The
+    # case-conflict membership scan follows symlinks like aws's reverse
+    # enumeration, independent of the destination's follow_symlinks config:
+    # --follow-symlinks is an inert flag on a download (aws applies it to the
+    # source walk only), so the gate must not shrink when the CLI bakes
+    # --no-follow-symlinks into the local destination storage.
     dest_keys = {_ckey(info) for info in plan.dest.scan(LocalScanOptions(recursive=True))}
     return CaseConflictGate(mode, dest_keys)
 
@@ -898,26 +877,25 @@ def sync_entries(
     root: str,
     item_filter: FileFilter | None,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
-    page_size: int,
     options: TransferOptions,
 ) -> Iterator[tuple[str, FileInfo]]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
     A local side walks in aws-cli byte order with its warnings routed to
     the transfer rollup (both sides warn, aws parity); an S3 side is the
-    shared anchored listing (folder markers dropped, ``request_payer`` /
-    ``page_size`` forwarded - aws-cli maps them onto the destination
-    listing too). Both sides' producers stamp ``compare_key`` (the merge-join
-    axis), so ``item_filter`` reads it and the pair key is taken from it.
+    shared anchored listing (folder markers dropped). Each side reads its own
+    source-config from its storage (a local side's ``follow_symlinks``, an S3
+    side's ``page_size`` / ``fetch_owner``) via ``default_scan_options``, so both
+    the source and the destination listing honor the storage each was built with -
+    aws-cli maps the same knobs onto the destination listing too. Both sides'
+    producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
+    it and the pair key is taken from it.
     """
     if isinstance(storage, S3Storage):
         key_prefix = root[len(storage.bucket) + 1 :]
         for info in scan_s3_source(
             storage,
             key_prefix=key_prefix,
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         ):
@@ -928,8 +906,6 @@ def sync_entries(
             storage,
             recursive=True,
             sort=True,  # the merge-join needs both sides byte-ordered
-            follow_symlinks=follow_symlinks,
-            detect_symlink_loops=detect_symlink_loops,
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
         )

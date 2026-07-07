@@ -77,7 +77,6 @@ class _FakeOpen(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         return None

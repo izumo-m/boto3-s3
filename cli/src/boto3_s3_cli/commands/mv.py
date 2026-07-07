@@ -101,7 +101,14 @@ class MvCommand(Command):
             args.no_overwrite, paths_type, client, operation="mv"
         )
         src_location, dest_location = transferargs.resolve_locations(
-            args, ctx, client, src, dest, src_type=src_type, dest_type=dest_type
+            args,
+            ctx,
+            client,
+            src,
+            dest,
+            src_type=src_type,
+            dest_type=dest_type,
+            page_size=page_size,
         )
 
         item_filter = filters.compile_filter(args.filters)
@@ -114,9 +121,7 @@ class MvCommand(Command):
                 dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
                 filter=item_filter,
-                follow_symlinks=args.follow_symlinks,
                 dryrun=args.dryrun,
-                page_size=page_size,
                 on_progress=printer.on_progress if printer.wants_progress else None,
                 on_result=printer.on_result,
                 transfer_config=transfer_config,

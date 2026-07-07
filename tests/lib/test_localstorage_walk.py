@@ -501,8 +501,9 @@ class TestGetFileinfo:
         link = tmp_path / "link.txt"
         link.symlink_to(target)
         warnings: list[str] = []
-        info = LocalStorage(str(link)).get_fileinfo(
-            follow_symlinks=False, on_warning=warnings.append
+        # follow_symlinks is the storage's own config now, not a get_fileinfo arg.
+        info = LocalStorage(str(link), follow_symlinks=False).get_fileinfo(
+            on_warning=warnings.append
         )
         assert info is None
         assert warnings == []
@@ -550,6 +551,21 @@ class TestLocalStorageScan:
         options = LocalScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         keys = [info.key for info in LocalStorage(tmp_path).scan(options)]
         assert keys == [str(tmp_path).replace(os.sep, "/") + "/a.txt"]
+
+    def test_default_scan_options_seeds_constructor_config(self) -> None:
+        storage = LocalStorage(".", follow_symlinks=False, detect_symlink_loops=True)
+        opts = storage.default_scan_options()
+        assert opts.follow_symlinks is False
+        assert opts.detect_symlink_loops is True
+
+    def test_follow_symlinks_config_reaches_an_arg_less_scan(self, tmp_path: Path) -> None:
+        # The walk knob configured on the storage flows into an arg-less scan()
+        # (via default_scan_options), so a symlink is skipped without a per-call arg.
+        _make_tree(tmp_path, "plain.txt")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "plain.txt")
+        storage = LocalStorage(tmp_path, follow_symlinks=False)
+        keys = sorted(info.compare_key for info in storage.scan())
+        assert keys == ["plain.txt"]  # link.txt skipped, no options passed
 
 
 class TestStatResultAndSymlink:

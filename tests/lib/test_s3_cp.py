@@ -22,7 +22,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ParamValidationError
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import GlobFilter, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -31,6 +31,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -157,17 +158,16 @@ class TestUploadRoute:
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/a/inner.txt"]
 
     def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
-        # The opt-in cycle guard (default off = aws parity) flows from cp's
-        # detect_symlink_loops flag through to the local recursive walk.
+        # The opt-in cycle guard (default off = aws parity) is configured on the
+        # LocalStorage source and reaches the local recursive walk.
         (tmp_path / "a.txt").write_bytes(b"x")
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
         client, calls = make_recording_client([{}])  # one PutObject for a.txt
         results: list[OpResult] = []
         S3().cp(
-            str(tmp_path),
+            LocalStorage(str(tmp_path), detect_symlink_loops=True),
             S3Storage("s3://b/t", client=client),
             recursive=True,
-            detect_symlink_loops=True,
             transfer_config=_SYNC,
             on_result=results.append,
         )
@@ -776,6 +776,28 @@ class TestCaseConflictGate:
                 **TransferOptions(case_conflict=CaseConflictMode.ERROR),
             )
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
+
+    def test_case_gate_follows_symlinks_regardless_of_dest_config(self, tmp_path: Path) -> None:
+        # Regression: --follow-symlinks is inert on a download (aws applies it to
+        # the source walk only), so the case-conflict membership scan must follow
+        # symlinks even when the local destination storage carries
+        # follow_symlinks=False (e.g. the CLI baking in --no-follow-symlinks).
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "real.txt").write_bytes(b"x")
+        (out / "A.txt").symlink_to(out / "real.txt")
+        plan = transferplan.plan_transfer(
+            S3Storage("s3://b/cc/"),
+            LocalStorage(str(out), follow_symlinks=False),
+            recursive=True,
+            operation="cp",
+        )
+        gate = producers.cp_case_gate(
+            plan, recursive=True, options=TransferOptions(case_conflict=CaseConflictMode.SKIP)
+        )
+        assert gate is not None
+        # The symlinked entry is followed into the membership set, not skipped.
+        assert "A.txt" in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
 
     def test_exact_case_match_at_dest_always_copies(self, tmp_path: Path) -> None:
         # The AlwaysSync arm: an exact-name local file never

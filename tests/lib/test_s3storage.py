@@ -88,11 +88,13 @@ def _storage(
     head_response: dict[str, Any] | None = None,
     head_error: Exception | None = None,
     url: str = "s3://bucket/prefix/",
+    page_size: int = 1000,
+    fetch_owner: bool = False,
 ) -> tuple[S3Storage, _FakeS3Client]:
     client = _FakeS3Client(
         pages=pages, error=error, head_response=head_response, head_error=head_error
     )
-    return S3Storage(url, client=client), client
+    return S3Storage(url, client=client, page_size=page_size, fetch_owner=fetch_owner), client
 
 
 def _obj(
@@ -199,6 +201,18 @@ class TestScanOptionForwarding:
         list(storage.scan())
         assert "FetchOwner" not in client.calls[0]
 
+    def test_storage_page_size_config_seeds_scan(self) -> None:
+        # page_size given to the constructor flows into an arg-less scan()
+        # (via default_scan_options), so an app tunes the listing on the storage.
+        storage, client = _storage([], page_size=3)
+        list(storage.scan())
+        assert client.calls[0]["PaginationConfig"] == {"PageSize": 3}
+
+    def test_storage_fetch_owner_config_seeds_scan(self) -> None:
+        storage, client = _storage([], fetch_owner=True)
+        list(storage.scan())
+        assert client.calls[0]["FetchOwner"] is True
+
 
 class TestScanPages:
     def test_yields_one_list_per_page(self) -> None:
@@ -274,6 +288,12 @@ class TestScanOptionsType:
     def test_default_scan_options_is_s3(self) -> None:
         storage, _ = _storage([])
         assert isinstance(storage.default_scan_options(), S3ScanOptions)
+
+    def test_default_scan_options_seeds_constructor_config(self) -> None:
+        storage, _ = _storage([], page_size=5, fetch_owner=True)
+        opts = storage.default_scan_options()
+        assert opts.page_size == 5
+        assert opts.fetch_owner is True
 
 
 class TestScanFilter:
@@ -428,8 +448,9 @@ class TestListBuckets:
         assert results[0].size is None
 
     def test_filters_forwarded(self) -> None:
-        storage, client = _storage([], url="s3://")
-        list(storage.list_buckets(page_size=7, name_prefix="al", region="us-west-2"))
+        # page_size is the storage's own config now (shared with the object listing).
+        storage, client = _storage([], url="s3://", page_size=7)
+        list(storage.list_buckets(name_prefix="al", region="us-west-2"))
         assert client.calls[0] == {
             "PaginationConfig": {"PageSize": 7},
             "Prefix": "al",

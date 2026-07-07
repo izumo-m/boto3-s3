@@ -182,10 +182,19 @@ class Storage(abc.ABC):
     scan_pages_filters: ClassVar[bool] = False
 
     def default_scan_options(self) -> ScanOptions:
-        """This backend's own :class:`ScanOptions`, with defaults (used by arg-less ``scan()``).
+        """This backend's own :class:`ScanOptions`: used when ``scan()`` gets none,
+        and the base an operation overlays its own knobs onto.
 
-        Builds :attr:`scan_options_type`; override only for a *dynamic* default
-        (most backends set the class attribute instead - nothing to override).
+        The default builds :attr:`scan_options_type` with all field defaults. A
+        backend that carries scan *source-config* on its instance - how this source
+        is read, set once on the constructor (``LocalStorage``'s ``follow_symlinks``
+        / ``detect_symlink_loops``, ``S3Storage``'s ``page_size`` / ``fetch_owner``)
+        - overrides this to seed those held values, so every scan reflects the
+        storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
+        paths build from this and overlay only the operation-inherent knobs
+        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix``), which
+        is what lets an app configure the walk through the storage rather than per
+        call.
         """
         return self.scan_options_type()
 
@@ -296,7 +305,6 @@ class Storage(abc.ABC):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         """Return the ``FileInfo`` for a single entry, or ``None`` if it is absent.
@@ -320,8 +328,10 @@ class Storage(abc.ABC):
 
         So ``None`` means "no transferable entry here"; the caller decides what
         that means (a single source raises its own "does not exist"; an existence
-        check proceeds). ``follow_symlinks=False`` skips a symlink; ``on_warning``
-        is the local-walk warning channel (ignored by S3).
+        check proceeds). ``on_warning`` is the local-walk warning channel (ignored
+        by S3). Whether a symlink is followed is the local backend's own
+        construction-time config (``LocalStorage(follow_symlinks=...)``), read from
+        the storage - not a parameter here.
         """
 
     @abc.abstractmethod

@@ -837,7 +837,12 @@ class LocalStorage(Storage):
             return os.path.abspath(filename)
 
     def __init__(
-        self, path: str | os.PathLike[str], *, walker: LocalFileGenerator | None = None
+        self,
+        path: str | os.PathLike[str],
+        *,
+        walker: LocalFileGenerator | None = None,
+        follow_symlinks: bool = True,
+        detect_symlink_loops: bool = False,
     ) -> None:
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
@@ -846,6 +851,13 @@ class LocalStorage(Storage):
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
         self._abspath = os.path.abspath(self._path)
+        # How this local source is read (the scan's source-config): whether
+        # symlinks are followed, and whether the recursive walk guards against
+        # symlink cycles. Seeded into every scan via default_scan_options (and read
+        # by the single-path get_fileinfo), so an app configures the walk once here
+        # rather than passing it through each operation.
+        self._follow_symlinks = follow_symlinks
+        self._detect_symlink_loops = detect_symlink_loops
         #: The directory-walk strategy (the default fast walk, or an app's). Bind
         #: the back-reference so the walk can stamp each entry's ``FileInfo.storage``
         #: (one walker serves one storage; sharing one across storages rebinds it).
@@ -889,6 +901,21 @@ class LocalStorage(Storage):
         if self._path.endswith(os.sep):
             return full_path + os.sep, True
         return full_path, False
+
+    @override
+    def default_scan_options(self) -> LocalScanOptions:
+        """The walk options seeded with this storage's held config
+        (:meth:`Storage.default_scan_options`).
+
+        ``follow_symlinks`` / ``detect_symlink_loops`` come from the constructor,
+        so every scan (and the single-path :meth:`get_fileinfo`) reads the walk
+        configured once on this ``LocalStorage``; an operation overlays only its
+        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto this.
+        """
+        return LocalScanOptions(
+            follow_symlinks=self._follow_symlinks,
+            detect_symlink_loops=self._detect_symlink_loops,
+        )
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries under :attr:`path`, one directory read (``os.scandir``) per page.
@@ -962,11 +989,16 @@ class LocalStorage(Storage):
         )
         item_filter = options.filter
         if not os.path.isdir(root):
-            info = self.get_fileinfo(
-                follow_symlinks=options.follow_symlinks, on_warning=options.on_warning
-            )
-            if info is not None and (item_filter is None or item_filter(info)):
-                yield info
+            # A single-file non-recursive scan honors the passed options'
+            # follow_symlinks (like the directory branch below), so it stats
+            # through _stat_one directly rather than get_fileinfo (which reads the
+            # storage's own config); compare_key is the basename, as get_fileinfo
+            # stamps for a single entry.
+            info = self._stat_one(root, follow_symlinks=options.follow_symlinks, notify=notify)
+            if info is not None:
+                info.compare_key = info.key.rsplit("/", 1)[-1]
+                if item_filter is None or item_filter(info):
+                    yield info
             return
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized root-prefix length (os.path.join(root, "") = root + a sep, the
@@ -1085,7 +1117,6 @@ class LocalStorage(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> LocalFileInfo | None:
         """Stat a single path (:meth:`Storage.get_fileinfo`).
@@ -1095,6 +1126,8 @@ class LocalStorage(Storage):
         basename. As with :meth:`open`, ``key`` is joined under the location and
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see :meth:`open`).
+        Whether a symlink is followed is the storage's own ``follow_symlinks``
+        config (constructor), like every scan this backend makes.
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
@@ -1102,7 +1135,7 @@ class LocalStorage(Storage):
         target = self._abspath
         if key:
             target = os.path.join(target, to_native_path(key))
-        info = self._stat_one(target, follow_symlinks=follow_symlinks, notify=notify)
+        info = self._stat_one(target, follow_symlinks=self._follow_symlinks, notify=notify)
         if info is not None:
             info.compare_key = info.key.rsplit("/", 1)[-1]
         return info

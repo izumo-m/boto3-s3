@@ -16,6 +16,7 @@ import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import replace
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
@@ -51,7 +52,6 @@ from boto3_s3.types import (
     ProgressCallback,
     ResultCallback,
     S3FileInfo,
-    S3ScanOptions,
     TransferOptions,
     TransferType,
     strip_response_metadata,
@@ -577,7 +577,6 @@ class S3:
         target: Location = "s3://",
         *,
         recursive: bool = False,
-        page_size: int = 1000,
         request_payer: str | None = None,
         bucket_name_prefix: str | None = None,
         bucket_region: str | None = None,
@@ -593,16 +592,21 @@ class S3:
         ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing and
         are meaningless for an object listing; conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
-        aws-cli). A non-S3 ``Location`` raises ``ValidationError``. The target is
-        validated eagerly; iteration is lazy.
+        aws-cli). The listing page size (object and bucket listings alike) is the
+        ``S3Storage``'s own ``page_size`` config (its constructor) - pass a
+        configured ``S3Storage`` as ``target`` to tune it. A non-S3 ``Location``
+        raises ``ValidationError``. The target is validated eagerly; iteration is
+        lazy.
         """
         storage = self._resolve_s3_target(target, operation="ls")
         if not storage.bucket:
-            return storage.list_buckets(
-                page_size=page_size, name_prefix=bucket_name_prefix, region=bucket_region
-            )
+            return storage.list_buckets(name_prefix=bucket_name_prefix, region=bucket_region)
         return storage.scan(
-            S3ScanOptions(recursive=recursive, page_size=page_size, request_payer=request_payer)
+            replace(
+                storage.default_scan_options(),
+                recursive=recursive,
+                request_payer=request_payer,
+            )
         )
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
@@ -636,10 +640,7 @@ class S3:
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
-        follow_symlinks: bool = True,
-        detect_symlink_loops: bool = False,
         dryrun: bool = False,
-        page_size: int = 1000,
         expected_size: int | None = None,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
@@ -679,11 +680,13 @@ class S3:
         root - a :class:`~boto3_s3.globsieve.GlobFilter` matches that key (a
         relative pattern) or the full ``key`` (an absolute one) while a richer
         predicate can read size / mtime / storage_class.
-        ``detect_symlink_loops`` (default ``False``; a library extension - ``aws
-        s3`` has no such option, so off keeps parity) guards a recursive local
-        walk against symlink cycles: with it (and ``follow_symlinks``) a directory
-        resolving to one of its own ancestors is skipped with a warning instead of
-        recursing until ``RecursionError`` - off costs no extra ``stat``.
+        How the local source is walked - whether symlinks are followed
+        (``follow_symlinks``) and whether the recursive walk guards against symlink
+        cycles (``detect_symlink_loops``, a library extension ``aws s3`` lacks) - is
+        configured on the ``LocalStorage`` itself (its constructor knobs), not on
+        ``cp``: pass a configured ``LocalStorage`` as ``src`` to change it; a bare
+        path string uses the defaults (follow symlinks, no cycle guard).
+        The S3 listing page size is likewise the ``S3Storage``'s own ``page_size``.
         ``dryrun`` enumerates (listing and HeadObject still
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
         still apply. ``expected_size`` is the multipart sizing hint for a
@@ -726,10 +729,7 @@ class S3:
             is_move=False,
             recursive=recursive,
             item_filter=filter,
-            follow_symlinks=follow_symlinks,
-            detect_symlink_loops=detect_symlink_loops,
             dryrun=dryrun,
-            page_size=page_size,
             on_progress=on_progress,
             on_result=on_result,
             cancel_token=cancel_token,
@@ -747,10 +747,7 @@ class S3:
         is_move: bool,
         recursive: bool,
         item_filter: FileFilter | None,
-        follow_symlinks: bool,
-        detect_symlink_loops: bool,
         dryrun: bool,
-        page_size: int,
         on_progress: ProgressCallback | None,
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
@@ -838,8 +835,6 @@ class S3:
                     plan,
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
-                    follow_symlinks=follow_symlinks,
-                    detect_symlink_loops=detect_symlink_loops,
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
@@ -850,7 +845,6 @@ class S3:
                     plan,
                     src_s3,
                     transferrer=transferrer,
-                    page_size=page_size,
                     item_filter=item_filter,
                     options=options,
                     operation=operation,
@@ -861,8 +855,6 @@ class S3:
                     plan,
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
-                    follow_symlinks=follow_symlinks,
-                    detect_symlink_loops=detect_symlink_loops,
                     item_filter=item_filter,
                 )
             else:
@@ -872,7 +864,6 @@ class S3:
                     transfer_type=transfer_type,
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
-                    page_size=page_size,
                     item_filter=item_filter,
                     options=options,
                     case_gate=case_gate,
@@ -1013,10 +1004,7 @@ class S3:
         *,
         recursive: bool = False,
         filter: FileFilter | None = None,
-        follow_symlinks: bool = True,
-        detect_symlink_loops: bool = False,
         dryrun: bool = False,
-        page_size: int = 1000,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
@@ -1091,10 +1079,7 @@ class S3:
             is_move=True,
             recursive=recursive,
             item_filter=filter,
-            follow_symlinks=follow_symlinks,
-            detect_symlink_loops=detect_symlink_loops,
             dryrun=dryrun,
-            page_size=page_size,
             on_progress=on_progress,
             on_result=on_result,
             cancel_token=cancel_token,
@@ -1112,10 +1097,7 @@ class S3:
         create_filter: bool | FileFilter = True,
         update_filter: bool | PairFilter | ParallelCompare | None = None,
         delete_filter: bool | FileFilter = False,
-        follow_symlinks: bool = True,
-        detect_symlink_loops: bool = False,
         dryrun: bool = False,
-        page_size: int = 1000,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
@@ -1301,9 +1283,6 @@ class S3:
                 root=plan.src_root,
                 item_filter=filter,
                 transferrer=transferrer,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
-                page_size=page_size,
                 options=options,
             )
             dest_entries = producers.sync_entries(
@@ -1311,9 +1290,6 @@ class S3:
                 root=plan.dest_root,
                 item_filter=filter,
                 transferrer=transferrer,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
-                page_size=page_size,
                 options=options,
             )
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
@@ -1375,7 +1351,6 @@ class S3:
         recursive: bool = False,
         filter: FileFilter | None = None,
         dryrun: bool = False,
-        page_size: int = 1000,
         request_payer: str | None = None,
         on_result: ResultCallback | None = None,
         capture_response: bool = False,
@@ -1442,12 +1417,13 @@ class S3:
 
         # Enumerating paths: full recursive delete, or the keyless
         # non-recursive folder-marker sweep. Both list without Delimiter.
-        # S3ScanOptions.prefix re-anchors the listing at the normalized prefix on
+        # ScanOptions.prefix re-anchors the listing at the normalized prefix on
         # the passed storage itself (client shared), so a custom S3Storage
-        # subclass and its scan_pages override survive.
-        options = S3ScanOptions(
+        # subclass and its scan_pages override survive; page_size / fetch_owner
+        # come from the storage's own config via default_scan_options.
+        options = replace(
+            storage.default_scan_options(),
             recursive=True,
-            page_size=page_size,
             request_payer=request_payer,
             prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),

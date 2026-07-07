@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Scan source-config now lives on the `Storage` constructor:
+  `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
+  `S3Storage(url, page_size=…, fetch_owner=…)` are seeded into every scan, so a
+  custom `scan_options_type` is honored through `cp` / `sync` / `ls` / `rm` too.
+  The matching operation arguments (`follow_symlinks` / `detect_symlink_loops` /
+  `page_size`, and `get_fileinfo`'s `follow_symlinks`) are removed.
 - `S3.sync` now splits the copy/delete decision into three per-lane filters:
   `create_filter` (new entries), `update_filter` (existing, was `compare`),
   `delete_filter` (orphans, was `delete`); a custom `update_filter` is only

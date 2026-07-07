@@ -25,6 +25,7 @@ from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelCompare, SyncPair
 from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError
+from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
@@ -108,10 +109,10 @@ class TestSyncUpload:
         (src / "loop").symlink_to(src)  # a directory cycle
         client, calls = make_recording_client([_listing(), {}])  # empty dest, PutObject a.txt
         results: list[OpResult] = []
+        # The cycle guard is configured on the LocalStorage source now.
         S3().sync(
-            str(src),
+            LocalStorage(str(src), detect_symlink_loops=True),
             S3Storage("s3://bucket/p", client=client),
-            detect_symlink_loops=True,
             transfer_config=_SERIAL,
             on_result=results.append,
         )

@@ -316,6 +316,12 @@ class S3Storage(Storage):
     :meth:`close`). The region is not derived from the URL; for a specific
     region / endpoint / profile, pass a pre-built ``client``.
 
+    How this source is *listed* is configured on the constructor too: ``page_size``
+    (the ``ListObjectsV2`` page size) and ``fetch_owner`` (populate each entry's
+    owner) are held on the instance and seeded into every scan via
+    :meth:`default_scan_options`, so a listing is tuned once here rather than per
+    operation.
+
     Thread safety: a built or supplied client is safe to share across threads for
     operation calls. Client *construction* is not, and is deliberately not locked
     here (a library lock cannot serialize against clients the caller builds
@@ -446,7 +452,14 @@ class S3Storage(Storage):
 
     # -- construction / identity ---------------------------------------------
 
-    def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
+    def __init__(
+        self,
+        url: str | os.PathLike[str],
+        *,
+        client: S3Client | None = None,
+        page_size: int = 1000,
+        fetch_owner: bool = False,
+    ) -> None:
         text = os.fspath(url)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
         # is optional here for convenience: "bucket/key" reads the same as
@@ -459,6 +472,12 @@ class S3Storage(Storage):
         self._bucket, self._key = _parse_s3_url(text)
         self._client = client
         self._owns_client = client is None
+        # How this source is listed (the scan's source-config): the ListObjectsV2
+        # page size and whether each entry's owner is fetched. Seeded into every
+        # scan via default_scan_options, so an app tunes the listing once here
+        # rather than passing it through each operation.
+        self._page_size = page_size
+        self._fetch_owner = fetch_owner
 
     @property
     def url(self) -> str:
@@ -561,6 +580,18 @@ class S3Storage(Storage):
             self._client.close()
             self._client = None
 
+    @override
+    def default_scan_options(self) -> S3ScanOptions:
+        """The listing options seeded with this storage's held config
+        (:meth:`Storage.default_scan_options`).
+
+        ``page_size`` / ``fetch_owner`` come from the constructor, so every scan
+        reflects the listing tuned once on this ``S3Storage``; an operation
+        overlays only its own knobs (``recursive`` / ``sort`` / ``filter`` /
+        ``on_warning``, and the internal ``prefix`` / ``request_payer``) onto this.
+        """
+        return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
+
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
@@ -627,7 +658,6 @@ class S3Storage(Storage):
     def list_buckets(
         self,
         *,
-        page_size: int = 1000,
         name_prefix: str | None = None,
         region: str | None = None,
     ) -> Iterator[FileInfo]:
@@ -637,11 +667,13 @@ class S3Storage(Storage):
         bucket is a container, not an openable entity (aws-cli's
         ``_list_all_buckets``, which its ``ls`` dispatches to for a bare
         ``s3://``): ``S3.ls`` calls this at the service root, and no transfer scan
-        ever yields buckets. ``name_prefix`` / ``region`` map to ``ListBuckets``
-        ``Prefix`` / ``BucketRegion`` (omitted when falsy, aws-cli's truthiness
-        check). Below the ListBuckets-paginator floor (botocore 1.34.162) it falls
-        back to one unpaginated ``list_buckets()`` with the filters inert
-        (docs/overview.md section 2). Errors surface on the consumer's pull.
+        ever yields buckets. The page size is the storage's own ``page_size``
+        (constructor config, shared with the object listing). ``name_prefix`` /
+        ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
+        when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
+        floor (botocore 1.34.162) it falls back to one unpaginated
+        ``list_buckets()`` with the filters inert (docs/overview.md section 2).
+        Errors surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
@@ -651,7 +683,7 @@ class S3Storage(Storage):
                 # (botocore 1.34.162). Drop this branch once the floor reaches it.
                 yield from _page_to_bucket_infos(client.list_buckets())
                 return
-            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": page_size}}
+            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
             if name_prefix:
                 paging["Prefix"] = name_prefix
             if region:
@@ -699,7 +731,6 @@ class S3Storage(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> S3FileInfo | None:
         """HeadObject a single key (:meth:`Storage.get_fileinfo`).
@@ -710,8 +741,8 @@ class S3Storage(Storage):
         ``os.path.join``), so a keyless or trailing-``/`` prefix needs none and a
         bare ``prefix`` still yields ``prefix/key``. A ``404`` returns ``None``
         (definitively absent); any other error (``403``, transport, 5xx) is
-        raised - existence could not be determined. ``follow_symlinks`` /
-        ``on_warning`` do not apply to S3 and are ignored. This is the generic
+        raised - existence could not be determined. ``on_warning`` does not apply
+        to S3 and is ignored. This is the generic
         HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
         """
         target_key = self._key

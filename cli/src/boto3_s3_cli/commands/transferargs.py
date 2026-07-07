@@ -511,30 +511,37 @@ def resolve_locations(
     *,
     src_type: str,
     dest_type: str,
+    page_size: int,
 ) -> tuple[object, object]:
     """Build the library-side location pair for the non-stream routes.
 
-    The S3 sides become ``S3Storage`` objects carrying the CLI-built client;
-    for S3->S3 with ``--source-region`` the source side gets its own client
-    in that region with the ``--endpoint-url`` override dropped (aws-cli
-    ClientFactory).
+    The S3 sides become ``S3Storage`` objects carrying the CLI-built client and
+    the ``--page-size`` listing config; a local side becomes a ``LocalStorage``
+    carrying ``--follow-symlinks``. The library reads how a source is walked /
+    listed from the storage itself now (not from a per-operation argument), so the
+    CLI bakes each command flag into the storage it builds here. For S3->S3 with
+    ``--source-region`` the source side gets its own client in that region with the
+    ``--endpoint-url`` override dropped (aws-cli ClientFactory).
     """
     # Deferred: S3Storage's chain reaches botocore; --help and usage errors
     # stay SDK-free (import contract, docs/imports.md).
-    from boto3_s3 import S3Storage
+    from boto3_s3 import LocalStorage, S3Storage
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # Construction is permissive (non-raising); validate the strict aws-cli
         # forms here so a usage error (rc 252) still precedes the transfer
         # pipeline.
-        storage = S3Storage(arg, client=client_for)
+        storage = S3Storage(arg, client=client_for, page_size=page_size)
         storage.validate()
         return storage
 
+    def _local(path: str) -> LocalStorage:
+        return LocalStorage(path, follow_symlinks=args.follow_symlinks)
+
     if src_type == "local":
-        return src, _s3(dest, client)
+        return _local(src), _s3(dest, client)
     if dest_type == "local":
-        return _s3(src, client), dest
+        return _s3(src, client), _local(dest)
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))
