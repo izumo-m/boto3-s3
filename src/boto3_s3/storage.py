@@ -80,9 +80,9 @@ class StorageCapability(Flag):
     ``EACCES`` / ``ENOENT``), reported per item like aws-cli, never pre-screened.
 
     The members mirror the methods one-to-one, because support genuinely differs
-    per kind (``S3Storage`` resolves one object via ``get_fileinfo`` yet does not
-    implement ``open``; a single-URL backend reads one object but cannot
-    enumerate):
+    per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
+    ``open("wb")`` - S3 writes ride ``s3transfer``; a single-URL backend reads one
+    object but cannot enumerate):
 
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
     - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry

@@ -5,8 +5,9 @@ The capability vocabulary is the structural pre-check a transfer runs on a custo
 methods a backend actually implements, distinct from runtime permission. These
 goldens pin the ``auto()`` bit layout, the reading lattice
 (``SORTABLE_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``), the fail-closed default, and
-each built-in's honest declaration - notably that ``S3Storage`` resolves a single
-object yet declares no ``OPEN_*`` because ``open`` is unimplemented.
+each built-in's honest declaration - notably that ``S3Storage`` declares
+``OPEN_READ`` (``open("rb")`` is a ``GetObject`` read) but not ``OPEN_WRITE``
+(``open("wb")`` is unimplemented; S3 writes ride ``s3transfer``).
 """
 
 from __future__ import annotations
