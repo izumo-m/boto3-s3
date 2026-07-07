@@ -120,8 +120,8 @@ s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
   `AwsCliComparison()`, tuned via `AwsCliComparison(size_only=True)` /
   `(exact_timestamps=True)`); `True` always, `False` never (leave existing
   as-is); or a content strategy `EtagComparison(s3)` /
-  `ChecksumComparison(s3, src, dest)` (wrap either in `ParallelCompare(...)` to
-  decide on a thread pool).
+  `ChecksumComparison(s3, src, dest)` (wrap any lane's filter in
+  `ParallelFilter(fn, executor=pool)` to decide on a caller-supplied thread pool).
 - **`delete_filter`** — whether to **delete** an orphan (at the destination, no
   longer in the source). `False` (default) keeps orphans; `True` deletes every
   one (`aws s3 sync --delete`); a predicate deletes only the ones it keeps. Items
@@ -146,7 +146,7 @@ The content strategies are opt-in submodule imports —
 `from boto3_s3.etagcompare import EtagComparison` /
 `from boto3_s3.checksumcompare import ChecksumComparison` (and
 `from boto3_s3.awsclicompare import AwsCliComparison` to tune the default).
-`ParallelCompare` imports from `boto3_s3` itself.
+`ParallelFilter` imports from `boto3_s3` itself.
 
 Because it runs in-process, sync hands back **structured results that `aws s3`
 can't**: `on_result` fires once per item as the run proceeds, so you know exactly

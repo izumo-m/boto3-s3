@@ -65,9 +65,9 @@ update pairs), `file_not_at_src` -> `delete_filter` (the orphans).
 ```python
 S3().sync(src, dest, *,
     filter: FileFilter | None = None,              # visibility, applied to BOTH sides (same type as rm/cp)
-    create_filter: bool | FileFilter = True,          # new (source-only) lane: True=all / False=none / predicate=scope
-    update_filter: bool | PairFilter | ParallelCompare | None = None,  # update lane: None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelCompare=pooled
-    delete_filter: bool | FileFilter = False,      # orphan lane: False=none / True=all / predicate=scope
+    create_filter: bool | FileFilter | ParallelFilter[FileInfo] = True,          # new (source-only) lane: True=all / False=none / predicate=scope / ParallelFilter=pooled
+    update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None = None,  # update lane: None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelFilter=pooled
+    delete_filter: bool | FileFilter | ParallelFilter[FileInfo] = False,      # orphan lane: False=none / True=all / predicate=scope / ParallelFilter=pooled
     dryrun=False,                                  # follow_symlinks / page_size are storage config now (storage.md)
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     capture_response=False,             # surface S3 responses on extra_info (opresult.md)
@@ -256,7 +256,7 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
 - **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag, so
   against such a bucket every object reads as differing - use the default
   `update_filter=None` there instead. The upload / download hash runs on sync's
-  calling thread unless the strategy is wrapped in `ParallelCompare` (section 10).
+  calling thread unless the strategy is wrapped in `ParallelFilter` (section 10).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 
@@ -289,7 +289,7 @@ exactly what content comparison must not trust). `update_filter=ChecksumComparis
 instead decides every both-sides pair by content; the only shortcut is the
 `check_size` size pre-check (a differing size copies for free). The cost is one
 `GetObjectAttributes` (plus the local hash) per both-sides pair; wrap the
-strategy in `ParallelCompare` (section 10) to run those concurrently.
+strategy in `ParallelFilter` (section 10) to run those concurrently.
 
 - **upload / download** reads the remote object's checksum and recomputes it over
   the local file: whole-file for a `FULL_OBJECT` checksum (CRC32 / CRC32C /
@@ -317,48 +317,68 @@ strategy in `ParallelCompare` (section 10) to run those concurrently.
   (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
   cross-account s3->s3 sync, exactly as `sync` does. The upload / download hash
   runs on sync's calling thread unless the strategy is wrapped in
-  `ParallelCompare` (section 10).
+  `ParallelFilter` (section 10).
 
-## 10. Parallelizing the content compare (`ParallelCompare`, opt-in)
+## 10. Parallelizing a lane's decision (`ParallelFilter`, opt-in)
 
-A content compare (`EtagComparison` / `ChecksumComparison`) does per-pair I/O - a
-`GetObjectAttributes` round-trip and/or a local hash - and by default `sync` runs
-every decision on its calling thread, one pair at a time. Wrapping the strategy
-in `boto3_s3.comparator.ParallelCompare` runs the **both-sides (update)**
-decisions on a thread pool instead:
+A lane's per-entry decision can do I/O: a content `update_filter=` strategy
+(`EtagComparison` / `ChecksumComparison`) runs a `GetObjectAttributes` round-trip
+and/or a local hash per pair, and a `create_filter` / `delete_filter` predicate
+may read bytes / object tags / attributes to decide. By default `sync` runs every
+decision on its calling thread, one entry at a time. Wrapping any lane's filter in
+`boto3_s3.comparator.ParallelFilter` runs that lane's decisions on a
+**caller-supplied** thread pool instead:
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 from boto3_s3.checksumcompare import ChecksumComparison
-from boto3_s3.comparator import ParallelCompare
+from boto3_s3.comparator import ParallelFilter
 
-s3.sync(src, dest, update_filter=ParallelCompare(ChecksumComparison(s3, src, dest), workers=16))
+with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
+    s3.sync(src, dest,
+        update_filter=ParallelFilter(ChecksumComparison(s3, src, dest), executor=pool),
+        delete_filter=ParallelFilter(is_expired, executor=pool))   # one pool, both lanes
 ```
 
-`ParallelCompare` is a value container, not a callable: `sync` recognizes it,
-reads `.compare` and `.workers`, and drives the pool itself - it is **never
-invoked** as a `PairFilter`. Wrapping is a pure performance transform: the same
-pairs are copied and the exit is the same as the bare strategy, only faster. The
-wrapped strategy must therefore be thread-safe; `ChecksumComparison` and
-`EtagComparison` are (read-only over their fields; a botocore client is safe to
-share for concurrent calls).
+`ParallelFilter` is a value container, not a callable: `sync` recognizes it in
+any of the three lanes, reads `.decide` and `.executor`, and drives the pool
+itself - it is **never invoked** as a filter. Wrapping is a pure performance
+transform: the same entries are acted on and the exit is the same as the bare
+filter, only faster. The wrapped filter must therefore be thread-safe;
+`ChecksumComparison` and `EtagComparison` are (read-only over their fields; a
+botocore client is safe to share for concurrent calls).
 
-- **What is parallelized.** Only the both-sides (`dest is not None`) decision -
-  the one that does I/O. **New** pairs (`dest is None`) and the **delete** lane
-  stay on the calling thread in compare-key order. That is deliberate: a content
-  strategy returns "copy" for a new pair with no I/O, so there is nothing to
-  parallelize there; and keeping new pairs in key order keeps the
-  `--case-conflict` gate's "first key wins" deterministic (its in-flight set is
-  order-sensitive, like aws-cli's `CaseConflictSync` in the not-at-dest slot).
-- **Ordering.** Pooled decisions are consumed in completion order, so transfers
+- **The executor is the caller's.** It is a required argument, and `sync` neither
+  creates nor shuts it down - reuse it across `sync` calls, share one pool across
+  lanes (pass the same object to each `ParallelFilter`) or give each lane its own,
+  as the application prefers. A `ParallelFilter` runs only filter decisions
+  (transfers use s3transfer's own pool, deletes the deleter's worker), so the pool
+  is a per-filter resource and lives on the wrapper rather than as a `sync`
+  argument. A `ProcessPoolExecutor` will not work (the predicate and its client
+  are not picklable) - the pool must be thread-based.
+- **What each lane parallelizes.** The **update** lane pools its both-sides
+  (`dest is not None`) decision, the **new** lane its `create_filter`, the
+  **delete** lane its `delete_filter` - each on its own executor when wrapped. A
+  lane left unwrapped decides inline on the calling thread in compare-key order.
+- **Ordering.** Pooled decisions are consumed in completion order, so survivors
   submit out of compare-key order - already true of every sync (s3transfer moves
-  bytes on its own pool; `on_result` fires unordered). Exit parity is unaffected.
-- **`workers`** defaults to the sync's `transfer_config.max_concurrency` (10).
-  The pooled `GetObjectAttributes` calls use the strategy's own client, so for a
-  `workers` above its connection-pool size (botocore's default 10) build the
-  strategy with a client sized to match.
+  bytes on its own pool; `on_result` fires unordered). The one visible
+  consequence is `create_filter`: parallelizing it makes the `--case-conflict`
+  gate's "first key wins" non-deterministic (which case-variant survives a
+  case-insensitive local destination, and which warns), because the gate's
+  in-flight set is order-sensitive (aws-cli's `CaseConflictSync` in the
+  not-at-dest slot). The **update** lane never touches the gate, and **delete**
+  orphans have no order to lose (their output interleaving is already
+  non-deterministic, section 5). Exit parity is otherwise unaffected.
+- **Back-pressure.** `sync` submits each pooled decision as a `Future` and keeps a
+  bounded number outstanding (the distinct executors' worker counts, summed), so a
+  huge listing is never materialized into futures all at once - a pool's own
+  `submit` queue is unbounded, so holding that bound is `sync`'s. The bound is
+  read from each pool (`ThreadPoolExecutor._max_workers`, else a constant); it is
+  throughput-only, never correctness.
 - **Errors / cancel.** A decision that raises aborts the sync (as the serial path
   does), surfacing when its result is consumed; `cancel_token` is polled between
-  pairs.
+  pairs. In-flight decisions on the caller's pool are abandoned to it.
 
-`ParallelCompare` is a library-only building block: there is no `aws s3` flag for
-content comparison, so the CLI never sets it and parity is not at stake.
+`ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
+parallel filter, so the CLI never sets it and parity is not at stake.

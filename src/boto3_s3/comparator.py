@@ -44,11 +44,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 
 if TYPE_CHECKING:
+    from concurrent.futures import Executor
+
     from boto3_s3.storage import Storage
 
 _T = TypeVar("_T")
@@ -89,29 +91,40 @@ PairFilter = Callable[[SyncPair], bool]
 
 
 @dataclass(frozen=True, slots=True)
-class ParallelCompare:
-    """Run a content ``update_filter=`` strategy on a thread pool (``S3.sync`` only).
+class ParallelFilter(Generic[_T]):
+    """Run one ``S3.sync`` lane's decision on a caller-supplied thread pool.
 
-    A value container, **not** a callable: ``S3.sync`` recognizes it and runs
-    the wrapped ``compare`` concurrently on up to ``workers`` threads, deciding
-    the both-sides (update) pairs - the ones where a content strategy does its
-    I/O - in parallel. Passing it is observationally identical to passing
-    ``compare`` bare: the same pairs are copied and the exit is the same, only
-    faster. The wrapped ``compare`` must be thread-safe;
+    A value container, **not** a callable: ``S3.sync`` recognizes it in any of
+    ``create_filter`` / ``update_filter`` / ``delete_filter`` and runs the wrapped
+    ``decide`` on ``executor`` instead of on the calling thread, so a lane whose
+    predicate does per-entry I/O decides many entries concurrently - a content
+    ``update_filter=`` strategy (``EtagComparison`` / ``ChecksumComparison``), or a
+    ``create`` / ``delete`` filter that reads bytes / object tags / attributes.
+    Passing it is observationally identical to passing ``decide`` bare, only
+    faster - **except** that parallelizing ``create_filter`` makes the
+    ``--case-conflict`` "first key wins" order non-deterministic (a library-only
+    knob, so no ``aws s3`` parity is at stake). The result set and the exit are
+    otherwise unchanged.
+
+    ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
+    creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool
+    across lanes (pass the same object to each ``ParallelFilter``) or giving each
+    lane its own, are the caller's to arrange. The wrapped ``decide`` runs on that
+    pool's threads, so it must be thread-safe;
     :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
-    :class:`~boto3_s3.etagcompare.EtagComparison` are. New (destination-missing)
-    pairs and the ``--case-conflict`` check stay on the calling thread in
-    compare-key order, so they remain deterministic.
+    :class:`~boto3_s3.etagcompare.EtagComparison` are (read-only over their
+    fields; a botocore client is safe to share for concurrent calls). A
+    ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
+    picklable) - the pool must be thread-based.
 
-    ``workers`` defaults to the sync's ``transfer_config.max_concurrency``.
+    ``_T`` is the wrapped predicate's argument: :class:`SyncPair` for a
+    ``update_filter`` (a :data:`PairFilter`), :class:`~boto3_s3.types.FileInfo`
+    for ``create_filter`` / ``delete_filter`` (a
+    :data:`~boto3_s3.types.FileFilter`).
     """
 
-    compare: PairFilter
-    workers: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.workers is not None and self.workers < 1:
-            raise ValueError(f"ParallelCompare workers must be >= 1, got {self.workers}")
+    decide: Callable[[_T], bool]
+    executor: Executor
 
 
 def _byte_ordered(
@@ -360,7 +373,7 @@ def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 __all__ = [
     "Comparator",
     "PairFilter",
-    "ParallelCompare",
+    "ParallelFilter",
     "SyncPair",
     "all_of",
     "any_of",

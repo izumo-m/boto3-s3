@@ -14,16 +14,17 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import Executor, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
-from boto3_s3.comparator import ParallelCompare, SyncPair
+from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
@@ -649,40 +650,38 @@ class TestSyncCopy:
         assert results == []
 
 
-class TestParallelCompare:
-    """``update_filter=ParallelCompare(...)`` pools the both-sides (update) decision
-    while keeping new pairs and the case-conflict gate on the calling thread, so
-    it copies exactly what the bare strategy would - only faster."""
+class TestParallelFilter:
+    """``ParallelFilter(fn, executor=pool)`` runs a lane's per-entry decision on a
+    caller-supplied thread pool - the same entries are acted on, only the decision
+    moves off the calling thread. It applies to any of the three lanes."""
 
-    def test_workers_must_be_positive(self) -> None:
-        with pytest.raises(ValueError, match="workers must be >= 1"):
-            ParallelCompare(_always_copies, workers=0)
+    def test_pool_window_tracks_the_executor(self) -> None:
+        from boto3_s3.s3 import _pool_window
 
-    def test_default_workers_inherit_or_fall_back(self) -> None:
-        from boto3_s3.s3 import _compare_workers
-
-        assert _compare_workers(None) == 10
-        assert _compare_workers(TransferConfig(max_concurrency=7)) == 7
+        with ThreadPoolExecutor(3) as pool:
+            assert _pool_window(pool) == 3
+        # A custom Executor without _max_workers falls back to the fixed constant.
+        assert _pool_window(cast("Executor", object())) == 16
 
     def test_cancel_token_aborts_the_pooled_path(self, tmp_path: Path) -> None:
-        # docs/sync.md: cancel_token is polled between pairs on the pooled
-        # (ParallelCompare) dispatch too, not only on the serial loop.
+        # docs/sync.md: cancel_token is polled between pairs on the pooled dispatch
+        # too, not only on the serial loop.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")
         client, calls = make_recording_client([_listing()])
         token = CancelToken()
         token.cancel()
-        with pytest.raises(CancelledError):
+        with ThreadPoolExecutor(2) as pool, pytest.raises(CancelledError):
             S3().sync(
                 str(src),
                 S3Storage("s3://bucket/p", client=client),
-                update_filter=ParallelCompare(_always_copies, workers=2),
+                update_filter=ParallelFilter(_always_copies, executor=pool),
                 transfer_config=_SERIAL,
                 cancel_token=token,
             )
         assert not [call for call in calls if call.operation == "PutObject"]
 
-    def test_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
+    def test_update_lane_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
         # Update pairs (a/b/c already at the destination) are pooled through
         # update_filter; new.txt is copied by create_filter. The pool only changes
         # WHERE the update decision runs, not WHAT it decides.
@@ -695,19 +694,70 @@ class TestParallelCompare:
 
         listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
         client, calls = make_recording_client([listing, {}, {}, {}])
-        S3().sync(
-            str(src),
-            S3Storage("s3://bucket/p", client=client),
-            update_filter=ParallelCompare(decide, workers=4),
-            transfer_config=_SERIAL,
-        )
+        with ThreadPoolExecutor(4) as pool:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                update_filter=ParallelFilter(decide, executor=pool),
+                transfer_config=_SERIAL,
+            )
         puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
         assert puts == {"p/a.txt", "p/c.txt", "p/new.txt"}
 
-    def test_new_pairs_decided_on_calling_thread_in_key_order(self, tmp_path: Path) -> None:
-        # New (destination-missing) pairs are decided by create_filter inline, in
-        # compare-key order, so the case-conflict gate's "first key wins" stays
-        # deterministic even under a parallel compare.
+    def test_create_lane_decides_off_the_calling_thread(self, tmp_path: Path) -> None:
+        # create_filter wrapped in ParallelFilter: the per-entry decision runs on
+        # the pool (not the calling thread); the right new objects still copy.
+        src = tmp_path / "src"
+        for name in ("a.txt", "b.txt"):
+            _write(src, name, b"xx")
+        main = threading.get_ident()
+        threads: set[int] = set()
+
+        def keep(info: FileInfo) -> bool:
+            threads.add(threading.get_ident())
+            return info.compare_key == "a.txt"
+
+        # empty dest -> both are new; only a.txt is kept, so one PutObject follows.
+        client, calls = make_recording_client([_listing(), {}])
+        with ThreadPoolExecutor(2) as pool:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                create_filter=ParallelFilter(keep, executor=pool),
+                transfer_config=_SERIAL,
+            )
+        puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
+        assert puts == {"p/a.txt"}
+        assert threads and main not in threads  # decided on pool threads
+
+    def test_delete_lane_decides_off_the_calling_thread(self, tmp_path: Path) -> None:
+        # delete_filter wrapped in ParallelFilter: the orphan decision runs on the
+        # pool; the survivors are still deleted through the batch on the main thread.
+        src = tmp_path / "src"
+        src.mkdir()
+        main = threading.get_ident()
+        threads: set[int] = set()
+
+        def keep(info: FileInfo) -> bool:
+            threads.add(threading.get_ident())
+            return info.key.endswith(".log")
+
+        client, calls = make_recording_client([_listing(("p/x.log", 2), ("p/y.txt", 2)), {}])
+        with ThreadPoolExecutor(2) as pool:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                delete_filter=ParallelFilter(keep, executor=pool),
+                transfer_config=_SERIAL,
+            )
+        keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
+        assert keys == ["p/x.log"]
+        assert threads and main not in threads  # decided on pool threads
+
+    def test_unpooled_create_lane_decides_inline_in_key_order(self, tmp_path: Path) -> None:
+        # An un-wrapped create_filter still decides inline in compare-key order (so
+        # the case-conflict gate's "first key wins" stays deterministic) even while
+        # the update lane runs on a pool.
         src = tmp_path / "src"
         for name in ("n1.txt", "n2.txt", "n3.txt"):
             _write(src, name, b"xx")
@@ -721,14 +771,37 @@ class TestParallelCompare:
             return False  # copy nothing; the test only pins the call order
 
         client, _calls = make_recording_client([_listing()])
-        S3().sync(
-            str(src),
-            S3Storage("s3://bucket/p", client=client),
-            create_filter=keep_new,
-            update_filter=ParallelCompare(_always_copies, workers=4),
-            transfer_config=_SERIAL,
-        )
+        with ThreadPoolExecutor(4) as pool:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                create_filter=keep_new,
+                update_filter=ParallelFilter(_always_copies, executor=pool),
+                transfer_config=_SERIAL,
+            )
         assert seen == ["n1.txt", "n2.txt", "n3.txt"]
+
+    def test_one_executor_shared_across_all_three_lanes(self, tmp_path: Path) -> None:
+        # A single pool passed to every lane decides create / update / delete
+        # together (a shared pool counts once toward the in-flight cap).
+        src = tmp_path / "src"
+        for name in ("keep.txt", "new.txt"):  # keep.txt updates, new.txt creates
+            _write(src, name, b"xx")
+        listing = _listing(("p/keep.txt", 2), ("p/orphan.txt", 2))  # orphan.txt deletes
+        client, calls = make_recording_client([listing, {}, {}, {}])
+        with ThreadPoolExecutor(4) as pool:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                create_filter=ParallelFilter(lambda _info: True, executor=pool),
+                update_filter=ParallelFilter(_always_copies, executor=pool),
+                delete_filter=ParallelFilter(lambda _info: True, executor=pool),
+                transfer_config=_SERIAL,
+            )
+        puts = {call.params["Key"] for call in calls if call.operation == "PutObject"}
+        assert puts == {"p/keep.txt", "p/new.txt"}
+        deleted = [entry["Key"] for entry in calls[-1].params["Delete"]["Objects"]]
+        assert deleted == ["p/orphan.txt"]
 
     def test_inner_exception_aborts_the_sync(self, tmp_path: Path) -> None:
         # A decision that raises aborts the sync (as the serial path does); the
@@ -740,10 +813,10 @@ class TestParallelCompare:
             raise ValueError("decide blew up")
 
         client, _calls = make_recording_client([_listing(("p/x.txt", 2))])
-        with pytest.raises(ValueError, match="decide blew up"):
+        with ThreadPoolExecutor(2) as pool, pytest.raises(ValueError, match="decide blew up"):
             S3().sync(
                 str(src),
                 S3Storage("s3://bucket/p", client=client),
-                update_filter=ParallelCompare(boom, workers=2),
+                update_filter=ParallelFilter(boom, executor=pool),
                 transfer_config=_SERIAL,
             )

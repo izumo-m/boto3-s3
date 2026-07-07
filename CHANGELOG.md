@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `create_filter` (new entries), `update_filter` (existing, was `compare`),
   `delete_filter` (orphans, was `delete`); a custom `update_filter` is only
   ever handed an entry present on both sides, never a one-sided one.
+- Any of `S3.sync`'s three filters can run on a caller-supplied thread pool via
+  `ParallelFilter(fn, executor=…)` (replaces `ParallelCompare`, which was
+  update-only and made its own pool).
 - `Storage.scan_pages` now applies `ScanOptions.filter` and returns
   already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
   can filter at its source; `storage.sieve_pages` wraps raw pages otherwise.
