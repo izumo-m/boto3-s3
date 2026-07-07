@@ -9,11 +9,12 @@ splits ``_list_all_buckets`` from ``_list_all_objects`` the same way). It also
 exposes
 ``get_client`` / ``bucket`` / ``key`` so the ``Transferrer`` can drive
 ``s3transfer`` directly for built-in S3 pairs. ``delete`` is implemented (a
-blind ``DeleteObject``); ``open`` is intentionally unimplemented - S3 always
-transfers through ``s3transfer`` (built-in pairs and the S3 side of an open-route
-custom-backend transfer alike), so no route calls it. The only thing it would
-add is direct programmatic S3 stream access, which nothing needs today (see
-:meth:`S3Storage.open`).
+blind ``DeleteObject``); ``open`` implements ``"rb"`` only - a ``GetObject`` read
+convenience (chiefly for a content-based ``sync`` filter reading an object's
+bytes), addressed by the object's full key. Its ``"wb"`` stays unimplemented:
+every S3 *write* rides ``s3transfer`` (built-in pairs and the S3 side of an
+open-route custom-backend transfer alike), so a writable stream has no caller
+(see :meth:`S3Storage.open`).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import os
 import re
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from botocore.exceptions import (
     BotoCoreError,
@@ -57,19 +58,18 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
 
-# S3Storage.open is intentionally unimplemented - every S3 transfer rides
-# s3transfer instead. The Transferrer drives it straight off get_client/bucket/
-# key for built-in pairs and the S3 side of an open-route custom transfer, and
-# streaming hands a fileobj to s3transfer (s3.py _cp_stream) - so nothing inside
-# boto3-s3 calls it (the custom side of an open-route transfer uses its own open,
-# never this).
-_OPEN_NOT_IMPLEMENTED = (
-    "S3Storage.open() is not implemented. S3 transfers go through s3transfer "
-    "(driven from get_client/bucket/key) - including the S3 side of an open-route "
-    "custom-backend transfer, whose custom side uses its own Storage.open - so "
-    "this generic per-object stream primitive has no caller. Implementing it "
-    "(GetObject->readable, multipart PutObject->writable committed on close) would "
-    "only add direct programmatic S3 stream access (see storage.py)."
+# S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
+# a content-based sync filter that reads an object's bytes). "wb" stays
+# unimplemented: every S3 *write* rides s3transfer instead - the Transferrer drives
+# it off get_client/bucket/key for built-in pairs and the S3 side of an open-route
+# custom transfer, and streaming hands a fileobj to s3transfer (s3.py _cp_stream) -
+# so the multipart upload a writable stream would need has no caller (the custom
+# side of an open-route transfer uses its own open, never this).
+_OPEN_WRITE_NOT_IMPLEMENTED = (
+    "S3Storage.open(mode='wb') is not implemented. S3 writes go through s3transfer "
+    "(driven from get_client/bucket/key), including the S3 side of an open-route "
+    "custom-backend transfer, so a writable stream has no caller. Use S3.cp / the "
+    "transfer engine to write to S3; open(mode='rb') is supported for reads."
 )
 
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
@@ -329,9 +329,10 @@ class S3Storage(Storage):
     side and pass it in rather than relying on the lazy default.
 
     Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
-    enumerates in native UTF-8 byte order (``ListObjectsV2``), and deletes; ``open``
-    is intentionally unimplemented (S3 rides ``s3transfer``), so no ``OPEN_*`` (see
-    :meth:`open`). ``scan_options_type`` is :class:`S3ScanOptions` (arg-less
+    enumerates in native UTF-8 byte order (``ListObjectsV2``), reads an object
+    (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
+    because every S3 write rides ``s3transfer`` (see :meth:`open`).
+    ``scan_options_type`` is :class:`S3ScanOptions` (arg-less
     ``scan()`` builds it, and :meth:`scan_pages` requires it). ``scan_pages_filters``
     is ``True`` - ``scan_pages`` sieves each page, so ``scan`` does not re-apply
     ``options.filter``.
@@ -342,6 +343,7 @@ class S3Storage(Storage):
         StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
         | StorageCapability.SORTABLE_SCAN
+        | StorageCapability.OPEN_READ
         | StorageCapability.DELETE
     )
     scan_options_type: ClassVar[type[ScanOptions]] = S3ScanOptions
@@ -694,19 +696,37 @@ class S3Storage(Storage):
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Intentionally unimplemented - every S3 transfer rides ``s3transfer``.
+        """Open the object at the full key ``key`` as a binary stream (``"rb"`` only).
 
-        No route reaches this: S3<->local / S3<->S3 transfers are driven through
-        ``s3transfer`` off ``get_client`` / ``bucket`` / ``key`` (``transfer.py``),
-        a stdin/stdout stream is handed to ``s3transfer`` as a fileobj (``s3.py``
-        ``_cp_stream``), and the S3 side of an open-route custom-backend transfer
-        likewise rides ``s3transfer`` (the *custom* side uses its own ``open``,
-        never this). Implementing it (GetObject -> readable stream; multipart
-        PutObject -> writable stream committed on ``close()``, honoring the
-        ``size`` hint) would only add direct programmatic S3 stream access, which
-        nothing needs today. It raises rather than silently misbehaving.
+        ``"rb"`` is a read convenience for building blocks over S3 - chiefly a
+        content-based ``S3.sync`` filter that must read an object's bytes:
+        ``GetObject`` on ``key`` (the object's *full* bucket key, exactly the
+        ``key`` carried on its ``FileInfo`` and the address ``delete`` uses),
+        returning botocore's streaming response body. So
+        ``info.storage.open(info.key, "rb")`` reads any backend's entry uniformly
+        (``LocalStorage`` resolves an absolute ``info.key`` to its file, a custom
+        backend to its own key space). The body is **read-only and forward-only**
+        (no ``seek``); it supports the context-manager / ``read`` / ``close``
+        protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a
+        missing key, denied access) translate to the library taxonomy; an error
+        raised *later* while reading the streamed body (a read timeout, a broken
+        stream) surfaces as botocore's - like the raw file object
+        ``LocalStorage.open`` returns, whose read errors are likewise un-wrapped.
+        ``request_payer`` and an SSE-C key are not on the generic ``open``
+        signature, so a requester-pays or SSE-C object must be read through the
+        client directly.
+
+        ``"wb"`` stays unimplemented: every S3 *write* rides ``s3transfer``
+        (built-in transfers off ``get_client`` / ``bucket`` / ``key``, the S3 side
+        of an open-route transfer, a stream handed to ``s3transfer``), so the
+        multipart upload a writable stream would need has no caller. It raises
+        rather than silently misbehaving.
         """
-        raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
+        if mode != "rb":
+            raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
+        with s3_errors(operation="open", bucket=self._bucket, key=key):
+            response = self.get_client().get_object(Bucket=self._bucket, Key=key)
+        return cast("BinaryIO", response["Body"])
 
     @override
     def delete(self, info: FileInfo, *, request_payer: str | None = None) -> Mapping[str, Any]:

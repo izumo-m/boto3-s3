@@ -49,6 +49,9 @@ declared capabilities promise:
 - **`open(key, mode, *, size=None) -> BinaryIO`** — per-object byte I/O. `"rb"`
   returns a readable stream; `"wb"` a writable one whose `close()` flushes buffered
   writes (standard file semantics). `size` is an optional total-length hint for writes.
+  `S3Storage` implements `"rb"` only (a `GetObject` read convenience, addressed by
+  the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
+  stays unimplemented, since every S3 write rides `s3transfer`.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
   container one page of `FileInfo` at a time. `options.filter` (the
   `--exclude`/`--include` predicate) is applied by **`scan()` as a safety net** by

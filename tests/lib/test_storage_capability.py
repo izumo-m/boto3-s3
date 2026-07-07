@@ -177,9 +177,12 @@ class TestAutoBitLayout:
 
 
 class TestBuiltinDeclarations:
-    def test_s3_declares_no_open(self) -> None:
-        # open() is unimplemented, so honesty requires omitting OPEN_*.
-        assert S3Storage.capabilities == C.GET_FILEINFO | C.SCAN | C.SORTABLE_SCAN | C.DELETE
+    def test_s3_declares_open_read_only(self) -> None:
+        # open("rb") is a GetObject read convenience; open("wb") is unimplemented
+        # (S3 writes ride s3transfer), so honesty requires OPEN_READ without OPEN_WRITE.
+        assert S3Storage.capabilities == (
+            C.GET_FILEINFO | C.SCAN | C.SORTABLE_SCAN | C.OPEN_READ | C.DELETE
+        )
 
     def test_local_is_fully_capable(self) -> None:
         assert LocalStorage.capabilities == (
@@ -198,7 +201,7 @@ class TestSupports:
         assert S3Storage("s3://b/k").supports(C.SCAN | C.DELETE)
 
     def test_absent_capability(self) -> None:
-        assert not S3Storage("s3://b/k").supports(C.OPEN_READ)
+        assert not S3Storage("s3://b/k").supports(C.OPEN_WRITE)
 
     def test_io_has_open_but_not_scan(self) -> None:
         s = IOStorage(io.BytesIO())
@@ -228,7 +231,7 @@ class TestLattice:
 
 class TestMissingCapabilities:
     def test_names_the_gap(self) -> None:
-        assert S3Storage("s3://b/k").missing_capabilities(C.OPEN_READ | C.SCAN) == C.OPEN_READ
+        assert S3Storage("s3://b/k").missing_capabilities(C.OPEN_WRITE | C.SCAN) == C.OPEN_WRITE
 
     def test_empty_when_all_present(self) -> None:
         assert LocalStorage(".").missing_capabilities(C.OPEN_WRITE | C.DELETE) == C(0)

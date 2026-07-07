@@ -8,6 +8,7 @@ wiring can be asserted.
 from __future__ import annotations
 
 import datetime as dt
+import io
 import threading
 from typing import Any
 
@@ -28,10 +29,12 @@ from boto3_s3 import (
     S3ScanOptions,
     S3Storage,
     ScanOptions,
+    StorageCapability,
     TransportError,
     ValidationError,
 )
 from boto3_s3.storage import sieve_pages
+from tests.utils.recorder import ApiCall, make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -706,3 +709,48 @@ class TestResolveRouting:
     def test_resolve_returns_storage_verbatim(self) -> None:
         storage = LocalStorage("some/path")
         assert S3().resolve(storage) is storage
+
+
+class TestOpen:
+    """``S3Storage.open`` - a ``GetObject`` read convenience (``"rb"`` only);
+    ``"wb"`` stays unimplemented (S3 writes ride s3transfer)."""
+
+    def test_rb_reads_object_bytes_by_full_key(self) -> None:
+        # The key is the object's *full* bucket key, used verbatim as the S3 Key
+        # (no prefix join) - so info.storage.open(info.key, "rb") reads it directly.
+        client, calls = make_recording_client([{"Body": io.BytesIO(b"hello-content")}])
+        storage = S3Storage("s3://bucket/data", client=client)
+        with storage.open("data/x.txt", "rb") as fh:
+            assert fh.read() == b"hello-content"
+        assert calls == [ApiCall("GetObject", {"Bucket": "bucket", "Key": "data/x.txt"})]
+
+    def test_rb_uses_the_key_verbatim_regardless_of_storage_prefix(self) -> None:
+        # No relativization against the storage's own key/prefix: the passed key
+        # is the GetObject Key as-is.
+        client, calls = make_recording_client([{"Body": io.BytesIO(b"")}])
+        storage = S3Storage("s3://bucket/some/prefix", client=client)
+        storage.open("other/deep/key.bin", "rb").close()
+        assert calls == [ApiCall("GetObject", {"Bucket": "bucket", "Key": "other/deep/key.bin"})]
+
+    def test_wb_raises_not_implemented(self) -> None:
+        client, calls = make_recording_client([])
+        storage = S3Storage("s3://bucket/data", client=client)
+        with pytest.raises(NotImplementedError, match="mode='wb'"):
+            storage.open("data/x.txt", "wb")
+        assert calls == []  # no API call for the unimplemented write
+
+    def test_rb_error_translates_to_taxonomy(self) -> None:
+        # A GetObject 404 surfaces as NotFoundError (s3_errors taxonomy), like
+        # the rest of the S3 call sites - not a raw botocore ClientError.
+        client, _calls = make_recording_client([_client_error("NoSuchKey", 404)])
+        storage = S3Storage("s3://bucket/data", client=client)
+        with pytest.raises(NotFoundError):
+            storage.open("data/gone.txt", "rb")
+
+    def test_capability_declares_open_read_not_write(self) -> None:
+        caps = S3Storage.capabilities
+        assert StorageCapability.OPEN_READ in caps
+        assert StorageCapability.OPEN_WRITE not in caps
+        storage = S3Storage("s3://bucket/data")
+        assert storage.supports(StorageCapability.OPEN_READ)
+        assert not storage.supports(StorageCapability.OPEN_WRITE)

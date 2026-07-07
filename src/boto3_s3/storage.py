@@ -33,9 +33,10 @@ object into an ``open("wb")`` whose ``close`` flushes it) while the S3 side ride
 (``Storage.capabilities``), an ``mv`` removes a custom source through its own
 ``delete``, and ``sync`` works when the custom side declares ``SORTABLE_SCAN`` (its
 merge-join needs both listings byte-ordered) (transfer.md section 12).
-``S3Storage.open`` stays unimplemented by design - the S3 side always rides
-``s3transfer``, never ``open``. None of this affects CLI / ``aws s3`` parity (the
-CLI only ever pairs a built-in with a stdio stream).
+``S3Storage.open`` implements ``"rb"`` only (a ``GetObject`` read convenience);
+its ``"wb"`` stays unimplemented, since the S3 side of a transfer always rides
+``s3transfer``. None of this affects CLI / ``aws s3`` parity (the CLI only ever
+pairs a built-in with a stdio stream).
 """
 
 from __future__ import annotations
@@ -288,8 +289,11 @@ class Storage(abc.ABC):
         writes like any file object (whether the backend persists per write or
         defers to the flush - write-through vs write-back - is its own choice).
         ``LocalStorage`` and the stream Storages (``IOStorage`` /
-        ``StdioStorage``) implement it; ``S3Storage.open`` stays unimplemented by
-        design (the S3 side always rides ``s3transfer``, never ``open``).
+        ``StdioStorage``) implement both modes. ``S3Storage`` implements ``"rb"``
+        only - a ``GetObject`` read convenience (chiefly for a content-based
+        ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
+        unimplemented, since every S3 write rides ``s3transfer`` rather than
+        ``open``.
         """
 
     @abc.abstractmethod

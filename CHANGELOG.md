@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Any of `S3.sync`'s three filters can run on a caller-supplied thread pool via
   `ParallelFilter(fn, executor=…)` (replaces `ParallelCompare`, which was
   update-only and made its own pool).
+- `S3Storage.open(key, "rb")` now reads an object (`GetObject`), so a
+  content-based filter can read S3 bytes; `"wb"` stays unimplemented.
 - `Storage.scan_pages` now applies `ScanOptions.filter` and returns
   already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
   can filter at its source; `storage.sieve_pages` wraps raw pages otherwise.
