@@ -153,7 +153,9 @@ relativization, so it is not part of the root.
 stamps each entry's root-relative `compare_key` (`info.key[len(root):]`) before
 the predicate runs.
 The evaluation is the **producer's** job: `scan_pages` returns already-filtered
-pages (`Storage.scan` just flattens + prefetches them). A backend may push the
+pages (`Storage.scan` flattens + prefetches them, re-applying the filter as a
+safety net unless the backend declares `scan_pages_filters = True` — the
+built-ins do; [`storage.md`](./storage.md)). A backend may push the
 predicate to its source (a REST listing filtering server-side) or wrap its raw
 pages with `storage.sieve_pages` - the built-in S3 backend sieves client-side,
 and the local backend applies it inside the walk (after the aws-cli vetting, so

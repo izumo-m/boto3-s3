@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from boto3_s3 import (
     BatchError,
-    Boto3S3Error,
     CaseConflictMode,
     CopyPropsMode,
     S3Storage,
@@ -608,11 +607,15 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     """Run the library call and derive the aws exit code (docs/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
-    ``failed`` lines, anything run-killing as one ``fatal error:`` line. A
-    clean run exits 2 when only warnings accumulated, else 0. The printer's
-    rendering thread runs for exactly the ``run()`` span - the ``with``
-    drains it on every path, so all queued lines are written (and precede a
-    ``fatal error:`` line) before the exit code is derived.
+    ``failed`` lines, anything run-killing as one ``fatal error:`` line -
+    *any* exception type, matching aws's ``CommandResultRecorder.__exit__``,
+    which converts whatever escapes the pipeline span into an ``ErrorResult``
+    (so e.g. a ``RecursionError`` from a pathologically deep tree is aws's
+    ``fatal error`` rc 1, never the dispatcher's 255). A clean run exits 2
+    when only warnings accumulated, else 0. The printer's rendering thread
+    runs for exactly the ``run()`` span - the ``with`` drains it on every
+    path, so all queued lines are written (and precede a ``fatal error:``
+    line) before the exit code is derived.
     """
     try:
         with printer:
@@ -620,7 +623,13 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     except BatchError:
         # Per-item failure lines were already streamed by the printer.
         return 1
-    except (Boto3S3Error, ValueError) as exc:
+    except AssertionError:
+        # An internal-invariant violation (a bug) surfaces loudly, like the
+        # dispatcher's AssertionError re-raise (cli.py) - masking it as a
+        # fatal error would also blunt the test doubles' unexpected-call
+        # guards.
+        raise
+    except Exception as exc:
         if not quiet:
             sys.stderr.write(f"fatal error: {exc}\n")
         return 1

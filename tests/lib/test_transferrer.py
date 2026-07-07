@@ -20,6 +20,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
+from boto3_s3 import transfer
 from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
@@ -976,6 +977,28 @@ class TestDownloadMoveFsync:
         assert _ops(calls) == ["GetObject", "DeleteObject"]
         assert fds == []
         assert transferrer.succeeded == 1
+
+    def test_windows_branch_opens_for_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows' os.fsync is FlushFileBuffers, which needs GENERIC_WRITE on
+        # the handle: the off-POSIX branch must open O_RDWR (a read-only fd
+        # fails every flush there), while POSIX keeps the read-only open.
+        target = tmp_path / "a.bin"
+        target.write_bytes(b"payload")
+        real_open = os.open
+        opens: list[tuple[str, int]] = []
+
+        def spy(path: str, flags: int, *args: Any, **kwargs: Any) -> int:
+            opens.append((path, flags))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", spy)
+        monkeypatch.setattr(os, "name", "nt")
+        transfer._FsyncDest(str(target))._fsync()  # pyright: ignore[reportPrivateUsage]
+        # One open (the file; no directory fsync off POSIX), write access set.
+        assert [path for path, _ in opens] == [str(target)]
+        assert opens[0][1] & os.O_RDWR == os.O_RDWR
 
     def test_cp_download_never_fsyncs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

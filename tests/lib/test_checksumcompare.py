@@ -222,6 +222,30 @@ class TestConstruction:
         ChecksumComparison(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
         assert resolved == ["local", "s3://b/obj"]
 
+    def test_s3_side_clients_built_at_construction(self) -> None:
+        # The decides may run on a ParallelFilter pool, where a lazy first
+        # get_client() would race boto3's non-thread-safe client construction:
+        # both S3 sides' clients are built (memoized) on the constructing thread.
+        from boto3_s3.s3storage import S3Storage
+
+        calls: list[str] = []
+
+        class _Counting(S3Storage):
+            def get_client(self) -> Any:
+                calls.append(self.bucket)
+                return _FakeClient({})
+
+        class _S3:
+            def resolve(self, loc: Any) -> Any:
+                return loc
+
+        ChecksumComparison(
+            _S3(),  # pyright: ignore[reportArgumentType]
+            _Counting("s3://a/p"),
+            _Counting("s3://b/q"),
+        )
+        assert calls == ["a", "b"]
+
 
 # -- new / missing / unsupported sides ----------------------------------------
 

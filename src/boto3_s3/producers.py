@@ -33,7 +33,6 @@ from boto3_s3.types import (
     CaseConflictMode,
     FileFilter,
     FileInfo,
-    LocalScanOptions,
     S3FileInfo,
     ScanOptions,
     TransferOptions,
@@ -96,6 +95,22 @@ def _ckey(info: FileInfo) -> str:
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
     return key
+
+
+def _single_source_info(
+    plan: transferplan.TransferPlan, transferrer: Transferrer
+) -> FileInfo | None:
+    """Resolve the single (non-dir_op) source through ``get_fileinfo``.
+
+    Stamps the producing backend as a safety net (mirroring ``Storage.scan``'s):
+    the built-ins stamp their own ``get_fileinfo`` results, so this only fills a
+    ``None`` left by a bespoke backend - keeping ``src_info.storage`` in
+    agreement with ``OpResult.src_storage`` on the single-object routes too.
+    """
+    single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    if single is not None and single.storage is None:
+        single.storage = plan.src
+    return single
 
 
 def open_side_display(storage: Storage, key: str) -> str:
@@ -270,7 +285,7 @@ def upload_items(
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
         # get_fileinfo has no filter, so an excluded single source is dropped here.
-        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+        single = _single_source_info(plan, transferrer)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
@@ -551,7 +566,9 @@ def head_single(
         ) from exc
     etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
-    # matching transferplan.item_paths' single-item branch.
+    # matching transferplan.item_paths' single-item branch. storage stamps the
+    # producing backend like every listing path, so src_info.storage agrees
+    # with OpResult.src_storage and a filter can reach the backend.
     yield S3FileInfo(
         key=key,
         size=head.get("ContentLength"),
@@ -560,6 +577,7 @@ def head_single(
         storage_class=head.get("StorageClass"),
         head=head,
         compare_key=key.rsplit("/", 1)[-1],
+        storage=src_storage,
     )
 
 
@@ -669,7 +687,7 @@ def open_upload_items(
             )
         )
     else:
-        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+        single = _single_source_info(plan, transferrer)
         if single is None:
             raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
@@ -822,6 +840,8 @@ def cp_case_gate(
     *,
     recursive: bool,
     options: TransferOptions,
+    transferrer: Transferrer,
+    item_filter: FileFilter | None,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -829,21 +849,33 @@ def cp_case_gate(
     The destination tree is enumerated up front (through ``plan.dest.scan``)
     into the exact-case membership set the gate's AlwaysSync arm consults -
     the observable equivalent of aws's reverse file generator + comparator.
-    Each entry's stamped ``compare_key`` is the root-relative membership key.
-    Scoped to ``s3local`` (a case-insensitive *filesystem* destination); a
-    custom ``s3open`` destination owns its own key space, so it never scans
-    the custom side here.
+    That reverse enumeration is a full walk of the destination side: aws
+    builds it with the run's ``follow_symlinks`` parameter, routes its
+    warnings into the shared result queue (they count toward rc 2), and runs
+    the ``--exclude`` / ``--include`` filters over it - so the membership scan
+    here reads the destination storage's own source-config
+    (``default_scan_options``), warns into the transfer rollup, and applies
+    the run's ``item_filter``, exactly like a source walk. Each entry's
+    stamped ``compare_key`` is the root-relative membership key. Scoped to
+    ``s3local`` (a case-insensitive *filesystem* destination); a custom
+    ``s3open`` destination owns its own key space, so it never scans the
+    custom side here.
     """
     mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
-    # paths_type == "s3local" guarantees a LocalStorage destination here. The
-    # case-conflict membership scan follows symlinks like aws's reverse
-    # enumeration, independent of the destination's follow_symlinks config:
-    # --follow-symlinks is an inert flag on a download (aws applies it to the
-    # source walk only), so the gate must not shrink when the CLI bakes
-    # --no-follow-symlinks into the local destination storage.
-    dest_keys = {_ckey(info) for info in plan.dest.scan(LocalScanOptions(recursive=True))}
+    # paths_type == "s3local" guarantees a LocalStorage destination here.
+    dest_keys = {
+        _ckey(info)
+        for info in plan.dest.scan(
+            walk_source_scan_options(
+                plan.dest,
+                recursive=True,
+                on_warning=transferrer.warner.warn,
+                item_filter=item_filter,
+            )
+        )
+    }
     return CaseConflictGate(mode, dest_keys)
 
 

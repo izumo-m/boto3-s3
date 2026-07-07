@@ -31,11 +31,18 @@ from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def _keys(tmp_path: Path, **kwargs: object) -> list[str]:
+def _keys(
+    tmp_path: Path,
+    on_warning: Callable[[str], None] | None = None,
+    **config: bool,
+) -> list[str]:
+    # config holds the LocalStorage constructor's scan source-config
+    # (follow_symlinks / detect_symlink_loops); walk_local reads it from the
+    # storage, taking only the per-call on_warning overlay.
     root = str(tmp_path)
     prefix = root.replace(os.sep, "/") + "/"
     out: list[str] = []
-    for info in LocalStorage(root).walk_local(**kwargs):  # type: ignore[arg-type]
+    for info in LocalStorage(root, **config).walk_local(on_warning=on_warning):
         assert info.key.startswith(prefix)
         rel = info.key[len(prefix) :]
         # walk_local stamps compare_key with this same root-relative key.
@@ -89,6 +96,26 @@ class TestWalkWarnings:
             (tmp_path / "locked").chmod(0o755)
         assert len(warnings) == 1 and "is not readable" in warnings[0]
 
+    def test_symlink_cycle_descent_warns_like_aws(self, tmp_path: Path) -> None:
+        # A directory cycle without detect_symlink_loops (the aws-parity mode):
+        # the per-entry vetting is dir-relative (one link per resolution) so
+        # every unrolled level is admitted, until the descent's full-path open
+        # accumulates SYMLOOP_MAX links and the kernel stops it with ELOOP.
+        # aws-cli vets children by full path, so os.path.exists() fails there
+        # and it warns "File does not exist." and exits rc 2 - the walk must
+        # emit that same warning, not prune the subtree silently (rc 0).
+        _make_tree(tmp_path, "a/keep.txt")
+        (tmp_path / "a" / "up").symlink_to(tmp_path)
+        warnings: list[str] = []
+        keys = _keys(tmp_path, on_warning=warnings.append)
+        # The unrolled levels all surface their file before the descent fails.
+        assert keys and all(key.endswith("keep.txt") for key in keys)
+        assert len(warnings) == 1
+        assert warnings[0].startswith("Skipping file ")
+        assert warnings[0].endswith(". File does not exist.")
+        warned = warnings[0].removeprefix("Skipping file ").removesuffix(". File does not exist.")
+        assert os.path.basename(warned) == "up"  # the cycle link the descent died on
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
     def test_special_file_warns_with_awscli_wording(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt")
@@ -141,13 +168,13 @@ class TestSymlinks:
 
 
 class TestSymlinkLoopDetection:
-    """``detect_loops`` (library extension, default off): an ancestor-stack guard."""
+    """``detect_symlink_loops`` (library extension, default off): an ancestor-stack guard."""
 
     def test_loop_skipped_with_a_warning_when_enabled(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a.txt")
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle: loop -> the root
         warnings: list[str] = []
-        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        keys = _keys(tmp_path, detect_symlink_loops=True, on_warning=warnings.append)
         assert keys == ["a.txt"]  # the cycle subtree is skipped, no RecursionError
         assert warnings == [f"Skipping file {tmp_path / 'loop'}. Symbolic link loop detected."]
 
@@ -158,14 +185,16 @@ class TestSymlinkLoopDetection:
         (tmp_path / "link1").symlink_to(tmp_path / "target")
         (tmp_path / "link2").symlink_to(tmp_path / "target")
         warnings: list[str] = []
-        keys = _keys(tmp_path, detect_loops=True, on_warning=warnings.append)
+        keys = _keys(tmp_path, detect_symlink_loops=True, on_warning=warnings.append)
         assert keys == ["link1/t.txt", "link2/t.txt", "target/t.txt"]
         assert warnings == []
 
     def test_enabled_is_a_noop_on_a_loopless_tree(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/b.txt", "c.txt")
         warnings: list[str] = []
-        assert _keys(tmp_path, detect_loops=True, on_warning=warnings.append) == _keys(tmp_path)
+        assert _keys(tmp_path, detect_symlink_loops=True, on_warning=warnings.append) == _keys(
+            tmp_path
+        )
         assert warnings == []
 
     def test_no_follow_symlinks_disables_detection(self, tmp_path: Path) -> None:
@@ -174,7 +203,12 @@ class TestSymlinkLoopDetection:
         _make_tree(tmp_path, "a.txt")
         (tmp_path / "loop").symlink_to(tmp_path)
         warnings: list[str] = []
-        keys = _keys(tmp_path, follow_symlinks=False, detect_loops=True, on_warning=warnings.append)
+        keys = _keys(
+            tmp_path,
+            follow_symlinks=False,
+            detect_symlink_loops=True,
+            on_warning=warnings.append,
+        )
         assert keys == ["a.txt"]
         assert warnings == []
 
@@ -529,6 +563,12 @@ class TestGetFileinfo:
 
 
 class TestLocalStorageScan:
+    def test_scan_rejects_a_foreign_scan_options(self, tmp_path: Path) -> None:
+        # Mirror of the S3Storage guard: a bare ScanOptions is rejected rather
+        # than silently walking with local defaults.
+        with pytest.raises(TypeError, match="LocalScanOptions"):
+            list(LocalStorage(str(tmp_path)).scan(ScanOptions(recursive=True)))
+
     def test_recursive_scan_streams_the_walk(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "a/inner.txt", "a.txt")
         infos = list(LocalStorage(tmp_path).scan(LocalScanOptions(recursive=True)))

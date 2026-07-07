@@ -303,10 +303,15 @@ class _ResponseCapture:
     stream. A ``before-parameter-build`` handler stashes the call's
     ``(Bucket, Key)`` in the per-request botocore ``context``; the paired
     ``after-call`` handler reads the parsed response back out (dropping the
-    streaming ``Body`` and ``ResponseMetadata``) and files it under that key.
-    ``_build_extra_info`` drains it per item. A multipart download issues many
-    ranged ``GetObject`` calls, so the first stored wins and the range-specific
-    fields are dropped, leaving the object-level metadata.
+    streaming ``Body`` and ``ResponseMetadata``) and files it under that key -
+    write and read operations into **separate stores**, so a same-run
+    ``GetObject`` on a key about to be written (e.g. a sync content filter
+    reading the destination through ``S3Storage.open(..., "rb")`` on this same
+    client) can never satisfy a write pop: ``extra_info["write"]`` is always
+    the transfer's own write response. ``_build_extra_info`` drains per item.
+    A multipart download issues many ranged ``GetObject`` calls, so the first
+    stored read wins and the range-specific fields are dropped, leaving the
+    object-level metadata.
 
     One instance per operation, registered on the transfer client when the
     manager is built - before enumeration starts for a listing-driven run
@@ -330,11 +335,13 @@ class _ResponseCapture:
     _READ_OPS = ("GetObject",)
 
     def __init__(self) -> None:
-        self._store: dict[tuple[str, str], dict[str, Any]] = {}
+        self._writes: dict[tuple[str, str], dict[str, Any]] = {}
+        self._reads: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = threading.Lock()
         # Bind once so unregister removes the same objects register added.
         self._stash_handler = self._stash_key
-        self._record_handler = self._record_response
+        self._record_write_handler = self._record_write
+        self._record_read_handler = self._record_read
 
     def _stash_key(self, params: Mapping[str, Any], context: dict[str, Any], **kwargs: Any) -> None:
         bucket = params.get("Bucket")
@@ -342,8 +349,21 @@ class _ResponseCapture:
         if bucket is not None and key is not None:
             context["boto3_s3_capture_key"] = (bucket, key)
 
-    def _record_response(
+    def _record_write(
         self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        self._record(self._writes, parsed, context)
+
+    def _record_read(
+        self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        self._record(self._reads, parsed, context)
+
+    def _record(
+        self,
+        store: dict[tuple[str, str], dict[str, Any]],
+        parsed: Mapping[str, Any],
+        context: Mapping[str, Any],
     ) -> None:
         bucket_key = context.get("boto3_s3_capture_key")
         if bucket_key is None:
@@ -360,26 +380,41 @@ class _ResponseCapture:
             response.pop("ContentLength", None)
         with self._lock:
             # First stored wins: a multipart download issues many ranged GETs for
-            # the same key, all carrying the same object-level metadata.
-            self._store.setdefault(bucket_key, response)
+            # the same key, all carrying the same object-level metadata (an item
+            # writes its key once, so the write store sees one terminal response).
+            store.setdefault(bucket_key, response)
 
     def register(self, client: Any) -> None:
         events = client.meta.events
         for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.register(f"before-parameter-build.s3.{op}", self._stash_handler)
-            events.register(f"after-call.s3.{op}", self._record_handler)
+        for op in self._WRITE_OPS:
+            events.register(f"after-call.s3.{op}", self._record_write_handler)
+        for op in self._READ_OPS:
+            events.register(f"after-call.s3.{op}", self._record_read_handler)
 
     def unregister(self, client: Any) -> None:
         events = client.meta.events
         for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.unregister(f"before-parameter-build.s3.{op}", self._stash_handler)
-            events.unregister(f"after-call.s3.{op}", self._record_handler)
+        for op in self._WRITE_OPS:
+            events.unregister(f"after-call.s3.{op}", self._record_write_handler)
+        for op in self._READ_OPS:
+            events.unregister(f"after-call.s3.{op}", self._record_read_handler)
 
-    def pop(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+    def pop_write(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        return self._pop(self._writes, bucket, key)
+
+    def pop_read(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        return self._pop(self._reads, bucket, key)
+
+    def _pop(
+        self, store: dict[tuple[str, str], dict[str, Any]], bucket: str | None, key: str | None
+    ) -> dict[str, Any] | None:
         if bucket is None or key is None:
             return None
         with self._lock:
-            return self._store.pop((bucket, key), None)
+            return store.pop((bucket, key), None)
 
 
 class Warner:
@@ -1015,9 +1050,13 @@ class Transferrer:
         if self._capture is None:
             return None, None
         if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
-            return self._capture.pop(item.dest_bucket, item.dest_key), None
+            # Also drain any read recorded for this key (a content filter's
+            # GetObject of the pre-overwrite destination through this client):
+            # it is not the item's transfer response, and must not linger.
+            self._capture.pop_read(item.dest_bucket, item.dest_key)
+            return self._capture.pop_write(item.dest_bucket, item.dest_key), None
         if self._transfer_type is TransferType.DOWNLOAD:
-            return None, self._capture.pop(item.src_bucket, item.src_key)
+            return None, self._capture.pop_read(item.src_bucket, item.src_key)
         return None, None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
@@ -1207,7 +1246,17 @@ class _FsyncDest:
             )
 
     def _fsync(self) -> None:
-        fd = os.open(self._path, os.O_RDONLY)
+        # POSIX fsyncs a read-only fd; Windows implements os.fsync as
+        # FlushFileBuffers, which requires write access (GENERIC_WRITE) on the
+        # handle - O_RDONLY there fails every flush with EBADF/EACCES. The
+        # freshly downloaded file is writable (s3transfer created it), so open
+        # for write off POSIX; O_BINARY/O_NOINHERIT exist only there.
+        flags = (
+            os.O_RDONLY
+            if os.name == "posix"
+            else os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        )
+        fd = os.open(self._path, flags)
         try:
             os.fsync(fd)
         finally:

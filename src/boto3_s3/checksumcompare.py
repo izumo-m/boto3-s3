@@ -44,11 +44,13 @@ Caveats. An object with **no** native checksum, or one whose algorithm cannot be
 computed locally (``crc32c`` / ``crc64nvme`` without ``awscrt``, or past
 ``pure_max_size``), is treated as differing (copied) - the strategy never skips
 on an indeterminate comparison. An upload / download comparison reads the
-**readable** (non-S3) side through its ``Storage.open`` on ``sync``'s main thread
-- any backend, not just a local file - so a read failure surfaces as that
-backend's error (a ``Boto3S3Error`` for a local file). SSE-C objects need the
-customer key to ``GetObjectAttributes`` and are not supported (they read as
-indeterminate -> copy).
+**readable** (non-S3) side through its ``Storage.open`` on whatever thread
+drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
+under :class:`~boto3_s3.comparator.ParallelFilter`) - any backend, not just a
+local file - so a read failure surfaces as that backend's error (a
+``Boto3S3Error`` for a local file). SSE-C objects need the customer key to
+``GetObjectAttributes`` and are not supported (they read as indeterminate ->
+copy).
 """
 
 from __future__ import annotations
@@ -149,8 +151,19 @@ class ChecksumComparison(ContentComparison):
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
+        # Construct-path SDK touch (the module import stays SDK-free).
+        from boto3_s3.s3storage import S3Storage
+
         self._src_storage = s3.resolve(src)
         self._dest_storage = s3.resolve(dest)
+        # Build each S3 side's client now (get_client memoizes): the decides
+        # may run on a ParallelFilter pool, and a lazy first build there would
+        # race boto3's non-thread-safe client construction (docs/s3.md). An
+        # eager build here is what keeps the strategy's documented
+        # thread-safety true for S3Storage sides passed without a client.
+        for side in (self._src_storage, self._dest_storage):
+            if isinstance(side, S3Storage):
+                side.get_client()
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer

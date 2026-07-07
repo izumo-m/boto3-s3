@@ -170,6 +170,19 @@ class TestScanFilterSafetyNet:
         assert LocalStorage.scan_pages_filters is True
         assert Storage.scan_pages_filters is False  # the safe default
 
+    def test_scan_stamps_the_producing_backend_as_a_safety_net(self) -> None:
+        class Unfiltered(_Stub):
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+
+        backend = Unfiltered()
+        infos = list(backend.scan(ScanOptions()))
+        # scan_pages left FileInfo.storage None; scan() fills the producing
+        # backend so a downstream consumer (a content update_filter opening
+        # info.storage, an on_result callback) can reach it on custom backends.
+        assert infos and all(info.storage is backend for info in infos)
+
 
 class TestAutoBitLayout:
     def test_members_are_successive_powers_of_two(self) -> None:

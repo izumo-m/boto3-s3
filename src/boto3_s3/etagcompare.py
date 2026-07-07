@@ -41,10 +41,12 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   treats every object as differing and re-copies it each run. Use the default
   ``update_filter=None`` there instead.
 
-Because the copy decision runs on ``sync``'s main thread, an upload / download
-pair blocks that thread on the local read + hash: the strategy trades wall-clock
-for byte-exact comparison (the size check skips that read when the two sides'
-sizes already differ).
+The copy decision runs on whatever thread drives the ``update_filter`` lane -
+``sync``'s calling thread by default, or a pool worker under
+:class:`~boto3_s3.comparator.ParallelFilter` - and an upload / download pair
+costs that thread the local read + hash: the strategy trades wall-clock for
+byte-exact comparison (the size check skips the read when the two sides' sizes
+already differ; ``ParallelFilter`` overlaps the reads instead).
 """
 
 from __future__ import annotations

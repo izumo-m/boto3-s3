@@ -109,11 +109,15 @@ class ParallelFilter(Generic[_T]):
     ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
     creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool
     across lanes (pass the same object to each ``ParallelFilter``) or giving each
-    lane its own, are the caller's to arrange. The wrapped ``decide`` runs on that
+    lane its own, are the caller's to arrange - but the ``sync`` call itself must
+    **not** run as a task on that same pool: the lane blocks its thread waiting
+    for decide futures that need a free worker, so a bounded pool driving both
+    deadlocks. The wrapped ``decide`` runs on that
     pool's threads, so it must be thread-safe;
     :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
     :class:`~boto3_s3.etagcompare.EtagComparison` are (read-only over their
-    fields; a botocore client is safe to share for concurrent calls). A
+    fields, S3-side clients built at construction; a botocore client is safe to
+    share for concurrent calls). A
     ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
     picklable) - the pool must be thread-based.
 

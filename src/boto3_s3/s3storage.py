@@ -273,7 +273,7 @@ def _page_to_infos(
     return infos
 
 
-def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
+def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
     Runs on the consumer's iteration thread - ``S3.ls`` iterates
@@ -281,7 +281,9 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
     bucket becomes an ``S3FileInfo`` whose ``key`` is the bucket name and whose
     ``mtime`` is the bucket's
     ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
-    root has no prefix, so ``compare_key`` is the bucket name itself.
+    root has no prefix, so ``compare_key`` is the bucket name itself; ``storage``
+    (the service-root ``S3Storage``) is stamped as the producing backend, like
+    every other producer's entries.
     """
     infos: list[FileInfo] = []
     for bucket in page.get("Buckets", []):
@@ -290,7 +292,11 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
             continue  # ListBuckets always populates Name; stay defensive
         infos.append(
             S3FileInfo(
-                key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate"), compare_key=name
+                key=name,
+                kind=FileKind.BUCKET,
+                mtime=bucket.get("CreationDate"),
+                compare_key=name,
+                storage=storage,
             )
         )
     return infos
@@ -684,7 +690,7 @@ class S3Storage(Storage):
                 # Back-compat (floor botocore 1.31): the ListBuckets paginator and
                 # its Prefix / BucketRegion parameters are a late-2024 addition
                 # (botocore 1.34.162). Drop this branch once the floor reaches it.
-                yield from _page_to_bucket_infos(client.list_buckets())
+                yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
             paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
             if name_prefix:
@@ -692,7 +698,7 @@ class S3Storage(Storage):
             if region:
                 paging["BucketRegion"] = region
             for page in client.get_paginator("list_buckets").paginate(**paging):
-                yield from _page_to_bucket_infos(page)
+                yield from _page_to_bucket_infos(page, self)
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
@@ -703,9 +709,11 @@ class S3Storage(Storage):
         ``GetObject`` on ``key`` (the object's *full* bucket key, exactly the
         ``key`` carried on its ``FileInfo`` and the address ``delete`` uses),
         returning botocore's streaming response body. So
-        ``info.storage.open(info.key, "rb")`` reads any backend's entry uniformly
-        (``LocalStorage`` resolves an absolute ``info.key`` to its file, a custom
-        backend to its own key space). The body is **read-only and forward-only**
+        ``info.storage.open(info.key, "rb")`` reads a built-in backend's entry
+        uniformly (``LocalStorage`` resolves an absolute ``info.key`` to its
+        file), and a typical custom backend's too (its ``key`` equals
+        ``compare_key`` - the scan-root-relative address its ``open`` is
+        required to resolve; docs/storage.md section 2). The body is **read-only and forward-only**
         (no ``seek``); it supports the context-manager / ``read`` / ``close``
         protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a
         missing key, denied access) translate to the library taxonomy; an error

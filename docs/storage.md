@@ -117,8 +117,10 @@ Three more members come with working defaults a custom backend normally keeps:
   polymorphically; `S3Storage` / `LocalStorage` override it with aws's
   `s3_format` / `local_format` on their own held state). The default is the
   open-route rule: the root is `""` — a custom backend encapsulates its own
-  location and its `open` / `delete` receive the scan-root-relative
-  `compare_key` unprefixed — and `use_src_name` follows the S3 convention
+  location, its `open` receives the scan-root-relative `compare_key`
+  unprefixed (`""` for the single location), and its `delete` receives the
+  entry's `FileInfo` (keyed by `info.key`; section "Keys" below) — and
+  `use_src_name` follows the S3 convention
   (`dir_op` or a trailing `/` on `as_text()`).
 
 Errors raised from these should map to the library taxonomy
@@ -129,11 +131,19 @@ Errors raised from these should map to the library taxonomy
 A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
 
 - **`key`** is the entry's full, `/`-separated identifier **in the backend's own
-  address space** — what `open` and `delete(info)` act on. A backend chooses its
-  own space (`S3Storage`'s `key` is the full bucket key, `LocalStorage`'s an
-  absolute path). A typical custom backend rooted at its location uses keys
-  relative to that root, so a recursive entry's `key` is its `compare_key` and
-  the single location is `""`.
+  address space** — what `delete(info)` acts on (the built-ins key on
+  `info.key`). A backend chooses its own space (`S3Storage`'s `key` is the full
+  bucket key, `LocalStorage`'s an absolute path). A typical custom backend
+  rooted at its location uses keys relative to that root, so a recursive
+  entry's `key` is its `compare_key` and the single location is `""`. `open`'s
+  address argument is backend-specific: `S3Storage.open` takes the full bucket
+  key, `LocalStorage.open` joins its key under the location (an absolute key
+  resolves to itself), and a **custom** backend's `open` must resolve the
+  scan-root-relative key the engine passes (`compare_key`; `""` for the single
+  location — the open route and the content strategies both pass that space).
+  For the typical custom backend (`key == compare_key`) the two spaces
+  coincide, so `info.storage.open(info.key, "rb")` reads built-in and typical
+  custom entries alike.
 - **`compare_key`** is the same entry **relative to the scan root**: the
   `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
   `scan` must stamp it on every entry.

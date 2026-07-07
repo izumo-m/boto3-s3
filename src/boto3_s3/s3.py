@@ -868,7 +868,6 @@ class S3:
         producers.require_open_capabilities(
             plan, recursive=recursive, is_move=is_move, operation=operation
         )
-        case_gate = producers.cp_case_gate(plan, recursive=recursive, options=options)
         transferrer = Transferrer(
             transfer_type,
             client,
@@ -885,6 +884,16 @@ class S3:
             on_progress=on_progress,
             on_result=on_result,
             capture_response=capture_response,
+        )
+        # After the Transferrer: the gate's destination membership scan warns
+        # into the shared rollup (aws's reverse enumeration shares the result
+        # queue) and applies the run's filter, like any side's walk.
+        case_gate = producers.cp_case_gate(
+            plan,
+            recursive=recursive,
+            options=options,
+            transferrer=transferrer,
+            item_filter=item_filter,
         )
         with transferrer:
             if not dryrun:

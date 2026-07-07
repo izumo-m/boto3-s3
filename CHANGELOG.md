@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scan settings that describe how a source is read now live on the `Storage`
   constructor — `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
   `S3Storage(url, page_size=…, fetch_owner=…)` — and are no longer `cp` / `mv` /
-  `sync` / `ls` / `rm` arguments.
+  `sync` / `ls` / `rm` (or `walk_local`) arguments.
+- `cp` / `mv` `--case-conflict`'s destination membership scan now walks like
+  aws's reverse enumeration: it honors the destination storage's
+  `follow_symlinks`, applies the run's filter, and counts its walk warnings.
+- `capture_response` now stores read and write responses separately, so a
+  same-run `GetObject` on a key being written (e.g. a content filter reading
+  the pre-overwrite destination) can never surface as the write response.
 - `S3.sync` now splits the copy/delete decision into three per-lane filters:
   `create_filter` (new entries), `update_filter` (existing, was `compare`),
   `delete_filter` (orphans, was `delete`); a custom `update_filter` is only
@@ -21,9 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update-only and made its own pool).
 - `S3Storage.open(key, "rb")` now reads an object (`GetObject`), so a
   content-based filter can read S3 bytes; `"wb"` stays unimplemented.
-- `Storage.scan_pages` now applies `ScanOptions.filter` and returns
-  already-filtered pages (`Storage.scan` no longer sieves), so a custom backend
-  can filter at its source; `storage.sieve_pages` wraps raw pages otherwise.
+- A backend's `scan_pages` now applies `ScanOptions.filter` itself and returns
+  already-filtered pages, so a custom backend can filter at its source
+  (`storage.sieve_pages` wraps raw pages); `Storage.scan` re-applies the filter
+  as a safety net unless the backend declares `scan_pages_filters = True` (the
+  built-ins do).
+- Every scanned entry now carries its producing backend as `FileInfo.storage`;
+  `SyncPair.src_storage` / `dest_storage` are gone - read `pair.src.storage` /
+  `pair.dest.storage`.
+- `StorageCapability.SORTED_SCAN` is renamed `SORTABLE_SCAN` (the promise is a
+  byte-orderable scan - `ScanOptions(sort=True)` - not an always-sorted stream).
 - S3 bucket listing moved to a dedicated `S3Storage.list_buckets` (the bare
   `s3://` service root); `scan` enumerates objects only, and `ScanOptions` drops
   `bucket_name_prefix` / `bucket_region`. `ls` behaviour is unchanged.
@@ -182,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.4.0...HEAD
+[0.4.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...boto3-s3-v0.4.0
 [0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.2.0...boto3-s3-v0.3.0
 [0.2.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.1.0...boto3-s3-v0.2.0
 [0.1.0]: https://github.com/izumo-m/boto3-s3/releases/tag/boto3-s3-v0.1.0

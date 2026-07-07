@@ -23,7 +23,7 @@ exists (``list_files`` / ``should_ignore_file`` / ``triggers_warning`` /
 ``os.scandir`` engine and its extensions - keep boto3-s3 names
 (:meth:`~LocalFileGenerator.scan_children` / :meth:`~LocalFileGenerator.classify_child`
 / :meth:`~LocalFileGenerator.dir_child` / :class:`WalkChild` /
-``have_dir_fd`` / ``detect_loops`` / :class:`LoopDetector`).
+``have_dir_fd`` / ``detect_symlink_loops`` / :class:`LoopDetector`).
 
 Performance (the reason for the ``os.scandir`` engine, not aws-cli's ``listdir``
 + per-name ``os.path.isdir`` / ``os.stat`` restat): ``os.scandir`` carries each
@@ -506,8 +506,12 @@ class LocalFileGenerator:
         stamps each child's ``compare_key`` (the key with the ``strip``-long root
         prefix removed, aws-cli's ``src_path[len(root):]``), then hands the list to
         :meth:`finalize_children` (which sorts, and is the override point for
-        pruning / registration). A directory that cannot be opened or scanned (a
-        race after its parent vetted it readable) yields an empty list.
+        pruning / registration). A directory that cannot be opened or scanned
+        (a symlink cycle stopped by the kernel, an over-long path, or a race
+        after its parent vetted it readable) is skipped through the
+        :meth:`triggers_warning` battery - the aws-cli warning its full-path
+        vetting would emit - and yields an empty list; if the battery sees
+        nothing wrong, the ``OSError`` propagates instead.
 
         The fast path scans through the directory's own fd where the platform
         allows (:data:`have_dir_fd`), so each entry's stat and readability probe
@@ -535,13 +539,23 @@ class LocalFileGenerator:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
             scan = os.scandir(dir_fd if dir_fd is not None else dir_path)
         except OSError:
-            # A race: the directory became unopenable after its parent vetted it
-            # readable. Prune it (an empty listing) rather than abort the walk.
-            # Scoped to the open/scandir establishment only - a per-entry
-            # OSError (from a race mid-scan or an override's classify_child)
-            # propagates rather than silently dropping the whole directory.
+            # The directory became unopenable even though its parent vetted it:
+            # deterministically (a symlink cycle the kernel stops with ``ELOOP``
+            # once a path accumulates SYMLOOP_MAX links - the per-entry vetting
+            # is dir-relative and resolves one link at a time, so it admits each
+            # level - or an over-long path), or by a race (deleted / chmod'd
+            # since). aws-cli vets children by *full path*, so its battery fails
+            # right here: run the same path battery for the same warning + rc 2
+            # (``ELOOP`` fails ``os.path.exists`` -> "File does not exist.").
+            # If the probes see nothing wrong (e.g. fd exhaustion resolved by the
+            # probe's close), re-raise like aws-cli's ``listdir`` would - never
+            # prune silently. Scoped to the open/scandir establishment only - a
+            # per-entry OSError (from a race mid-scan or an override's
+            # classify_child) propagates rather than dropping the directory.
             if dir_fd is not None:
                 os.close(dir_fd)
+            if not self.triggers_warning(dir_path.rstrip(os.sep), notify):
+                raise
             return []
         try:
             with scan as it:
@@ -990,8 +1004,6 @@ class LocalStorage(Storage):
     def walk_local(
         self,
         *,
-        follow_symlinks: bool = True,
-        detect_loops: bool = False,
         on_warning: Callable[[str], None] | None = None,
     ) -> Iterator[LocalFileInfo]:
         """Yield every file under :attr:`path` (recursively) in aws-cli's byte order.
@@ -1000,24 +1012,21 @@ class LocalStorage(Storage):
         it anchors at the absolutized path with a trailing ``os.sep`` (so
         ``FileInfo.key`` is absolute, ``compare_key`` comes out relative to
         :attr:`path`, and a non-directory root degrades to a "does not exist"
-        warning rather than a scan error), building the ``ScanOptions`` the walker
-        reads from the given knobs. This is the raw walk (no ``ScanOptions.filter``);
-        ``scan`` applies the filter through :meth:`scan_pages`. The byte-order /
-        warning semantics are the walker's - see
-        :meth:`LocalFileGenerator.list_files`. A single source object goes through
-        :meth:`get_fileinfo` instead, not this walk.
+        warning rather than a scan error). The walk reads this storage's held
+        source-config (``follow_symlinks`` / ``detect_symlink_loops`` from the
+        constructor, via :meth:`default_scan_options` - the same walk ``scan``
+        runs); ``on_warning`` is the per-call overlay, like an operation's. This
+        is the raw walk (no ``ScanOptions.filter``); ``scan`` applies the filter
+        through :meth:`scan_pages`. The byte-order / warning semantics are the
+        walker's - see :meth:`LocalFileGenerator.list_files`. A single source
+        object goes through :meth:`get_fileinfo` instead, not this walk.
         """
         # local_format(dir_op=True) form; self._abspath is computed once at
         # construction. list_files stamps compare_key (key relative to root) and,
         # from options.storage below, each entry's producing backend.
         yield from self._walker.list_files(
             self._abspath + os.sep,
-            LocalScanOptions(
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_loops,
-                on_warning=on_warning,
-                storage=self,
-            ),
+            replace(self.default_scan_options(), on_warning=on_warning, storage=self),
         )
 
     def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[FileInfo]:

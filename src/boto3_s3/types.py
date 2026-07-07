@@ -158,7 +158,8 @@ class ScanOptions:
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     each ``Storage.scan_pages`` producer, which returns already-filtered pages
-    (``scan`` flattens + prefetches them, it no longer sieves). A backend may
+    (``scan`` flattens + prefetches them, re-sieving only as a safety net for a
+    backend that does not declare ``scan_pages_filters``). A backend may
     push the predicate to its source (a REST listing filtering server-side) or
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
     prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
