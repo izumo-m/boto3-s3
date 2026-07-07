@@ -1,7 +1,7 @@
 """``boto3_s3.checksumcompare``: a native-checksum content-comparison strategy for ``S3.sync``.
 
 ``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
-copies the source). The default ``compare=None`` decides by size + last-modified,
+copies the source). The default ``update_filter=None`` decides by size + last-modified,
 aws-cli style; :class:`ChecksumComparison` decides by **content**,
 comparing S3's stored native checksum against the checksum the local file would
 carry:
@@ -25,8 +25,8 @@ imports no AWS SDK module at import time; the SDK touches - the boto3 client (vi
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
-It is a replacement ``compare=`` strategy, not composed with the default:
-``S3.sync(compare=ChecksumComparison(s3, src, dest))`` decides every pair by content.
+It is a replacement ``update_filter=`` strategy, not composed with the default:
+``S3.sync(update_filter=ChecksumComparison(s3, src, dest))`` decides every pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + local hash on
@@ -43,10 +43,14 @@ that fallback is slow, the ``pure_max_size`` arg can cap it: above the cap, with
 Caveats. An object with **no** native checksum, or one whose algorithm cannot be
 computed locally (``crc32c`` / ``crc64nvme`` without ``awscrt``, or past
 ``pure_max_size``), is treated as differing (copied) - the strategy never skips
-on an indeterminate comparison. An upload / download comparison reads the local
-file on ``sync``'s main thread, so it raises ``OSError`` if that file is
-unreadable. SSE-C objects need the customer key to ``GetObjectAttributes`` and
-are not supported (they read as indeterminate -> copy).
+on an indeterminate comparison. An upload / download comparison reads the
+**readable** (non-S3) side through its ``Storage.open`` on whatever thread
+drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
+under :class:`~boto3_s3.comparator.ParallelFilter`) - any backend, not just a
+local file - so a read failure surfaces as that backend's error (a
+``Boto3S3Error`` for a local file). SSE-C objects need the customer key to
+``GetObjectAttributes`` and are not supported (they read as indeterminate ->
+copy).
 """
 
 from __future__ import annotations
@@ -61,12 +65,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from boto3_s3.comparator import READ_CHUNK, ContentComparison
-from boto3_s3.localstorage import to_native_path
-from boto3_s3.types import LocalFileInfo, TransferType
+from boto3_s3.types import TransferType
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     from boto3_s3.s3 import S3
-    from boto3_s3.storage import Location
+    from boto3_s3.storage import Location, Storage
     from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
@@ -90,16 +95,19 @@ class ChecksumComparison(ContentComparison):
     """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
 
     Copies a pair when the destination's
-    stored S3 checksum does not match the source's content. A source-only pair
-    (no destination) always copies. An upload / download reads the remote
+    stored S3 checksum does not match the source's content. ``S3.sync`` hands it
+    only both-sides pairs (source-only is ``create_filter``'s lane; a standalone
+    source-only pair copies as a defensive fallback). An upload / download reads
+    the remote
     object's checksum via ``GetObjectAttributes`` and recomputes it over the
-    local file (whole-file for a ``FULL_OBJECT`` checksum, or part-by-part at the
-    returned ``ObjectParts`` sizes for a ``COMPOSITE`` one). An s3-to-s3 (COPY)
+    **readable** (non-S3) side's bytes (through its ``Storage.open`` - any
+    backend), whole-file for a ``FULL_OBJECT`` checksum or part-by-part at the
+    returned ``ObjectParts`` sizes for a ``COMPOSITE`` one. An s3-to-s3 (COPY)
     pair compares the two objects' stored checksums directly (both via
     ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched
     algorithm, or an algorithm that cannot be computed locally is treated as
     differing (copy), so it never skips on an indeterminate comparison. It is a
-    replacement ``compare=`` strategy, selected instead of the size+time default.
+    replacement ``update_filter=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
     ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to
@@ -143,33 +151,53 @@ class ChecksumComparison(ContentComparison):
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
+        # Construct-path SDK touch (the module import stays SDK-free).
+        from boto3_s3.s3storage import S3Storage
+
         self._src_storage = s3.resolve(src)
         self._dest_storage = s3.resolve(dest)
+        # Build each S3 side's client now (get_client memoizes): the decides
+        # may run on a ParallelFilter pool, and a lazy first build there would
+        # race boto3's non-thread-safe client construction (docs/s3.md). An
+        # eager build here is what keeps the strategy's documented
+        # thread-safety true for S3Storage sides passed without a client.
+        for side in (self._src_storage, self._dest_storage):
+            if isinstance(side, S3Storage):
+                side.get_client()
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
-    def _local_remote_differ(
-        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    def _readable_remote_differ(
+        self,
+        storage: Storage | None,
+        readable: FileInfo,
+        remote: FileInfo,
+        transfer_type: TransferType,
     ) -> bool:
-        # The remote entry belongs to the endpoint the direction names; its
+        # The remote (S3) entry belongs to the endpoint the direction names; its
         # storage carries the client/bucket GetObjectAttributes needs.
-        storage = self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
-        remote_checksum = self._remote_checksum(storage, remote.key)
+        s3_storage = (
+            self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
+        )
+        remote_checksum = self._remote_checksum(s3_storage, remote.key)
         if remote_checksum is None:
             return True
-        if not _can_compute(remote_checksum.algorithm, local.size, self.pure_max_size):
+        if not _can_compute(remote_checksum.algorithm, readable.size, self.pure_max_size):
             return True
-        path = to_native_path(local.key)
-        if remote_checksum.part_sizes is not None:
-            # None = the local file outruns the parts sum (an appended tail):
-            # definitely different content, whatever the part digests say.
-            local_value = _composite_b64(
-                path, remote_checksum.algorithm, remote_checksum.part_sizes
-            )
-        else:
-            local_value = _whole_b64(path, remote_checksum.algorithm)
-        return local_value != remote_checksum.value
+        key = readable.compare_key
+        if storage is None or key is None:
+            return True  # cannot open the readable side -> treat as differing (copy)
+        with storage.open(key, "rb") as fh:
+            if remote_checksum.part_sizes is not None:
+                # None = the readable side outruns the parts sum (an appended
+                # tail): definitely different content, whatever the digests say.
+                readable_value = _composite_b64(
+                    fh, remote_checksum.algorithm, remote_checksum.part_sizes
+                )
+            else:
+                readable_value = _whole_b64(fh, remote_checksum.algorithm)
+        return readable_value != remote_checksum.value
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: compare the two objects' stored checksums (no bytes read).
@@ -299,43 +327,41 @@ def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) ->
 # -- local checksum computation ------------------------------------------------
 
 
-def _whole_b64(path: str, algorithm: str) -> str:
-    """The base64 ``FULL_OBJECT`` checksum of the whole file (streamed)."""
+def _whole_b64(fh: BinaryIO, algorithm: str) -> str:
+    """The base64 ``FULL_OBJECT`` checksum of the whole stream ``fh``."""
     hasher = _new_hasher(algorithm)
     assert hasher is not None  # callers gate on _can_compute
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(READ_CHUNK), b""):
-            hasher.update(block)
+    for block in iter(lambda: fh.read(READ_CHUNK), b""):
+        hasher.update(block)
     return base64.b64encode(hasher.digest()).decode("ascii")
 
 
-def _composite_b64(path: str, algorithm: str, part_sizes: tuple[int, ...]) -> str | None:
+def _composite_b64(fh: BinaryIO, algorithm: str, part_sizes: tuple[int, ...]) -> str | None:
     """The base64 ``COMPOSITE`` checksum + ``"-N"`` at the exact part boundaries.
 
     ``base64(ALGO(concat of each part's raw ALGO digest)) + "-<n>"`` - the
     checksum-of-checksums S3 forms for a multipart upload, with the part split
-    taken from GetObjectAttributes' ``ObjectParts`` (so it is exact, not guessed).
-    Both length mismatches read as differing: a file shorter than the parts sum
-    hashes short (a truncated final part), and a file *longer* than it returns
-    ``None`` - the remote object is exactly the parts sum long, so an appended
-    local tail means different content even though the per-part digests (which
-    never see the tail) would collide.
+    taken from GetObjectAttributes' ``ObjectParts`` (so it is exact, not guessed),
+    read from the stream ``fh``. Both length mismatches read as differing: a
+    readable side shorter than the parts sum hashes short (a truncated final
+    part), and one *longer* returns ``None`` - the remote object is exactly the
+    parts sum long, so an appended tail means different content even though the
+    per-part digests (which never see the tail) would collide.
     """
     combined = bytearray()
-    with open(path, "rb") as fh:
-        for size in part_sizes:
-            part = _new_hasher(algorithm)
-            assert part is not None
-            remaining = size
-            while remaining > 0:
-                block = fh.read(min(READ_CHUNK, remaining))
-                if not block:
-                    break
-                part.update(block)
-                remaining -= len(block)
-            combined += part.digest()
-        if fh.read(1):
-            return None
+    for size in part_sizes:
+        part = _new_hasher(algorithm)
+        assert part is not None
+        remaining = size
+        while remaining > 0:
+            block = fh.read(min(READ_CHUNK, remaining))
+            if not block:
+                break
+            part.update(block)
+            remaining -= len(block)
+        combined += part.digest()
+    if fh.read(1):
+        return None
     top = _new_hasher(algorithm)
     assert top is not None
     top.update(bytes(combined))

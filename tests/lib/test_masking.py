@@ -3,7 +3,8 @@
 import io
 import logging
 import pathlib
-from collections.abc import Iterator
+import sys
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import pytest
@@ -29,7 +30,9 @@ MODULE_NAMES = [
 
 
 @contextmanager
-def _stream_logger(name: str, **kwargs: object) -> Iterator[tuple[logging.Logger, io.StringIO]]:
+def _stream_logger(
+    name: str, **kwargs: object
+) -> Generator[tuple[logging.Logger, io.StringIO], None, None]:
     """Set up a masked stream logger over a StringIO and restore on exit."""
     logger = logging.getLogger(name)
     before_handlers = list(logger.handlers)
@@ -216,6 +219,21 @@ class TestMaskTextNotation:
         assert '"SecretAccessKey": "***"' in out
         assert '"SessionToken": "***"' in out
 
+    def test_signature_mismatch_byte_dump_masked(self) -> None:
+        # A SignatureDoesNotMatch (403) body echoes the canonical request as a hex
+        # byte-dump; bytes.fromhex would reconstruct the x-amz-security-token line,
+        # so the text-form masks never see it. The whole dump must be masked.
+        hex_dump = ("x-amz-security-token:" + SESSION_TOKEN).encode().hex(" ")
+        body = (
+            "<Error><Code>SignatureDoesNotMatch</Code>"
+            f"<CanonicalRequestBytes>{hex_dump}</CanonicalRequestBytes>"
+            f"<StringToSignBytes>{hex_dump}</StringToSignBytes></Error>"
+        )
+        out = m.mask_text(body)
+        assert hex_dump not in out  # the reversible dump is gone
+        assert "<CanonicalRequestBytes>***</CanonicalRequestBytes>" in out
+        assert "<StringToSignBytes>***</StringToSignBytes>" in out
+
     def test_long_non_url_run_does_not_hang(self) -> None:
         # Guards against ReDoS in the proxy-URL regex: a long contiguous
         # scheme-class run that never reaches "://" must mask in linear time.
@@ -321,6 +339,22 @@ class TestSecretMaskingFilter:
         record = self._record("creds=%s", SECRET_KEY)
         f.filter(record)
         assert SECRET_KEY not in record.getMessage()
+
+    def test_exception_traceback_is_masked(self) -> None:
+        # A record logged with exc_info: the handler appends the traceback from
+        # record.exc_text, a channel the message mask never sees. A secret in the
+        # exception message must be masked there too.
+        f = m.SecretMaskingFilter()
+        try:
+            raise ValueError(f"failed https://b/k?X-Amz-Signature={SIGNATURE}")
+        except ValueError:
+            record = logging.LogRecord(
+                "boto3_s3.test", logging.DEBUG, __file__, 1, "boom", (), sys.exc_info()
+            )
+        assert f.filter(record) is True
+        assert record.exc_text is not None
+        assert SIGNATURE not in record.exc_text
+        assert "X-Amz-Signature=***" in record.exc_text
 
     def test_filter_admits_all_records(self) -> None:
         f = m.SecretMaskingFilter()

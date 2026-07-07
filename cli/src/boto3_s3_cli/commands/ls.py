@@ -56,7 +56,7 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
-        storage = S3Storage(target, client=ctx.client_factory(args))
+        storage = S3Storage(target, client=ctx.client_factory(args), page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 
@@ -66,7 +66,6 @@ class LsCommand(Command):
         for info in S3().ls(
             storage,
             recursive=args.recursive,
-            page_size=page_size,
             request_payer=args.request_payer,
             bucket_name_prefix=args.bucket_name_prefix,
             bucket_region=args.bucket_region,

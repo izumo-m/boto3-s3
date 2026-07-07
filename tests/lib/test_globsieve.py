@@ -487,6 +487,34 @@ class TestAnchored:
         assert m.included("keep/a", "D:/data/src/keep/a") is True  # other drive -> visible
 
 
+class TestSeparatorNormalization:
+    """A pattern's host separator folds to ``/`` at compile time so it matches the
+    ``/``-folded ``compare_key`` (aws-cli's per-side ``replace`` in
+    ``filters._match_pattern``, collapsed to one step because boto3-s3 matches in
+    ``/`` space). Windows-only behavior, so the Windows cases simulate ``os.sep``.
+    """
+
+    def test_windows_backslash_relative_pattern_folds_and_matches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows a relative '\'-separated --exclude matches the '/'-folded
+        # compare_key (aws-cli folds it to the native sep and matches native paths).
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
+        monkeypatch.setattr(globsieve.os, "sep", "\\")
+        m = globsieve.compile(
+            [GlobPattern.exclude("logs\\*.txt"), GlobPattern.exclude("a\\b\\c.log")]
+        )
+        assert m.included("logs/app.txt") is False  # dir/suffix pattern, folded
+        assert m.included("a/b/c.log") is False  # literal pattern, folded
+        assert m.included("logs/app.log") is True  # neither pattern -> visible
+
+    def test_posix_backslash_stays_a_literal(self) -> None:
+        # On POSIX os.sep is '/', so folding is a no-op and '\' is a literal (not a
+        # separator) - it does not match a '/'-separated key, like aws-cli on POSIX.
+        m = globsieve.compile([GlobPattern.exclude("logs\\*.txt")])
+        assert m.included("logs/app.txt") is True  # '\' literal -> no match -> visible
+
+
 class TestGlobFilter:
     """The fluent ``GlobFilter`` front end: a ``FileFilter`` matching ``compare_key``."""
 

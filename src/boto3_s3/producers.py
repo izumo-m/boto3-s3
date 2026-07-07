@@ -20,6 +20,7 @@ producers need all of them. Like the planner, importing this module reaches
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from boto3_s3 import requestparams, transferplan
@@ -39,9 +40,39 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from boto3_s3.comparator import SyncPair
+
+
+def walk_source_scan_options(
+    storage: Storage,
+    *,
+    recursive: bool,
+    sort: bool = False,
+    on_warning: Callable[[str], None] | None,
+    item_filter: FileFilter | None,
+) -> ScanOptions:
+    """Scan options for a walkable transfer source (upload / sync side).
+
+    Built from the storage's own ``default_scan_options`` - which seeds the
+    source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
+    ``detect_symlink_loops``, a custom backend's own knobs, both configured on the
+    constructor) - with only the operation-inherent knobs overlaid (``recursive`` /
+    ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
+    or any custom source backend whose ``scan_pages`` requires its own
+    ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
+    would honor it. An S3 source never comes here (it lists through
+    :func:`scan_s3_source`).
+    """
+    return replace(
+        storage.default_scan_options(),
+        recursive=recursive,
+        sort=sort,
+        on_warning=on_warning,
+        filter=item_filter,
+    )
+
 
 # S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
 # for larger uploads; the size string is aws-cli's rendered constant
@@ -64,6 +95,22 @@ def _ckey(info: FileInfo) -> str:
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
     return key
+
+
+def _single_source_info(
+    plan: transferplan.TransferPlan, transferrer: Transferrer
+) -> FileInfo | None:
+    """Resolve the single (non-dir_op) source through ``get_fileinfo``.
+
+    Stamps the producing backend as a safety net (mirroring ``Storage.scan``'s):
+    the built-ins stamp their own ``get_fileinfo`` results, so this only fills a
+    ``None`` left by a bespoke backend - keeping ``src_info.storage`` in
+    agreement with ``OpResult.src_storage`` on the single-object routes too.
+    """
+    single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    if single is not None and single.storage is None:
+        single.storage = plan.src
+    return single
 
 
 def open_side_display(storage: Storage, key: str) -> str:
@@ -127,7 +174,7 @@ def _glacier_gate(
     if options.get("ignore_glacier_warnings"):
         transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
     else:
-        transferrer.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
+        transferrer.warner.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
     return True
 
 
@@ -209,8 +256,6 @@ def upload_items(
     *,
     dest_bucket: str,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
     item_filter: FileFilter | None,
 ) -> Iterator[TransferItem]:
     """Materialize upload items from the local source (warnings -> rollup).
@@ -219,28 +264,32 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1, like aws-cli). Either way the
-    producer stamps each entry's ``compare_key``, so ``item_filter`` reads it
-    directly.
+    with [Errno 21] Is a directory, rc 1, like aws-cli). The recursive listing
+    stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
+    scan (``scan_pages``' contract); the single source, having no scan filter, is
+    filtered here.
     """
     infos: Iterator[FileInfo]
     if plan.dir_op:
+        # The recursive listing filters inside the scan (the scan_pages contract),
+        # so a LocalStorage subclass can prune during the walk.
         infos = plan.src.scan(
-            ScanOptions(
+            walk_source_scan_options(
+                plan.src,
                 recursive=True,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
-                on_warning=transferrer.warn,
+                on_warning=transferrer.warner.warn,
+                item_filter=item_filter,
             )
         )
     else:
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
-        single = plan.src.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=transferrer.warn)
+        # get_fileinfo has no filter, so an excluded single source is dropped here.
+        single = _single_source_info(plan, transferrer)
         infos = iter([single] if single is not None else [])
+        if item_filter is not None:
+            infos = (info for info in infos if item_filter(info))
     for info in infos:
-        if item_filter is not None and not item_filter(info):
-            continue
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
 
 
@@ -258,7 +307,7 @@ def upload_item_from_info(
     if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
         # aws-cli's _warn_if_too_large: warn (rendered relative) but
         # still attempt, so S3's own EntityTooLarge stays visible.
-        transferrer.warn(
+        transferrer.warner.warn(
             f"File {LocalStorage.relative_path(native)} exceeds s3 upload limit of "
             f"{_MAX_UPLOAD_SIZE_TEXT}.",
             key=compare_key,
@@ -283,7 +332,6 @@ def s3_source_items(
     transfer_type: TransferType,
     dest_bucket: str,
     transferrer: Transferrer,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
@@ -295,14 +343,15 @@ def s3_source_items(
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         )
-    elif not src_storage.key:
+    elif src_storage.bucket and not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
         # bucket and exact-matches nothing -> zero items, rc 0. Same
-        # outcome here without issuing the listing.
+        # outcome here without issuing the listing. A bucketless service root
+        # (`cp s3://`) is NOT this case: it falls to head_single, whose empty
+        # Bucket hits botocore's Invalid-bucket ParamValidation like aws.
         return
     else:
         infos = head_single(
@@ -385,7 +434,7 @@ def download_item_from_info(
     # an S3 key "data//../secret") must still be caught - bare
     # normpath("/../secret") == "/secret" would slip the "..".
     if os.path.normpath("." + os.sep + compare_key).startswith(".." + os.sep):
-        transferrer.warn(
+        transferrer.warner.warn(
             f"Skipping file {compare_key}. File references a parent directory.",
             key=compare_key,
         )
@@ -443,7 +492,6 @@ def scan_s3_source(
     storage: S3Storage,
     *,
     key_prefix: str,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
 ) -> Iterator[FileInfo]:
@@ -452,12 +500,12 @@ def scan_s3_source(
     The shared transfer-side enumeration: cp/mv scan their source here,
     and sync scans whichever of its sides is S3 (the destination too).
     Folder markers never surface; the scan stamps each entry's prefix-relative
-    ``compare_key``, which ``item_filter`` matches against.
+    ``compare_key``, which ``item_filter`` matches against. Built from the passed
+    ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
+    config and a custom ``S3Storage`` subclass survive), with the operation-inherent
+    knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
+    ``key_prefix``, and ``request_payer`` from the transfer options.
     """
-    bucket = storage.bucket
-    list_storage = storage
-    if key_prefix != storage.key:
-        list_storage = S3Storage(f"s3://{bucket}/{key_prefix}", client=storage.get_client())
 
     def scan_filter(info: FileInfo) -> bool:
         # Zero-byte '/'-terminated "folder marker" objects never transfer
@@ -468,13 +516,14 @@ def scan_s3_source(
             return True
         return item_filter(info)
 
-    scan_options = ScanOptions(
+    scan_options = replace(
+        storage.default_scan_options(),
         recursive=True,
-        page_size=page_size,
-        request_payer=options.get("request_payer"),
+        prefix=key_prefix,
         filter=scan_filter,
+        request_payer=options.get("request_payer"),
     )
-    return list_storage.scan(scan_options)
+    return storage.scan(scan_options)
 
 
 def head_single(
@@ -517,7 +566,9 @@ def head_single(
         ) from exc
     etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
-    # matching transferplan.item_paths' single-item branch.
+    # matching transferplan.item_paths' single-item branch. storage stamps the
+    # producing backend like every listing path, so src_info.storage agrees
+    # with OpResult.src_storage and a filter can reach the backend.
     yield S3FileInfo(
         key=key,
         size=head.get("ContentLength"),
@@ -526,6 +577,7 @@ def head_single(
         storage_class=head.get("StorageClass"),
         head=head,
         compare_key=key.rsplit("/", 1)[-1],
+        storage=src_storage,
     )
 
 
@@ -564,7 +616,7 @@ def require_open_sync_capabilities(
     """Reject an open-route custom side that cannot back a ``sync``.
 
     ``sync`` merge-joins two byte-ordered listings, so a custom side must
-    declare ``SORTED_SCAN`` (an unsorted side would manufacture phantom
+    declare ``SORTABLE_SCAN`` (an unsorted side would manufacture phantom
     new/delete pairs - with ``--delete``, destination corruption). On top of
     that: an ``opens3`` source needs ``OPEN_READ``; an ``s3open`` destination
     needs ``OPEN_WRITE`` plus ``DELETE`` when ``delete`` removes orphans (the
@@ -572,10 +624,10 @@ def require_open_sync_capabilities(
     """
     if plan.paths_type == "opens3":
         custom: Storage = plan.src
-        needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_READ
+        needed = StorageCapability.SORTABLE_SCAN | StorageCapability.OPEN_READ
     elif plan.paths_type == "s3open":
         custom = plan.dest
-        needed = StorageCapability.SORTED_SCAN | StorageCapability.OPEN_WRITE
+        needed = StorageCapability.SORTABLE_SCAN | StorageCapability.OPEN_WRITE
         if delete:
             needed |= StorageCapability.DELETE
     else:
@@ -602,8 +654,6 @@ def open_upload_items(
     *,
     dest_bucket: str,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
@@ -626,25 +676,28 @@ def open_upload_items(
     (rc 0), matching an empty S3 prefix listing.
     """
     if plan.dir_op:
+        # The recursive listing filters inside the scan (the scan_pages contract),
+        # so a custom source backend can push the predicate to its source.
         infos: Iterator[FileInfo] = plan.src.scan(
-            ScanOptions(
+            walk_source_scan_options(
+                plan.src,
                 recursive=True,
-                follow_symlinks=follow_symlinks,
-                detect_symlink_loops=detect_symlink_loops,
-                on_warning=transferrer.warn,
+                on_warning=transferrer.warner.warn,
+                item_filter=item_filter,
             )
         )
     else:
-        single = plan.src.get_fileinfo(follow_symlinks=follow_symlinks, on_warning=transferrer.warn)
+        single = _single_source_info(plan, transferrer)
         if single is None:
             raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
                 operation=operation,
             )
+        # get_fileinfo has no filter, so an excluded single source is dropped here.
         infos = iter([single])
+        if item_filter is not None:
+            infos = (info for info in infos if item_filter(info))
     for info in infos:
-        if item_filter is not None and not item_filter(info):
-            continue
         yield open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
 
 
@@ -682,7 +735,6 @@ def open_download_items(
     src_storage: S3Storage,
     *,
     transferrer: Transferrer,
-    page_size: int,
     item_filter: FileFilter | None,
     options: TransferOptions,
     operation: str,
@@ -705,14 +757,15 @@ def open_download_items(
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         )
-    elif not src_storage.key:
+    elif src_storage.bucket and not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket custom`): aws lists
         # the bucket and exact-matches nothing -> zero items (the built-in
-        # download path's behavior, without issuing the listing).
+        # download path's behavior, without issuing the listing). A bucketless
+        # service root (`cp s3:// custom`) instead falls to head_single, whose
+        # empty Bucket hits botocore's Invalid-bucket ParamValidation like aws.
         return
     else:
         infos = head_single(
@@ -787,6 +840,8 @@ def cp_case_gate(
     *,
     recursive: bool,
     options: TransferOptions,
+    transferrer: Transferrer,
+    item_filter: FileFilter | None,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -794,15 +849,33 @@ def cp_case_gate(
     The destination tree is enumerated up front (through ``plan.dest.scan``)
     into the exact-case membership set the gate's AlwaysSync arm consults -
     the observable equivalent of aws's reverse file generator + comparator.
-    Each entry's stamped ``compare_key`` is the root-relative membership key.
-    Scoped to ``s3local`` (a case-insensitive *filesystem* destination); a
-    custom ``s3open`` destination owns its own key space, so it never scans
-    the custom side here.
+    That reverse enumeration is a full walk of the destination side: aws
+    builds it with the run's ``follow_symlinks`` parameter, routes its
+    warnings into the shared result queue (they count toward rc 2), and runs
+    the ``--exclude`` / ``--include`` filters over it - so the membership scan
+    here reads the destination storage's own source-config
+    (``default_scan_options``), warns into the transfer rollup, and applies
+    the run's ``item_filter``, exactly like a source walk. Each entry's
+    stamped ``compare_key`` is the root-relative membership key. Scoped to
+    ``s3local`` (a case-insensitive *filesystem* destination); a custom
+    ``s3open`` destination owns its own key space, so it never scans the
+    custom side here.
     """
     mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
-    dest_keys = {_ckey(info) for info in plan.dest.scan(ScanOptions(recursive=True))}
+    # paths_type == "s3local" guarantees a LocalStorage destination here.
+    dest_keys = {
+        _ckey(info)
+        for info in plan.dest.scan(
+            walk_source_scan_options(
+                plan.dest,
+                recursive=True,
+                on_warning=transferrer.warner.warn,
+                item_filter=item_filter,
+            )
+        )
+    }
     return CaseConflictGate(mode, dest_keys)
 
 
@@ -836,42 +909,39 @@ def sync_entries(
     root: str,
     item_filter: FileFilter | None,
     transferrer: Transferrer,
-    follow_symlinks: bool,
-    detect_symlink_loops: bool,
-    page_size: int,
     options: TransferOptions,
 ) -> Iterator[tuple[str, FileInfo]]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
     A local side walks in aws-cli byte order with its warnings routed to
     the transfer rollup (both sides warn, aws parity); an S3 side is the
-    shared anchored listing (folder markers dropped, ``request_payer`` /
-    ``page_size`` forwarded - aws-cli maps them onto the destination
-    listing too). Both sides' producers stamp ``compare_key`` (the merge-join
-    axis), so ``item_filter`` reads it and the pair key is taken from it.
+    shared anchored listing (folder markers dropped). Each side reads its own
+    source-config from its storage (a local side's ``follow_symlinks``, an S3
+    side's ``page_size`` / ``fetch_owner``) via ``default_scan_options``, so both
+    the source and the destination listing honor the storage each was built with -
+    aws-cli maps the same knobs onto the destination listing too. Both sides'
+    producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
+    it and the pair key is taken from it.
     """
     if isinstance(storage, S3Storage):
         key_prefix = root[len(storage.bucket) + 1 :]
         for info in scan_s3_source(
             storage,
             key_prefix=key_prefix,
-            page_size=page_size,
             item_filter=item_filter,
             options=options,
         ):
             yield _ckey(info), info
         return
     for info in storage.scan(
-        ScanOptions(
+        walk_source_scan_options(
+            storage,
             recursive=True,
             sort=True,  # the merge-join needs both sides byte-ordered
-            follow_symlinks=follow_symlinks,
-            detect_symlink_loops=detect_symlink_loops,
-            on_warning=transferrer.warn,
+            on_warning=transferrer.warner.warn,
+            item_filter=item_filter,  # each side's visibility filter, applied in the scan
         )
     ):
-        if item_filter is not None and not item_filter(info):
-            continue
         yield _ckey(info), info
 
 

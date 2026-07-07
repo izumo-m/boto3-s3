@@ -120,6 +120,43 @@ class TestWriteSlot:
             info = cast("dict[str, Any]", r.extra_info)
             assert info["write"]["ETag"] == _etag(contents[r.key]), r.key
 
+    def test_filter_read_never_satisfies_the_write_slot(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        # A sync content filter reading the pre-overwrite destination through
+        # the run's own client (pair.dest.storage.open(..., "rb")) records a
+        # GetObject for the very key the upload then writes. Reads and writes
+        # are stored separately, so the write slot still surfaces the
+        # PutObject response - the OLD object's payload must not win.
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "k.txt").write_bytes(b"new-bytes!")
+        seed = tmp_path / "seed.txt"
+        seed.write_bytes(b"old")
+        S3().cp(str(seed), f"s3://{BUCKET}/pre/k.txt")
+
+        read_back: list[bytes] = []
+
+        def reads_dest(pair: Any) -> bool:
+            dest = pair.dest
+            assert dest is not None and dest.storage is not None
+            with dest.storage.open(dest.key, "rb") as fh:
+                read_back.append(fh.read())
+            return True
+
+        out, cb = _sink()
+        S3().sync(
+            str(src),
+            f"s3://{BUCKET}/pre/",
+            update_filter=reads_dest,
+            capture_response=True,
+            on_result=cb,
+        )
+        assert read_back == [b"old"]  # the filter really read the old object
+        copied = [r for r in out if r.outcome is OpOutcome.SUCCEEDED]
+        info = cast("dict[str, Any]", copied[0].extra_info)
+        assert info["ETag"] == info["write"]["ETag"] == _etag(b"new-bytes!")
+
 
 class TestBackwardCompatWhenOff:
     def test_upload_without_flag_has_no_extra_info(self, s3_client: Any, tmp_path: Path) -> None:
@@ -189,7 +226,8 @@ class TestClientHygiene:
         assert results[0].extra_info is None
         capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
         assert capture is not None
-        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._writes == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._reads == {}  # pyright: ignore[reportPrivateUsage]
 
     def test_no_overwrite_skip_drains_the_captured_412(
         self, s3_client: Any, tmp_path: Path
@@ -222,7 +260,8 @@ class TestClientHygiene:
         assert results[0].extra_info is None
         capture = transferrer._capture  # pyright: ignore[reportPrivateUsage]
         assert capture is not None
-        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._writes == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._reads == {}  # pyright: ignore[reportPrivateUsage]
 
     def test_exit_unregisters_capture_even_when_shutdown_raises(
         self, s3_client: Any, tmp_path: Path
@@ -255,7 +294,8 @@ class TestClientHygiene:
         # Handlers left the client despite the raise: a later PutObject on the
         # same client must not feed the old capture store.
         client.put_object(Bucket=BUCKET, Key="later.txt", Body=b"y")
-        assert capture._store == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._writes == {}  # pyright: ignore[reportPrivateUsage]
+        assert capture._reads == {}  # pyright: ignore[reportPrivateUsage]
 
 
 class TestStreamRoutes:
@@ -413,7 +453,9 @@ class TestSyncDelete:
         src = tmp_path / "src"
         src.mkdir()
         out, cb = _sink()
-        S3().sync(str(src), f"s3://{BUCKET}/dst", delete=True, capture_response=True, on_result=cb)
+        S3().sync(
+            str(src), f"s3://{BUCKET}/dst", delete_filter=True, capture_response=True, on_result=cb
+        )
         assert len(out) == 1  # just the orphan removal (nothing to transfer)
         info = cast("dict[str, Any]", out[0].extra_info)
         assert "delete" in info  # the batched DeleteObjects entry, reconstructed

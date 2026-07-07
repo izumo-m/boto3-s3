@@ -5,6 +5,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-07
+
+- `LocalStorage(path, fsync=True)` makes an `mv` download durable: the file (and
+  its parent dir on POSIX) is fsynced before the S3 source is deleted, closing the
+  crash window aws-cli leaves. Off by default (aws parity).
+- Scan settings that describe how a source is read now live on the `Storage`
+  constructor — `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
+  `S3Storage(url, page_size=…, fetch_owner=…)` — and are no longer `cp` / `mv` /
+  `sync` / `ls` / `rm` (or `walk_local`) arguments.
+- `cp` / `mv` `--case-conflict`'s destination membership scan now walks like
+  aws's reverse enumeration: it honors the destination storage's
+  `follow_symlinks`, applies the run's filter, and counts its walk warnings.
+- `capture_response` now stores read and write responses separately, so a
+  same-run `GetObject` on a key being written (e.g. a content filter reading
+  the pre-overwrite destination) can never surface as the write response.
+- `S3.sync` now splits the copy/delete decision into three per-lane filters:
+  `create_filter` (new entries), `update_filter` (existing, was `compare`),
+  `delete_filter` (orphans, was `delete`); a custom `update_filter` is only
+  ever handed an entry present on both sides, never a one-sided one.
+- Any of `S3.sync`'s three filters can run on a caller-supplied thread pool via
+  `ParallelFilter(fn, executor=…)` (replaces `ParallelCompare`, which was
+  update-only and made its own pool).
+- `S3Storage.open(key, "rb")` now reads an object (`GetObject`), so a
+  content-based filter can read S3 bytes; `"wb"` stays unimplemented.
+- A backend's `scan_pages` now applies `ScanOptions.filter` itself and returns
+  already-filtered pages, so a custom backend can filter at its source
+  (`storage.sieve_pages` wraps raw pages); `Storage.scan` re-applies the filter
+  as a safety net unless the backend declares `scan_pages_filters = True` (the
+  built-ins do).
+- Every scanned entry now carries its producing backend as `FileInfo.storage`;
+  `SyncPair.src_storage` / `dest_storage` are gone - read `pair.src.storage` /
+  `pair.dest.storage`.
+- `StorageCapability.SORTED_SCAN` is renamed `SORTABLE_SCAN` (the promise is a
+  byte-orderable scan - `ScanOptions(sort=True)` - not an always-sorted stream).
+- S3 bucket listing moved to a dedicated `S3Storage.list_buckets` (the bare
+  `s3://` service root); `scan` enumerates objects only, and `ScanOptions` drops
+  `bucket_name_prefix` / `bucket_region`. `ls` behaviour is unchanged.
+- `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator` -
+  subclass its public seams and inject via `LocalStorage(path, walker=...)`; one
+  walker may be shared across storages.
+- Each local entry carries its followed `stat_result` and an `is_symlink` flag on
+  `LocalFileInfo`, for a `filter` / `on_result` to read.
+
 ## [0.4.0] - 2026-07-03
 
 - Fix: `cp` / `mv` now apply `filter=` to a single S3 source too (an excluded
@@ -154,7 +197,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.5.0...HEAD
+[0.5.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.4.0...boto3-s3-v0.5.0
+[0.4.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.3.0...boto3-s3-v0.4.0
 [0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.2.0...boto3-s3-v0.3.0
 [0.2.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.1.0...boto3-s3-v0.2.0
 [0.1.0]: https://github.com/izumo-m/boto3-s3/releases/tag/boto3-s3-v0.1.0

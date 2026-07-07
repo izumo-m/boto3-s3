@@ -20,6 +20,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
+from boto3_s3 import transfer
 from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
@@ -75,6 +76,7 @@ def _run(
     options: TransferOptions | None = None,
     config: TransferConfig = _SYNC_CONFIG,
     is_move: bool = False,
+    dest_storage: LocalStorage | None = None,
 ) -> tuple[list[ApiCall], list[ApiCall], list[OpResult], Transferrer]:
     client, calls = make_recording_client(responses)
     source_client = None
@@ -95,6 +97,7 @@ def _run(
         client,
         source_client=source_client,
         src_storage=src_storage,
+        dest_storage=dest_storage,
         transfer_config=config,
         options=options,
         is_move=is_move,
@@ -542,6 +545,18 @@ class TestNonTransferOutcomes:
         assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
         assert results[0].transfer_type is TransferType.DOWNLOAD
 
+    def test_warner_sink_is_exposed_and_counts_into_the_rollup(self) -> None:
+        # A backend walk's ScanOptions.on_warning targets transferrer.warner.warn
+        # (the shared sink) directly, not a Transferrer method; it still emits a
+        # WARNED record and counts into the rollup exposed on the Transferrer.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.", key="x")
+        assert transferrer.warned == 1
+        assert [result.outcome for result in results] == [OpOutcome.WARNED]
+        assert results[0].transfer_type is TransferType.UPLOAD
+
     def test_progress_events_accumulate(self, tmp_path: Path) -> None:
         # Driven through a download: the canned GetObject Body is genuinely
         # read by s3transfer's I/O loop, which is what fires progress deltas
@@ -866,6 +881,141 @@ class TestMove:
             OpOutcome.SKIPPED,
         ]
         assert all(result.transfer_type is TransferType.MOVE for result in results)
+
+
+class TestDownloadMoveFsync:
+    """``LocalStorage(fsync=True)``: the durability barrier before an mv's delete.
+
+    A library-only opt-in (off by default = aws parity): a ``mv`` whose download
+    lands on a local destination fsyncs the file (and its parent dir on POSIX)
+    before the S3 source is deleted, closing s3transfer's crash window (the source
+    is deleted while the bytes may still be only in the page cache).
+    """
+
+    def _item(self, tmp_path: Path) -> TransferItem:
+        return TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "out" / "a.bin"),
+        )
+
+    def _get_object_response(self) -> dict[str, Any]:
+        return {"Body": io.BytesIO(b"payload"), "ContentLength": 7, "ETag": '"abc123"'}
+
+    def _fsync_spy(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Record every ``os.fsync`` while still performing the real flush."""
+        real_fsync = os.fsync
+        fds: list[int] = []
+
+        def spy(fd: int) -> None:
+            fds.append(fd)
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", spy)
+        return fds
+
+    def test_fsyncs_file_and_dir_then_deletes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fds = self._fsync_spy(monkeypatch)
+        item = self._item(tmp_path)
+        calls, _, results, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [self._get_object_response(), {}],
+            is_move=True,
+            dest_storage=LocalStorage(tmp_path, fsync=True),
+        )
+        # The delete still runs - fsync only precedes it. POSIX fsyncs the file
+        # and its parent directory (2); Windows the file alone (1).
+        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert len(fds) == (2 if os.name == "posix" else 1)
+        assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_fsync_failure_keeps_the_s3_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(fd: int) -> None:
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(os, "fsync", boom)
+        item = self._item(tmp_path)
+        # The DeleteObject is never issued (fsync gates it), so no response for it.
+        calls, _, results, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [self._get_object_response()],
+            is_move=True,
+            dest_storage=LocalStorage(tmp_path, fsync=True),
+        )
+        # The bytes are on disk, but the source survives and the move reports failed.
+        assert _ops(calls) == ["GetObject"]
+        assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "Input/output error" in str(results[0].error)
+        assert str(results[0].error).startswith("Failed to persist ")
+
+    def test_default_storage_does_not_fsync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fds = self._fsync_spy(monkeypatch)
+        item = self._item(tmp_path)
+        calls, _, _, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [self._get_object_response(), {}],
+            is_move=True,
+            dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws parity
+        )
+        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert fds == []
+        assert transferrer.succeeded == 1
+
+    def test_windows_branch_opens_for_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows' os.fsync is FlushFileBuffers, which needs GENERIC_WRITE on
+        # the handle: the off-POSIX branch must open O_RDWR (a read-only fd
+        # fails every flush there), while POSIX keeps the read-only open.
+        target = tmp_path / "a.bin"
+        target.write_bytes(b"payload")
+        real_open = os.open
+        opens: list[tuple[str, int]] = []
+
+        def spy(path: str, flags: int, *args: Any, **kwargs: Any) -> int:
+            opens.append((path, flags))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", spy)
+        monkeypatch.setattr(os, "name", "nt")
+        transfer._FsyncDest(str(target))._fsync()  # pyright: ignore[reportPrivateUsage]
+        # One open (the file; no directory fsync off POSIX), write access set.
+        assert [path for path, _ in opens] == [str(target)]
+        assert opens[0][1] & os.O_RDWR == os.O_RDWR
+
+    def test_cp_download_never_fsyncs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The barrier is scoped to mv; a plain cp deletes no source, so even a
+        # fsync=True destination skips it.
+        fds = self._fsync_spy(monkeypatch)
+        item = self._item(tmp_path)
+        calls, _, _, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [self._get_object_response()],
+            dest_storage=LocalStorage(tmp_path, fsync=True),
+        )
+        assert _ops(calls) == ["GetObject"]
+        assert fds == []
+        assert transferrer.succeeded == 1
 
 
 class TestChecksumOptions:

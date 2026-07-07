@@ -30,10 +30,11 @@ Under `--debug`, credentials actually appear in **botocore's logger output**, no
 in the `http.client` wire dump (verified against live botocore).
 
 - In `botocore/endpoint.py`, `logger.debug("Sending http request: %s", request)`
-  has a `request` that is an `AWSPreparedRequest`. Its `__repr__` includes
-  `headers=`, so the signed `Authorization: AWS4-HMAC-SHA256 Credential=AKIA.../...,
-  Signature=...` and the `X-Amz-Security-Token` header are emitted in full as a
-  **dict repr**.
+  has a `request` that is an `AWSPreparedRequest`. Its `__repr__` renders
+  `headers=` as the `HTTPHeaders` text form - plain `Header: value` lines - so the
+  signed `Authorization: AWS4-HMAC-SHA256 Credential=AKIA.../..., Signature=...` and
+  the `X-Amz-Security-Token: ...` header are emitted in full (older botocore
+  rendered a Python dict repr; the patterns cover both).
 - `botocore/auth.py` emits `CanonicalRequest:\n<...>`, `StringToSign:\n<...>`, and
   `Signature:\n<hex>` at DEBUG level (the first two include the signed headers,
   i.e. `x-amz-security-token`).
@@ -46,6 +47,12 @@ in the `http.client` wire dump (verified against live botocore).
   resolution issues an STS call whose response body carries the temporary
   `SecretAccessKey` and `SessionToken` (the credentials themselves), in XML or
   JSON. These are masked in both encodings.
+- The same `Response body:` DEBUG line fires for **error** responses. A
+  `SignatureDoesNotMatch` (HTTP 403) body echoes the request's canonical form back
+  as `<CanonicalRequestBytes>` / `<StringToSignBytes>` - a space-separated hex dump
+  that `bytes.fromhex` reconstructs verbatim, *including* the signed
+  `x-amz-security-token` / `x-amz-server-side-encryption-customer-key` header lines.
+  The text-form patterns never see the hex twin, so the whole dump is masked.
 
 These all go through Python `logging`, so a **`logging.Filter` attached to the
 handler** can capture and mask all of them. The `http.client` wire dump
@@ -74,7 +81,9 @@ ancestor logger**. Hence the only thing that can catch records from
 `botocore.auth` and the like is the filter on the handler attached to the
 `botocore` logger. The filter rewrites the record's final formatted message via
 `mask_text` and clears `record.args` (so that re-formatting cannot bring the raw
-values back).
+values back). It also masks any attached exception traceback (`record.exc_text`,
+which the handler's formatter appends from `exc_info`), so a secret embedded in an
+exception message is redacted on that channel too, not only in the message.
 
 ### 3.3 The `http.client` wire dump is not handled
 
@@ -95,8 +104,10 @@ account issued a request, **the last 4 characters are kept** (`***MPLE`).
 
 ### 4.1 Target patterns
 
-We pick up both the URL/query forms and the **dict header repr form** that
-botocore emits (`'X-Amz-Security-Token': '...'`, including `b'...'`).
+We pick up the URL/query forms, the plain `Header: value` line form (how
+botocore's `AWSPreparedRequest` repr renders headers), and the **dict-repr form**
+that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
+`'SSECustomerKey': '...'`, including `b'...'`).
 
 | Target | Example (input -> output) | Notation |
 |---|---|---|
@@ -107,6 +118,7 @@ botocore emits (`'X-Amz-Security-Token': '...'`, including `b'...'`).
 | SSO bearer token (`x-amz-sso_bearer_token` header, dict / colon form - the `sso GetRoleCredentials` request botocore logs at DEBUG; the token mints role credentials for every account/role the user can access) | `'x-amz-sso_bearer_token': 'aoal-...'` -> `'x-amz-sso_bearer_token': '***'` | `***` |
 | sso-oidc token-endpoint bodies (`"accessToken"` / `"refreshToken"` / `"idToken"` / `"clientSecret"` in a CreateToken / RegisterClient `Response body:` line) | `"accessToken": "aoat-..."` -> `"accessToken": "***"` | `***` |
 | STS response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML and `"SecretAccessKey"`/`"SessionToken"` JSON; an AssumeRole / GetSessionToken body logged at DEBUG) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>` | `***` |
+| Signature-mismatch byte-dump (`<CanonicalRequestBytes>` / `<StringToSignBytes>` in a `SignatureDoesNotMatch` response body - a hex dump that reconstructs the signed headers) | `<CanonicalRequestBytes>78 2d 61 ...</CanonicalRequestBytes>` -> `<CanonicalRequestBytes>***</CanonicalRequestBytes>` | `***` (whole dump) |
 | SSE-C customer key (`x-amz-server-side-encryption-customer-key` and the `copy-source` variant, dict / colon form, case-insensitive) | `'x-amz-server-side-encryption-customer-key': '<b64>'` -> `'...customer-key': '***'` | `***`. The `-md5` companion header (a non-secret hash) is kept |
 | SSE-C customer key, boto3 parameter form (`'SSECustomerKey'` / `'CopySourceSSECustomerKey'` in a logged kwargs dict - s3transfer logs each task's `extra_args` at DEBUG *before* botocore base64-encodes the key) | `'SSECustomerKey': '<raw key>'` -> `'SSECustomerKey': '***'` (str or bytes repr) | `***`. The `...KeyMD5` companion is kept |
 | Proxy URL userinfo | `https://user:pass@proxy:8080` -> `https://***:***@proxy:8080` | `***:***` (per `mask_proxy_url`) |
@@ -141,8 +153,9 @@ botocore emits (`'X-Amz-Security-Token': '...'`, including `b'...'`).
 ## 7. Tests
 
 - `tests/lib/test_masking.py`: the replacement notation (`***` / `***MPLE`), proxy
-  (contrasting output against `mask_proxy_url` for a match), the dict header repr
-  form and the `Signature:\n` form, `set_stream_logger` (handler attachment,
+  (contrasting output against `mask_proxy_url` for a match), the header-line and
+  dict-repr forms and the `Signature:\n` form, the signature-mismatch byte-dump,
+  the exception-traceback channel, `set_stream_logger` (handler attachment,
   toggling `mask_secrets`, masking of child-logger propagation), and being pure
   stdlib with no dependencies.
 - `tests/cli/unit/test_debug_logging.py`: that `--debug` attaches a masking handler

@@ -5,6 +5,16 @@ Provenance: aws-cli's ``tests/functional/s3/test_ls_command.py``
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py`` (``ListCommand``).
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
+
 Adaptation rules (aws-cli harness -> ``tests.utils.recorder``):
 
 - ``self.parsed_responses`` / ``self.operations_called`` become

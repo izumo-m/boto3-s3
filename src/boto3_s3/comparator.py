@@ -13,16 +13,19 @@ copy or delete. This module is layer two's material:
   buries its strategy calls in the merge loop; splitting them keeps each
   side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
-- A :data:`PairFilter` is a copy judgment: a predicate over a pair where
-  ``True`` copies the source. It is what ``S3.sync(compare=...)`` selects -
-  the size+time default, a content strategy (``EtagComparison`` / ``ChecksumComparison``),
-  or a caller's own. (``S3.sync``'s delete lane instead narrows with a
-  ``FileFilter`` over the destination-only orphan.)
+- A :data:`PairFilter` is the **update** judgment: a predicate over a
+  both-sides pair where ``True`` re-copies the source over the destination. It
+  is what ``S3.sync(update_filter=...)`` selects - the size+time default, a
+  content strategy (``EtagComparison`` / ``ChecksumComparison``), or a caller's
+  own. ``S3.sync`` only ever hands it an update pair (both sides present), so it
+  never faces a ``None`` side; the new (source-only) lane is governed by
+  ``create_filter`` and the delete lane by ``delete_filter``, each a ``FileFilter``
+  over the one side it has.
 - :func:`compare_size_time` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); it is the judgment
   behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
-  selects for ``compare=None``. The direction is read from
+  selects for ``update_filter=None``. The direction is read from
   ``pair.transfer_type``.
 - :class:`ContentComparison` is the shared template of the content
   strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
@@ -41,9 +44,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
-from boto3_s3.types import FileInfo, LocalFileInfo, TransferType
+from boto3_s3.types import FileInfo, S3FileInfo, TransferType
+
+if TYPE_CHECKING:
+    from concurrent.futures import Executor
+
+    from boto3_s3.storage import Storage
 
 _T = TypeVar("_T")
 
@@ -63,6 +71,13 @@ class SyncPair:
     - both set: the key exists on both sides (copy is an *update*),
     - ``dest`` is ``None``: source-only (copy is a *new* transfer),
     - ``src`` is ``None``: destination-only (the delete candidate).
+
+    The backend each side was listed from rides on that side's entry
+    (``pair.src.storage`` / ``pair.dest.storage``, stamped by the producing
+    ``Storage.scan``): a content ``update_filter=`` strategy reads the non-S3
+    side's bytes through its ``Storage.open`` - so content comparison works for any
+    backend, not just a local filesystem. A lane only reads the storage of a side
+    it has (the present ``FileInfo``), so a ``None`` side never needs one.
     """
 
     key: str
@@ -76,29 +91,67 @@ PairFilter = Callable[[SyncPair], bool]
 
 
 @dataclass(frozen=True, slots=True)
-class ParallelCompare:
-    """Run a content ``compare=`` strategy on a thread pool (``S3.sync`` only).
+class ParallelFilter(Generic[_T]):
+    """Run one ``S3.sync`` lane's decision on a caller-supplied thread pool.
 
-    A value container, **not** a callable: ``S3.sync`` recognizes it and runs
-    the wrapped ``compare`` concurrently on up to ``workers`` threads, deciding
-    the both-sides (update) pairs - the ones where a content strategy does its
-    I/O - in parallel. Passing it is observationally identical to passing
-    ``compare`` bare: the same pairs are copied and the exit is the same, only
-    faster. The wrapped ``compare`` must be thread-safe;
+    A value container, **not** a callable: ``S3.sync`` recognizes it in any of
+    ``create_filter`` / ``update_filter`` / ``delete_filter`` and runs the wrapped
+    ``decide`` on ``executor`` instead of on the calling thread, so a lane whose
+    predicate does per-entry I/O decides many entries concurrently - a content
+    ``update_filter=`` strategy (``EtagComparison`` / ``ChecksumComparison``), or a
+    ``create`` / ``delete`` filter that reads bytes / object tags / attributes.
+    Passing it is observationally identical to passing ``decide`` bare, only
+    faster - **except** that parallelizing ``create_filter`` makes the
+    ``--case-conflict`` "first key wins" order non-deterministic (a library-only
+    knob, so no ``aws s3`` parity is at stake). The result set and the exit are
+    otherwise unchanged.
+
+    ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
+    creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool
+    across lanes (pass the same object to each ``ParallelFilter``) or giving each
+    lane its own, are the caller's to arrange - but the ``sync`` call itself must
+    **not** run as a task on that same pool: the lane blocks its thread waiting
+    for decide futures that need a free worker, so a bounded pool driving both
+    deadlocks. The wrapped ``decide`` runs on that
+    pool's threads, so it must be thread-safe;
     :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
-    :class:`~boto3_s3.etagcompare.EtagComparison` are. New (destination-missing)
-    pairs and the ``--case-conflict`` check stay on the calling thread in
-    compare-key order, so they remain deterministic.
+    :class:`~boto3_s3.etagcompare.EtagComparison` are (read-only over their
+    fields, S3-side clients built at construction; a botocore client is safe to
+    share for concurrent calls). A
+    ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
+    picklable) - the pool must be thread-based.
 
-    ``workers`` defaults to the sync's ``transfer_config.max_concurrency``.
+    ``_T`` is the wrapped predicate's argument: :class:`SyncPair` for a
+    ``update_filter`` (a :data:`PairFilter`), :class:`~boto3_s3.types.FileInfo`
+    for ``create_filter`` / ``delete_filter`` (a
+    :data:`~boto3_s3.types.FileFilter`).
     """
 
-    compare: PairFilter
-    workers: int | None = None
+    decide: Callable[[_T], bool]
+    executor: Executor
 
-    def __post_init__(self) -> None:
-        if self.workers is not None and self.workers < 1:
-            raise ValueError(f"ParallelCompare workers must be >= 1, got {self.workers}")
+
+def _byte_ordered(
+    entries: Iterable[tuple[str, FileInfo]], side: str
+) -> Iterator[tuple[str, FileInfo]]:
+    """Dev-only pass-through that asserts a side ascends by ``compare_key``.
+
+    :meth:`Comparator.compare`'s merge-join assumes both sides arrive in UTF-8
+    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str`` order is code-point
+    = byte order). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
+    order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
+    ``--delete`` the deletion of files present on both sides. This trips a loud
+    ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call
+    site, so it is compiled out entirely under ``-O`` (zero production cost).
+    """
+    prev: str | None = None
+    for key, info in entries:
+        assert prev is None or key >= prev, (
+            f"{side} sync stream is not byte-ordered by compare_key "
+            f"({prev!r} then {key!r}); a SORTABLE_SCAN backend must yield ascending keys"
+        )
+        prev = key
+        yield key, info
 
 
 @dataclass(frozen=True)
@@ -112,7 +165,10 @@ class Comparator:
     ordering contract (S3 byte order; the local walk sorts to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
     to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
-    stamped onto every emitted pair - context, not a judgment.
+    stamped onto every emitted pair - context, not a judgment. Each side's backend
+    already rides on its ``FileInfo`` (``pair.src.storage`` / ``pair.dest.storage``,
+    stamped by the producing ``Storage.scan``), so a content ``update_filter=``
+    strategy can open the non-S3 side of any pair without the merge threading it.
     """
 
     transfer_type: TransferType
@@ -129,6 +185,9 @@ class Comparator:
         without materializing either side.
         """
         transfer_type = self.transfer_type
+        if __debug__:  # dev guard: catch an unsorted SORTABLE_SCAN side (compiled out under -O)
+            src_entries = _byte_ordered(src_entries, "source")
+            dest_entries = _byte_ordered(dest_entries, "destination")
         src_iter = iter(src_entries)
         dest_iter = iter(dest_entries)
         src = next(src_iter, None)
@@ -159,10 +218,12 @@ def compare_size_time(
 
     Not a public building block: it implements
     :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
-    for ``compare=None``.
+    for ``update_filter=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
-    direction-asymmetric). A source-only pair always copies (aws-cli's
-    ``MissingFileSync``). For a pair present on both sides:
+    direction-asymmetric). ``S3.sync`` hands this only both-sides pairs (a
+    source-only pair is ``create_filter``'s lane); its dest-``None`` branch is a
+    defensive fallback that copies, matching aws-cli's ``MissingFileSync``, when
+    a strategy is called standalone. For a pair present on both sides:
 
     - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
       Ignored when ``exact_timestamps`` is also set: the flags fill the same
@@ -176,7 +237,7 @@ def compare_size_time(
       ``ExactTimestampsSync``; uploads/copies are unaffected).
 
     The ``no_overwrite`` write-guard is orthogonal and lives in the ``S3.sync``
-    loop, not here, so it composes with any ``compare=`` strategy. Comparisons
+    loop, not here, so it composes with any ``update_filter=`` strategy. Comparisons
     run at full ``timedelta`` precision (aws-cli's ``total_seconds``). A missing
     ``size`` or ``mtime`` on either side counts as a difference - aws-cli never
     faces one (its listings always carry both), so leaning toward copying is the
@@ -208,19 +269,29 @@ READ_CHUNK = 1024 * 1024
 
 
 class ContentComparison:
-    """The shared skeleton of the content ``compare=`` strategies (``True`` = copy).
+    """The shared skeleton of the content ``update_filter=`` strategies (``True`` = copy).
 
     Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
     with their leaf digest work. What lives here is everything the two must
-    agree on - the missing-source guard, the source-only always-copy, the
-    ``check_size`` size-mismatch decision, and the ``transfer_type`` dispatch
-    onto the two hooks - so the strategies cannot silently drift apart on the
-    decision shape.
+    agree on - the missing-source guard, the defensive source-only copy (``S3.sync``
+    routes source-only pairs to ``create_filter``, so it is reached only when a
+    strategy is called standalone), the ``check_size`` size-mismatch decision, and
+    the split into the two hooks - so the strategies cannot silently drift apart
+    on the decision shape.
+
+    Which side is the S3 object (the stored digest to compare against) is decided
+    by **type** - the ``S3FileInfo`` side - not by the transfer direction, so the
+    other ("readable") side may be any backend: its bytes are read through the
+    ``Storage.open`` carried on that side's entry (``pair.src.storage`` /
+    ``pair.dest.storage``), not a local filesystem path. Both sides S3 -> the
+    s3-to-s3 digest compare; neither side S3 -> nothing to compare against, so copy.
+
+    ``_strategy_name`` is the guard-message name each subclass sets ("etag
+    comparison" / "checksum comparison").
     """
 
     __slots__ = ()
 
-    #: The guard-message name ("etag comparison" / "checksum comparison").
     _strategy_name: ClassVar[str]
 
     # Storage is the subclass's (each declares its own slot).
@@ -240,38 +311,38 @@ class ContentComparison:
         ):
             # Differing sizes mean differing content - copy without trusting the
             # stored digest (MD5 / a fixed-width CRC can collide; the size is
-            # independent evidence) and without reading the local file.
+            # independent evidence) and without reading the readable side.
             return True
-        transfer_type = pair.transfer_type
-        if transfer_type is TransferType.COPY:
+        src_is_s3 = isinstance(src, S3FileInfo)
+        dest_is_s3 = isinstance(dest, S3FileInfo)
+        if src_is_s3 and dest_is_s3:
             return self._copy_differs(src, dest)
-        if transfer_type is TransferType.UPLOAD:
-            local, remote = src, dest
-        elif transfer_type is TransferType.DOWNLOAD:
-            local, remote = dest, src
-        else:  # MOVE / DELETE never reach a copy decision; guard defensively.
-            raise ValueError(
-                f"{self._strategy_name} cannot judge a {transfer_type.value!r} pair: {pair.key!r}"
-            )
-        if not isinstance(local, LocalFileInfo):
-            raise ValueError(
-                f"{self._strategy_name}: no local side for pair {pair.key!r} "
-                f"(transfer_type={transfer_type.value})"
-            )
-        return self._local_remote_differ(local, remote, transfer_type)
+        if dest_is_s3 and not src_is_s3:  # upload-shaped: src is the readable side
+            return self._readable_remote_differ(src.storage, src, dest, pair.transfer_type)
+        if src_is_s3 and not dest_is_s3:  # download-shaped: dest is the readable side
+            return self._readable_remote_differ(dest.storage, dest, src, pair.transfer_type)
+        # Neither side is an S3 object: no stored digest to compare against -> copy.
+        return True
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: whether the two S3 sides' stored digests disagree."""
         raise NotImplementedError
 
-    def _local_remote_differ(
-        self, local: LocalFileInfo, remote: FileInfo, transfer_type: TransferType
+    def _readable_remote_differ(
+        self,
+        storage: Storage | None,
+        readable: FileInfo,
+        remote: FileInfo,
+        transfer_type: TransferType,
     ) -> bool:
-        """Upload/download: whether the local content differs from the S3 side.
+        """Whether the readable side's content differs from the S3 ``remote`` side.
 
-        ``transfer_type`` tells which endpoint the remote entry belongs to
-        (UPLOAD -> the destination, DOWNLOAD -> the source) for a strategy
-        that must reach that endpoint's client.
+        ``storage`` opens the readable side (``storage.open(readable.compare_key,
+        "rb")``) - any backend, not just a local file; ``None`` (a pair built
+        without a backend) means it cannot be read, so the strategy copies.
+        ``transfer_type`` tells which endpoint ``remote`` belongs to (UPLOAD -> the
+        destination, DOWNLOAD -> the source) for a strategy that must reach that
+        endpoint's client.
         """
         raise NotImplementedError
 
@@ -306,7 +377,7 @@ def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 __all__ = [
     "Comparator",
     "PairFilter",
-    "ParallelCompare",
+    "ParallelFilter",
     "SyncPair",
     "all_of",
     "any_of",

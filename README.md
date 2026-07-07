@@ -76,7 +76,7 @@ from boto3_s3 import S3
 s3 = S3()
 
 # Sync a directory tree up to S3, removing remote extras (mirror).
-s3.sync("./site", "s3://my-bucket/site/", delete=True)
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
 
 # Copy a single object up or down.
 s3.cp("./report.csv", "s3://my-bucket/report.csv")
@@ -108,24 +108,45 @@ s3.sync("s3://my-bucket/site/", "./site")       # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 ```
 
-It supports the flags you know from the command:
+`sync` makes one of three decisions per entry — the same three cases as
+`aws s3 sync`, each with its own filter:
 
-- **`delete=True`** — remove destination entries the source no longer has. Items
-  hidden by a filter stay out of deletion too, exactly like `aws s3 sync`.
-- **`compare=`** — how the source and destination are compared: `None` (default)
-  uses size + mtime (equivalently `AwsCliComparison()`, tuned via
-  `AwsCliComparison(size_only=True)` / `(exact_timestamps=True)`); `True` copies
-  everything, `False` copies nothing; or pass a content strategy like
-  `EtagComparison(s3)` / `ChecksumComparison(s3, src, dest)` (wrap either in
-  `ParallelCompare(...)` to decide on a thread pool).
-- **`filter=`** — include/exclude matching; **`dryrun=True`** to
-  preview every transfer and deletion first.
+- **`create_filter`** — whether to **create** an entry that is new (in the source,
+  not yet at the destination). `True` (default) creates every one; `False`
+  creates none; a predicate creates only the ones it keeps. (aws always creates;
+  this is the knob aws does not expose.)
+- **`update_filter`** — for an entry **present on both sides**, whether to
+  **overwrite** it: `None` (default) decides by size + mtime (equivalently
+  `AwsCliComparison()`, tuned via `AwsCliComparison(size_only=True)` /
+  `(exact_timestamps=True)`); `True` always, `False` never (leave existing
+  as-is); or a content strategy `EtagComparison(s3)` /
+  `ChecksumComparison(s3, src, dest)` (wrap any lane's filter in
+  `ParallelFilter(fn, executor=pool)` to decide on a caller-supplied thread pool).
+- **`delete_filter`** — whether to **delete** an orphan (at the destination, no
+  longer in the source). `False` (default) keeps orphans; `True` deletes every
+  one (`aws s3 sync --delete`); a predicate deletes only the ones it keeps. Items
+  hidden by `filter` stay out of deletion too, exactly like `aws s3 sync`.
+
+`create_filter` and `delete_filter` are the two membership knobs (create / delete);
+`update_filter` is the overwrite judgment for the entries on both sides.
+`filter=` is separate — it decides which entries are **visible** at all (pruning
+both sides symmetrically, like `--exclude` / `--include`); **`dryrun=True`**
+previews every transfer and deletion first.
+
+```python
+# Full mirror: create new, overwrite changed, delete removed.
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
+
+# Update-only mirror: refresh existing files and prune deleted ones,
+# but never publish brand-new files.
+s3.sync("./site", "s3://my-bucket/site/", create_filter=False, delete_filter=True)
+```
 
 The content strategies are opt-in submodule imports —
 `from boto3_s3.etagcompare import EtagComparison` /
 `from boto3_s3.checksumcompare import ChecksumComparison` (and
 `from boto3_s3.awsclicompare import AwsCliComparison` to tune the default).
-`ParallelCompare` imports from `boto3_s3` itself.
+`ParallelFilter` imports from `boto3_s3` itself.
 
 Because it runs in-process, sync hands back **structured results that `aws s3`
 can't**: `on_result` fires once per item as the run proceeds, so you know exactly
@@ -142,7 +163,7 @@ def track(r):
     if r.transfer_type is TransferType.UPLOAD and r.outcome is OpOutcome.SUCCEEDED:
         uploaded.append(r.key)
 
-s3.sync("./site", "s3://my-bucket/site/", delete=True, on_result=track)
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 print(f"{len(uploaded)} files uploaded")
 ```
 
@@ -153,10 +174,10 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, recursive, page_size, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. |
+| `ls(target="s3://", *, recursive, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
-| `sync(src, dest, *, delete, filter, compare, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
+| `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
 | `rm(target, *, recursive, filter, dryrun, request_payer, …)` | `rm` | Delete objects (a single key, a recursive prefix, or the folder-marker sweep). |
 | `mb(target, *, tags)` | `mb` | Create the bucket of `target`. |
 | `rb(target)` | `rb` | Delete the (empty) bucket of `target`. |
@@ -289,11 +310,12 @@ s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
 ```
 
 `filter=` also accepts a plain `Callable[[FileInfo], bool]` for arbitrary
-per-item gating. `sync` adds `compare=` and `delete=` (`True` to remove all
-extras, or a filter to remove only matching ones). They answer different
-questions: `filter=` decides **which items take part at all**, while `compare=`
-then decides, for each matched source/destination pair, **whether it actually
-needs copying** (by size + mtime, or by content with `EtagComparison` / `ChecksumComparison`).
+per-item gating. `sync` adds one filter per decision — `create_filter=` (create a
+new entry?), `update_filter=` (overwrite one on both sides?), `delete_filter=`
+(delete an orphan?). They answer different questions from `filter=`: `filter=`
+decides **which items take part at all** (visible on either side), while the
+three lane filters decide **what to do** with the entries that do — create,
+overwrite, delete.
 
 ## Progress, results, cancellation, dry run
 

@@ -37,10 +37,13 @@ def two_path_usage(command: str) -> str:
 
 
 def invalid_bucket_name_message(name: str = "") -> str:
-    """botocore's client-side rejection of an empty / malformed bucket name.
+    """A simplified form of botocore's client-side bad-bucket-name rejection.
 
-    The str form of botocore's ``ParamValidationError``: ``"Parameter
-    validation failed:"`` + newline + report - the message aws prints when it
-    sends the bad name through to the API layer.
+    botocore raises a ``ParamValidationError`` whose str form is ``"Parameter
+    validation failed:"`` + newline + a report, and aws prints that report in
+    full (it continues ``: Bucket name must match the regex ...``). We reproduce
+    only the leading ``Invalid bucket name "<name>"`` line: the charter pins the
+    rc (mb / rb 1, website 252), this stderr text is non-contractual, and the
+    version-fragile regex tail is deliberately omitted.
     """
     return f'Parameter validation failed:\nInvalid bucket name "{name}"'

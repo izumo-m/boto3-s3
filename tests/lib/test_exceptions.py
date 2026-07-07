@@ -173,11 +173,8 @@ class TestBackendExceptionChaining:
 
 class TestPublicReExport:
     @pytest.mark.parametrize("name", CATEGORY_NAMES)
-    def test_top_level_attribute_exists(self, name: str) -> None:
-        assert hasattr(boto3_s3, name)
-
-    @pytest.mark.parametrize("name", CATEGORY_NAMES)
     def test_top_level_identity_matches_module(self, name: str) -> None:
+        # Identity implies existence, so this also covers "re-exported at all".
         assert getattr(boto3_s3, name) is getattr(ex, name)
 
     def test_all_enumerates_the_taxonomy(self) -> None:

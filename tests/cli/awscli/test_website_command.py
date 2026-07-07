@@ -6,6 +6,16 @@ kept verbatim so the file stays diffable against the aws-cli original; the
 aws-cli harness's ``assert_params_for_cmd`` becomes the recording client
 (``tests/utils/recorder.py``) plus an explicit rc/params assert, like the
 other ports.
+
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py`` (``WebsiteCommand``).
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
 """
 
 from __future__ import annotations

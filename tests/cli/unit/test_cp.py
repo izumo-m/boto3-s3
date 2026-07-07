@@ -453,6 +453,28 @@ class TestStreaming:
         assert rc == 1
         assert "fatal error: invalid literal for int()" in captured.err
 
+    def test_unexpected_pipeline_exception_is_a_fatal_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # aws wraps the whole pipeline in CommandResultRecorder.__exit__, which
+        # converts ANY escaping exception into "fatal error: ..." rc 1 (e.g. a
+        # RecursionError from a pathologically deep tree). The run-span catch
+        # must be that broad - the dispatcher's 255 is for pre-pipeline errors.
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def boom(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", boom)
+        ctx, _ = _recording_ctx([])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "fatal error: maximum recursion depth exceeded" in captured.err
+
     def test_expected_size_non_integer_ignored_off_the_stream_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -614,6 +636,46 @@ def _get_response() -> dict[str, Any]:
     import io
 
     return {"Body": io.BytesIO(b"x"), "ContentLength": 1, "ETag": '"u"'}
+
+
+class TestSourceScanWiring:
+    """The CLI delivers --follow-symlinks / --page-size as Storage constructor
+    config (resolve_locations), not per-operation arguments - pin that the
+    flags still shape the walk / listing end to end."""
+
+    def test_no_follow_symlinks_reaches_the_source_walk(self, tmp_path: Path) -> None:
+        (tmp_path / "real.txt").write_bytes(b"x")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+        ctx, calls = _recording_ctx([{}])
+        rc = cli.main(
+            ["cp", str(tmp_path), "s3://bucket/pre/", "--recursive", "--no-follow-symlinks"],
+            ctx=ctx,
+        )
+        assert rc == 0
+        assert [c.params["Key"] for c in calls if c.operation == "PutObject"] == ["pre/real.txt"]
+
+    def test_follow_symlinks_is_the_default(self, tmp_path: Path) -> None:
+        (tmp_path / "real.txt").write_bytes(b"x")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+        ctx, calls = _recording_ctx([{}, {}])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
+        assert rc == 0
+        assert sorted(c.params["Key"] for c in calls if c.operation == "PutObject") == [
+            "pre/link.txt",
+            "pre/real.txt",
+        ]
+
+    def test_page_size_reaches_the_source_listing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --page-size is baked into the S3Storage the CLI builds; the paginator
+        # translates it to MaxKeys on the wire.
+        monkeypatch.chdir(tmp_path)
+        ctx, calls = _recording_ctx([_case_listing(), _get_response(), _get_response()])
+        rc = cli.main(["cp", "s3://b/cc/", "out", "--recursive", "--page-size", "5"], ctx=ctx)
+        assert rc == 0
+        assert calls[0].operation == "ListObjectsV2"
+        assert calls[0].params["MaxKeys"] == 5
 
 
 class TestCaseConflict:

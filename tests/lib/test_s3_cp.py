@@ -20,9 +20,9 @@ from typing import Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import GlobFilter, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -31,15 +31,20 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
+from boto3_s3.localstorage import LocalStorage
+from boto3_s3.producers import CaseConflictGate
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
+from boto3_s3.transfer import Transferrer
 from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
+    FileFilter,
     FileInfo,
     OpOutcome,
     OpResult,
     TransferOptions,
+    TransferType,
 )
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -142,6 +147,18 @@ class TestUploadRoute:
         assert isinstance(r.dest_storage, S3Storage) and r.dest_storage.bucket == "bucket"
         assert r.dest_info is None
 
+    def test_single_download_stamps_the_producing_backend(self, tmp_path: Path) -> None:
+        # The single-object HEAD path (head_single) stamps FileInfo.storage like
+        # every listing path, so src_info agrees with src_storage (opresult.md)
+        # and a filter can reach the backend (info.storage) on this route too.
+        client, _ = make_recording_client([_head_response(), _get_response()])
+        src = S3Storage("s3://b/d/a.txt", client=client)
+        results: list[OpResult] = []
+        S3().cp(src, str(tmp_path / "a.txt"), transfer_config=_SYNC, on_result=results.append)
+        r = results[0]
+        assert r.src_info is not None and r.src_info.storage is src
+        assert r.src_storage is src
+
     def test_recursive_upload_walks_in_byte_order(self, tmp_path: Path) -> None:
         for name in ("a/inner.txt", "a.txt"):
             target = tmp_path / name
@@ -157,17 +174,16 @@ class TestUploadRoute:
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/a/inner.txt"]
 
     def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
-        # The opt-in cycle guard (default off = aws parity) flows from cp's
-        # detect_symlink_loops flag through to the local recursive walk.
+        # The opt-in cycle guard (default off = aws parity) is configured on the
+        # LocalStorage source and reaches the local recursive walk.
         (tmp_path / "a.txt").write_bytes(b"x")
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
         client, calls = make_recording_client([{}])  # one PutObject for a.txt
         results: list[OpResult] = []
         S3().cp(
-            str(tmp_path),
+            LocalStorage(str(tmp_path), detect_symlink_loops=True),
             S3Storage("s3://b/t", client=client),
             recursive=True,
-            detect_symlink_loops=True,
             transfer_config=_SYNC,
             on_result=results.append,
         )
@@ -362,6 +378,20 @@ class TestDownloadRoute:
             "An error occurred (404) when calling the HeadObject operation: "
             'Key "no-such" does not exist'
         )
+
+    def test_bucketless_service_root_source_reaches_head_not_silent_zero(
+        self, tmp_path: Path
+    ) -> None:
+        # A bare `s3://` (service root) as a non-recursive source must NOT take the
+        # keyless-bucket `cp s3://bucket .` zero-item short-circuit: it reaches
+        # HeadObject with Bucket="", which botocore rejects (Invalid bucket name)
+        # like `aws s3 cp s3://` (rc 1), not a silent rc-0 no-op.
+        err = ParamValidationError(report='Invalid bucket name ""')
+        client, calls = make_recording_client([err])
+        with pytest.raises(ValidationError, match="Invalid bucket name"):
+            S3().cp(S3Storage("s3://", client=client), str(tmp_path / "x"), transfer_config=_SYNC)
+        assert _ops(calls) == ["HeadObject"]  # attempted, not short-circuited to zero
+        assert calls[0].params["Bucket"] == ""
 
     def test_dryrun_heads_but_never_gets(self, tmp_path: Path) -> None:
         client, calls = make_recording_client([_head_response()])
@@ -700,6 +730,44 @@ class TestNoOverwriteDownload:
         assert dest.read_bytes() == b"payload"
 
 
+class TestSourceScanConfig:
+    """The recursive S3 source lists via ``scan_s3_source``, whose options derive
+    from the passed storage's own ``default_scan_options`` - so constructor
+    config and a custom ``S3Storage`` subclass survive through the engine."""
+
+    def test_recursive_s3_source_lists_with_the_constructor_config(self, tmp_path: Path) -> None:
+        client, calls = make_recording_client([_cc_listing(), _get_response(), _get_response()])
+        S3().cp(
+            S3Storage("s3://b/cc/", client=client, page_size=5, fetch_owner=True),
+            str(tmp_path / "out"),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        listing = calls[0]
+        assert listing.operation == "ListObjectsV2"
+        # The paginator translates the storage's page_size into MaxKeys.
+        assert listing.params["MaxKeys"] == 5
+        assert listing.params["FetchOwner"] is True
+
+    def test_custom_s3_subclass_scan_pages_override_survives(self, tmp_path: Path) -> None:
+        class Tagged(S3Storage):
+            def scan_pages(self, options: Any) -> Any:
+                for page in super().scan_pages(options):
+                    for info in page:
+                        info.compare_key = f"TAG/{info.compare_key}"
+                    yield page
+
+        listing = {
+            "Contents": [{"Key": "d/a.txt", "Size": 7, "LastModified": _MTIME, "ETag": '"x"'}]
+        }
+        client, _ = make_recording_client([listing, _get_response()])
+        out = tmp_path / "out"
+        S3().cp(Tagged("s3://b/d/", client=client), str(out), recursive=True, transfer_config=_SYNC)
+        # The override's compare_key rewrite shaped the download target: the
+        # engine consumed the subclass's scan, not a re-built bare S3Storage.
+        assert (out / "TAG" / "a.txt").read_bytes() == b"payload"
+
+
 def _cc_listing() -> dict[str, Any]:
     return {
         "Contents": [
@@ -762,6 +830,60 @@ class TestCaseConflictGate:
                 **TransferOptions(case_conflict=CaseConflictMode.ERROR),
             )
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
+
+    def _build_gate(
+        self, dest: LocalStorage, item_filter: FileFilter | None = None
+    ) -> tuple[CaseConflictGate | None, Transferrer]:
+        plan = transferplan.plan_transfer(
+            S3Storage("s3://b/cc/"), dest, recursive=True, operation="cp"
+        )
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.DOWNLOAD, client)
+        gate = producers.cp_case_gate(
+            plan,
+            recursive=True,
+            options=TransferOptions(case_conflict=CaseConflictMode.SKIP),
+            transferrer=transferrer,
+            item_filter=item_filter,
+        )
+        return gate, transferrer
+
+    def test_case_gate_scan_reads_the_dest_storage_config(self, tmp_path: Path) -> None:
+        # aws builds the case-conflict reverse enumeration with the run's
+        # follow_symlinks parameter (rgen_kwargs), so the membership scan honors
+        # the destination storage's config: a --no-follow-symlinks destination
+        # excludes the symlinked twin that a default destination includes.
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "real.txt").write_bytes(b"x")
+        (out / "A.txt").symlink_to(out / "real.txt")
+        gate, _ = self._build_gate(LocalStorage(str(out)))
+        assert gate is not None
+        assert "A.txt" in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+        gate, _ = self._build_gate(LocalStorage(str(out), follow_symlinks=False))
+        assert gate is not None
+        assert "A.txt" not in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
+    def test_case_gate_scan_warns_into_the_rollup_and_filters(self, tmp_path: Path) -> None:
+        # aws's reverse enumeration shares the result queue (its walk warnings
+        # count toward rc 2) and passes the --exclude/--include filters; the
+        # membership scan does the same: the unreadable file warns through the
+        # transferrer and the filtered-out entry stays out of the set.
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "A.txt").write_bytes(b"x")
+        (out / "secret.txt").write_bytes(b"x")
+        (out / "secret.txt").chmod(0)
+        try:
+            gate, transferrer = self._build_gate(
+                LocalStorage(str(out)), item_filter=lambda info: info.compare_key != "A.txt"
+            )
+        finally:
+            (out / "secret.txt").chmod(0o644)
+        assert gate is not None
+        assert gate._dest_keys == set()  # pyright: ignore[reportPrivateUsage]
+        assert transferrer.warned == 1  # the unreadable-file walk warning
 
     def test_exact_case_match_at_dest_always_copies(self, tmp_path: Path) -> None:
         # The AlwaysSync arm: an exact-name local file never

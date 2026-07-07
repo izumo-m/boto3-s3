@@ -5,6 +5,18 @@ Provenance: aws-cli's ``tests/functional/s3/test_cp_command.py``
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py`` (``CpCommand``)
+driving ``s3handler.py`` over ``filegenerator.py`` / ``fileinfobuilder.py``, with
+``results.py`` and ``subscribers.py`` (glacier gate, copy-props).
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
+
 Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 
 - ``Context.transfer_config`` injects ``TransferConfig(use_threads=False)``
@@ -24,8 +36,9 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 - ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
   page-size default; rm port rule) and never show ``EncodingType``.
 - ``mock.patch`` targets translate: ``mimetypes.guess_type`` and ``os.utime``
-  are identical seams; the aws-cli's ``filegenerator.get_file_stat`` becomes
-  ``boto3_s3.localstorage._file_stat``; the streaming tests swap ``sys.stdin``
+  are identical seams; the aws-cli's ``filegenerator.get_file_stat`` (patched in
+  ``vendor/aws-cli/awscli/customizations/s3/filegenerator.py``) becomes
+  ``boto3_s3.localstorage.get_file_stat``; the streaming tests swap ``sys.stdin``
   / ``sys.stdout`` for shims exposing a ``buffer`` instead of patching the
   aws-cli's ``BufferedBytesIO`` onto ``sys.stdin``.
 - The case-conflict ``*_with_existing_file`` variants keep the aws-cli's
@@ -38,13 +51,19 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 Not ported, with reasons:
 
 - ``TestCpWithCRTClient``: the CRT engine is charter exception 2.
-- ``TestAccesspointCPCommand`` / ``TestS3ExpressCpRecursive``: ARN/express
-  endpoint-resolution harnesses; ARN parsing is covered by the unit tier.
+- ``TestAccesspointCPCommand``: an ARN endpoint-resolution harness; ARN parsing
+  is covered by the unit tier (``TestS3ExpressCpRecursive`` *is* ported below).
 - ``TestCpSourceRegion``: a different aws-cli harness (``BaseS3CLIRunnerTest``);
   the client wiring is covered by ``tests/cli/unit/test_cp.py``.
 - The s3s3 SSE-C matrix (4 tests with large canned sequences): the parameter
-  mapping they pin is covered by ``tests/lib/test_requestparams.py`` and the
-  copy-source HEAD tests here.
+  mapping they pin, including the copy-source HEAD, is covered by
+  ``tests/lib/test_requestparams.py``.
+- The two s3s3 SSE-KMS *copy* tests (``test_cp_copy_with_sse_kms_and_key_id`` /
+  ``..._large_file_...``): ``map_copy_object_params`` shares
+  ``_set_sse_request_params`` with the upload path, so the mapping is pinned by
+  ``tests/lib/test_requestparams.py`` (``test_sse_and_kms_key`` on both
+  ``TestPutObjectParams`` and ``TestCopyObjectParams``); the upload SSE-KMS pair
+  is ported here.
 - Storage-class variants other than STANDARD_IA / DEEP_ARCHIVE and the
   duplicate recursive-mp prop-override cases: mechanically identical
   siblings of ported tests.
@@ -309,6 +328,7 @@ class TestCPCommand:
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Expires"] == "90"
 
+    # aws-cli: test_upload_standard_ia, test_upload_deep_archive
     @pytest.mark.parametrize("storage_class", ["STANDARD_IA", "DEEP_ARCHIVE"])
     def test_upload_storage_class(self, tmp_path: Any, storage_class: str) -> None:
         # aws-cli test_upload_standard_ia / test_upload_deep_archive (the
@@ -503,6 +523,7 @@ class TestCPCommand:
         assert _operations(calls) == ["ListObjectsV2"]
         assert "GLACIER" in result.stderr
 
+    # aws-cli: test_warns_on_{glacier,deep_arhive}_incompatible_operation (+ _for_multipart_file)
     @pytest.mark.parametrize(
         ("storage_class", "content_length"),
         [
@@ -531,6 +552,7 @@ class TestCPCommand:
         assert _operations(calls) == ["HeadObject"]
         assert "GLACIER" in result.stderr
 
+    # aws-cli: test_turn_off_glacier_warnings (+ _for_deep_archive)
     @pytest.mark.parametrize("storage_class", ["GLACIER", "DEEP_ARCHIVE"])
     def test_turn_off_glacier_warnings(self, tmp_path: Any, storage_class: str) -> None:
         result, calls = _run_cmd(
@@ -677,7 +699,7 @@ class TestCPCommand:
         # Patch the stat helper to report an invalid timestamp (impossible to
         # produce portably on a real filesystem; aws-cli patches its
         # get_file_stat the same way).
-        with mock.patch("boto3_s3.localstorage._file_stat", return_value=(None, None)):
+        with mock.patch("boto3_s3.localstorage.get_file_stat", return_value=(None, None)):
             result, _ = _run_cmd(
                 [_client_error("NoSuchBucket", 404, "PutObject")],
                 ["cp", full_path, "s3://bucket/foo.txt"],
@@ -1403,6 +1425,7 @@ class _StdoutShim:
         pass
 
 
+# aws-cli: TestCPCommand (the --no-overwrite block, carved into its own class; same method names)
 class TestCPCommandNoOverwrite:
     """The aws-cli no-overwrite block of TestCPCommand."""
 
@@ -1660,6 +1683,7 @@ class TestStreamingCPCommand:
 
 
 class TestCPCommandChecksums:
+    # aws-cli: TestCPCommand.test_upload_with_checksum_algorithm_* (one per algorithm)
     @pytest.mark.parametrize(
         "algorithm",
         [
@@ -1686,6 +1710,7 @@ class TestCPCommandChecksums:
         assert calls[0].operation == "PutObject"
         assert calls[0].params["ChecksumAlgorithm"] == algorithm
 
+    # aws-cli: TestCPCommand.test_multipart_upload_with_checksum_algorithm_crc32
     def test_multipart_upload_with_checksum_algorithm_crc32(self, tmp_path: Any) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
@@ -1708,6 +1733,7 @@ class TestCPCommandChecksums:
         assert {"ETag": "foo-e1", "ChecksumCRC32": "foo-1", "PartNumber": mock.ANY} in parts
         assert {"ETag": "foo-e2", "ChecksumCRC32": "foo-2", "PartNumber": mock.ANY} in parts
 
+    # aws-cli: TestCPCommand.test_copy_with_checksum_algorithm_crc32
     def test_copy_with_checksum_algorithm_crc32(self, tmp_path: Any) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {"ETag": "foo-1", "ChecksumCRC32": "Tq0H4g=="}],
@@ -1722,6 +1748,7 @@ class TestCPCommandChecksums:
         assert calls[1].operation == "CopyObject"
         assert calls[1].params["ChecksumAlgorithm"] == "CRC32"
 
+    # aws-cli: TestCPCommand.test_download_with_checksum_mode_crc32, _crc32c
     @pytest.mark.parametrize("checksum_field", ["ChecksumCRC32", "ChecksumCRC32C"])
     def test_download_with_checksum_mode(self, tmp_path: Any, checksum_field: str) -> None:
         _, calls = _run_cmd(
@@ -1759,6 +1786,7 @@ class TestCpRecursiveCaseConflict:
         # Expect success (not error mode) and no warnings (not warn or skip).
         assert not result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_error_with_existing_file (test_sync_command.py)
     def test_error_with_existing_file(self, case_insensitive_workdir: Any) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
@@ -1768,6 +1796,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
         # The first (admitted) key still downloads; only the conflicting
         # second key trips the error gate - so one GetObject is scripted.
@@ -1779,6 +1808,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_warn_with_existing_file (test_sync_command.py)
     def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
@@ -1787,6 +1817,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_warn_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_warn_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
         result, _ = _run_cmd(
             [
@@ -1799,6 +1830,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"warning: Downloading bucket/{self.LOWER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_skip_with_existing_file (test_sync_command.py)
     def test_skip_with_existing_file(self, case_insensitive_workdir: Any) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
@@ -1806,6 +1838,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"warning: Skipping bucket/{self.UPPER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_skip_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_skip_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
         result, _ = _run_cmd(
             [
@@ -1817,6 +1850,7 @@ class TestCpRecursiveCaseConflict:
         )
         assert f"warning: Skipping bucket/{self.LOWER_KEY}" in result.stderr
 
+    # aws-cli: TestSyncCaseConflict.test_ignore_with_existing_file (test_sync_command.py)
     def test_ignore_with_existing_file(self, tmp_path: Any) -> None:
         (tmp_path / self.LOWER_KEY).write_text("mycontent")
         _run_cmd(
@@ -1824,6 +1858,7 @@ class TestCpRecursiveCaseConflict:
             self._cmd(tmp_path, "ignore"),
         )
 
+    # aws-cli: TestSyncCaseConflict.test_ignore_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_ignore_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
         _run_cmd(
             [

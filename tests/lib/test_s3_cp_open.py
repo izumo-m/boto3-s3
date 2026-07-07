@@ -114,7 +114,7 @@ class _MemStorage(Storage):
     capabilities = (
         StorageCapability.OPEN_READ
         | StorageCapability.OPEN_WRITE
-        | StorageCapability.SORTED_SCAN
+        | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
 
@@ -138,16 +138,21 @@ class _MemStorage(Storage):
         return _MemWriter(self._store, key)  # type: ignore[return-value]
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        yield [
+        # scan_pages returns already-filtered pages (the contract): a real custom
+        # backend would push options.filter to its source; this in-memory one sieves.
+        infos = [
             FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
             for key, data in sorted(self._store.items())
         ]
+        if options.filter is not None:
+            infos = [info for info in infos if options.filter(info)]
+        if infos:
+            yield infos
 
     def get_fileinfo(
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         if key not in self._store:
@@ -188,7 +193,7 @@ class _NoDeleteMem(_MemStorage):
     """Readable/writable but not deletable - an mv *source* trips the gate (DELETE)."""
 
     capabilities = (
-        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE | StorageCapability.SORTED_SCAN
+        StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE | StorageCapability.SORTABLE_SCAN
     )
 
 

@@ -36,6 +36,8 @@ from boto3_s3.checksumcompare import (
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
 )
 from boto3_s3.comparator import SyncPair
+from boto3_s3.localstorage import LocalStorage, to_native_path
+from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, LocalFileInfo, S3FileInfo, TransferType
 
 try:
@@ -165,16 +167,32 @@ def _key(p: Path) -> str:
 
 
 def _local(key: str, *, size: int | None = None) -> LocalFileInfo:
-    return LocalFileInfo(key=key, size=size)
+    # compare_key is the basename: the strategy opens it against a LocalStorage
+    # rooted at the file's parent (see _storage_for).
+    return LocalFileInfo(key=key, size=size, compare_key=key.rsplit("/", 1)[-1])
 
 
 def _s3(key: str = "obj", *, size: int | None = None) -> S3FileInfo:
     return S3FileInfo(key=key, size=size)
 
 
+def _storage_for(info: FileInfo | None) -> Storage | None:
+    """A LocalStorage rooted at a local side's parent dir, so ``open(compare_key)``
+    reaches the real file the strategy hashes."""
+    if isinstance(info, LocalFileInfo):
+        return LocalStorage(os.path.dirname(to_native_path(info.key)))
+    return None
+
+
 def _pair(
     transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
 ) -> SyncPair:
+    # The backend rides on each side's FileInfo; the strategy reads pair.src.storage
+    # / pair.dest.storage to open the readable (local) side.
+    if src is not None:
+        src.storage = _storage_for(src)
+    if dest is not None:
+        dest.storage = _storage_for(dest)
     return SyncPair(key="obj", transfer_type=transfer_type, src=src, dest=dest)
 
 
@@ -204,6 +222,30 @@ class TestConstruction:
         ChecksumComparison(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
         assert resolved == ["local", "s3://b/obj"]
 
+    def test_s3_side_clients_built_at_construction(self) -> None:
+        # The decides may run on a ParallelFilter pool, where a lazy first
+        # get_client() would race boto3's non-thread-safe client construction:
+        # both S3 sides' clients are built (memoized) on the constructing thread.
+        from boto3_s3.s3storage import S3Storage
+
+        calls: list[str] = []
+
+        class _Counting(S3Storage):
+            def get_client(self) -> Any:
+                calls.append(self.bucket)
+                return _FakeClient({})
+
+        class _S3:
+            def resolve(self, loc: Any) -> Any:
+                return loc
+
+        ChecksumComparison(
+            _S3(),  # pyright: ignore[reportArgumentType]
+            _Counting("s3://a/p"),
+            _Counting("s3://b/q"),
+        )
+        assert calls == ["a", "b"]
+
 
 # -- new / missing / unsupported sides ----------------------------------------
 
@@ -219,16 +261,6 @@ class TestNewAndMissingSides:
         f = _upload_filter(_FakeClient({}))
         with pytest.raises(ValueError, match="without a source entry"):
             f(_pair(transfer_type, dest=_s3()))
-
-    def test_move_kind_raises(self) -> None:
-        f = _upload_filter(_FakeClient({}))
-        with pytest.raises(ValueError, match="cannot judge a 'move' pair"):
-            f(_pair(TransferType.MOVE, src=_local("k", size=1), dest=_s3(size=1)))
-
-    def test_upload_non_local_side_raises(self) -> None:
-        f = _upload_filter(_FakeClient({}))
-        with pytest.raises(ValueError, match="no local side"):
-            f(_pair(TransferType.UPLOAD, src=_s3(size=1), dest=_s3(size=1)))
 
 
 # -- size pre-check ------------------------------------------------------------
@@ -427,11 +459,6 @@ class TestCopyDirect:
         )
         assert f2(pair) is True
 
-    def test_reads_no_bytes(self) -> None:
-        # COPY never opens a local file; keys point at nothing on disk.
-        f = self._copy(_full("sha256", "ABC"), _full("sha256", "ABC"))
-        assert f(self._pair()) is False
-
     def test_composite_values_skip_pagination(self) -> None:
         # COPY compares the stored value strings directly, so a COMPOSITE object
         # (whose parts would otherwise paginate) is read with one call per side.
@@ -572,15 +599,19 @@ class TestPureFallback:
 
 class TestHelperUnits:
     def test_whole_b64_crc32_and_sha256(self, tmp_path: Path) -> None:
-        p = str(_write(tmp_path))
-        assert _whole_b64(p, "crc32") == _GOLDEN["crc32"]
-        assert _whole_b64(p, "sha256") == _GOLDEN["sha256"]
+        p = _write(tmp_path)
+        with open(p, "rb") as fh:
+            assert _whole_b64(fh, "crc32") == _GOLDEN["crc32"]
+        with open(p, "rb") as fh:
+            assert _whole_b64(fh, "sha256") == _GOLDEN["sha256"]
 
     @_needs_crt
     def test_composite_b64_matches_independent(self, tmp_path: Path) -> None:
-        p = str(_write(tmp_path))
+        p = _write(tmp_path)
         sizes = (500, 524)
-        assert _composite_b64(p, "crc32c", sizes) == _composite_golden(_DATA, list(sizes), "crc32c")
+        with open(p, "rb") as fh:
+            got = _composite_b64(fh, "crc32c", sizes)
+        assert got == _composite_golden(_DATA, list(sizes), "crc32c")
 
     def test_can_compute_always_for_stdlib(self) -> None:
         for algo in ("crc32", "sha1", "sha256"):

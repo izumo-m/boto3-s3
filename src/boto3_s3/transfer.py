@@ -62,7 +62,7 @@ from boto3_s3.exceptions import (
     ConfigurationError,
     ValidationError,
 )
-from boto3_s3.localstorage import translate_os_error
+from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
@@ -303,10 +303,15 @@ class _ResponseCapture:
     stream. A ``before-parameter-build`` handler stashes the call's
     ``(Bucket, Key)`` in the per-request botocore ``context``; the paired
     ``after-call`` handler reads the parsed response back out (dropping the
-    streaming ``Body`` and ``ResponseMetadata``) and files it under that key.
-    ``_build_extra_info`` drains it per item. A multipart download issues many
-    ranged ``GetObject`` calls, so the first stored wins and the range-specific
-    fields are dropped, leaving the object-level metadata.
+    streaming ``Body`` and ``ResponseMetadata``) and files it under that key -
+    write and read operations into **separate stores**, so a same-run
+    ``GetObject`` on a key about to be written (e.g. a sync content filter
+    reading the destination through ``S3Storage.open(..., "rb")`` on this same
+    client) can never satisfy a write pop: ``extra_info["write"]`` is always
+    the transfer's own write response. ``_build_extra_info`` drains per item.
+    A multipart download issues many ranged ``GetObject`` calls, so the first
+    stored read wins and the range-specific fields are dropped, leaving the
+    object-level metadata.
 
     One instance per operation, registered on the transfer client when the
     manager is built - before enumeration starts for a listing-driven run
@@ -318,21 +323,25 @@ class _ResponseCapture:
     application put on a shared client. The events engine has no lock, so a capture
     operation needs exclusive use of its client for the operation's span
     (docs/s3.md).
+
+    ``_WRITE_OPS`` are the terminal object-writing operations observed - the
+    intermediate multipart calls (CreateMultipartUpload / UploadPart /
+    UploadPartCopy) are deliberately not, only the response describing the finished
+    object is wanted. ``_READ_OPS`` is the object-reading operation (a download);
+    HeadObject is not observed.
     """
 
-    #: The terminal object-writing operations. The intermediate multipart calls
-    #: (CreateMultipartUpload / UploadPart / UploadPartCopy) are deliberately not
-    #: observed - only the response describing the finished object is wanted.
     _WRITE_OPS = ("PutObject", "CopyObject", "CompleteMultipartUpload")
-    #: The object-reading operation (a download). HeadObject is not observed.
     _READ_OPS = ("GetObject",)
 
     def __init__(self) -> None:
-        self._store: dict[tuple[str, str], dict[str, Any]] = {}
+        self._writes: dict[tuple[str, str], dict[str, Any]] = {}
+        self._reads: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = threading.Lock()
         # Bind once so unregister removes the same objects register added.
         self._stash_handler = self._stash_key
-        self._record_handler = self._record_response
+        self._record_write_handler = self._record_write
+        self._record_read_handler = self._record_read
 
     def _stash_key(self, params: Mapping[str, Any], context: dict[str, Any], **kwargs: Any) -> None:
         bucket = params.get("Bucket")
@@ -340,8 +349,21 @@ class _ResponseCapture:
         if bucket is not None and key is not None:
             context["boto3_s3_capture_key"] = (bucket, key)
 
-    def _record_response(
+    def _record_write(
         self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        self._record(self._writes, parsed, context)
+
+    def _record_read(
+        self, parsed: Mapping[str, Any], context: Mapping[str, Any], **kwargs: Any
+    ) -> None:
+        self._record(self._reads, parsed, context)
+
+    def _record(
+        self,
+        store: dict[tuple[str, str], dict[str, Any]],
+        parsed: Mapping[str, Any],
+        context: Mapping[str, Any],
     ) -> None:
         bucket_key = context.get("boto3_s3_capture_key")
         if bucket_key is None:
@@ -358,26 +380,92 @@ class _ResponseCapture:
             response.pop("ContentLength", None)
         with self._lock:
             # First stored wins: a multipart download issues many ranged GETs for
-            # the same key, all carrying the same object-level metadata.
-            self._store.setdefault(bucket_key, response)
+            # the same key, all carrying the same object-level metadata (an item
+            # writes its key once, so the write store sees one terminal response).
+            store.setdefault(bucket_key, response)
 
     def register(self, client: Any) -> None:
         events = client.meta.events
         for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.register(f"before-parameter-build.s3.{op}", self._stash_handler)
-            events.register(f"after-call.s3.{op}", self._record_handler)
+        for op in self._WRITE_OPS:
+            events.register(f"after-call.s3.{op}", self._record_write_handler)
+        for op in self._READ_OPS:
+            events.register(f"after-call.s3.{op}", self._record_read_handler)
 
     def unregister(self, client: Any) -> None:
         events = client.meta.events
         for op in (*self._WRITE_OPS, *self._READ_OPS):
             events.unregister(f"before-parameter-build.s3.{op}", self._stash_handler)
-            events.unregister(f"after-call.s3.{op}", self._record_handler)
+        for op in self._WRITE_OPS:
+            events.unregister(f"after-call.s3.{op}", self._record_write_handler)
+        for op in self._READ_OPS:
+            events.unregister(f"after-call.s3.{op}", self._record_read_handler)
 
-    def pop(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+    def pop_write(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        return self._pop(self._writes, bucket, key)
+
+    def pop_read(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
+        return self._pop(self._reads, bucket, key)
+
+    def _pop(
+        self, store: dict[tuple[str, str], dict[str, Any]], bucket: str | None, key: str | None
+    ) -> dict[str, Any] | None:
         if bucket is None or key is None:
             return None
         with self._lock:
-            return self._store.pop((bucket, key), None)
+            return store.pop((bucket, key), None)
+
+
+class Warner:
+    """The op-level warning sink: a message body -> a WARNED ``OpResult``.
+
+    A single place that turns a warning into an ``OpResult`` and reports it, so
+    both a backend enumeration (``ScanOptions.on_warning``) and the transfer
+    engine funnel their warnings through the same emitter instead of the walk
+    reaching into the transfer engine for one. Warnings count independently of
+    files (``warned > 0`` alone maps to exit code 2, aws rc model); the count is
+    thread-safe because a walk worker and a transfer worker can warn at once.
+    The transfer run's :class:`Transferrer` builds one from its result context
+    and exposes it as :attr:`Transferrer.warner`.
+    """
+
+    def __init__(
+        self,
+        *,
+        transfer_type: TransferType,
+        src_storage: Storage | None,
+        dest_storage: Storage | None,
+        operation: str,
+        on_result: ResultCallback | None,
+    ) -> None:
+        self._transfer_type = transfer_type
+        self._src_storage = src_storage
+        self._dest_storage = dest_storage
+        self._operation = operation
+        self._on_result = on_result
+        self._warned = 0
+        self._lock = threading.Lock()
+
+    @property
+    def warned(self) -> int:
+        return self._warned
+
+    def warn(self, body: str, *, key: str = "") -> None:
+        """Record a warning (aws-cli message body, no ``warning: `` prefix)."""
+        with self._lock:
+            self._warned += 1
+        if self._on_result is not None:
+            self._on_result(
+                OpResult(
+                    transfer_type=self._transfer_type,
+                    key=key,
+                    outcome=OpOutcome.WARNED,
+                    error=Boto3S3Error(body, operation=self._operation),
+                    src_storage=self._src_storage,
+                    dest_storage=self._dest_storage,
+                )
+            )
 
 
 class Transferrer:
@@ -464,9 +552,18 @@ class Transferrer:
         self._lock = threading.Lock()
         self._succeeded = 0
         self._failed = 0
-        self._warned = 0
         self._skipped = 0
         self._first_error: Boto3S3Error | None = None
+        # The shared warning sink: the walk (ScanOptions.on_warning) and this
+        # engine both report through it, so a warning never routes into the
+        # engine itself. It owns the warned count (rolled into the rc).
+        self._warner = Warner(
+            transfer_type=self._result_transfer_type,
+            src_storage=src_storage,
+            dest_storage=dest_storage,
+            operation=operation,
+            on_result=on_result,
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -508,7 +605,12 @@ class Transferrer:
 
     @property
     def warned(self) -> int:
-        return self._warned
+        return self._warner.warned
+
+    @property
+    def warner(self) -> Warner:
+        """The run's warning sink - what a walk's ``ScanOptions.on_warning`` targets."""
+        return self._warner
 
     @property
     def skipped(self) -> int:
@@ -521,24 +623,14 @@ class Transferrer:
     # -- non-transfer outcomes ----------------------------------------------
 
     def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning (aws-cli message body, no ``warning: `` prefix).
+        """Record a warning through the shared sink (:attr:`warner`).
 
-        Warnings count independently of files: a transfer that succeeds but
-        fails its mtime stamp produces both a SUCCEEDED and a WARNED record,
-        and ``warned > 0`` alone maps to exit code 2 (aws rc model).
+        A transfer that succeeds but fails its mtime stamp produces both a
+        SUCCEEDED and a WARNED record, and ``warned > 0`` alone maps to exit code
+        2 (aws rc model). This engine's own warnings go here; a backend walk
+        reports directly through :attr:`warner`.
         """
-        with self._lock:
-            self._warned += 1
-        self._emit(
-            OpResult(
-                transfer_type=self._result_transfer_type,
-                key=key,
-                outcome=OpOutcome.WARNED,
-                error=Boto3S3Error(body, operation=self._operation),
-                src_storage=self._src_storage,
-                dest_storage=self._dest_storage,
-            )
-        )
+        self._warner.warn(body, key=key)
 
     def skip(self, item: TransferItem) -> None:
         """Record a silent, non-warning skip (no exit-code effect)."""
@@ -660,6 +752,16 @@ class Transferrer:
         if item.case_conflict_cleanup is not None:
             subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         if self._is_move:
+            # Durability barrier before the source delete (LocalStorage(fsync=True),
+            # a library-only opt-in; off by default = aws parity). Only a real local
+            # destination path can be fsynced - a stream / custom (open-route) dest
+            # owns its own durability, so item.dest_fileobj downloads are excluded.
+            if (
+                item.dest_path is not None
+                and isinstance(self._dest_storage, LocalStorage)
+                and self._dest_storage.fsync
+            ):
+                subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
         self._get_manager().download(
@@ -948,9 +1050,13 @@ class Transferrer:
         if self._capture is None:
             return None, None
         if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
-            return self._capture.pop(item.dest_bucket, item.dest_key), None
+            # Also drain any read recorded for this key (a content filter's
+            # GetObject of the pre-overwrite destination through this client):
+            # it is not the item's transfer response, and must not linger.
+            self._capture.pop_read(item.dest_bucket, item.dest_key)
+            return self._capture.pop_write(item.dest_bucket, item.dest_key), None
         if self._transfer_type is TransferType.DOWNLOAD:
-            return None, self._capture.pop(item.src_bucket, item.src_key)
+            return None, self._capture.pop_read(item.src_bucket, item.src_key)
         return None, None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
@@ -1065,10 +1171,15 @@ class _Progress:
         self._fire(0)
 
     def on_progress(self, future: Any, bytes_transferred: int, **kwargs: Any) -> None:
+        # Fire inside the lock: accumulate-and-deliver must be atomic, else two
+        # multipart workers can deliver their snapshots out of order (a later,
+        # larger `done` before an earlier one) and `bytes_done` moves backward -
+        # the monotonicity this class promises. The callback is fast (enqueue /
+        # throttled paint), and the lock is per-item, so this serializes only one
+        # object's part callbacks.
         with self._lock:
             self._done += bytes_transferred
-            done = self._done
-        self._fire(done)
+            self._fire(self._done)
 
 
 class _DirectoryCreator:
@@ -1088,6 +1199,76 @@ class _DirectoryCreator:
                 key=None,
                 message=f"Could not create directory {directory}: {exc}",
             ) from exc
+
+
+class _FsyncDest:
+    """Fsync a ``mv`` download's destination file before its S3 source is deleted.
+
+    A library-only durability step, opt-in via ``LocalStorage(fsync=True)`` (off
+    by default = aws parity). s3transfer finalizes a filename download with a
+    temp-file write + ``os.rename`` and never fsyncs, so aws-cli / s3transfer
+    delete the durable S3 source while the downloaded bytes may still be only in
+    the page cache - a crash between the two loses the move outright. Placed
+    immediately before ``_DeleteSource`` (the same slot and flip contract as
+    ``_CloseFileobj`` on the open route): on a successful transfer it fsyncs the
+    file and its parent directory, and any durability failure flips the settled
+    future via ``set_exception`` so ``_DeleteSource`` sees the failure and skips
+    the delete, leaving the S3 copy in place (``_Completion`` records ``move
+    failed``). A transfer that already failed does nothing.
+
+    The file is reopened by path - the rename left the inode unchanged, so its
+    dirty pages flush regardless of which fd fsyncs them - then the *immediate*
+    parent directory is fsynced to persist the rename's dirent. The directory
+    fsync is POSIX-only: a directory has no fsyncable handle on Windows, where the
+    file fsync alone is the durability step (NTFS journaling carries the
+    metadata). A freshly created intermediate directory is not walked back to its
+    own parent; the common case downloads into an existing tree.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            return
+        try:
+            self._fsync()
+        except OSError as exc:
+            future.set_exception(
+                translate_os_error(
+                    exc,
+                    operation=None,
+                    key=None,
+                    message=f"Failed to persist {self._path} to disk: {exc}",
+                )
+            )
+
+    def _fsync(self) -> None:
+        # POSIX fsyncs a read-only fd; Windows implements os.fsync as
+        # FlushFileBuffers, which requires write access (GENERIC_WRITE) on the
+        # handle - O_RDONLY there fails every flush with EBADF/EACCES. The
+        # freshly downloaded file is writable (s3transfer created it), so open
+        # for write off POSIX; O_BINARY/O_NOINHERIT exist only there.
+        flags = (
+            os.O_RDONLY
+            if os.name == "posix"
+            else os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        )
+        fd = os.open(self._path, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if os.name != "posix":
+            return
+        directory = os.path.dirname(self._path) or os.curdir
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 class _DeleteSource:
@@ -1128,11 +1309,11 @@ class _CloseFileobj:
 
     The transfer owns every fileobj a ``Storage.open`` hands it (the file
     protocol the open route relies on): a real backend's ``close`` releases a
-    reader or *commits* a writer (``Storage.open``'s contract), while a
-    caller-supplied stream (``IOStorage``) hands back a close-suppressing view,
-    so this is a harmless flush there. Sits before ``_DeleteSource`` /
-    ``_Completion`` so a writer's commit failure flips the settled future to a
-    failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
+    reader or flushes a writer's buffered writes (``Storage.open``'s contract),
+    while a caller-supplied stream (``IOStorage``) hands back a close-suppressing
+    view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    ``_Completion`` so a writer's ``close`` (flush) failure flips the settled
+    future to a failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
     then sees the failure and skips its delete). A transfer that already failed
     still closes - to release the resource - but never lets a close error
     overwrite the original failure.

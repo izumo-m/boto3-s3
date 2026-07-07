@@ -14,7 +14,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` / the backends |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
-| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path). Its recursive walk `LocalStorage.walk_local` is a faithful port of aws-cli `FileGenerator.list_files` (byte-order walk, warning rules), split into overridable protected methods (`_walk` / `_should_ignore` / `_stat_info` / ...) so a subclass can extend the traversal; `LoopDetector` guards symlink cycles |
+| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behaviour (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops`) is set on the same constructor; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
@@ -99,10 +99,14 @@ the SDK at module import time.
 3. download: `_DirectoryCreator` (creates the parent dir; tolerates EEXIST,
    otherwise fails with aws-cli's wording `Could not create directory ...`).
 4. copy: the copy-props chain (section 4).
-5. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
+5. mv download + `LocalStorage(fsync=True)` only: `_FsyncDest` (section 11) - a
+   library-only durability barrier fsyncing the downloaded file (and its parent
+   dir on POSIX) just before `_DeleteSource`, so a durability failure flips the
+   future and the source is not deleted (off by default = aws parity).
+6. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
    before `_Completion` (the same slot where aws-cli places the DeleteSource
    family ahead of the Done recorder).
-6. `_Completion` (**always last**) - bridges the future's result to the rollup
+7. `_Completion` (**always last**) - bridges the future's result to the rollup
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
    a successful download it post-success stamps the mtime (section 5). Each
    record carries the item's listing entries (`src_info` / `dest_info`) and the
@@ -115,8 +119,8 @@ the SDK at module import time.
    `capture_response` layers the written / read object's own response on top
    ([`opresult.md`](./opresult.md)).
 
-Items 3-5 are route-conditional (download / copy / mv only); the always-present
-spine is 1-2 then 6 (the numbering is the slot order, not a single chain that
+Items 3-6 are route-conditional (download / copy / mv only); the always-present
+spine is 1-2 then 7 (the numbering is the slot order, not a single chain that
 every transfer runs end to end).
 
 `on_result` / `on_progress` are **called from s3transfer's worker threads**
@@ -263,7 +267,10 @@ dest-existence check for download. We ported the same three faces:
 - **>48.8 TiB warning** (upload): as in aws-cli, **it only warns and still
   attempts the transfer** (to show S3's EntityTooLarge).
 - walk warnings (unreadable / special file / broken symlink / invalid mtime) go
-  from `walk_local`'s `on_warning` to `Transferrer.warn` (aws-cli's wording).
+  from a walk's `ScanOptions.on_warning` to the run's shared warning sink
+  (`Transferrer.warner`, a `Warner`), the same sink the engine's own warnings use
+  (aws-cli's wording) - so the walk reports a warning without reaching into the
+  transfer engine.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
   off, a symlink cycle recurses until `RecursionError`, exactly like aws-cli; on
@@ -272,7 +279,12 @@ dest-existence check for download. We ported the same three faces:
   ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
   a global visited set) still follows a legitimate diamond of links to the same
   external directory, like GNU `find -L`; it fails open (no `stat` identity →
-  keep descending). Off costs no extra `stat` (a no-op detector).
+  keep descending). Off costs no extra `stat` (a no-op detector). Both
+  `detect_symlink_loops` and `follow_symlinks` are the local walk's **source-config**:
+  they are set on the `LocalStorage` constructor
+  (`LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)`) and seeded into
+  every scan by `default_scan_options`, not passed per operation (the CLI bakes
+  `--follow-symlinks` into the storage it builds).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore` = the application condition of aws-cli's
   `_modify_instructions_for_case_conflicts`): aws builds this with the sync
@@ -372,9 +384,26 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   future to failed with `set_exception`** (s3transfer accepts an override after
   done - isomorphic to aws-cli's `DeleteSourceSubscriber`), and `_Completion`
   aggregates it as `move failed` (rc 1). The bytes have already arrived.
+- **Durability barrier (`LocalStorage(fsync=True)`, a library extension; default
+  off = aws parity)**: s3transfer finalizes a filename download with a temp-file
+  write + `os.rename` and never fsyncs, so aws-cli deletes the durable S3 source
+  while the downloaded bytes may still be only in the page cache - a crash between
+  the two loses the move outright. When the download's destination `LocalStorage`
+  opts in, the `_FsyncDest` subscriber (section 3, only on the S3->local `mv`
+  download route, `item.dest_path is not None`) fsyncs the file - reopened by path,
+  the rename left the inode unchanged - and then its immediate parent directory
+  (POSIX only; a directory has no fsyncable handle on Windows, where the file
+  fsync alone is the step) **before** `_DeleteSource` runs. A durability failure
+  flips the settled future via `set_exception` (the same contract as
+  `_CloseFileobj` on the open route), so `_DeleteSource` skips the delete and the
+  S3 copy survives (`move failed`, rc 1). A freshly created intermediate directory
+  is not walked back to its own parent (the common case downloads into an existing
+  tree); the mtime stamp stays post-delete, so only the file *contents* are made
+  durable, not the cosmetic mtime. The CLI leaves this off to keep aws parity.
 - Cases where the deletion does not run: dryrun (no submit at all), filter
   exclusion, skip (no-overwrite's 412 / dest already exists, the glacier gate),
-  transfer failure. For copy-props' post-copy tagging failure (the rollback of
+  transfer failure, a `LocalStorage(fsync=True)` durability failure (above). For
+  copy-props' post-copy tagging failure (the rollback of
   section 4), because `_SetTags` flips the future first, the source remains and only the
   dest is rolled back (aws-cli's order). A folder marker is not transferred, so it
   is not deleted either. An emptied local dir is left in place (as in aws).
@@ -416,8 +445,8 @@ and outside aws parity.
   the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the
   fileobj from `plan.dest.open(key, "wb")` to download into. The transfer
   **closes every fileobj `open` returns** (`transfer._CloseFileobj`): for a
-  writer that `close` is the commit (`Storage.open`'s contract), and a commit
-  failure flips the settled future via `set_exception` (a failed transfer).
+  writer that `close` flushes buffered writes (`Storage.open`'s contract), and a
+  `close` (flush) failure flips the settled future via `set_exception` (a failed transfer).
   `s3transfer` itself never closes a caller fileobj (`CompleteDownloadNOOPTask`),
   so this is the sole close. An `IOStorage` hands back a close-suppressing view,
   so the caller's own stream is never closed (section 6).
@@ -463,11 +492,11 @@ and outside aws parity.
   backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
   download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
-  failed writer commit - leaves the source in place.
+  failed writer `close` (flush) - leaves the source in place.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a
-  custom side must declare `SORTED_SCAN` - an unsorted listing would manufacture
+  custom side must declare `SORTABLE_SCAN` - an unsorted listing would manufacture
   phantom new/delete pairs and, with `--delete`, corrupt the destination. A
-  dedicated gate (`producers.require_open_sync_capabilities`) requires `SORTED_SCAN` +
+  dedicated gate (`producers.require_open_sync_capabilities`) requires `SORTABLE_SCAN` +
   `OPEN_READ` (an `opens3` source) / `OPEN_WRITE` (an `s3open` destination), plus
   `DELETE` when `--delete` removes orphans from an `s3open` custom destination
   (`opens3` orphans are S3, deleted without the custom side). `sync` passes

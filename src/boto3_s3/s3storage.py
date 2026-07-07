@@ -1,15 +1,20 @@
 """S3 storage backend: ``S3Storage`` (an ``s3://bucket/prefix`` + boto3 client).
 
-Implements ``scan`` (``ListObjectsV2``; ``ListBuckets`` at the bare-``s3://``
-service root) over an overridable ``scan_pages`` seam - subclasses customize
-per-page entry handling there while keeping scan's prefetch - and exposes
+Implements ``scan`` (``ListObjectsV2`` object listing) over an overridable
+``scan_pages`` seam - subclasses customize per-page entry handling there while
+keeping scan's prefetch. The bare-``s3://`` service root is a *different*
+operation - ``list_buckets`` (``ListBuckets``), kept separate because a bucket is
+a container, not an openable entity, so a transfer scan never yields one (aws-cli
+splits ``_list_all_buckets`` from ``_list_all_objects`` the same way). It also
+exposes
 ``get_client`` / ``bucket`` / ``key`` so the ``Transferrer`` can drive
 ``s3transfer`` directly for built-in S3 pairs. ``delete`` is implemented (a
-blind ``DeleteObject``); ``open`` is intentionally unimplemented - S3 always
-transfers through ``s3transfer`` (built-in pairs and the S3 side of an open-route
-custom-backend transfer alike), so no route calls it. The only thing it would
-add is direct programmatic S3 stream access, which nothing needs today (see
-:meth:`S3Storage.open`).
+blind ``DeleteObject``); ``open`` implements ``"rb"`` only - a ``GetObject`` read
+convenience (chiefly for a content-based ``sync`` filter reading an object's
+bytes), addressed by the object's full key. Its ``"wb"`` stays unimplemented:
+every S3 *write* rides ``s3transfer`` (built-in pairs and the S3 side of an
+open-route custom-backend transfer alike), so a writable stream has no caller
+(see :meth:`S3Storage.open`).
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import os
 import re
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from botocore.exceptions import (
     BotoCoreError,
@@ -44,8 +49,8 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.storage import Storage, StorageCapability
-from boto3_s3.types import FileInfo, FileKind, S3FileInfo, ScanOptions
+from boto3_s3.storage import Storage, StorageCapability, sieve_pages
+from boto3_s3.types import FileInfo, FileKind, S3FileInfo, S3ScanOptions, ScanOptions
 
 if TYPE_CHECKING:
     from typing import BinaryIO
@@ -53,19 +58,18 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
 
-# S3Storage.open is intentionally unimplemented - every S3 transfer rides
-# s3transfer instead. The Transferrer drives it straight off get_client/bucket/
-# key for built-in pairs and the S3 side of an open-route custom transfer, and
-# streaming hands a fileobj to s3transfer (s3.py _cp_stream) - so nothing inside
-# boto3-s3 calls it (the custom side of an open-route transfer uses its own open,
-# never this).
-_OPEN_NOT_IMPLEMENTED = (
-    "S3Storage.open() is not implemented. S3 transfers go through s3transfer "
-    "(driven from get_client/bucket/key) - including the S3 side of an open-route "
-    "custom-backend transfer, whose custom side uses its own Storage.open - so "
-    "this generic per-object stream primitive has no caller. Implementing it "
-    "(GetObject->readable, multipart PutObject->writable committed on close) would "
-    "only add direct programmatic S3 stream access (see storage.py)."
+# S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
+# a content-based sync filter that reads an object's bytes). "wb" stays
+# unimplemented: every S3 *write* rides s3transfer instead - the Transferrer drives
+# it off get_client/bucket/key for built-in pairs and the S3 side of an open-route
+# custom transfer, and streaming hands a fileobj to s3transfer (s3.py _cp_stream) -
+# so the multipart upload a writable stream would need has no caller (the custom
+# side of an open-route transfer uses its own open, never this).
+_OPEN_WRITE_NOT_IMPLEMENTED = (
+    "S3Storage.open(mode='wb') is not implemented. S3 writes go through s3transfer "
+    "(driven from get_client/bucket/key), including the S3 side of an open-route "
+    "custom-backend transfer, so a writable stream has no caller. Use S3.cp / the "
+    "transfer engine to write to S3; open(mode='rb') is supported for reads."
 )
 
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
@@ -218,7 +222,7 @@ def s3_errors(
 
 
 def _page_to_infos(
-    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str
+    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str, storage: S3Storage
 ) -> list[FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
@@ -229,6 +233,9 @@ def _page_to_infos(
     ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
     ``Prefix``, so every object key and common-prefix starts with it, and the
     slice is the root-relative key operations and custom filters match against.
+    ``storage`` (the listing backend) is stamped on every entry alongside
+    ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
+    ``info.storage``.
     """
     infos: list[FileInfo] = []
     if not recursive:
@@ -240,6 +247,7 @@ def _page_to_infos(
                         key=dir_prefix,
                         kind=FileKind.DIRECTORY,
                         compare_key=dir_prefix[len(prefix) :],
+                        storage=storage,
                     )
                 )
     for obj in page.get("Contents", []):
@@ -259,18 +267,23 @@ def _page_to_infos(
                 storage_class=obj.get("StorageClass"),
                 owner=owner.get("ID") if owner else None,
                 compare_key=key[len(prefix) :],
+                storage=storage,
             )
         )
     return infos
 
 
-def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
+def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
-    Runs on the prefetch worker thread. Each bucket becomes an ``S3FileInfo``
-    whose ``key`` is the bucket name and whose ``mtime`` is the bucket's
+    Runs on the consumer's iteration thread - ``S3.ls`` iterates
+    :meth:`list_buckets` directly, not through ``scan``'s prefetch worker. Each
+    bucket becomes an ``S3FileInfo`` whose ``key`` is the bucket name and whose
+    ``mtime`` is the bucket's
     ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
-    root has no prefix, so ``compare_key`` is the bucket name itself.
+    root has no prefix, so ``compare_key`` is the bucket name itself; ``storage``
+    (the service-root ``S3Storage``) is stamped as the producing backend, like
+    every other producer's entries.
     """
     infos: list[FileInfo] = []
     for bucket in page.get("Buckets", []):
@@ -279,7 +292,11 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef) -> list[FileInfo]:
             continue  # ListBuckets always populates Name; stay defensive
         infos.append(
             S3FileInfo(
-                key=name, kind=FileKind.BUCKET, mtime=bucket.get("CreationDate"), compare_key=name
+                key=name,
+                kind=FileKind.BUCKET,
+                mtime=bucket.get("CreationDate"),
+                compare_key=name,
+                storage=storage,
             )
         )
     return infos
@@ -293,9 +310,10 @@ class S3Storage(Storage):
     ``S3Storage("bucket/key")`` is read the same as ``S3Storage("s3://bucket/key")``
     (intentional library leniency; :meth:`S3.resolve` stays strict and routes a
     bare ``"bucket/key"`` to local instead). An empty bucket part (bare ``"s3://"``) is the
-    *service root*: :meth:`scan` then lists the account's buckets instead of
-    objects; a key without a bucket (``"s3:///k"``) is rejected by
-    :meth:`validate`. The bucket part may be an access-point ARN (plain or
+    *service root*: :meth:`list_buckets` lists the account's buckets there (what
+    ``S3.ls`` uses), while object listing / a transfer needs a bucket; a key
+    without a bucket (``"s3:///k"``) is rejected by :meth:`validate`. The bucket
+    part may be an access-point ARN (plain or
     Outposts), which is passed whole as the ``Bucket`` parameter; S3 Object Lambda
     and Outposts bucket ARNs are rejected like ``aws s3`` rejects them (by
     :meth:`validate`, deferred from construction). When
@@ -304,23 +322,38 @@ class S3Storage(Storage):
     :meth:`close`). The region is not derived from the URL; for a specific
     region / endpoint / profile, pass a pre-built ``client``.
 
+    How this source is *listed* is configured on the constructor too: ``page_size``
+    (the ``ListObjectsV2`` page size) and ``fetch_owner`` (populate each entry's
+    owner) are held on the instance and seeded into every scan via
+    :meth:`default_scan_options`, so a listing is tuned once here rather than per
+    operation.
+
     Thread safety: a built or supplied client is safe to share across threads for
     operation calls. Client *construction* is not, and is deliberately not locked
     here (a library lock cannot serialize against clients the caller builds
     elsewhere). For concurrent use, build the client at a safe time on the caller
     side and pass it in rather than relying on the lazy default.
+
+    Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
+    enumerates in native UTF-8 byte order (``ListObjectsV2``), reads an object
+    (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
+    because every S3 write rides ``s3transfer`` (see :meth:`open`).
+    ``scan_options_type`` is :class:`S3ScanOptions` (arg-less
+    ``scan()`` builds it, and :meth:`scan_pages` requires it). ``scan_pages_filters``
+    is ``True`` - ``scan_pages`` sieves each page, so ``scan`` does not re-apply
+    ``options.filter``.
     """
 
     scheme: ClassVar[str] = "s3"
-    #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
-    #: (``ListObjectsV2``), and deletes; ``open`` is intentionally unimplemented
-    #: (S3 rides ``s3transfer``), so no ``OPEN_*`` (see :meth:`open`).
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
-        | StorageCapability.SORTED_SCAN
+        | StorageCapability.SORTABLE_SCAN
+        | StorageCapability.OPEN_READ
         | StorageCapability.DELETE
     )
+    scan_options_type: ClassVar[type[ScanOptions]] = S3ScanOptions
+    scan_pages_filters: ClassVar[bool] = True
 
     # -- S3 path grammar (aws-cli string rules; no client, no validation) ----
 
@@ -428,7 +461,14 @@ class S3Storage(Storage):
 
     # -- construction / identity ---------------------------------------------
 
-    def __init__(self, url: str | os.PathLike[str], *, client: S3Client | None = None) -> None:
+    def __init__(
+        self,
+        url: str | os.PathLike[str],
+        *,
+        client: S3Client | None = None,
+        page_size: int = 1000,
+        fetch_owner: bool = False,
+    ) -> None:
         text = os.fspath(url)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
         # is optional here for convenience: "bucket/key" reads the same as
@@ -441,6 +481,12 @@ class S3Storage(Storage):
         self._bucket, self._key = _parse_s3_url(text)
         self._client = client
         self._owns_client = client is None
+        # How this source is listed (the scan's source-config): the ListObjectsV2
+        # page size and whether each entry's owner is fetched. Seeded into every
+        # scan via default_scan_options, so an app tunes the listing once here
+        # rather than passing it through each operation.
+        self._page_size = page_size
+        self._fetch_owner = fetch_owner
 
     @property
     def url(self) -> str:
@@ -544,37 +590,65 @@ class S3Storage(Storage):
             self._client = None
 
     @override
+    def default_scan_options(self) -> S3ScanOptions:
+        """The listing options seeded with this storage's held config
+        (:meth:`Storage.default_scan_options`).
+
+        ``page_size`` / ``fetch_owner`` come from the constructor, so every scan
+        reflects the listing tuned once on this ``S3Storage``; an operation
+        overlays only its own knobs (``recursive`` / ``sort`` / ``filter`` /
+        ``on_warning``, and the internal ``prefix`` / ``request_payer``) onto this.
+        """
+        return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
+
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
-        ``options.recursive`` omits ``Delimiter`` and yields every object as a
-        ``FILE`` entry; non-recursive passes ``Delimiter='/'`` and additionally
-        emits one ``DIRECTORY``-kind ``S3FileInfo`` per sub-"directory" (before the
-        page's objects). ``FileInfo.key`` is the full S3 key (or the prefix for
-        directories), in ListObjectsV2's UTF-8 lexicographic byte order across
-        pages - so a recursive stream is directly merge-joinable (the basis of
-        ``sync``). ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
-        ``S3FileInfo.owner``.
+        Object listing only - the openable-entity enumeration ``scan`` promises
+        (aws-cli's ``_list_all_objects``). ``options.recursive`` omits
+        ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
+        passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
+        ``S3FileInfo`` per sub-"directory" (before the page's objects).
+        ``FileInfo.key`` is the full S3 key (or the prefix for directories), in
+        ListObjectsV2's UTF-8 lexicographic byte order across pages - so a
+        recursive stream is directly merge-joinable (the basis of ``sync``).
+        ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
+        ``S3FileInfo.owner``. The bare service root (empty bucket) is *not* an
+        object container: it is listed with :meth:`list_buckets` (``S3.ls``
+        dispatches there), and reaching object listing with an empty bucket fails
+        with botocore's ``Invalid bucket name`` ParamValidation - matching
+        ``aws s3 cp/rm/sync s3://``.
 
-        At the service root (empty bucket part) the pages come from
-        ``ListBuckets`` instead - one ``BUCKET``-kind entry per bucket, filtered
-        by ``options.bucket_name_prefix`` / ``options.bucket_region``;
-        ``recursive`` / ``request_payer`` / ``fetch_owner`` are ignored there,
-        and the two bucket filters are ignored for object listings (aws-cli
-        parity: ``aws s3 ls`` with no bucket disregards ``--recursive``).
+        ``options.filter`` is applied here (:meth:`Storage.scan_pages`'s contract):
+        the raw ``ListObjectsV2`` pages are sieved client-side with
+        :func:`~boto3_s3.storage.sieve_pages` before they are yielded. This is the
+        override seam: subclass and filter / enrich each page, then
+        ``super().scan_pages(options)``; the work runs on :meth:`Storage.scan`'s
+        prefetch worker so it overlaps consumption. Fetch-time botocore errors are
+        translated to ``Boto3S3Error`` here and surface on the consumer's pull.
 
-        This is the override seam (see :meth:`Storage.scan_pages`): subclass and
-        filter / enrich each page, then ``super().scan_pages(options)``; the work
-        runs on :meth:`Storage.scan`'s prefetch worker so it overlaps consumption.
-        Fetch-time botocore errors are translated to ``Boto3S3Error`` here and
-        surface on the consumer's pull.
+        Requires an :class:`S3ScanOptions` (this backend's option type); a foreign
+        ``ScanOptions`` is rejected rather than silently listing with defaults.
         """
-        if not self._bucket:
-            yield from self._scan_bucket_pages(options)
-            return
+        if not isinstance(options, S3ScanOptions):
+            raise TypeError(f"S3Storage.scan requires S3ScanOptions, got {type(options).__name__}")
+        raw = self._scan_object_pages(options)
+        if options.filter is not None:
+            raw = sieve_pages(raw, options.filter)
+        yield from raw
+
+    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[FileInfo]]:
+        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
+
+        ``options.prefix`` overrides the storage's own key as the listing anchor
+        (a transfer's normalized prefix) - both the ``Prefix`` and the
+        ``compare_key`` relativization use it - so this instance lists under it
+        without being rebuilt.
+        """
+        prefix = options.prefix if options.prefix is not None else self._key
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
-            "Prefix": self._key,
+            "Prefix": prefix,
             "PaginationConfig": {"PageSize": options.page_size},
         }
         if not options.recursive:
@@ -588,52 +662,79 @@ class S3Storage(Storage):
         with s3_errors(operation="ls", bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive, prefix=self._key)
+                yield _page_to_infos(page, recursive=options.recursive, prefix=prefix, storage=self)
 
-    def _scan_bucket_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one ``list[FileInfo]`` per ``ListBuckets`` page (service root).
+    def list_buckets(
+        self,
+        *,
+        name_prefix: str | None = None,
+        region: str | None = None,
+    ) -> Iterator[FileInfo]:
+        """List the account's buckets as ``BUCKET``-kind ``FileInfo`` (the service root).
 
-        ``bucket_name_prefix`` / ``bucket_region`` map to ``Prefix`` /
-        ``BucketRegion`` and are omitted when falsy (matching aws-cli's
-        truthiness check, so ``""`` behaves like "not given").
+        The S3-only counterpart to :meth:`scan_pages`, kept separate because a
+        bucket is a container, not an openable entity (aws-cli's
+        ``_list_all_buckets``, which its ``ls`` dispatches to for a bare
+        ``s3://``): ``S3.ls`` calls this at the service root, and no transfer scan
+        ever yields buckets. The page size is the storage's own ``page_size``
+        (constructor config, shared with the object listing). ``name_prefix`` /
+        ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
+        when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
+        floor (botocore 1.34.162) it falls back to one unpaginated
+        ``list_buckets()`` with the filters inert (docs/overview.md section 2).
+        Errors surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
             if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31, docs/overview.md section 2):
-                # the ListBuckets paginator and its Prefix / BucketRegion /
-                # MaxBuckets parameters are a late-2024 addition (botocore
-                # 1.34.162). Below that, get_paginator("list_buckets") raises
-                # OperationNotPageableError, so fall back to a single
-                # unpaginated list_buckets() - the era-appropriate aws s3 ls,
-                # where the two bucket filters were silently inert. Drop this
-                # branch once the botocore floor reaches 1.34.162.
-                yield _page_to_bucket_infos(client.list_buckets())
+                # Back-compat (floor botocore 1.31): the ListBuckets paginator and
+                # its Prefix / BucketRegion parameters are a late-2024 addition
+                # (botocore 1.34.162). Drop this branch once the floor reaches it.
+                yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
-            paginator = client.get_paginator("list_buckets")
-            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": options.page_size}}
-            if options.bucket_name_prefix:
-                paging["Prefix"] = options.bucket_name_prefix
-            if options.bucket_region:
-                paging["BucketRegion"] = options.bucket_region
-            for page in paginator.paginate(**paging):
-                yield _page_to_bucket_infos(page)
+            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
+            if name_prefix:
+                paging["Prefix"] = name_prefix
+            if region:
+                paging["BucketRegion"] = region
+            for page in client.get_paginator("list_buckets").paginate(**paging):
+                yield from _page_to_bucket_infos(page, self)
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
-        """Intentionally unimplemented - every S3 transfer rides ``s3transfer``.
+        """Open the object at the full key ``key`` as a binary stream (``"rb"`` only).
 
-        No route reaches this: S3<->local / S3<->S3 transfers are driven through
-        ``s3transfer`` off ``get_client`` / ``bucket`` / ``key`` (``transfer.py``),
-        a stdin/stdout stream is handed to ``s3transfer`` as a fileobj (``s3.py``
-        ``_cp_stream``), and the S3 side of an open-route custom-backend transfer
-        likewise rides ``s3transfer`` (the *custom* side uses its own ``open``,
-        never this). Implementing it (GetObject -> readable stream; multipart
-        PutObject -> writable stream committed on ``close()``, honoring the
-        ``size`` hint) would only add direct programmatic S3 stream access, which
-        nothing needs today. It raises rather than silently misbehaving.
+        ``"rb"`` is a read convenience for building blocks over S3 - chiefly a
+        content-based ``S3.sync`` filter that must read an object's bytes:
+        ``GetObject`` on ``key`` (the object's *full* bucket key, exactly the
+        ``key`` carried on its ``FileInfo`` and the address ``delete`` uses),
+        returning botocore's streaming response body. So
+        ``info.storage.open(info.key, "rb")`` reads a built-in backend's entry
+        uniformly (``LocalStorage`` resolves an absolute ``info.key`` to its
+        file), and a typical custom backend's too (its ``key`` equals
+        ``compare_key`` - the scan-root-relative address its ``open`` is
+        required to resolve; docs/storage.md section 2). The body is **read-only and forward-only**
+        (no ``seek``); it supports the context-manager / ``read`` / ``close``
+        protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a
+        missing key, denied access) translate to the library taxonomy; an error
+        raised *later* while reading the streamed body (a read timeout, a broken
+        stream) surfaces as botocore's - like the raw file object
+        ``LocalStorage.open`` returns, whose read errors are likewise un-wrapped.
+        ``request_payer`` and an SSE-C key are not on the generic ``open``
+        signature, so a requester-pays or SSE-C object must be read through the
+        client directly.
+
+        ``"wb"`` stays unimplemented: every S3 *write* rides ``s3transfer``
+        (built-in transfers off ``get_client`` / ``bucket`` / ``key``, the S3 side
+        of an open-route transfer, a stream handed to ``s3transfer``), so the
+        multipart upload a writable stream would need has no caller. It raises
+        rather than silently misbehaving.
         """
-        raise NotImplementedError(_OPEN_NOT_IMPLEMENTED)
+        if mode != "rb":
+            raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
+        with s3_errors(operation="open", bucket=self._bucket, key=key):
+            response = self.get_client().get_object(Bucket=self._bucket, Key=key)
+        return cast("BinaryIO", response["Body"])
 
     @override
     def delete(self, info: FileInfo, *, request_payer: str | None = None) -> Mapping[str, Any]:
@@ -659,7 +760,6 @@ class S3Storage(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> S3FileInfo | None:
         """HeadObject a single key (:meth:`Storage.get_fileinfo`).
@@ -670,8 +770,8 @@ class S3Storage(Storage):
         ``os.path.join``), so a keyless or trailing-``/`` prefix needs none and a
         bare ``prefix`` still yields ``prefix/key``. A ``404`` returns ``None``
         (definitively absent); any other error (``403``, transport, 5xx) is
-        raised - existence could not be determined. ``follow_symlinks`` /
-        ``on_warning`` do not apply to S3 and are ignored. This is the generic
+        raised - existence could not be determined. ``on_warning`` does not apply
+        to S3 and is ignored. This is the generic
         HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
         """
         target_key = self._key
@@ -696,6 +796,7 @@ class S3Storage(Storage):
             storage_class=head.get("StorageClass"),
             head=head,
             compare_key=target_key.rsplit("/", 1)[-1],
+            storage=self,
         )
 
 

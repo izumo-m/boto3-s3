@@ -16,7 +16,7 @@ from boto3_s3 import ValidationError
 from boto3_s3_cli.shorthand import parse_map_option
 
 
-def _parse(value: str) -> dict[str, str | bytes]:
+def _parse(value: str) -> dict[str, str]:
     return parse_map_option(value, name="--metadata", operation="cp")
 
 

@@ -42,6 +42,12 @@ destination, so they carry `dest` / `dest_storage` but no `dest_info`.
 So `src_storage` + `src_info.key` (or `dest_storage` + `dest_info.key`) re-reaches
 the object directly - e.g. a HeadObject - without re-deriving anything.
 
+Each `FileInfo` also carries its producing backend as `FileInfo.storage`, so
+wherever `src_info` / `dest_info` is present it agrees with `src_storage` /
+`dest_storage` (the same backend). The separate `src_storage` / `dest_storage`
+fields are kept because they are populated even where the entry is absent - a
+`cp` / `mv` destination, and every warning / notice.
+
 ## Which operation populates which field
 
 | field | cp / mv | sync (copy) | rm / sync (delete) | warning · notice |

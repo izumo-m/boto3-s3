@@ -101,9 +101,14 @@ def _rm(
     client: _FakeS3Client,
     **kwargs: Any,
 ) -> list[OpResult]:
-    """Run S3().rm with a result collector and return the OpResults."""
+    """Run S3().rm with a result collector and return the OpResults.
+
+    ``page_size`` is now storage config, so it is routed to the ``S3Storage``
+    constructor rather than to ``rm``.
+    """
     results: list[OpResult] = []
-    storage = S3Storage(url, client=client)
+    page_size = kwargs.pop("page_size", 1000)
+    storage = S3Storage(url, client=client, page_size=page_size)
     S3().rm(storage, on_result=results.append, **kwargs)
     return results
 

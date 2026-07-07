@@ -28,14 +28,15 @@ backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
-object into an ``open("wb")`` whose ``close`` commits it) while the S3 side rides
+object into an ``open("wb")`` whose ``close`` flushes it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
 (``Storage.capabilities``), an ``mv`` removes a custom source through its own
-``delete``, and ``sync`` works when the custom side declares ``SORTED_SCAN`` (its
+``delete``, and ``sync`` works when the custom side declares ``SORTABLE_SCAN`` (its
 merge-join needs both listings byte-ordered) (transfer.md section 12).
-``S3Storage.open`` stays unimplemented by design - the S3 side always rides
-``s3transfer``, never ``open``. None of this affects CLI / ``aws s3`` parity (the
-CLI only ever pairs a built-in with a stdio stream).
+``S3Storage.open`` implements ``"rb"`` only (a ``GetObject`` read convenience);
+its ``"wb"`` stays unimplemented, since the S3 side of a transfer always rides
+``s3transfer``. None of this affects CLI / ``aws s3`` parity (the CLI only ever
+pairs a built-in with a stdio stream).
 """
 
 from __future__ import annotations
@@ -50,14 +51,16 @@ from boto3_s3.concurrency import prefetch
 from boto3_s3.types import FileInfo, ScanOptions
 
 
-def _sieve_pages(
+def sieve_pages(
     pages: Iterator[Sequence[FileInfo]], keep: Callable[[FileInfo], bool]
 ) -> Iterator[list[FileInfo]]:
-    """Apply ``keep`` to each page; drop pages sieved empty.
+    """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
 
-    Lazily wraps a :meth:`Storage.scan_pages` producer: :func:`prefetch`'s
-    worker drives it, so the predicate runs on the worker thread and excluded
-    entries - and emptied pages - never enter the hand-off queue.
+    The building block a :meth:`Storage.scan_pages` implementation uses to honor
+    ``options.filter`` when it cannot push the predicate to the source: wrap the
+    raw page stream with it. Lazy, so :func:`prefetch`'s worker drives it - the
+    predicate runs on the worker thread and excluded entries (and pages emptied
+    by it) never enter the hand-off queue.
     """
     for page in pages:
         kept = [info for info in page if keep(info)]
@@ -77,20 +80,20 @@ class StorageCapability(Flag):
     ``EACCES`` / ``ENOENT``), reported per item like aws-cli, never pre-screened.
 
     The members mirror the methods one-to-one, because support genuinely differs
-    per kind (``S3Storage`` resolves one object via ``get_fileinfo`` yet does not
-    implement ``open``; a single-URL backend reads one object but cannot
-    enumerate):
+    per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
+    ``open("wb")`` - S3 writes ride ``s3transfer``; a single-URL backend reads one
+    object but cannot enumerate):
 
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
     - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
     - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
-    - ``SORTED_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
+    - ``SORTABLE_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
       (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,
       and gates on this capability for a custom side
     - ``DELETE`` - ``delete(info)`` (``rm`` / ``mv`` source / ``sync --delete``)
 
     The reading members form a lattice (expanded by :func:`_implied`):
-    ``SORTED_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration
+    ``SORTABLE_SCAN`` implies ``SCAN`` implies ``GET_FILEINFO`` (ordered enumeration
     implies enumeration implies single-entry resolution), so a backend need only
     declare its strongest one.
     """
@@ -99,18 +102,18 @@ class StorageCapability(Flag):
     OPEN_WRITE = auto()
     GET_FILEINFO = auto()
     SCAN = auto()
-    SORTED_SCAN = auto()
+    SORTABLE_SCAN = auto()
     DELETE = auto()
 
 
 def _implied(caps: StorageCapability) -> StorageCapability:
     """Expand :class:`StorageCapability`'s reading lattice for a containment test.
 
-    ``SORTED_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``, so a backend that declares
+    ``SORTABLE_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``, so a backend that declares
     only its strongest reading capability still satisfies a check for a weaker
     one. Applied wherever capabilities are tested, never to the stored value.
     """
-    if caps & StorageCapability.SORTED_SCAN:
+    if caps & StorageCapability.SORTABLE_SCAN:
         caps |= StorageCapability.SCAN
     if caps & StorageCapability.SCAN:
         caps |= StorageCapability.GET_FILEINFO
@@ -128,33 +131,80 @@ class Storage(abc.ABC):
     :meth:`validate` is a no-op by default (override to reject a malformed
     location before an operation uses it). Built-in implementations are
     ``LocalStorage`` and ``S3Storage``.
+
+    Class attributes (a concrete backend sets / overrides these):
+
+    ``scheme`` - which storage family this is, a display/classification label
+    (result rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
+    other value is a non-built-in backend (a custom one, or a stdio stream).
+    Transfer *routing* does not read it: the planner routes by concrete type (the
+    structural match in ``transferplan._paths_type``). Each concrete Storage sets
+    its own token.
+
+    ``sep`` - the separator of this backend's path space, as it appears in
+    formatted roots (:meth:`format`) and item keys. ``"/"`` for S3, streams, and
+    custom backends (``FileInfo.key`` / ``compare_key`` are ``/``-separated by
+    contract); ``LocalStorage`` overrides with the host ``os.sep``.
+
+    ``capabilities`` - which transfer operations this Storage *kind* implements
+    (:class:`StorageCapability`): the structural, class-level contract a transfer
+    pre-checks for a custom side - distinct from runtime *permission* (a denied
+    write / missing target is an execution-time error, not modeled here). The
+    default declares nothing (fail-closed); each concrete Storage overrides it, and
+    a subclass may narrow or widen it.
+
+    ``scan_options_type`` - this backend's :class:`~boto3_s3.types.ScanOptions`
+    type. ``scan()`` with no options builds it (via :meth:`default_scan_options`),
+    so a backend whose ``scan_pages`` requires its own subclass still works
+    arg-less. The base is a plain :class:`~boto3_s3.types.ScanOptions`; ``S3Storage``
+    / ``LocalStorage`` set :class:`~boto3_s3.types.S3ScanOptions` /
+    :class:`~boto3_s3.types.LocalScanOptions`. A custom backend that defines its own
+    subclass just sets this one attribute - no method to override. (A backend that
+    takes the base ``ScanOptions`` needs nothing here.)
+
+    ``scan_pages_filters`` - whether this backend's ``scan_pages`` already applies
+    ``options.filter`` itself. When ``False`` (default), :meth:`scan` applies it as
+    a safety net after ``scan_pages`` (on the prefetch worker), so a custom backend
+    that forgets to filter cannot silently leak excluded entries into ``--exclude``
+    / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
+    built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
+    ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that still
+    warns on excluded files, or early in a custom ``LocalFileGenerator``'s
+    ``finalize_children``). A backend that filters at its source, or prunes early by
+    calling ``options.filter`` itself, sets ``True`` to skip the redundant re-filter
+    without re-implementing :meth:`scan`.
     """
 
-    #: Which storage family this is - a display/classification label (result
-    #: rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
-    #: other value is a non-built-in backend (a custom one, or a stdio stream).
-    #: Transfer *routing* does not read it: the planner routes by concrete type
-    #: (the structural match in ``transferplan._paths_type``). Each concrete
-    #: Storage sets its own token.
     scheme: ClassVar[str]
 
-    #: The separator of this backend's path space, as it appears in formatted
-    #: roots (:meth:`format`) and item keys. ``"/"`` for S3, streams, and custom
-    #: backends (``FileInfo.key`` / ``compare_key`` are ``/``-separated by
-    #: contract); ``LocalStorage`` overrides with the host ``os.sep``.
     sep: ClassVar[str] = "/"
 
-    #: Which transfer operations this Storage *kind* implements
-    #: (:class:`StorageCapability`): the structural, class-level contract a
-    #: transfer pre-checks for a custom side - distinct from runtime *permission*
-    #: (a denied write / missing target is an execution-time error, not modeled
-    #: here). The default declares nothing (fail-closed); each concrete Storage
-    #: overrides it, and a subclass may narrow or widen it.
     capabilities: ClassVar[StorageCapability] = StorageCapability(0)
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
+
+    scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
+
+    scan_pages_filters: ClassVar[bool] = False
+
+    def default_scan_options(self) -> ScanOptions:
+        """This backend's own :class:`ScanOptions`: used when ``scan()`` gets none,
+        and the base an operation overlays its own knobs onto.
+
+        The default builds :attr:`scan_options_type` with all field defaults. A
+        backend that carries scan *source-config* on its instance - how this source
+        is read, set once on the constructor (``LocalStorage``'s ``follow_symlinks``
+        / ``detect_symlink_loops``, ``S3Storage``'s ``page_size`` / ``fetch_owner``)
+        - overrides this to seed those held values, so every scan reflects the
+        storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
+        paths build from this and overlay only the operation-inherent knobs
+        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix``), which
+        is what lets an app configure the walk through the storage rather than per
+        call.
+        """
+        return self.scan_options_type()
 
     def scan(self, options: ScanOptions | None = None) -> Iterator[FileInfo]:
         """Yield the entries under this storage as a flat ``FileInfo`` stream.
@@ -163,20 +213,33 @@ class Storage(abc.ABC):
         producer and overlaps it with a background :func:`prefetch` worker, so the
         next page's I/O (an S3 ``ListObjectsV2`` round-trip, a local ``stat``
         batch) runs while the consumer handles the current page; a producer error
-        surfaces on the consumer's pull. ``options.filter`` is applied here, page
-        by page on that same worker - excluded entries (and pages sieved empty)
-        never cross the hand-off queue, and the predicate runs off the consumer's
-        thread. Pass ``options`` to control the walk (defaults to
-        ``ScanOptions()``). To customize the entries, override :meth:`scan_pages`,
-        not this method. Used by ``ls`` and the recursive forms of ``cp`` /
-        ``rm`` / ``sync``.
+        surfaces on the consumer's pull. ``options.filter`` is applied here as a
+        safety net (on the prefetch worker) **unless** the backend declares
+        :attr:`scan_pages_filters` - so a custom backend that does not filter in
+        ``scan_pages`` cannot silently leak excluded entries; a backend that
+        filters at its source or prunes early declares the flag to skip the
+        redundant re-filter. Pass ``options`` to control the walk (defaults to
+        :meth:`default_scan_options`). To customize the entries, override
+        :meth:`scan_pages`, not this method. Each yielded entry has its
+        ``FileInfo.storage`` set to this backend as a safety net (only when a
+        ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
+        their filters see it too. Used by ``ls`` and the recursive forms of
+        ``cp`` / ``rm`` / ``sync``.
         """
-        opts = options if options is not None else ScanOptions()
-        pages: Iterator[Sequence[FileInfo]] = self.scan_pages(opts)
-        if opts.filter is not None:
-            pages = _sieve_pages(pages, opts.filter)
+        opts = options if options is not None else self.default_scan_options()
+        pages = self.scan_pages(opts)
+        if opts.filter is not None and not self.scan_pages_filters:
+            pages = sieve_pages(pages, opts.filter)
         with prefetch(pages, queue_size=self._scan_prefetch_pages) as items:
-            yield from items
+            for info in items:
+                # Safety net: stamp the producing backend so a downstream consumer
+                # (sync's content compare via pair.src.storage, an on_result
+                # callback) can reach it even when a custom scan_pages did not set
+                # it. The built-ins stamp it during the scan so their filters
+                # already see it; this only fills a None left by a bespoke backend.
+                if info.storage is None:
+                    info.storage = self
+                yield info
 
     @abc.abstractmethod
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
@@ -187,15 +250,19 @@ class Storage(abc.ABC):
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
         customized stream keeps the page-ahead overlap, cheaper than
-        re-implementing :meth:`scan`. Yield raw pages: ``options.filter`` is
-        :meth:`scan`'s concern, applied centrally downstream of this producer
-        (and of any override), so implementations never check it.
+        re-implementing :meth:`scan`. **Apply ``options.filter`` here** and return
+        already-filtered pages: whatever this producer omits is simply absent
+        downstream (its ``sync`` effect is side-specific - the visibility layer in
+        ``ScanOptions.filter`` / docs/globsieve.md). A backend that cannot push the
+        predicate to its source wraps its raw pages with :func:`sieve_pages`; one
+        that can (e.g. a REST listing) translates ``options.filter`` into a
+        server-side query instead.
 
         ``options.recursive`` walks every entry beneath the prefix (all ``FILE``
         kind, no directory grouping); non-recursive yields the immediate entries
         plus one ``DIRECTORY``-kind ``FileInfo`` per sub-"directory" (S3
         ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
-        ``compare_key``): a backend declaring ``SORTED_SCAN`` MUST honor it, so
+        ``compare_key``): a backend declaring ``SORTABLE_SCAN`` MUST honor it, so
         two recursive streams can be merge-joined (what ``sync`` relies on) after
         each is relativized to its scan root; when ``sort`` is ``False`` (``cp`` /
         ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper natural order.
@@ -210,17 +277,23 @@ class Storage(abc.ABC):
         """Open the object at ``key`` as a binary stream.
 
         ``"rb"`` returns a readable stream; ``"wb"`` a writable one whose
-        ``close()`` commits the write. ``size`` is an optional total-length hint
+        ``close()`` flushes any buffered writes (standard file semantics).
+        ``size`` is an optional total-length hint
         for writes (lets S3 choose single-part vs multipart up front). This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path a custom backend
         (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
         non-built-in side of an open-route transfer (``opens3`` / ``s3open``,
         transfer.md section 12), handing the returned fileobj to ``s3transfer``
-        and ``close``-ing it when done - a ``"wb"`` ``close`` is the write's
-        commit point. ``LocalStorage`` and the stream Storages (``IOStorage`` /
-        ``StdioStorage``) implement it; ``S3Storage.open`` stays unimplemented by
-        design (the S3 side always rides ``s3transfer``, never ``open``).
+        and ``close``-ing it when done - a ``"wb"`` ``close`` flushes buffered
+        writes like any file object (whether the backend persists per write or
+        defers to the flush - write-through vs write-back - is its own choice).
+        ``LocalStorage`` and the stream Storages (``IOStorage`` /
+        ``StdioStorage``) implement both modes. ``S3Storage`` implements ``"rb"``
+        only - a ``GetObject`` read convenience (chiefly for a content-based
+        ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
+        unimplemented, since every S3 write rides ``s3transfer`` rather than
+        ``open``.
         """
 
     @abc.abstractmethod
@@ -243,7 +316,6 @@ class Storage(abc.ABC):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         """Return the ``FileInfo`` for a single entry, or ``None`` if it is absent.
@@ -267,8 +339,10 @@ class Storage(abc.ABC):
 
         So ``None`` means "no transferable entry here"; the caller decides what
         that means (a single source raises its own "does not exist"; an existence
-        check proceeds). ``follow_symlinks=False`` skips a symlink; ``on_warning``
-        is the local-walk warning channel (ignored by S3).
+        check proceeds). ``on_warning`` is the local-walk warning channel (ignored
+        by S3). Whether a symlink is followed is the local backend's own
+        construction-time config (``LocalStorage(follow_symlinks=...)``), read from
+        the storage - not a parameter here.
         """
 
     @abc.abstractmethod
@@ -322,7 +396,7 @@ class Storage(abc.ABC):
         """Whether this storage implements every capability in ``needed``.
 
         The capability lattice is applied first (see :class:`StorageCapability`),
-        so e.g. a backend declaring ``SORTED_SCAN`` ``supports(SCAN)``. This is
+        so e.g. a backend declaring ``SORTABLE_SCAN`` ``supports(SCAN)``. This is
         the structural pre-check a transfer runs on a custom (``open``-routed)
         side; a built-in S3 / local side rides ``s3transfer`` and is not gated.
         """

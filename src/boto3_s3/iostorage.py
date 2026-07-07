@@ -12,7 +12,7 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
 (download). The transfer ``close``s every fileobj ``open`` returns (the open
-route commits a real backend's writer that way), so each view here absorbs that
+route flushes a real backend's writer that way), so each view here absorbs that
 ``close`` into a flush: the caller's stream is **never closed** by ``IOStorage``
 (it owns only the thin view / codec adapter).
 
@@ -55,7 +55,7 @@ class _Uncloseable:
     """A pass-through binary view whose ``close`` never closes the wrapped stream.
 
     The open route lets the transfer ``close`` every fileobj ``open`` returns -
-    that ``close`` is how a real backend commits a write. IOStorage never owns
+    that ``close`` is how a real backend flushes a write. IOStorage never owns
     the caller's stream, so it hands back this view instead of the raw stream:
     ``close`` flushes any buffered bytes (so a stdout download is visible) but
     leaves the underlying stream open for the caller. Every other attribute
@@ -157,11 +157,12 @@ class IOStorage(Storage):
     A binary stream is used as-is; a text stream is wrapped with ``encoding``
     (default utf-8). The caller's stream is never closed by this class. As a single
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
+
+    ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
+    I/O (both directions, chosen per ``open`` call), with no listing or deletion.
     """
 
     scheme: ClassVar[str] = "stdio"
-    #: A single stream supports only byte I/O (both directions, chosen per
-    #: ``open`` call); it has no listing or deletion, so just the ``OPEN_*`` pair.
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
@@ -201,7 +202,6 @@ class IOStorage(Storage):
         self,
         key: str = "",
         *,
-        follow_symlinks: bool = True,
         on_warning: Callable[[str], None] | None = None,
     ) -> FileInfo | None:
         raise NotImplementedError(_NOT_A_CONTAINER)

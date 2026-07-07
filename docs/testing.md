@@ -325,7 +325,18 @@ Ports keep aws-cli test names, canned responses, and expectations verbatim
 where possible (see the adaptation rules in each port's module docstring -
 e.g. `tests/cli/awscli/test_ls_command.py`). Genuine divergences are to be marked
 `xfail(strict=True)` with the open design question in the reason, never
-silently rewritten (none currently; all ports match aws-cli). The presign port freezes botocore's signing clock
+silently rewritten (none currently; all ports match aws-cli).
+
+Each ported test is traceable to its aws-cli original by a simple convention:
+a test carrying **no** `# aws-cli:` comment shares its original's class and
+method name (so the same name locates it in aws-cli's
+`tests/functional/s3/test_<cmd>_command.py`). A `# aws-cli:` comment names a
+divergent origin instead - placed above the test for a per-test difference (a
+rename, a parametrized merge of several aws-cli tests, a method from a different
+aws-cli class or file, or `none` for a boto3-s3 addition), or above a class when
+a whole block was carved out of one aws-cli class under the same method names.
+The comment references the aws-cli test by logical `Class.method` name - or just
+the method name when the origin is in the same class - never a vendored path. The presign port freezes botocore's signing clock
 through the `get_current_datetime` seam - patched in both modules that
 bind it, `botocore.auth` and (when awscrt is importable - the dev
 environment always is, section 4) `botocore.crt.auth` - and keeps

@@ -2,7 +2,33 @@
     "venvPath": ".",
     "venv": ".venv",
     "pythonVersion": "3.10",
-    "include": ["src", "cli/src"],
+    "include": ["src", "cli/src", "tests"],
     "exclude": ["vendor", "**/__pycache__", ".venv"],
-    "typeCheckingMode": "strict"
+    "typeCheckingMode": "strict",
+    "executionEnvironments": [
+        {
+            // Test code legitimately does what strict mode forbids: white-box
+            // access to production internals, hand-written client fakes that
+            // cannot structurally match botocore's generated S3Client, and
+            // untyped third-party classes (botocore Config, s3transfer
+            // TransferConfig). Relax only those rule families under tests/;
+            // every other strict check still runs here (reportReturnType,
+            // reportOptionalMemberAccess, reportIncompatibleMethodOverride,
+            // reportDeprecated, ...).
+            "root": "tests",
+            // Restore repo-root import resolution: `root` alone would search
+            // only from tests/, breaking the `tests.utils.*` absolute imports
+            // (tests/ is a real package with __init__.py).
+            "extraPaths": ["."],
+            "reportPrivateUsage": "none",
+            "reportPrivateImportUsage": "none",
+            "reportArgumentType": "none",
+            "reportAttributeAccessIssue": "none",
+            "reportUnknownMemberType": "none",
+            "reportUnknownVariableType": "none",
+            "reportUnknownArgumentType": "none",
+            "reportUnknownLambdaType": "none",
+            "reportUnusedFunction": "none"
+        }
+    ]
 }

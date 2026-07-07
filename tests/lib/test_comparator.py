@@ -128,6 +128,24 @@ def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: b
     )
 
 
+class TestComparatorOrderGuard:
+    """Dev-only guard: an unsorted ``SORTABLE_SCAN`` side trips a loud
+    ``AssertionError`` instead of silently mis-pairing (and, with ``--delete``,
+    deleting files present on both sides)."""
+
+    def test_descending_source_trips_the_assert(self) -> None:
+        with pytest.raises(AssertionError, match="not byte-ordered"):
+            _pairs(_entries("b", "a"), _entries("a", "b"))
+
+    def test_descending_dest_trips_the_assert(self) -> None:
+        with pytest.raises(AssertionError, match="not byte-ordered"):
+            _pairs(_entries("a", "b"), _entries("c", "a"))
+
+    def test_ordered_streams_pass_untouched(self) -> None:
+        # No false positive: correctly byte-ordered sides pair normally.
+        assert len(_pairs(_entries("a", "b", "c"), _entries("a", "c"))) == 3
+
+
 class TestCompareSizeTime:
     """aws-cli syncstrategy matrix, by direction and variant flag."""
 
