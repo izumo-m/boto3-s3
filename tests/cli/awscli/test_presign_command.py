@@ -5,6 +5,16 @@ Provenance: aws-cli's ``tests/functional/s3/test_presign_command.py``
 the exact frozen-time signatures included - are kept verbatim so the file
 stays diffable against the aws-cli original.
 
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py`` (``PresignCommand``).
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
+
 Adaptation rules (on top of the mb port's - see
 ``tests/cli/awscli/test_mb_command.py``):
 

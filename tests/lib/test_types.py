@@ -183,11 +183,8 @@ class TestLocalScanOptions:
 
 class TestPublicReExport:
     @pytest.mark.parametrize("name", TYPE_NAMES)
-    def test_top_level_import_succeeds(self, name: str) -> None:
-        assert hasattr(boto3_s3, name)
-
-    @pytest.mark.parametrize("name", TYPE_NAMES)
     def test_top_level_identity_matches_module(self, name: str) -> None:
+        # Identity implies existence, so this also covers "re-exported at all".
         assert getattr(boto3_s3, name) is getattr(t, name)
 
     def test_all_enumerates_public_types(self) -> None:

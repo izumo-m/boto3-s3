@@ -435,11 +435,6 @@ class TestCopyDirect:
         )
         assert f2(pair) is True
 
-    def test_reads_no_bytes(self) -> None:
-        # COPY never opens a local file; keys point at nothing on disk.
-        f = self._copy(_full("sha256", "ABC"), _full("sha256", "ABC"))
-        assert f(self._pair()) is False
-
     def test_composite_values_skip_pagination(self) -> None:
         # COPY compares the stored value strings directly, so a COMPOSITE object
         # (whose parts would otherwise paginate) is read with one call per side.

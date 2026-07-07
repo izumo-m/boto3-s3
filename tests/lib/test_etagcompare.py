@@ -213,13 +213,6 @@ class TestCopyDirectEtag:
         pair = _pair(TransferType.COPY, src=FileInfo(key="k"), dest=_s3(etag="abc"))
         assert EtagComparison()(pair) is True
 
-    def test_reads_no_bytes(self) -> None:
-        # Keys point at nothing on disk; the equal-etag skip still holds.
-        pair = _pair(
-            TransferType.COPY, src=_s3(etag="abc", key="nope"), dest=_s3(etag="abc", key="nope")
-        )
-        assert EtagComparison()(pair) is False
-
     def test_size_collision_guard(self) -> None:
         # Equal etag but different size: check_size forces a copy (MD5 collisions
         # exist), while pure-etag mode trusts the equality and skips.

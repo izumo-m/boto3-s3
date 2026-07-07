@@ -5,6 +5,19 @@ Provenance: aws-cli's ``tests/functional/s3/test_sync_command.py``
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py``
+(``SyncCommand``), ``comparator.py``, and ``syncstrategy/`` (``caseconflict.py`` /
+``delete.py`` / ``nooverwrite.py`` / ``sizeonly.py`` / ``exacttimestamps.py``), on
+the same ``s3handler.py`` / ``filegenerator.py`` pipeline as cp.
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
+
 Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
 
 - Sync deletions: the aws-cli issues one ``DeleteObject`` per key; ours
@@ -318,6 +331,7 @@ class TestSyncCommand:
         assert _operations(calls) == ["ListObjectsV2"]
         assert not full_path.exists()
 
+    # aws-cli: test_sync_skips_over_files_deleted_between_listing_and_transfer_{valueerror,oserror}
     def test_sync_skips_over_files_deleted_between_listing_and_transfer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -456,6 +470,7 @@ class TestSyncCommand:
             ),
         ]
 
+    # aws-cli: none (boto3-s3 addition; absolute --exclude roots at source; --delete removes orphan)
     def test_absolute_exclude_does_not_protect_the_destination_from_delete(
         self, tmp_path: Path
     ) -> None:
@@ -474,6 +489,7 @@ class TestSyncCommand:
         delete = next(c for c in calls if c.operation == "DeleteObjects")
         assert delete.params["Delete"]["Objects"] == [{"Key": "keep/a.txt"}]
 
+    # aws-cli: none (boto3-s3 addition; relative --exclude hides both sides; --delete spares dest)
     def test_relative_exclude_protects_the_destination_from_delete(self, tmp_path: Path) -> None:
         # A relative --exclude matches each side's compare_key, so it hides
         # keep/a.txt on BOTH sides; the dest is invisible and --delete leaves it
@@ -530,6 +546,7 @@ class TestSyncCommand:
         assert calls[5].params["PartNumber"] == 1
         assert calls[7].params["Tagging"] == {"TagSet": [{"Key": "tag-key", "Value": "val" * 3000}]}
 
+    # aws-cli: test_upload_with_checksum_algorithm_* (one per algorithm)
     @pytest.mark.parametrize(
         "algorithm",
         [
@@ -584,6 +601,7 @@ class TestSyncCommand:
             "ChecksumAlgorithm": "SHA1",
         }
 
+    # aws-cli: test_download_with_checksum_mode_* (one per algorithm)
     @pytest.mark.parametrize(
         "checksum_field",
         [

@@ -5,6 +5,17 @@ Provenance: aws-cli's ``tests/functional/s3/test_mv_command.py``
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
+The behaviour under test is aws-cli's s3 command implementation in
+``vendor/aws-cli/awscli/customizations/s3/`` - ``subcommands.py`` (``MvCommand``)
+on the same ``s3handler.py`` / ``filegenerator.py`` pipeline as cp.
+
+A test carrying no ``# aws-cli:`` comment ports the aws-cli test of the same
+class and method name. A ``# aws-cli:`` comment names a divergent origin
+instead: above a test for a per-test difference (a rename, a parametrized
+merge of several aws-cli tests, a method from a different aws-cli class or
+file, or ``none`` for a boto3-s3 addition), or above a class when a whole
+block was carved out of one aws-cli class under the same method names.
+
 Adaptation rules (on top of the cp port's - see its module docstring):
 
 - The aws-cli harness feeds every service's responses through one stubbed
@@ -346,6 +357,7 @@ class TestMvCommand:
         assert calls[1].params["ChecksumMode"] == "ENABLED"
 
 
+# aws-cli: TestMvCommand (the --no-overwrite block, carved into its own class; same method names)
 class TestMvCommandNoOverwrite:
     """The aws-cli no-overwrite block of TestMvCommand (source-survival pins)."""
 
