@@ -67,9 +67,10 @@ class FileInfo:
     rather than produced by ``scan``.
 
     ``storage`` is the backend the entry was listed from - the ``Storage`` whose
-    ``scan`` (or single-key path) produced it - stamped by the producer alongside
-    ``compare_key`` (aws-cli carries the analogous ``client`` / ``source_client``
-    on its own ``FileInfo``). It lets a ``ScanOptions.filter`` predicate reach the
+    ``scan`` (or single-key path) produced it - stamped by the producer during the
+    scan, before any filter runs (aws-cli carries the analogous ``client`` /
+    ``source_client`` on its own ``FileInfo``). It lets a ``ScanOptions.filter``
+    predicate reach the
     backend behind the entry (e.g. a ``HeadObject`` for a tag the listing omits),
     and it is the handle ``sync`` reads through :attr:`SyncPair.src` /
     :attr:`~boto3_s3.comparator.SyncPair.dest` to open a pair's non-S3 side for a
@@ -229,10 +230,19 @@ class LocalScanOptions(ScanOptions):
     skipped with a ``Symbolic link loop detected`` warning (via ``on_warning``)
     instead of recursing until ``RecursionError``. Off is zero extra cost (no
     per-directory ``stat``).
+
+    ``storage`` is not a user knob: ``LocalStorage`` threads its own instance here
+    (``scan_pages`` / ``walk_local``) so the *shared, stateless*
+    :class:`~boto3_s3.localstorage.LocalFileGenerator` can stamp each entry's
+    ``FileInfo.storage`` before the visibility filter runs, without holding a
+    back-reference to any one storage (which would misfire when one walker is
+    shared across storages). ``None`` on a hand-built options object -
+    ``Storage.scan``'s backstop fills ``FileInfo.storage`` afterwards instead.
     """
 
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
+    storage: Storage | None = None
 
 
 class TransferType(enum.Enum):

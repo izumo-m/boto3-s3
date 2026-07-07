@@ -568,6 +568,48 @@ class TestLocalStorageScan:
         assert keys == ["plain.txt"]  # link.txt skipped, no options passed
 
 
+class TestWalkerSharing:
+    """One ``LocalFileGenerator`` may be shared across several ``LocalStorage``
+    instances: the walker is stateless, and the producing storage is threaded
+    per-walk via ``LocalScanOptions.storage`` (not a back-reference on the walker),
+    so each scan stamps its OWN backend onto ``FileInfo.storage``."""
+
+    def test_shared_walker_stamps_the_right_backend_per_storage(self, tmp_path: Path) -> None:
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "x.txt").write_bytes(b"1")
+        (tmp_path / "b").mkdir()
+        (tmp_path / "b" / "y.txt").write_bytes(b"2")
+        walker = LocalFileGenerator()
+        sa = LocalStorage(str(tmp_path / "a"), walker=walker)
+        sb = LocalStorage(str(tmp_path / "b"), walker=walker)
+        assert sa.walker is sb.walker is walker  # genuinely one shared walker
+        # Recursive (the walker's own filter path): each scan stamps its own storage.
+        a_infos = list(sa.scan(LocalScanOptions(recursive=True)))
+        b_infos = list(sb.scan(LocalScanOptions(recursive=True)))
+        assert a_infos and all(i.storage is sa for i in a_infos)
+        assert b_infos and all(i.storage is sb for i in b_infos)
+        # Non-recursive path too.
+        assert all(i.storage is sa for i in sa.scan())
+        assert all(i.storage is sb for i in sb.scan())
+
+    def test_shared_walker_filter_sees_the_right_backend(self, tmp_path: Path) -> None:
+        # storage is stamped BEFORE the visibility filter, so a predicate reaches
+        # the correct backend even when the walker is shared.
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "x.txt").write_bytes(b"1")
+        walker = LocalFileGenerator()
+        sa = LocalStorage(str(tmp_path / "a"), walker=walker)
+        LocalStorage(str(tmp_path), walker=walker)  # a later storage sharing the walker
+        seen: list[object] = []
+
+        def _spy(info: FileInfo) -> bool:
+            seen.append(info.storage)
+            return True
+
+        list(sa.scan(LocalScanOptions(recursive=True, filter=_spy)))
+        assert seen and all(s is sa for s in seen)
+
+
 class TestStatResultAndSymlink:
     """Every listed ``LocalFileInfo`` carries its followed ``stat_result`` and
     ``is_symlink`` flag - no opt-in, and the walk keeps its ``dir_fd`` fast path

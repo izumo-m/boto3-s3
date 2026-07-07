@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, cast
 
@@ -312,10 +313,12 @@ class LocalFileGenerator:
     entries vetted - see this module's docstring for the seam layering and the
     aws-cli name mapping. The default instance is the fast ``os.scandir`` walk.
 
-    The class is stateless across a walk: the per-walk knobs (``follow_symlinks``
-    / ``detect_loops`` / ``notify``) are passed to
-    :meth:`list_files` (aws-cli carries them on the instance instead, but here one
-    walker serves every scan the owning ``LocalStorage`` makes).
+    The class is **stateless across a walk**: the per-walk context
+    (``follow_symlinks`` / ``detect_symlink_loops`` / ``on_warning`` / the producing
+    ``storage``) rides on the :class:`~boto3_s3.types.LocalScanOptions` passed to
+    :meth:`list_files`, not on the instance (aws-cli carries them on the instance
+    instead). So **one walker can be shared across several ``LocalStorage``
+    instances** - each scan stamps its own ``storage`` from the options.
     """
 
     #: Whether this platform can scan a directory through its file descriptor and
@@ -335,12 +338,6 @@ class LocalFileGenerator:
     )
     #: The stamp for an unrepresentable mtime (aws-cli's ``EPOCH_TIME``).
     EPOCH_TIME: ClassVar[datetime] = _EPOCH
-
-    #: The owning ``LocalStorage``, bound by its ``__init__`` (one walker serves one
-    #: storage). :meth:`scan_children` stamps it onto each entry's
-    #: ``FileInfo.storage`` alongside ``compare_key`` - before ``scan_pages`` filters
-    #: - so a ``ScanOptions.filter`` and ``sync``'s content compare reach the backend.
-    storage: LocalStorage | None = None
 
     def list_files(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
         """Yield every file under ``root`` (recursively) in aws-cli byte order.
@@ -405,10 +402,18 @@ class LocalFileGenerator:
         # key relative to root.
         strip = len(root.replace(os.sep, "/"))
         item_filter = options.filter
+        storage = options.storage
         for page in self.walk_dir(root, options, strip=strip, notify=notify, detector=detector):
             # compare_key is already stamped (scan_children, before finalize_children);
-            # here only the visibility filter runs. No filter (or a custom
-            # finalize_children that already pruned) -> the page passes untouched.
+            # here we stamp each entry's producing backend (options.storage, walk-
+            # constant) before the visibility filter, so a predicate - and sync's
+            # content compare - can reach it. Then the filter runs; no filter (or a
+            # custom finalize_children that already pruned) -> the page passes
+            # untouched. storage is None only for a hand-built options object
+            # (Storage.scan's backstop fills FileInfo.storage afterwards).
+            if storage is not None:
+                for info in page:
+                    info.storage = storage
             if item_filter is None:
                 yield page
                 continue
@@ -513,10 +518,12 @@ class LocalFileGenerator:
         synthetic entries or read a different source - reusing
         :meth:`classify_child` / :meth:`dir_child` / :meth:`normalize_sort` so the
         sort key and directory-info shape need not be reproduced (an injected
-        child still needs its ``compare_key`` stamped - ``info.key[strip:]``). To
-        prune / register / re-order after the fact, override the finer
-        :meth:`finalize_children` instead; for a per-entry change,
-        :meth:`classify_child` (or :meth:`should_ignore_entry` / :meth:`stat_info`).
+        child still needs its ``compare_key`` stamped - ``info.key[strip:]``;
+        ``FileInfo.storage`` need not be set - the caller stamps the producing
+        backend after the walk yields a page). To prune / register / re-order after
+        the fact, override the finer :meth:`finalize_children` instead; for a
+        per-entry change, :meth:`classify_child` (or :meth:`should_ignore_entry` /
+        :meth:`stat_info`).
         """
         children: list[WalkChild] = []
         dir_fd: int | None = None
@@ -551,7 +558,6 @@ class LocalFileGenerator:
                 os.close(dir_fd)
         for child in children:
             child.info.compare_key = child.info.key[strip:]
-            child.info.storage = self.storage
         return self.finalize_children(children)
 
     def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
@@ -648,7 +654,11 @@ class LocalFileGenerator:
         strip entries it does not want transferred, or re-order. It receives the
         children *unsorted*, so pruning here happens before the sort; call
         ``super().finalize_children`` (or :meth:`normalize_sort`) for aws-cli byte
-        order. Dropping a ``DIRECTORY`` child prunes its whole subtree (the walk
+        order. ``FileInfo.storage`` (the producing backend) is *not* set yet - the
+        caller stamps it after the walk yields a page, before the visibility filter
+        - so an override shapes the subtree from ``compare_key`` / ``key`` /
+        ``kind``, not from the backend handle. Dropping a ``DIRECTORY`` child prunes
+        its whole subtree (the walk
         never descends what this does not return) - a speedup ``aws s3`` cannot do
         (it vets every file), so it is the right place for a non-parity backup
         walk, not the default. The default returns the sorted list unchanged.
@@ -858,11 +868,11 @@ class LocalStorage(Storage):
         # rather than passing it through each operation.
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
-        #: The directory-walk strategy (the default fast walk, or an app's). Bind
-        #: the back-reference so the walk can stamp each entry's ``FileInfo.storage``
-        #: (one walker serves one storage; sharing one across storages rebinds it).
+        # The directory-walk strategy (the default fast walk, or an app's). The
+        # walker is stateless, so one instance may be shared across LocalStorage
+        # instances: the producing storage is threaded per-walk via
+        # LocalScanOptions.storage (scan_pages / walk_local below), not held on it.
         self._walker = walker if walker is not None else LocalFileGenerator()
-        self._walker.storage = self
 
     @property
     def path(self) -> str:
@@ -945,6 +955,11 @@ class LocalStorage(Storage):
             raise TypeError(
                 f"LocalStorage.scan requires LocalScanOptions, got {type(options).__name__}"
             )
+        # Thread this storage as the producing backend so the (shared, stateless)
+        # walker stamps each entry's FileInfo.storage from options.storage before
+        # the filter runs - overriding whatever a caller left there, since the
+        # entries are this storage's. (walk_local sets it the same way.)
+        options = replace(options, storage=self)
         if options.recursive:
             yield from self._walker.list_file_pages(self._abspath + os.sep, options)
             return
@@ -973,13 +988,15 @@ class LocalStorage(Storage):
         :meth:`get_fileinfo` instead, not this walk.
         """
         # local_format(dir_op=True) form; self._abspath is computed once at
-        # construction. list_files stamps compare_key (key relative to root).
+        # construction. list_files stamps compare_key (key relative to root) and,
+        # from options.storage below, each entry's producing backend.
         yield from self._walker.list_files(
             self._abspath + os.sep,
             LocalScanOptions(
                 follow_symlinks=follow_symlinks,
                 detect_symlink_loops=detect_loops,
                 on_warning=on_warning,
+                storage=self,
             ),
         )
 
@@ -1010,6 +1027,9 @@ class LocalStorage(Storage):
             follow_symlinks=options.follow_symlinks,
             notify=notify,
         ):
+            # scan_children stamps compare_key only; stamp the producing backend
+            # here (options.storage == self, forced by scan_pages) before the filter.
+            info.storage = options.storage
             if item_filter is None or item_filter(info):
                 yield info
 

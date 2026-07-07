@@ -214,7 +214,7 @@ class Storage(abc.ABC):
         :meth:`default_scan_options`). To customize the entries, override
         :meth:`scan_pages`, not this method. Each yielded entry has its
         ``FileInfo.storage`` set to this backend as a safety net (only when a
-        ``scan_pages`` left it ``None``); the built-ins stamp it at construction so
+        ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
         their filters see it too. Used by ``ls`` and the recursive forms of
         ``cp`` / ``rm`` / ``sync``.
         """
@@ -227,8 +227,8 @@ class Storage(abc.ABC):
                 # Safety net: stamp the producing backend so a downstream consumer
                 # (sync's content compare via pair.src.storage, an on_result
                 # callback) can reach it even when a custom scan_pages did not set
-                # it. The built-ins stamp at construction so their filters already
-                # see it; this only fills a None left by a bespoke backend.
+                # it. The built-ins stamp it during the scan so their filters
+                # already see it; this only fills a None left by a bespoke backend.
                 if info.storage is None:
                     info.storage = self
                 yield info

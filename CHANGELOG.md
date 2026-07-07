@@ -5,12 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Scan source-config now lives on the `Storage` constructor:
-  `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
-  `S3Storage(url, page_size=…, fetch_owner=…)` are seeded into every scan, so a
-  custom `scan_options_type` is honored through `cp` / `sync` / `ls` / `rm` too.
-  The matching operation arguments (`follow_symlinks` / `detect_symlink_loops` /
-  `page_size`, and `get_fileinfo`'s `follow_symlinks`) are removed.
+- Scan settings that describe how a source is read now live on the `Storage`
+  constructor — `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
+  `S3Storage(url, page_size=…, fetch_owner=…)` — and are no longer `cp` / `mv` /
+  `sync` / `ls` / `rm` arguments.
 - `S3.sync` now splits the copy/delete decision into three per-lane filters:
   `create_filter` (new entries), `update_filter` (existing, was `compare`),
   `delete_filter` (orphans, was `delete`); a custom `update_filter` is only
@@ -22,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `s3://` service root); `scan` enumerates objects only, and `ScanOptions` drops
   `bucket_name_prefix` / `bucket_region`. `ls` behaviour is unchanged.
 - `LocalStorage`'s directory walk is now a customizable `LocalFileGenerator` -
-  subclass its public seams and inject via `LocalStorage(path, walker=...)`.
+  subclass its public seams and inject via `LocalStorage(path, walker=...)`; one
+  walker may be shared across storages.
 - Each local entry carries its followed `stat_result` and an `is_symlink` flag on
   `LocalFileInfo`, for a `filter` / `on_result` to read.
 
