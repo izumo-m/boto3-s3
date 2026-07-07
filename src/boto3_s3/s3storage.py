@@ -327,23 +327,24 @@ class S3Storage(Storage):
     here (a library lock cannot serialize against clients the caller builds
     elsewhere). For concurrent use, build the client at a safe time on the caller
     side and pass it in rather than relying on the lazy default.
+
+    Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
+    enumerates in native UTF-8 byte order (``ListObjectsV2``), and deletes; ``open``
+    is intentionally unimplemented (S3 rides ``s3transfer``), so no ``OPEN_*`` (see
+    :meth:`open`). ``scan_options_type`` is :class:`S3ScanOptions` (arg-less
+    ``scan()`` builds it, and :meth:`scan_pages` requires it). ``scan_pages_filters``
+    is ``True`` - ``scan_pages`` sieves each page, so ``scan`` does not re-apply
+    ``options.filter``.
     """
 
     scheme: ClassVar[str] = "s3"
-    #: S3 resolves a single object (HEAD), enumerates in native UTF-8 byte order
-    #: (``ListObjectsV2``), and deletes; ``open`` is intentionally unimplemented
-    #: (S3 rides ``s3transfer``), so no ``OPEN_*`` (see :meth:`open`).
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.GET_FILEINFO
         | StorageCapability.SCAN
         | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
-    #: The S3 listing option type (:attr:`Storage.scan_options_type`): arg-less
-    #: ``scan()`` builds an :class:`S3ScanOptions`, which :meth:`scan_pages` requires.
     scan_options_type: ClassVar[type[ScanOptions]] = S3ScanOptions
-    #: ``scan_pages`` sieves each page (:attr:`Storage.scan_pages_filters`), so
-    #: ``scan`` does not re-apply ``options.filter``.
     scan_pages_filters: ClassVar[bool] = True
 
     # -- S3 path grammar (aws-cli string rules; no client, no validation) ----

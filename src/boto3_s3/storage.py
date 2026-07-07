@@ -130,55 +130,62 @@ class Storage(abc.ABC):
     :meth:`validate` is a no-op by default (override to reject a malformed
     location before an operation uses it). Built-in implementations are
     ``LocalStorage`` and ``S3Storage``.
+
+    Class attributes (a concrete backend sets / overrides these):
+
+    ``scheme`` - which storage family this is, a display/classification label
+    (result rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
+    other value is a non-built-in backend (a custom one, or a stdio stream).
+    Transfer *routing* does not read it: the planner routes by concrete type (the
+    structural match in ``transferplan._paths_type``). Each concrete Storage sets
+    its own token.
+
+    ``sep`` - the separator of this backend's path space, as it appears in
+    formatted roots (:meth:`format`) and item keys. ``"/"`` for S3, streams, and
+    custom backends (``FileInfo.key`` / ``compare_key`` are ``/``-separated by
+    contract); ``LocalStorage`` overrides with the host ``os.sep``.
+
+    ``capabilities`` - which transfer operations this Storage *kind* implements
+    (:class:`StorageCapability`): the structural, class-level contract a transfer
+    pre-checks for a custom side - distinct from runtime *permission* (a denied
+    write / missing target is an execution-time error, not modeled here). The
+    default declares nothing (fail-closed); each concrete Storage overrides it, and
+    a subclass may narrow or widen it.
+
+    ``scan_options_type`` - this backend's :class:`~boto3_s3.types.ScanOptions`
+    type. ``scan()`` with no options builds it (via :meth:`default_scan_options`),
+    so a backend whose ``scan_pages`` requires its own subclass still works
+    arg-less. The base is a plain :class:`~boto3_s3.types.ScanOptions`; ``S3Storage``
+    / ``LocalStorage`` set :class:`~boto3_s3.types.S3ScanOptions` /
+    :class:`~boto3_s3.types.LocalScanOptions`. A custom backend that defines its own
+    subclass just sets this one attribute - no method to override. (A backend that
+    takes the base ``ScanOptions`` needs nothing here.)
+
+    ``scan_pages_filters`` - whether this backend's ``scan_pages`` already applies
+    ``options.filter`` itself. When ``False`` (default), :meth:`scan` applies it as
+    a safety net after ``scan_pages`` (on the prefetch worker), so a custom backend
+    that forgets to filter cannot silently leak excluded entries into ``--exclude``
+    / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
+    built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
+    ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that still
+    warns on excluded files, or early in a custom ``LocalFileGenerator``'s
+    ``finalize_children``). A backend that filters at its source, or prunes early by
+    calling ``options.filter`` itself, sets ``True`` to skip the redundant re-filter
+    without re-implementing :meth:`scan`.
     """
 
-    #: Which storage family this is - a display/classification label (result
-    #: rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
-    #: other value is a non-built-in backend (a custom one, or a stdio stream).
-    #: Transfer *routing* does not read it: the planner routes by concrete type
-    #: (the structural match in ``transferplan._paths_type``). Each concrete
-    #: Storage sets its own token.
     scheme: ClassVar[str]
 
-    #: The separator of this backend's path space, as it appears in formatted
-    #: roots (:meth:`format`) and item keys. ``"/"`` for S3, streams, and custom
-    #: backends (``FileInfo.key`` / ``compare_key`` are ``/``-separated by
-    #: contract); ``LocalStorage`` overrides with the host ``os.sep``.
     sep: ClassVar[str] = "/"
 
-    #: Which transfer operations this Storage *kind* implements
-    #: (:class:`StorageCapability`): the structural, class-level contract a
-    #: transfer pre-checks for a custom side - distinct from runtime *permission*
-    #: (a denied write / missing target is an execution-time error, not modeled
-    #: here). The default declares nothing (fail-closed); each concrete Storage
-    #: overrides it, and a subclass may narrow or widen it.
     capabilities: ClassVar[StorageCapability] = StorageCapability(0)
 
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
 
-    #: This backend's :class:`~boto3_s3.types.ScanOptions` type. ``scan()`` with no
-    #: options builds it (via :meth:`default_scan_options`), so a backend whose
-    #: ``scan_pages`` requires its own subclass still works arg-less. The base is a
-    #: plain :class:`~boto3_s3.types.ScanOptions`; ``S3Storage`` / ``LocalStorage``
-    #: set :class:`~boto3_s3.types.S3ScanOptions` / :class:`~boto3_s3.types.LocalScanOptions`.
-    #: A custom backend that defines its own subclass just sets this one attribute -
-    #: no method to override. (A backend that takes the base ``ScanOptions`` needs
-    #: nothing here.)
     scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
-    #: Whether this backend's ``scan_pages`` already applies ``options.filter``
-    #: itself. When ``False`` (default), :meth:`scan` applies it as a safety net
-    #: after ``scan_pages`` (on the prefetch worker), so a custom backend that
-    #: forgets to filter cannot silently leak excluded entries into ``--exclude`` /
-    #: ``--include`` and, on a ``sync --delete`` destination, into deletion. The
-    #: built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
-    #: ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that
-    #: still warns on excluded files, or early in a custom ``LocalFileGenerator``'s
-    #: ``finalize_children``). A backend that filters at its source, or prunes early
-    #: by calling ``options.filter`` itself, sets ``True`` to skip the redundant
-    #: re-filter without re-implementing :meth:`scan`.
     scan_pages_filters: ClassVar[bool] = False
 
     def default_scan_options(self) -> ScanOptions:

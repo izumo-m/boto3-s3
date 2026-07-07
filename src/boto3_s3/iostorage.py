@@ -157,11 +157,12 @@ class IOStorage(Storage):
     A binary stream is used as-is; a text stream is wrapped with ``encoding``
     (default utf-8). The caller's stream is never closed by this class. As a single
     endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
+
+    ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
+    I/O (both directions, chosen per ``open`` call), with no listing or deletion.
     """
 
     scheme: ClassVar[str] = "stdio"
-    #: A single stream supports only byte I/O (both directions, chosen per
-    #: ``open`` call); it has no listing or deletion, so just the ``OPEN_*`` pair.
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )

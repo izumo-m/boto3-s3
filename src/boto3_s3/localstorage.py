@@ -319,24 +319,26 @@ class LocalFileGenerator:
     :meth:`list_files`, not on the instance (aws-cli carries them on the instance
     instead). So **one walker can be shared across several ``LocalStorage``
     instances** - each scan stamps its own ``storage`` from the options.
+
+    Class attributes: ``have_dir_fd`` - whether this platform can scan a directory
+    through its file descriptor and stat/open entries relative to it (fstatat /
+    openat - no kernel path re-walk); True on POSIX, False on Windows (which lacks
+    dir_fd / O_DIRECTORY but returns entry attributes inline from FindNextFile). A
+    feature probe, not an ``os.name`` check, so any platform missing the APIs
+    degrades correctly. ``dir_open_flags`` are the flags for the one ``open()`` that
+    turns a directory path into the fd we scan through (POSIX; O_DIRECTORY /
+    O_NONBLOCK are absent and unused off it). ``EPOCH_TIME`` is the stamp for an
+    unrepresentable mtime (aws-cli's ``EPOCH_TIME``).
     """
 
-    #: Whether this platform can scan a directory through its file descriptor and
-    #: stat/open entries relative to it (fstatat / openat - no kernel path
-    #: re-walk). True on POSIX, False on Windows (which lacks dir_fd / O_DIRECTORY
-    #: but returns entry attributes inline from FindNextFile). A feature probe,
-    #: not an os.name check, so any platform missing the APIs degrades correctly.
     have_dir_fd: ClassVar[bool] = (
         os.scandir in os.supports_fd
         and os.open in os.supports_dir_fd
         and hasattr(os, "O_DIRECTORY")
     )
-    #: Flags for the one open() that turns a directory path into the fd we scan
-    #: through (POSIX; O_DIRECTORY / O_NONBLOCK are absent and unused off it).
     dir_open_flags: ClassVar[int] = (
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NONBLOCK", 0)
     )
-    #: The stamp for an unrepresentable mtime (aws-cli's ``EPOCH_TIME``).
     EPOCH_TIME: ClassVar[datetime] = _EPOCH
 
     def list_files(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
@@ -805,14 +807,20 @@ class LocalStorage(Storage):
     the fast ``os.scandir`` walk). Pass ``walker=`` a custom subclass to change
     the traversal - e.g. to resolve Cygwin ``!<symlink>`` files on a
     native-Python Windows build - without subclassing ``LocalStorage`` itself.
+
+    Class attributes: ``sep`` is the host-native separator (``os.sep``;
+    :meth:`format` returns ``os.sep`` forms, unlike every other backend's ``/``
+    space). ``capabilities`` is the full set - the local filesystem supports every
+    transfer operation: byte I/O both ways, single-entry stat, a sorted walk (so
+    ``SORTABLE_SCAN``), and delete. ``scan_options_type`` is
+    :class:`LocalScanOptions` (arg-less ``scan()`` builds it, and :meth:`scan_pages`
+    requires it). ``scan_pages_filters`` is ``True`` - the walk applies
+    ``options.filter`` (the default walker late, after vetting/warnings; a custom
+    ``LocalFileGenerator`` possibly early), so ``scan`` does not re-apply it.
     """
 
     scheme: ClassVar[str] = "local"
-    #: Local roots and keys are host-native (:meth:`format` returns ``os.sep``
-    #: forms), unlike every other backend's ``/`` space.
     sep: ClassVar[str] = os.sep
-    #: The local filesystem supports every transfer operation: byte I/O both
-    #: ways, single-entry stat, a sorted walk (so ``SORTABLE_SCAN``), and delete.
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ
         | StorageCapability.OPEN_WRITE
@@ -821,12 +829,7 @@ class LocalStorage(Storage):
         | StorageCapability.SORTABLE_SCAN
         | StorageCapability.DELETE
     )
-    #: The local-walk option type (:attr:`Storage.scan_options_type`): arg-less
-    #: ``scan()`` builds a :class:`LocalScanOptions`, which :meth:`scan_pages` requires.
     scan_options_type: ClassVar[type[ScanOptions]] = LocalScanOptions
-    #: The walk applies ``options.filter`` (:attr:`Storage.scan_pages_filters`) -
-    #: the default walker late (after vetting/warnings), a custom
-    #: ``LocalFileGenerator`` possibly early - so ``scan`` does not re-apply it.
     scan_pages_filters: ClassVar[bool] = True
 
     @staticmethod

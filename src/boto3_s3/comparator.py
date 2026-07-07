@@ -268,11 +268,13 @@ class ContentComparison:
     ``Storage.open`` carried on that side's entry (``pair.src.storage`` /
     ``pair.dest.storage``), not a local filesystem path. Both sides S3 -> the
     s3-to-s3 digest compare; neither side S3 -> nothing to compare against, so copy.
+
+    ``_strategy_name`` is the guard-message name each subclass sets ("etag
+    comparison" / "checksum comparison").
     """
 
     __slots__ = ()
 
-    #: The guard-message name ("etag comparison" / "checksum comparison").
     _strategy_name: ClassVar[str]
 
     # Storage is the subclass's (each declares its own slot).

@@ -318,13 +318,15 @@ class _ResponseCapture:
     application put on a shared client. The events engine has no lock, so a capture
     operation needs exclusive use of its client for the operation's span
     (docs/s3.md).
+
+    ``_WRITE_OPS`` are the terminal object-writing operations observed - the
+    intermediate multipart calls (CreateMultipartUpload / UploadPart /
+    UploadPartCopy) are deliberately not, only the response describing the finished
+    object is wanted. ``_READ_OPS`` is the object-reading operation (a download);
+    HeadObject is not observed.
     """
 
-    #: The terminal object-writing operations. The intermediate multipart calls
-    #: (CreateMultipartUpload / UploadPart / UploadPartCopy) are deliberately not
-    #: observed - only the response describing the finished object is wanted.
     _WRITE_OPS = ("PutObject", "CopyObject", "CompleteMultipartUpload")
-    #: The object-reading operation (a download). HeadObject is not observed.
     _READ_OPS = ("GetObject",)
 
     def __init__(self) -> None:

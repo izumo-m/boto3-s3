@@ -71,7 +71,7 @@ _CRT_CONSUMED_KEYS = frozenset(
     }
 )
 
-#: aws-cli DEFAULTS (awscli/customizations/s3/transferconfig.py), verbatim.
+# aws-cli DEFAULTS (awscli/customizations/s3/transferconfig.py), verbatim.
 DEFAULTS: dict[str, Any] = {
     "multipart_threshold": 8 * (1024**2),
     "multipart_chunksize": 8 * (1024**2),

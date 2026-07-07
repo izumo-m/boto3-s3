@@ -82,7 +82,7 @@ _MIN_REPAINT_INTERVAL = 0.1
 # Records are slim (a few strings), so the resident cost is a few MiB.
 _QUEUE_MAX = 10_000
 
-#: Queue sentinel: drain what remains, then stop the printer thread.
+# Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
 
 
