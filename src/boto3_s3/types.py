@@ -329,6 +329,9 @@ class OpResult:
     src: str | None = None
     dest: str | None = None
     src_info: FileInfo | None = None
+    # None for cp / mv, which never list the destination; only sync populates it
+    # (the pre-existing object the copy compared against). dest_storage still
+    # carries the destination backend in that case.
     dest_info: FileInfo | None = None
     src_storage: Storage | None = None
     dest_storage: Storage | None = None
