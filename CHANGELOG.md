@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `LocalStorage(path, fsync=True)` makes an `mv` download durable: the file (and
+  its parent dir on POSIX) is fsynced before the S3 source is deleted, closing the
+  crash window aws-cli leaves. Off by default (aws parity).
 - Scan settings that describe how a source is read now live on the `Storage`
   constructor — `LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)` and
   `S3Storage(url, page_size=…, fetch_owner=…)` — and are no longer `cp` / `mv` /

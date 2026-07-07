@@ -62,7 +62,7 @@ from boto3_s3.exceptions import (
     ConfigurationError,
     ValidationError,
 )
-from boto3_s3.localstorage import translate_os_error
+from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
     CopyPropsMode,
@@ -717,6 +717,16 @@ class Transferrer:
         if item.case_conflict_cleanup is not None:
             subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         if self._is_move:
+            # Durability barrier before the source delete (LocalStorage(fsync=True),
+            # a library-only opt-in; off by default = aws parity). Only a real local
+            # destination path can be fsynced - a stream / custom (open-route) dest
+            # owns its own durability, so item.dest_fileobj downloads are excluded.
+            if (
+                item.dest_path is not None
+                and isinstance(self._dest_storage, LocalStorage)
+                and self._dest_storage.fsync
+            ):
+                subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
         self._get_manager().download(
@@ -1150,6 +1160,66 @@ class _DirectoryCreator:
                 key=None,
                 message=f"Could not create directory {directory}: {exc}",
             ) from exc
+
+
+class _FsyncDest:
+    """Fsync a ``mv`` download's destination file before its S3 source is deleted.
+
+    A library-only durability step, opt-in via ``LocalStorage(fsync=True)`` (off
+    by default = aws parity). s3transfer finalizes a filename download with a
+    temp-file write + ``os.rename`` and never fsyncs, so aws-cli / s3transfer
+    delete the durable S3 source while the downloaded bytes may still be only in
+    the page cache - a crash between the two loses the move outright. Placed
+    immediately before ``_DeleteSource`` (the same slot and flip contract as
+    ``_CloseFileobj`` on the open route): on a successful transfer it fsyncs the
+    file and its parent directory, and any durability failure flips the settled
+    future via ``set_exception`` so ``_DeleteSource`` sees the failure and skips
+    the delete, leaving the S3 copy in place (``_Completion`` records ``move
+    failed``). A transfer that already failed does nothing.
+
+    The file is reopened by path - the rename left the inode unchanged, so its
+    dirty pages flush regardless of which fd fsyncs them - then the *immediate*
+    parent directory is fsynced to persist the rename's dirent. The directory
+    fsync is POSIX-only: a directory has no fsyncable handle on Windows, where the
+    file fsync alone is the durability step (NTFS journaling carries the
+    metadata). A freshly created intermediate directory is not walked back to its
+    own parent; the common case downloads into an existing tree.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            return
+        try:
+            self._fsync()
+        except OSError as exc:
+            future.set_exception(
+                translate_os_error(
+                    exc,
+                    operation=None,
+                    key=None,
+                    message=f"Failed to persist {self._path} to disk: {exc}",
+                )
+            )
+
+    def _fsync(self) -> None:
+        fd = os.open(self._path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if os.name != "posix":
+            return
+        directory = os.path.dirname(self._path) or os.curdir
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 class _DeleteSource:

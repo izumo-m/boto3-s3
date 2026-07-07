@@ -856,6 +856,7 @@ class LocalStorage(Storage):
         walker: LocalFileGenerator | None = None,
         follow_symlinks: bool = True,
         detect_symlink_loops: bool = False,
+        fsync: bool = False,
     ) -> None:
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
@@ -871,6 +872,13 @@ class LocalStorage(Storage):
         # rather than passing it through each operation.
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
+        # A library-only durability knob for this local backend as a *destination*
+        # (default off = aws parity). When set, a ``mv`` whose download lands here
+        # fsyncs the file (and its parent directory) before deleting the S3 source,
+        # closing the window where aws-cli / s3transfer delete the durable S3 copy
+        # while the download is still only in the page cache. Read by the transfer
+        # engine off the destination storage; see ``docs/transfer.md`` section 11.
+        self._fsync = fsync
         # The directory-walk strategy (the default fast walk, or an app's). The
         # walker is stateless, so one instance may be shared across LocalStorage
         # instances: the producing storage is threaded per-walk via
@@ -880,6 +888,15 @@ class LocalStorage(Storage):
     @property
     def path(self) -> str:
         return self._path
+
+    @property
+    def fsync(self) -> bool:
+        """Whether a ``mv`` download into this destination fsyncs before deleting the source.
+
+        The library-only durability knob from the constructor (default off). The
+        transfer engine consults it only on the ``mv`` download route.
+        """
+        return self._fsync
 
     @property
     def walker(self) -> LocalFileGenerator:

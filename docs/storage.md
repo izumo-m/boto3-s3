@@ -73,7 +73,11 @@ declared capabilities promise:
   `follow_symlinks` / `detect_symlink_loops`). A subclass keeps one backend's knobs
   from leaking into another's; the built-ins reject a foreign options type, and a
   custom backend reads its own knobs from its own subclass or from its instance
-  state, taking the common base otherwise.
+  state, taking the common base otherwise. `LocalStorage` also takes one
+  **destination-side** constructor knob that is *not* a scan source-config:
+  `fsync` (default off = aws parity), a library extension the transfer engine
+  reads off the destination to make an `mv` download durable before deleting the
+  S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry

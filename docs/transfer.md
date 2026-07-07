@@ -99,10 +99,14 @@ the SDK at module import time.
 3. download: `_DirectoryCreator` (creates the parent dir; tolerates EEXIST,
    otherwise fails with aws-cli's wording `Could not create directory ...`).
 4. copy: the copy-props chain (section 4).
-5. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
+5. mv download + `LocalStorage(fsync=True)` only: `_FsyncDest` (section 11) - a
+   library-only durability barrier fsyncing the downloaded file (and its parent
+   dir on POSIX) just before `_DeleteSource`, so a durability failure flips the
+   future and the source is not deleted (off by default = aws parity).
+6. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
    before `_Completion` (the same slot where aws-cli places the DeleteSource
    family ahead of the Done recorder).
-6. `_Completion` (**always last**) - bridges the future's result to the rollup
+7. `_Completion` (**always last**) - bridges the future's result to the rollup
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
    a successful download it post-success stamps the mtime (section 5). Each
    record carries the item's listing entries (`src_info` / `dest_info`) and the
@@ -115,8 +119,8 @@ the SDK at module import time.
    `capture_response` layers the written / read object's own response on top
    ([`opresult.md`](./opresult.md)).
 
-Items 3-5 are route-conditional (download / copy / mv only); the always-present
-spine is 1-2 then 6 (the numbering is the slot order, not a single chain that
+Items 3-6 are route-conditional (download / copy / mv only); the always-present
+spine is 1-2 then 7 (the numbering is the slot order, not a single chain that
 every transfer runs end to end).
 
 `on_result` / `on_progress` are **called from s3transfer's worker threads**
@@ -380,9 +384,26 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   future to failed with `set_exception`** (s3transfer accepts an override after
   done - isomorphic to aws-cli's `DeleteSourceSubscriber`), and `_Completion`
   aggregates it as `move failed` (rc 1). The bytes have already arrived.
+- **Durability barrier (`LocalStorage(fsync=True)`, a library extension; default
+  off = aws parity)**: s3transfer finalizes a filename download with a temp-file
+  write + `os.rename` and never fsyncs, so aws-cli deletes the durable S3 source
+  while the downloaded bytes may still be only in the page cache - a crash between
+  the two loses the move outright. When the download's destination `LocalStorage`
+  opts in, the `_FsyncDest` subscriber (section 3, only on the S3->local `mv`
+  download route, `item.dest_path is not None`) fsyncs the file - reopened by path,
+  the rename left the inode unchanged - and then its immediate parent directory
+  (POSIX only; a directory has no fsyncable handle on Windows, where the file
+  fsync alone is the step) **before** `_DeleteSource` runs. A durability failure
+  flips the settled future via `set_exception` (the same contract as
+  `_CloseFileobj` on the open route), so `_DeleteSource` skips the delete and the
+  S3 copy survives (`move failed`, rc 1). A freshly created intermediate directory
+  is not walked back to its own parent (the common case downloads into an existing
+  tree); the mtime stamp stays post-delete, so only the file *contents* are made
+  durable, not the cosmetic mtime. The CLI leaves this off to keep aws parity.
 - Cases where the deletion does not run: dryrun (no submit at all), filter
   exclusion, skip (no-overwrite's 412 / dest already exists, the glacier gate),
-  transfer failure. For copy-props' post-copy tagging failure (the rollback of
+  transfer failure, a `LocalStorage(fsync=True)` durability failure (above). For
+  copy-props' post-copy tagging failure (the rollback of
   section 4), because `_SetTags` flips the future first, the source remains and only the
   dest is rolled back (aws-cli's order). A folder marker is not transferred, so it
   is not deleted either. An emptied local dir is left in place (as in aws).
