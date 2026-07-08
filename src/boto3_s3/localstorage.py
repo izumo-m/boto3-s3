@@ -702,7 +702,9 @@ class LocalFileGenerator:
         lstat-based, vetting-free; the follow-and-descend companion child is
         ``scan_children``'s); otherwise no-follow skips it silently. A stat
         that comes back ``None`` (a broken symlink followed, or the entry raced
-        away between the scan and here) is the "does not exist" skip; then
+        away between the scan and here) is the "does not exist" skip. A stat that
+        says ``S_IFLNK`` (only an lstat-style override produces one) is its own
+        vetting-free leaf, like :meth:`symlink_child`; then
         :meth:`should_ignore_entry` vets that valid stat, and the kind is keyed on
         its ``st_mode`` (``S_IFDIR`` = descend via :meth:`dir_child`, else a file
         via :meth:`stat_info`). Keying on that same stat - rather than a fresh
@@ -720,6 +722,12 @@ class LocalFileGenerator:
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
             return None
+        if stat_module.S_ISLNK(st.st_mode):
+            # Only an lstat-style entry_stat_result override produces this mode:
+            # the link is its own leaf, vetting-free like symlink_child (a name
+            # plus a target, no content to probe - the file probe would open the
+            # target, which Windows refuses for a directory).
+            return WalkChild(entry.name, self.stat_info(entry, full, st, notify), None)
         if self.should_ignore_entry(entry, full, dir_fd, st, notify=notify):
             return None
         if stat_module.S_ISDIR(st.st_mode):

@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   combinations compose. Defaults off = aws parity.
   `LocalFileGenerator.scan_children` / `classify_child` now take the scan
   `options` instead of a bare `follow_symlinks`.
+- A walk whose `entry_stat_result` override reports a symlink (an lstat-style
+  walker) now emits that entry as a vetting-free leaf; the old readability
+  probe opened the link target, which Windows refuses for a directory symlink
+  (the entry was silently dropped there).
 
 ## [0.5.0] - 2026-07-07
 
