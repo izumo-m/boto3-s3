@@ -1,7 +1,7 @@
 """Threading helpers for overlapping I/O with consumption.
 
 The Storage ``scan`` path is a lazy generator, but each page fetch
-(``ListObjectsV2`` for S3, a batched ``os.listdir`` + ``os.stat`` for local) is I/O the
+(``ListObjectsV2`` for S3, one ``os.scandir`` per directory for local) is I/O the
 consumer would otherwise block on. :func:`prefetch` runs the page iterable on a
 worker thread and hands back a flattened iterator, so the next page is in flight
 while the consumer processes the current one.

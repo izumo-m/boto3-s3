@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 
@@ -285,16 +285,11 @@ class ContentComparison:
     ``Storage.open`` carried on that side's entry (``pair.src.storage`` /
     ``pair.dest.storage``), not a local filesystem path. Both sides S3 -> the
     s3-to-s3 digest compare; neither side S3 -> nothing to compare against, so copy.
-
-    ``_strategy_name`` is the guard-message name each subclass sets ("etag
-    comparison" / "checksum comparison").
     """
 
     __slots__ = ()
 
-    _strategy_name: ClassVar[str]
-
-    # Storage is the subclass's (each declares its own slot).
+    # No storage slot in the base - each subclass declares its own.
     check_size: bool
 
     def __call__(self, pair: SyncPair) -> bool:

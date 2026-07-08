@@ -1137,8 +1137,9 @@ class LocalStorage(Storage):
         ``FileInfo.key`` is absolute, ``compare_key`` comes out relative to
         :attr:`path`, and a non-directory root degrades to a "does not exist"
         warning rather than a scan error). The walk reads this storage's held
-        source-config (``follow_symlinks`` / ``detect_symlink_loops`` from the
-        constructor, via :meth:`default_scan_options` - the same walk ``scan``
+        source-config (``follow_symlinks`` / ``detect_symlink_loops`` /
+        ``return_directories`` / ``return_symlinks`` from the constructor, via
+        :meth:`default_scan_options` - the same walk ``scan``
         runs); ``on_warning`` is the per-call overlay, like an operation's. This
         is the raw walk (no ``ScanOptions.filter``); ``scan`` applies the filter
         through :meth:`scan_pages`. The byte-order / warning semantics are the

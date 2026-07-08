@@ -129,8 +129,6 @@ class ChecksumComparison(ContentComparison):
 
     __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
 
-    _strategy_name = "checksum comparison"
-
     check_size: bool
     pure_max_size: int | None
     # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries

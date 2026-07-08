@@ -186,7 +186,7 @@ class CaseConflictGate:
     with the **exact same case** always transfers (``AlwaysSync`` - cp
     overwrites); everything else runs the conflict check
     (``CaseConflictSync``): a conflict exists when another file with the
-    same casefolded name was already admitted in this run, or the
+    same lowercased name was already admitted in this run, or the
     destination path exists (only possible on a case-insensitive
     filesystem, where a case-variant satisfies ``os.path.exists``). The
     messages are aws's verbatim, emitted as uncounted NOTICE records (aws
@@ -206,7 +206,7 @@ class CaseConflictGate:
     def _admit(self, item: TransferItem, lowered: str) -> bool:
         """Admit a download: track it in-flight and arrange its cleanup.
 
-        Mirrors aws-cli's ``CaseConflictSync``: the casefolded key joins the
+        Mirrors aws-cli's ``CaseConflictSync``: the lowercased key joins the
         in-flight set, and the item carries the callback that removes it when the
         download finishes (wired as ``_CaseConflictCleanup`` in
         ``_submit_download``), so the set reflects only downloads still in flight -
@@ -660,7 +660,7 @@ def open_upload_items(
 ) -> Iterator[TransferItem]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
-    The open-route mirror of ``_cp_upload_items`` - a recursive source
+    The open-route mirror of ``upload_items`` - a recursive source
     enumerates through ``plan.src.scan``, a single source resolves through
     ``plan.src.get_fileinfo`` - but the source has no local path: the engine
     reads its ``Storage.open(key, "rb")``. The open key is the entry's
@@ -742,8 +742,8 @@ def open_download_items(
 ) -> Iterator[TransferItem]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
-    The open-route mirror of the S3-source half of ``_cp_s3_source_items``:
-    the source is enumerated identically (``_cp_scan`` for a recursive
+    The open-route mirror of the S3-source half of ``s3_source_items``:
+    the source is enumerated identically (``scan_s3_source`` for a recursive
     prefix, ``head_single`` for one object), but each entry is written
     through ``plan.dest.open(key, "wb")`` instead of to a local path. The
     destination's local-filesystem gates (case-conflict, parent-reference,

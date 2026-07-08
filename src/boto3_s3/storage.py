@@ -224,7 +224,7 @@ class Storage(abc.ABC):
         ``FileInfo.storage`` set to this backend as a safety net (only when a
         ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
         their filters see it too. Used by ``ls`` and the recursive forms of
-        ``cp`` / ``rm`` / ``sync``.
+        ``cp`` / ``mv`` / ``rm`` / ``sync``.
         """
         opts = options if options is not None else self.default_scan_options()
         pages = self.scan_pages(opts)

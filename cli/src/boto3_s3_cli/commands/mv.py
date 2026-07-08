@@ -137,8 +137,9 @@ class MvCommand(Command):
         Always: the textual onto-itself guard on the keyless-normalized URIs
         (the form aws prints - ``mv s3://b/k s3://b`` reports ``s3://b/``),
         ``--recursive`` included. When validation is on (the flag, or the
-        env variable equal to the string ``true`` - aws-cli's ``ensure_boolean``
-        accepts nothing else) and the *keys* match, both sides resolve
+        env variable set to ``true`` case-insensitively - aws-cli's
+        ``ensure_boolean``, so ``TRUE`` / ``True`` count too, any other value
+        off) and the *keys* match, both sides resolve
         through ``S3PathResolver`` - the source-side s3control client in
         ``--source-region``, the destination's in ``--region``, sts without
         one (aws-cli's ``from_session`` wiring) - and every resolved pair runs

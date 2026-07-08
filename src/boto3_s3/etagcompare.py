@@ -113,8 +113,6 @@ class EtagComparison(ContentComparison):
 
     __slots__ = ("check_size", "part_size")
 
-    _strategy_name = "etag comparison"
-
     def __init__(
         self,
         s3: S3 | None = None,

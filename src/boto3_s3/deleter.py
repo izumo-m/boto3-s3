@@ -72,7 +72,7 @@ class S3Deleter:
 
     The worker thread is non-daemon, so an unclosed deleter keeps the
     interpreter alive until the in-flight batch finishes - use the context
-    manager. Note the recursive scan: a non-recursive scan also yields
+    manager. Use a recursive scan: a non-recursive scan also yields
     DIRECTORY (``CommonPrefixes``) entries, which are not object keys::
 
         with S3Deleter(storage, on_result=cb) as deleter:

@@ -23,7 +23,10 @@ Prerequisites:
 
 - Python 3.10+ (the floor is 3.10; see `.python-version`).
 - [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- For the end-to-end suite only: Docker (with Compose) and AWS CLI v2 on `PATH`.
+- For the end-to-end suite only: Docker (with Compose), plus the `aws` CLI v2
+  matching `vendor/aws-cli` — installed into `.venv/bin` by
+  `scripts/install-awscli.sh` (below), not an arbitrary `PATH` aws, which can
+  drift the goldens.
 
 Install the workspace and its dev tools into a local virtualenv:
 
@@ -56,6 +59,7 @@ The e2e suite differentially compares `boto3-s3` against the real `aws` command
 against a local MinIO endpoint:
 
 ```bash
+scripts/install-awscli.sh    # pin aws (matching vendor/aws-cli) into .venv/bin — idempotent
 scripts/compose-up.sh        # start MinIO, wait for buckets to be provisioned
 source scripts/minio-env.sh  # point AWS tooling and the e2e gate at MinIO
 uv run pytest tests/cli/e2e  # run the parity suite

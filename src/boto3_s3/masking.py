@@ -297,7 +297,9 @@ def set_stream_logger(
 
     Extra keyword-only parameters beyond boto3's signature: *stream* (defaults
     to ``sys.stderr``, like ``logging.StreamHandler``), *mask_secrets*, and
-    *extra_secrets* (literal values masked wherever they appear).
+    *extra_secrets* (literal values at least ``MASK_MIN_LEN`` characters long,
+    masked wherever they appear; shorter values are skipped so a stray short
+    string cannot blank out swaths of the log).
     """
     if format_string is None:
         format_string = "%(asctime)s %(name)s [%(levelname)s] %(message)s"

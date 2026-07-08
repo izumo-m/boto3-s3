@@ -456,9 +456,9 @@ def build_transfer_options(
     ):
         if value is not None:
             # Paramfiles and shorthand are already resolved in place -
-            # :func:`resolve_parse_time_values` runs at the head of every
-            # cp/mv/sync (aws resolves them at parse time), so the values
-            # here are consumed verbatim.
+            # :func:`classify_paths` runs at the head of every cp/mv/sync
+            # (aws resolves them at parse time), so the values here are
+            # consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
     if args.metadata is not None:
         options["metadata"] = args.metadata
