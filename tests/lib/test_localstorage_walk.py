@@ -502,6 +502,31 @@ class TestReturnEntries:
         opts = LocalScanOptions(recursive=True, return_directories=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
+    def test_non_recursive_scan_does_not_leak_the_follow_descent_companion(
+        self, tmp_path: Path
+    ) -> None:
+        # A one-level scan does not descend, so return_symlinks + follow_symlinks
+        # must not surface a symlinked directory's target as an extra DIRECTORY
+        # entry (scan_children appends that companion only for the recursive walk
+        # to descend). The link is its own leaf, and follow_symlinks - a traversal
+        # knob - changes nothing at one level: the output equals the no-follow
+        # one. A real sub-directory still surfaces as a DIRECTORY entry, S3-style.
+        _make_tree(tmp_path, "real/inner.txt", "target.txt")
+        (tmp_path / "dlink").symlink_to(tmp_path / "real")
+        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
+        storage = LocalStorage(str(tmp_path))
+
+        expected = [
+            ("dlink", FileKind.FILE, True),
+            ("flink", FileKind.FILE, True),
+            ("real/", FileKind.DIRECTORY, False),
+            ("target.txt", FileKind.FILE, False),
+        ]
+        for follow in (True, False):
+            opts = LocalScanOptions(recursive=False, return_symlinks=True, follow_symlinks=follow)
+            rows = [(i.compare_key, i.kind, i.is_symlink) for i in storage.scan(opts)]
+            assert rows == expected, follow
+
 
 class TestScanPagesAreScandirAligned:
     """``scan_pages`` hands off one page per directory file-run (one ``os.scandir``)."""

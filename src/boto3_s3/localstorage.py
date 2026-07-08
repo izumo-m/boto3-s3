@@ -1173,6 +1173,16 @@ class LocalStorage(Storage):
         for _sort_name, info, _loop_key in self._walker.scan_children(
             root, strip=strip, options=options, notify=notify
         ):
+            # Under return_symlinks + follow_symlinks, scan_children appends a
+            # symlinked directory's target as a second, DIRECTORY-kind child so
+            # the recursive walk descends it (the link is already out as its own
+            # leaf). A one-level scan does not descend, so that companion is not
+            # an entry here - it would just duplicate the link's path in followed
+            # form. Drop it; follow_symlinks is a traversal knob and must not add
+            # an entry at one level. A plain followed dir-symlink (no
+            # return_symlinks) still surfaces as its DIRECTORY entry, S3-style.
+            if options.return_symlinks and info.kind is FileKind.DIRECTORY and info.is_symlink:
+                continue
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
             info.storage = options.storage
