@@ -70,7 +70,8 @@ declared capabilities promise:
   them to `scan_pages` but the caller does not pass them per operation
   (`S3ScanOptions` = the `ListObjectsV2` knobs `page_size` / `fetch_owner`, plus
   the operation-set `request_payer` / `prefix`; `LocalScanOptions` =
-  `follow_symlinks` / `detect_symlink_loops`). A subclass keeps one backend's knobs
+  `follow_symlinks` / `detect_symlink_loops` / `return_directories` /
+  `return_symlinks`). A subclass keeps one backend's knobs
   from leaking into another's; the built-ins reject a foreign options type, and a
   custom backend reads its own knobs from its own subclass or from its instance
   state, taking the common base otherwise. `LocalStorage` also takes one
@@ -101,7 +102,8 @@ Three more members come with working defaults a custom backend normally keeps:
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
   the single place a backend seeds the **source-config it holds on the instance**.
   The built-ins override it to inject their constructor knobs
-  (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…)`,
+  (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…, return_directories=…,
+  return_symlinks=…)`,
   `S3Storage(page_size=…, fetch_owner=…)`); a custom backend overrides it to seed
   its own instance state (or for any dynamic default). Every scan builds from it:
   the high-level `cp` / `sync` / `ls` / `rm` paths take

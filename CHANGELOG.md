@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `LocalStorage(path, return_directories=…, return_symlinks=…)` (also on
+  `LocalScanOptions`): the scan can now return directories as their own entries
+  (the walk root included, at `compare_key == ""`) and/or symlinks as
+  unfollowed leaves; `follow_symlinks` keeps meaning traversal only, so all
+  combinations compose. Defaults off = aws parity.
+  `LocalFileGenerator.scan_children` / `classify_child` now take the scan
+  `options` instead of a bare `follow_symlinks`.
+
 ## [0.5.0] - 2026-07-07
 
 - `LocalStorage(path, fsync=True)` makes an `mv` download durable: the file (and

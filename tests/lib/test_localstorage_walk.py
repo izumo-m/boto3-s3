@@ -12,6 +12,7 @@ deliberate absence of a directory check (aws fails later at open - rc 1
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from boto3_s3.exceptions import NotFoundError
+from boto3_s3.globsieve import GlobFilter
 from boto3_s3.localstorage import (
     LocalFileGenerator,
     LocalStorage,
@@ -300,18 +302,12 @@ class TestWalkIsCustomizable:
                 full: str,
                 dir_fd: int | None,
                 *,
-                follow_symlinks: bool,
+                options: LocalScanOptions,
                 notify: Callable[[str], None],
             ) -> WalkChild | None:
                 if entry.name.endswith(".me"):
                     return None  # skip decided here, not in should_ignore_entry
-                return super().classify_child(
-                    entry,
-                    full,
-                    dir_fd,
-                    follow_symlinks=follow_symlinks,
-                    notify=notify,
-                )
+                return super().classify_child(entry, full, dir_fd, options=options, notify=notify)
 
         keys = [
             info.compare_key for info in LocalStorage(str(tmp_path), walker=_Skip()).walk_local()
@@ -330,14 +326,11 @@ class TestWalkIsCustomizable:
                 dir_path: str,
                 *,
                 strip: int,
-                follow_symlinks: bool,
+                options: LocalScanOptions,
                 notify: Callable[[str], None],
             ) -> list[WalkChild]:
                 children = super().scan_children(
-                    dir_path,
-                    strip=strip,
-                    follow_symlinks=follow_symlinks,
-                    notify=notify,
+                    dir_path, strip=strip, options=options, notify=notify
                 )
                 # An injected child stamps its own compare_key (info.key[strip:]).
                 key = (dir_path + "_synthetic").replace(os.sep, "/")
@@ -423,6 +416,91 @@ class TestWalkIsCustomizable:
         assert keys == ["keep.txt", "sub/nested.txt"]
         # dir + symlink registered in byte order; the excluded dir is not registered
         assert registered == ["link.txt", "sub/"]
+
+
+class TestReturnEntries:
+    """``return_directories`` / ``return_symlinks``: what the stream *contains*.
+
+    Both default off = aws parity (a transfer lists files only);
+    ``follow_symlinks`` keeps meaning traversal, so returning and following are
+    independent axes.
+    """
+
+    def test_return_directories_surfaces_every_directory_and_the_root(self, tmp_path: Path) -> None:
+        # Strictly interpreted, "return directories" includes the walk root:
+        # its record leads the stream at compare_key "" (sorts before every
+        # child key). foo/ lands between foo.txt and foo/bar ('.' < '/'), and
+        # an empty directory surfaces despite owning no files.
+        _make_tree(tmp_path, "a.txt", "foo.txt", "foo/bar")
+        (tmp_path / "empty").mkdir()
+
+        infos = list(LocalStorage(str(tmp_path), return_directories=True).walk_local())
+        keys = [i.compare_key for i in infos]
+        assert keys == ["", "a.txt", "empty/", "foo.txt", "foo/", "foo/bar"]
+        kinds = {i.compare_key: i.kind for i in infos}
+        assert kinds[""] is FileKind.DIRECTORY
+        assert kinds["foo/"] is FileKind.DIRECTORY
+        assert kinds["foo/bar"] is FileKind.FILE
+        root = infos[0]
+        assert root.stat_result is not None
+        assert root.key.endswith("/")  # the walk anchor, separator-folded
+
+    def test_return_symlinks_keeps_links_as_unfollowed_leaves(self, tmp_path: Path) -> None:
+        # No-follow + return: every link is its own lstat-based leaf. The dir
+        # link is not descended, the broken link is an entry rather than a
+        # warning, and the walk warns about nothing.
+        _make_tree(tmp_path, "real/inner.txt")
+        (tmp_path / "link_dir").symlink_to(tmp_path / "real")
+        (tmp_path / "link_broken").symlink_to(tmp_path / "nowhere")
+        warnings: list[str] = []
+
+        infos = list(
+            LocalStorage(str(tmp_path), follow_symlinks=False, return_symlinks=True).walk_local(
+                on_warning=warnings.append
+            )
+        )
+        assert [(i.compare_key, i.is_symlink) for i in infos] == [
+            ("link_broken", True),
+            ("link_dir", True),
+            ("real/inner.txt", False),
+        ]
+        assert warnings == []
+        link = next(i for i in infos if i.compare_key == "link_dir")
+        assert link.stat_result is not None
+        assert stat.S_ISLNK(link.stat_result.st_mode)  # the link's own lstat
+
+    def test_return_symlinks_while_following_descends_dir_targets(self, tmp_path: Path) -> None:
+        # Follow + return: the link's own leaf comes out at "name" and a
+        # directory target is additionally descended at "name/" (the one extra
+        # followed stat this combination costs); a file target is not
+        # duplicated - the link leaf is the entry at that name.
+        _make_tree(tmp_path, "real/inner.txt", "target.txt")
+        (tmp_path / "dlink").symlink_to(tmp_path / "real")
+        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
+
+        infos = list(LocalStorage(str(tmp_path), return_symlinks=True).walk_local())
+        assert [(i.compare_key, i.is_symlink) for i in infos] == [
+            ("dlink", True),
+            ("dlink/inner.txt", False),
+            ("flink", True),
+            ("real/inner.txt", False),
+            ("target.txt", False),
+        ]
+
+    def test_root_record_and_the_scan_filter_on_its_empty_key(self, tmp_path: Path) -> None:
+        # The root's compare_key is "": a glob '*' matches it (fnmatch), a
+        # non-empty literal does not - so an exclude-everything filter drops
+        # the root record too, while a targeted exclude leaves it standing.
+        _make_tree(tmp_path, "a.txt")
+        storage = LocalStorage(str(tmp_path))
+
+        drop_all = GlobFilter().exclude("*").compile()
+        opts = LocalScanOptions(recursive=True, return_directories=True, filter=drop_all)
+        assert list(storage.scan(opts)) == []
+
+        drop_txt = GlobFilter().exclude("*.txt").compile()
+        opts = LocalScanOptions(recursive=True, return_directories=True, filter=drop_txt)
+        assert [info.compare_key for info in storage.scan(opts)] == [""]
 
 
 class TestScanPagesAreScandirAligned:

@@ -224,13 +224,27 @@ class S3ScanOptions(ScanOptions):
 class LocalScanOptions(ScanOptions):
     """Local-walk knobs - the ``LocalStorage`` backend's :class:`ScanOptions`.
 
-    ``follow_symlinks=False`` skips symlinks. ``detect_symlink_loops`` (default
-    ``False``, a library extension - ``aws s3`` has none, so off keeps parity)
-    guards the recursive walk against symlink cycles: with it (and
-    ``follow_symlinks``) a directory that resolves to one of its own ancestors is
-    skipped with a ``Symbolic link loop detected`` warning (via ``on_warning``)
-    instead of recursing until ``RecursionError``. Off is zero extra cost (no
-    per-directory ``stat``).
+    ``follow_symlinks`` says whether the walk *traverses* symlinks (``False``
+    skips what they point at); ``return_symlinks`` says whether the links
+    themselves *appear in the output*, as unfollowed leaves carrying their own
+    lstat (``is_symlink=True``; a broken link is an entry too, vetting-free).
+    Independent axes - all four combinations are meaningful: following while
+    returning descends a link's directory target right after the link's own
+    leaf, at the cost of one extra followed stat. ``return_directories``
+    returns every directory as its own ``DIRECTORY``-kind entry at its
+    byte-order position; strictly interpreted that includes the walk root
+    itself, leading the stream with ``compare_key == ""`` (note a glob
+    ``*`` matches that empty key, a non-empty literal does not). Both
+    ``return_*`` default ``False`` = ``aws s3`` parity (a transfer lists files
+    only), and transfer / sync lanes expect exactly that file-only stream -
+    the knobs are for scans an application consumes itself.
+
+    ``detect_symlink_loops`` (default ``False``, a library extension -
+    ``aws s3`` has none, so off keeps parity) guards the recursive walk
+    against symlink cycles: with it (and ``follow_symlinks``) a directory that
+    resolves to one of its own ancestors is skipped with a ``Symbolic link
+    loop detected`` warning (via ``on_warning``) instead of recursing until
+    ``RecursionError``. Off is zero extra cost (no per-directory ``stat``).
 
     ``storage`` is not a user knob: ``LocalStorage`` threads its own instance here
     (``scan_pages`` / ``walk_local``) so the *shared, stateless*
@@ -243,6 +257,8 @@ class LocalScanOptions(ScanOptions):
 
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
+    return_directories: bool = False
+    return_symlinks: bool = False
     storage: Storage | None = None
 
 
