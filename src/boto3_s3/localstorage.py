@@ -530,7 +530,8 @@ class LocalFileGenerator:
         """The walk root's own ``DIRECTORY`` record (``options.return_directories``).
 
         ``root`` is the absolutized walk root with a trailing separator (the
-        ``list_file_pages`` anchor). Its ``compare_key`` is the empty string -
+        ``list_file_pages`` anchor, or ``_scan_one_level``'s for a non-recursive
+        scan). Its ``compare_key`` is the empty string -
         the root relativized to itself - which sorts before every child key,
         so the record leads the stream; note glob filters see that ``""`` (a
         lone ``*`` matches it, a non-empty literal does not). The stat is
@@ -1099,7 +1100,10 @@ class LocalStorage(Storage):
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``) as a single page, anchored at the absolutized path
-        (``self._abspath``) so ``FileInfo.key`` is absolute.
+        (``self._abspath``) so ``FileInfo.key`` is absolute. Under
+        ``return_directories`` that page also leads with the scanned root's own
+        record (``compare_key == ""`` - see ``root_info``), as the recursive walk
+        does; the S3 backend has no such knob, so this is a local-only extension.
 
         Requires a :class:`LocalScanOptions` (this backend's option type); a
         foreign ``ScanOptions`` is rejected rather than silently walking with
@@ -1166,6 +1170,18 @@ class LocalStorage(Storage):
                 if item_filter is None or item_filter(info):
                     yield info
             return
+        if options.return_directories:
+            # A one-level scan lists the immediate entries; strictly, "return
+            # directories" also includes the scanned directory itself, so lead
+            # with its record - the same root_info the recursive walk prepends
+            # (compare_key "", key ending in "/"), anchored with the trailing
+            # separator. None (a race removed the root) simply drops it, as its
+            # children are about to be. Stamped and filtered like every entry.
+            root_record = self._walker.root_info(os.path.join(root, ""))
+            if root_record is not None:
+                root_record.storage = options.storage
+                if item_filter is None or item_filter(root_record):
+                    yield root_record
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized root-prefix length (os.path.join(root, "") = root + a sep, the
         # common prefix of every child key). One level down this equals the name.

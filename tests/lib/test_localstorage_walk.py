@@ -527,6 +527,47 @@ class TestReturnEntries:
             rows = [(i.compare_key, i.kind, i.is_symlink) for i in storage.scan(opts)]
             assert rows == expected, follow
 
+    def test_non_recursive_scan_returns_the_root_under_return_directories(
+        self, tmp_path: Path
+    ) -> None:
+        # "Return directories" includes the scanned directory itself, so a
+        # one-level scan leads with the root's own record (compare_key "", key
+        # ending in "/") just like the recursive walk - and drops it again with
+        # return_directories off, where the level is only its immediate entries.
+        _make_tree(tmp_path, "a.txt")
+        (tmp_path / "sub").mkdir()
+        storage = LocalStorage(str(tmp_path))
+
+        opts = LocalScanOptions(recursive=False, return_directories=True)
+        infos = list(storage.scan(opts))
+        assert [(i.compare_key, i.kind) for i in infos] == [
+            ("", FileKind.DIRECTORY),
+            ("a.txt", FileKind.FILE),
+            ("sub/", FileKind.DIRECTORY),
+        ]
+        root = infos[0]
+        assert root.key.endswith("/") and root.stat_result is not None and not root.is_symlink
+
+        off = LocalScanOptions(recursive=False, return_directories=False)
+        assert [i.compare_key for i in storage.scan(off)] == ["a.txt", "sub/"]
+
+    def test_non_recursive_root_record_obeys_the_scan_filter_on_its_empty_key(
+        self, tmp_path: Path
+    ) -> None:
+        # Same empty-key filter contract as the recursive root: a glob '*'
+        # matches "" so exclude-all drops the root too, a non-empty literal
+        # does not so a targeted exclude leaves it standing.
+        _make_tree(tmp_path, "a.txt")
+        storage = LocalStorage(str(tmp_path))
+
+        drop_all = GlobFilter().exclude("*").compile()
+        opts = LocalScanOptions(recursive=False, return_directories=True, filter=drop_all)
+        assert list(storage.scan(opts)) == []
+
+        drop_txt = GlobFilter().exclude("*.txt").compile()
+        opts = LocalScanOptions(recursive=False, return_directories=True, filter=drop_txt)
+        assert [info.compare_key for info in storage.scan(opts)] == [""]
+
 
 class TestScanPagesAreScandirAligned:
     """``scan_pages`` hands off one page per directory file-run (one ``os.scandir``)."""
