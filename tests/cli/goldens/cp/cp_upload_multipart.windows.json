@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "cp",
+    "src/big.bin",
+    "s3://<BUCKET>/up/big.bin"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "up/big.bin"
+  ],
+  "scenario": "cp_upload_multipart",
+  "src_tree": null,
+  "stdout_lines": [
+    "upload: src\\big.bin to s3://<BUCKET>/up/big.bin"
+  ]
+}

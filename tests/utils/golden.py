@@ -19,6 +19,16 @@ goldens predate the field and omit it (loaded as ``None``, not compared).
 Bucket-lifecycle commands (``mb`` / ``rb``) further record ``bucket_exists``
 - whether the scenario bucket exists after the run; ``remaining_keys`` is
 ``None`` when it does not (a bucket that is gone has no key listing).
+
+Platform variants (docs/testing.md sections 3 and 8): the transfer kinds
+(`WINDOWS_VARIANT_KINDS`) have an OS-dependent local side, so next to the
+POSIX base ``<name>.json`` they may carry a ``<name>.windows.json`` captured
+from ``aws.exe``. Loading on Windows prefers the variant and falls back to
+the base (most captures are identical); capturing on Windows writes only
+variants - and only where the capture differs from the base on a compared
+field - never the base files, which stay POSIX captures. Every other kind's
+golden is platform-independent (the Windows e2e drift run verifies the same
+files against ``aws.exe`` unchanged).
 """
 
 from __future__ import annotations
@@ -36,6 +46,10 @@ from typing import Any
 import pytest
 
 GOLDENS_DIR = Path(__file__).resolve().parents[1] / "cli" / "goldens"
+
+# Kinds whose goldens have a host-OS-dependent local side (result-line
+# separators, dir-vs-file outcomes) and may therefore carry a Windows variant.
+WINDOWS_VARIANT_KINDS = frozenset({"cp", "mv", "sync"})
 
 
 @dataclass(frozen=True)
@@ -65,8 +79,13 @@ class Golden:
 
 
 def golden_path(kind: str, name: str) -> Path:
-    """Path of the golden for scenario *name* of *kind* (e.g. ``"ls"``)."""
+    """Path of the base (POSIX-captured) golden for scenario *name* of *kind*."""
     return GOLDENS_DIR / kind / f"{name}.json"
+
+
+def _windows_variant_path(kind: str, name: str) -> Path:
+    """Path of the Windows-captured variant next to the base golden."""
+    return GOLDENS_DIR / kind / f"{name}.windows.json"
 
 
 def update_goldens_enabled() -> bool:
@@ -84,17 +103,54 @@ def detect_aws_version() -> str:
     return proc.stdout.decode(errors="replace").strip() or "unknown"
 
 
-def write_golden(kind: str, golden: Golden) -> Path:
-    """Persist *golden*; returns the path written."""
-    path = golden_path(kind, golden.scenario)
+def _dump_golden(path: Path, golden: Golden) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(golden), indent=2, sort_keys=True) + "\n")
     return path
 
 
+def write_golden(kind: str, golden: Golden) -> Path | None:
+    """Persist *golden*; returns the path written (``None`` = nothing written).
+
+    On POSIX this writes the base file. On Windows only the
+    `WINDOWS_VARIANT_KINDS` are written, as ``<name>.windows.json`` variants,
+    and only when the capture differs from the base on a compared field
+    (``aws_version`` excluded - it always differs); a variant whose capture
+    stopped differing is pruned. Base files are never written from Windows:
+    they are POSIX captures (platform-independent kinds included, which is
+    why their Windows capture is skipped outright).
+    """
+    base_path = golden_path(kind, golden.scenario)
+    if os.name != "nt":
+        return _dump_golden(base_path, golden)
+    if kind not in WINDOWS_VARIANT_KINDS:
+        return None
+    if not base_path.exists():
+        pytest.fail(
+            f"golden {base_path} is missing; capture the POSIX baseline first "
+            "(docs/testing.md section 8)"
+        )
+    base = json.loads(base_path.read_text())
+    captured = asdict(golden)
+    variant = _windows_variant_path(kind, golden.scenario)
+    if all(value == base.get(key) for key, value in captured.items() if key != "aws_version"):
+        variant.unlink(missing_ok=True)
+        return None
+    return _dump_golden(variant, golden)
+
+
 def load_golden(kind: str, name: str) -> Golden:
-    """Load the committed golden, failing with regeneration instructions if absent."""
+    """Load the committed golden, failing with regeneration instructions if absent.
+
+    On Windows a ``<name>.windows.json`` variant wins over the base file for
+    the `WINDOWS_VARIANT_KINDS` (absent variant = the captures are identical,
+    fall back to the base).
+    """
     path = golden_path(kind, name)
+    if os.name == "nt" and kind in WINDOWS_VARIANT_KINDS:
+        variant = _windows_variant_path(kind, name)
+        if variant.exists():
+            path = variant
     if not path.exists():
         pytest.fail(
             f"golden {path} is missing. Generate it against MinIO:\n"

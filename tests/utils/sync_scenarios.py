@@ -21,6 +21,7 @@ warning (rc 2), and a destination that exists as a file fails per item
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from tests.utils.cp_scenarios import (
@@ -277,9 +278,15 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
         # The dest walk warns (file-as-directory), then each download fails
-        # with ENOTDIR; failures win the rc (1).
-        expected_stderr_tokens_ours=("File does not exist.", "Not a directory"),
-        expected_stderr_tokens_aws=("File does not exist.", "Not a directory"),
+        # with ENOTDIR; failures win the rc (1). On Windows the failure is
+        # ENOENT instead (file-as-directory opens answer [Errno 2] there),
+        # and aws's warning line is not pinned - only its failure is.
+        expected_stderr_tokens_ours=("File does not exist.", "Not a directory")
+        if os.name != "nt"
+        else ("File does not exist.", "[Errno 2]"),
+        expected_stderr_tokens_aws=("File does not exist.", "Not a directory")
+        if os.name != "nt"
+        else ("[Errno 2]",),
     ),
     # -- copies ---------------------------------------------------------------
     CpScenario(

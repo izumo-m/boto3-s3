@@ -1,0 +1,30 @@
+{
+  "argv": [
+    "sync",
+    "s3://<BUCKET>/d",
+    "dest"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "new.txt:6:02db0d26",
+    "same.txt:3:dc5e6f7c",
+    "short.txt:14:230bc950",
+    "touch.txt:3:622a6eda"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d/new.txt",
+    "d/same.txt",
+    "d/short.txt",
+    "d/touch.txt"
+  ],
+  "scenario": "sync_download_mixed_times",
+  "src_tree": null,
+  "stdout_lines": [
+    "download: s3://<BUCKET>/d/new.txt to dest\\new.txt",
+    "download: s3://<BUCKET>/d/short.txt to dest\\short.txt",
+    "download: s3://<BUCKET>/d/touch.txt to dest\\touch.txt"
+  ]
+}

@@ -27,6 +27,7 @@ and the e2e diff feeds both subprocesses the same bytes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -117,6 +118,15 @@ class CpScenario(BaseScenario):
     # Directories created with an explicit mode (workdir-relative -> mode),
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
+    # aws's own outcome is racy on a case-insensitive destination (its warn
+    # text: "may result in ... race conditions between concurrent downloads",
+    # observed as a remove->rename [WinError 183] collision between the twin
+    # downloads). On such a filesystem there is no stable aws behavior to
+    # diff or record: e2e pins only ours' deterministic side (rc 0 + stderr
+    # tokens) and the golden tiers stand down (no capture, no replay). This
+    # is the one carve-out from the unconditional-rc charter note above -
+    # where aws itself is nondeterministic, no defined rc exists to match.
+    undefined_on_case_insensitive_dest: bool = False
 
 
 def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
@@ -351,8 +361,13 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
+        # ours synthesizes EISDIR on every host; aws hits EISDIR at open on
+        # POSIX but ENOENT on Windows (opening "src\" fails there).
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=("upload failed", "Is a directory"),
+        expected_stderr_tokens_aws=(
+            "upload failed",
+            "Is a directory" if os.name != "nt" else "[Errno 2]",
+        ),
     ),
     CpScenario(
         name="cp_upload_dest_bucket_missing",
@@ -772,6 +787,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         ),
         seed=_SEED_CASE,
         capture_tree=True,
+        undefined_on_case_insensitive_dest=True,
         expected_stderr_tokens_ours=("warning: Downloading", "differs only by case"),
         expected_stderr_tokens_aws=("warning: Downloading", "differs only by case"),
     ),

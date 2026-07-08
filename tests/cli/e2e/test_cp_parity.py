@@ -48,6 +48,7 @@ from tests.utils.harness import (
     run_aws_subprocess_with_stdin,
     run_cli_subprocess_with_stdin,
 )
+from tests.utils.host import is_case_insensitive
 
 
 @dataclass
@@ -100,6 +101,23 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
         ours = _run_side(
             run_cli_subprocess_with_stdin, scenario, bucket, s3_client, tmp_path / "ours"
         )
+
+        if scenario.undefined_on_case_insensitive_dest and is_case_insensitive(tmp_path):
+            # aws's own rc/output are racy here (the twin downloads' rename
+            # race - see the scenario field's docstring), so there is nothing
+            # stable to diff or record: pin only ours' deterministic side.
+            assert ours.result.rc == 0, (
+                f"[{scenario.name}] ours must stay deterministic on a "
+                f"case-insensitive destination:\n"
+                f"  ours rc={ours.result.rc} stderr={ours.result.stderr.strip()!r}"
+            )
+            assert_stderr_tokens(
+                scenario.expected_stderr_tokens_ours,
+                ours.result.stderr,
+                side="ours",
+                scenario=scenario.name,
+            )
+            return
 
         if not scenario.diff_only:
             if update_goldens_enabled():

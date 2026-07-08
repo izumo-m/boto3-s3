@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "sync",
+    "s3://<BUCKET>/d",
+    "dest",
+    "--delete"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "a.txt:13:48ec9dee"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d/a.txt"
+  ],
+  "scenario": "sync_download_delete",
+  "src_tree": null,
+  "stdout_lines": [
+    "delete: dest\\stale.txt",
+    "delete: dest\\sub\\stale2.txt",
+    "download: s3://<BUCKET>/d/a.txt to dest\\a.txt"
+  ]
+}

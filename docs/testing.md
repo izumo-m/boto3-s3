@@ -70,6 +70,27 @@ commands. Committed to git.
 - **Replay** - the functional suite seeds moto with the scenario's exact
   layout, runs the CLI in-process, and compares against the golden.
 
+### Platform variants (Windows)
+
+A transfer golden's local side is OS-dependent (result-line separators; the
+file-vs-directory outcome of a trailing-`/` destination), so the cp/mv/sync
+goldens (`WINDOWS_VARIANT_KINDS` in `tests/utils/golden.py`) may carry a
+Windows twin next to the POSIX base: `<name>.windows.json`, captured from
+the real `aws.exe`. Loading on Windows prefers the variant and falls back to
+the base when absent - absence means the two captures are identical, which
+holds for most scenarios. Capture on Windows writes only variants, and only
+where the capture differs from the base on a compared field (a variant that
+stops differing is pruned); base files are POSIX captures and are never
+written from Windows - the platform-independent kinds (ls/rm/mb/rb/presign/
+website, verified against `aws.exe` unchanged) skip Windows capture
+entirely. One scenario has no Windows golden by design:
+`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - aws's own
+twin-download rename race makes its outcome undefined on a case-insensitive
+destination (its warn text says as much), so the golden tiers stand down
+there and e2e pins only ours' deterministic rc 0. Where aws itself is
+nondeterministic no defined rc exists to match, so this does not breach the
+exit-code charter.
+
 ### Endpoint policy (MinIO goldens, occasional real-AWS verification)
 
 A golden is a **drift detector, not ground truth**: the truth the exit-code
@@ -391,5 +412,63 @@ must stay client-stack-free).
   verified on moto (which supports the operation fully). Against real S3
   the same scenarios exit 0 on both sides - rc parity is endpoint-relative
   by design.
-- **Windows**: `scripts/minio-env.sh` is POSIX; set the variables manually
-  (or add a `.ps1` twin when Windows-native development starts).
+
+## 8. Running the suite on Windows (WSL2 host)
+
+Windows is a supported OS (overview.md section 2); the suite runs there on a
+real Windows CPython using a host-installed `uv`, driven either from a native
+Windows shell or from WSL2 through its interop. Two things make the run
+representative:
+
+- **Work from an NTFS copy, not the WSL tree.** A Windows process can read
+  the repo through `\\wsl.localhost\...`, but that path serves the ext4
+  filesystem over 9P - case-sensitive and slow, a hybrid no real Windows
+  deployment has. Copy the working tree to an NTFS directory instead,
+  excluding the platform-bound and derived trees:
+
+      rsync -a --delete --exclude .git --exclude .venv --exclude vendor \
+        --exclude __pycache__ --exclude out --exclude .pytest_cache \
+        --exclude .ruff_cache  <repo>/  /mnt/c/tmp/boto3-s3-wintest/
+
+  (`vendor/` is reference-only for the tests - docstrings cite it, nothing
+  imports from it - so the copy stays a few MiB.)
+
+- **Sync with `--all-packages`.** A bare `uv sync` installs only the root
+  project; without the `cli` workspace member every `boto3_s3_cli` import
+  fails at collection:
+
+      cd /mnt/c/tmp/boto3-s3-wintest
+      uv sync --all-packages
+      uv run pytest -q
+
+  `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
+  the support floor) - the host Python installation is not used.
+
+Prerequisites: a Windows `uv` on `PATH`, and Windows **Developer Mode** (or
+an elevated shell) because several `tests/lib` scenarios create symlinks.
+Tests staged on chmod-revoked access skip themselves on Windows (the
+`skip_if_chmod_is_inert` mark in `tests/utils/host.py`).
+
+**Goldens on Windows.** The cp/mv/sync goldens resolve to their
+`<name>.windows.json` variants (section 3, "Platform variants"); regenerating
+them needs this Windows setup plus the e2e stack below - `UPDATE_GOLDENS=1`
+from Windows writes only those variants and never touches the POSIX base
+files, so it is safe to run. `cp_case_conflict_warn` deliberately has no
+Windows golden and its functional replay self-skips on a case-insensitive
+filesystem.
+
+**e2e on Windows.** The differential machinery works unchanged against the
+WSL2 MinIO stack: install the AWS CLI v2 MSI at the version
+`scripts/install-awscli.sh` pins (the vendored `aws-cli`'s - the section 4
+drift rationale applies to this binary too), start the stack inside WSL2
+(`scripts/compose-up.sh`), and Windows reaches it on `127.0.0.1:9000`
+through WSL2's localhost forwarding. The MinIO variables must be set in the
+**Windows** process - WSLENV propagation cannot be relied on - which is what
+`scripts/minio-env.cmd` (the `minio-env.sh` twin; a runner, because cmd
+cannot `source`) is for:
+
+    cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+
+The Linux-capture caveat above applies to the e2e golden drift checks of
+cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
+never run the Windows and Linux e2e suites concurrently.
