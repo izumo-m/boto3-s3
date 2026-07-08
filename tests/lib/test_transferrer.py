@@ -791,8 +791,10 @@ class TestMove:
         monkeypatch.setattr(os, "remove", _boom)
         _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
-        # aws prints the OS's own wording after "move failed: ...".
-        assert str(results[0].error) == f"[Errno 13] Permission denied: '{src}'"
+        # aws prints the OS's own wording after "move failed: ..." - compare via
+        # str(OSError(...)): that rendering quotes the filename with repr, so the
+        # expectation stays exact where the path itself contains backslashes.
+        assert str(results[0].error) == str(OSError(13, "Permission denied", str(src)))
 
     def test_transfer_failure_leaves_the_source(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"

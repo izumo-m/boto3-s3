@@ -104,9 +104,14 @@ class TestParamfile:
                 "file:///nonexistent/boto3_s3_xyz", "--content-type", operation="cp"
             )
 
-    def test_binary_file_via_text_prefix_hints_fileb(self, tmp_path: Path) -> None:
+    def test_binary_file_via_text_prefix_hints_fileb(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         p = tmp_path / "k.bin"
         p.write_bytes(b"\xff\xfe\x00\x01")  # not valid UTF-8
+        # Pin the decode to UTF-8 (aws's compat_open knob): the locale default
+        # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
+        monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
         with pytest.raises(ValidationError) as excinfo:
             transferargs.blob_value(f"file://{p}", "--sse-c-key", operation="cp")
         # Byte-exact aws wording (paramfile.get_file -> ParamError): the
@@ -123,6 +128,7 @@ class TestParamfile:
         # aws expands ~ and $VARs in the paramfile path (expandvars(expanduser)).
         (tmp_path / "ct.txt").write_text("text/x-home")
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads this, not HOME
         monkeypatch.setenv("BOTO3_S3_TESTDIR", str(tmp_path))
         assert (
             transferargs.resolve_text_paramfile("file://~/ct.txt", "--content-type", operation="cp")

@@ -46,6 +46,7 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
+from tests.utils.host import is_case_insensitive, skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
@@ -205,9 +206,8 @@ class TestUploadRoute:
         assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
         assert calls == []
 
+    @skip_if_chmod_is_inert
     def test_unreadable_single_source_warns_without_failing(self, tmp_path: Path) -> None:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root reads anything")
         src = tmp_path / "secret.txt"
         src.write_bytes(b"x")
         src.chmod(0)
@@ -806,7 +806,9 @@ class TestCaseConflictGate:
         assert len(notices) == 1
         assert str(notices[0].error).startswith("warning: Skipping b/cc/a.txt -> ")
         assert "differs only by case" in str(notices[0].error)
-        assert (out / "A.txt").exists() and not (out / "a.txt").exists()
+        # Listed by stored name: exists() cannot tell the twins apart on a
+        # case-insensitive destination.
+        assert os.listdir(out) == ["A.txt"]
 
     def test_warn_downloads_both_with_a_notice(self, tmp_path: Path) -> None:
         calls, results, out = self._run(
@@ -864,7 +866,7 @@ class TestCaseConflictGate:
         assert gate is not None
         assert "A.txt" not in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
 
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_case_gate_scan_warns_into_the_rollup_and_filters(self, tmp_path: Path) -> None:
         # aws's reverse enumeration shares the result queue (its walk warnings
         # count toward rc 2) and passes the --exclude/--include filters; the
@@ -895,8 +897,16 @@ class TestCaseConflictGate:
         calls, results, _ = self._run(
             tmp_path, CaseConflictMode.SKIP, [_cc_listing(), _get_response(), _get_response()]
         )
-        assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject", "GetObject"]
-        assert [r for r in results if r.outcome is OpOutcome.NOTICE] == []
+        notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
+        if is_case_insensitive(tmp_path):
+            # The exact-match arm still copies A.txt unconditionally, but here
+            # the twin IS gated: ``os.path.exists(dest)`` sees A.txt for a.txt
+            # (the gate's case-insensitive-filesystem arm).
+            assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject"]
+            assert len(notices) == 1
+        else:
+            assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject", "GetObject"]
+            assert notices == []
 
     def test_ignore_mode_builds_no_gate(self, tmp_path: Path) -> None:
         calls, results, _out = self._run(

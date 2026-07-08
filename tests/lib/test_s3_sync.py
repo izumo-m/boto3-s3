@@ -38,6 +38,7 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
+from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SERIAL = TransferConfig(use_threads=False)
@@ -547,9 +548,8 @@ class TestSyncDownload:
         assert stale.exists()
         assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
 
+    @skip_if_chmod_is_inert
     def test_local_delete_failure_aggregates_into_batcherror(self, tmp_path: Path) -> None:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root removes anything")
         out = tmp_path / "out"
         stale = _write(out, "locked/stale.txt", b"xx")
         stale.parent.chmod(0o555)

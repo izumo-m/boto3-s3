@@ -29,8 +29,7 @@ from boto3_s3.localstorage import (
     to_native_path,
 )
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
-
-_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+from tests.utils.host import skip_if_chmod_is_inert
 
 
 def _keys(
@@ -74,7 +73,7 @@ class TestWalkOrder:
 
 
 class TestWalkWarnings:
-    @pytest.mark.skipif(_IS_ROOT, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_unreadable_file_warns_and_is_skipped(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt", "secret.txt")
         (tmp_path / "secret.txt").chmod(0)
@@ -87,7 +86,7 @@ class TestWalkWarnings:
             f"Skipping file {tmp_path / 'secret.txt'}. File/Directory is not readable."
         ]
 
-    @pytest.mark.skipif(_IS_ROOT, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_unreadable_directory_warns_once_and_prunes(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt", "locked/inner.txt")
         (tmp_path / "locked").chmod(0)
@@ -112,6 +111,12 @@ class TestWalkWarnings:
         keys = _keys(tmp_path, on_warning=warnings.append)
         # The unrolled levels all surface their file before the descent fails.
         assert keys and all(key.endswith("keep.txt") for key in keys)
+        if os.name == "nt":
+            # No ELOOP on Windows: the descent dies on the path-length limit
+            # instead, at a host-dependent depth with the not-readable wording -
+            # pin only that it warns rather than pruning silently.
+            assert warnings and all(w.startswith("Skipping file ") for w in warnings)
+            return
         assert len(warnings) == 1
         assert warnings[0].startswith("Skipping file ")
         assert warnings[0].endswith(". File does not exist.")
@@ -661,7 +666,7 @@ class TestGetFileinfo:
             "block special device, FIFO, or socket."
         ]
 
-    @pytest.mark.skipif(_IS_ROOT, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_unreadable_file_warns_and_skips(self, tmp_path: Path) -> None:
         secret = tmp_path / "secret.txt"
         secret.write_bytes(b"x")
@@ -864,7 +869,8 @@ class TestStatResultAndSymlink:
         # followed) and a symlinked directory is not descended - a backup walk.
         _make_tree(tmp_path, "reg.txt", "realdir/inner.txt")
         (tmp_path / "linkfile").symlink_to(tmp_path / "reg.txt")
-        (tmp_path / "linkdir").symlink_to(tmp_path / "realdir")
+        # target_is_directory: Windows needs a directory-type symlink (no-op on POSIX).
+        (tmp_path / "linkdir").symlink_to(tmp_path / "realdir", target_is_directory=True)
 
         class LstatWalker(LocalFileGenerator):
             def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:

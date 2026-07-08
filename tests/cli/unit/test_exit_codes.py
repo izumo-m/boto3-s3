@@ -8,7 +8,6 @@ client, so the parse -> dispatch -> error -> exit-code wiring is covered.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
@@ -329,19 +328,18 @@ class TestRecursiveDestDirCreation:
     pipeline's rc 1. sync always did this; cp/mv --recursive share it now."""
 
     @pytest.fixture()
-    def readonly_dir(self, tmp_path: Any) -> Any:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root creates anything")
-        ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o555)
-        yield ro
-        ro.chmod(0o755)
+    def blocked_parent(self, tmp_path: Any) -> Any:
+        # A file where the destination's parent directory should be: makedirs
+        # fails on every platform (a chmod-denied directory would not hold on
+        # Windows or as root), and every OSError category maps to the same 255.
+        blocker = tmp_path / "ro"
+        blocker.write_bytes(b"")
+        return blocker
 
-    def test_cp_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
-        rc = cli.main(["cp", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+    def test_cp_uncreatable_recursive_dest_exits_255(self, blocked_parent: Any) -> None:
+        rc = cli.main(["cp", "s3://b/pre", str(blocked_parent / "new"), "--recursive"])
         assert rc == 255
 
-    def test_mv_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
-        rc = cli.main(["mv", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+    def test_mv_uncreatable_recursive_dest_exits_255(self, blocked_parent: Any) -> None:
+        rc = cli.main(["mv", "s3://b/pre", str(blocked_parent / "new"), "--recursive"])
         assert rc == 255

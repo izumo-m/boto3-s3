@@ -25,6 +25,7 @@ from botocore.exceptions import ClientError
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
@@ -227,7 +228,7 @@ class TestPipelineErrors:
 
 
 class TestWarnings:
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_unreadable_source_warns_rc_2(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -244,7 +245,7 @@ class TestWarnings:
         assert f"warning: Skipping file {src}. File/Directory is not readable." in captured.err
         assert calls == []
 
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
+    @skip_if_chmod_is_inert
     def test_quiet_keeps_rc_2_but_prints_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -272,7 +273,8 @@ class TestSuccessShapes:
         rc = cli.main(["cp", "a.txt", "s3://bucket/up/"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 0
-        assert captured.out.endswith("upload: ./a.txt to s3://bucket/up/a.txt\n")
+        # aws-cli's relative_path joins with the native sep (".\\a.txt" on Windows).
+        assert captured.out.endswith(f"upload: .{os.sep}a.txt to s3://bucket/up/a.txt\n")
         assert calls[0].params["Key"] == "up/a.txt"
         assert calls[0].params["ContentType"] == "text/plain"
 
@@ -285,7 +287,7 @@ class TestSuccessShapes:
         rc = cli.main(["cp", "a.txt", "s3://bucket/k", "--dryrun"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 0
-        assert captured.out == "(dryrun) upload: ./a.txt to s3://bucket/k\n"
+        assert captured.out == f"(dryrun) upload: .{os.sep}a.txt to s3://bucket/k\n"
         assert calls == []
 
     def test_quiet_suppresses_success_output(

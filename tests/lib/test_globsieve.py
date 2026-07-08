@@ -13,6 +13,7 @@ Three layers:
 from __future__ import annotations
 
 import ntpath
+import posixpath
 
 import pytest
 
@@ -508,9 +509,12 @@ class TestSeparatorNormalization:
         assert m.included("a/b/c.log") is False  # literal pattern, folded
         assert m.included("logs/app.log") is True  # neither pattern -> visible
 
-    def test_posix_backslash_stays_a_literal(self) -> None:
+    def test_posix_backslash_stays_a_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # On POSIX os.sep is '/', so folding is a no-op and '\' is a literal (not a
         # separator) - it does not match a '/'-separated key, like aws-cli on POSIX.
+        # Simulated like the Windows cases above, so the test runs on any host.
+        monkeypatch.setattr(globsieve.os, "path", posixpath)
+        monkeypatch.setattr(globsieve.os, "sep", "/")
         m = globsieve.compile([GlobPattern.exclude("logs\\*.txt")])
         assert m.included("logs/app.txt") is True  # '\' literal -> no match -> visible
 

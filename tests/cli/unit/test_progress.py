@@ -13,6 +13,7 @@ commands get the same guarantee from ``finish_transfer``).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -54,7 +55,8 @@ class TestResultLines:
             printer.on_result(
                 _result(OpOutcome.SUCCEEDED, src=str(tmp_path / "a.txt"), dest="s3://b/k")
             )
-        assert capsys.readouterr().out == "upload: ./a.txt to s3://b/k\n"
+        # aws-cli's relative_path joins with the native sep (".\\a.txt" on Windows).
+        assert capsys.readouterr().out == f"upload: .{os.sep}a.txt to s3://b/k\n"
 
     def test_stream_token_renders_verbatim(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The stream endpoint token "-" is not a local path: aws prints
