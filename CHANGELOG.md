@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Multipart copies no longer lose the source's metadata and tags on upstream
+  s3transfer >= 0.19 (`copy_props` now adapts to its new copy-props handling).
 - `LocalStorage(path, return_directories=…, return_symlinks=…)` (also on
   `LocalScanOptions`): the scan can now return directories as their own entries
   (the walk root included, at `compare_key == ""`) and/or symlinks as

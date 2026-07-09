@@ -1430,6 +1430,21 @@ class _SetMetadataDirectiveProps:
     already replaced *some* properties explicitly, the remaining ones are
     still source-injected and the directive flips to REPLACE (aws-cli rule),
     on the single-part path too.
+
+    Unlike aws-cli's subscriber, the directive is set to REPLACE on *every*
+    injection, not only the explicit-props case. Upstream s3transfer >= 0.19
+    grew its own multipart metadata preservation that strips these seven
+    properties from CreateMultipartUpload unless ``MetadataDirective`` is
+    REPLACE (and its head-based re-preserve never runs here because the
+    engine pre-provides size and ETag); always sending REPLACE keeps the
+    injected properties alive there. On older s3transfer the directive is
+    simply dropped from the create call (it sits in
+    ``CREATE_MULTIPART_ARGS_BLACKLIST`` in every supported version), so the
+    wire request is unchanged. A caller-supplied directive is never
+    overwritten - though in practice none can be present, because the engine
+    only attaches copy-props subscribers when ``metadata_directive`` is unset
+    (the aws-cli gate) and ``_auto_populate_metadata_directive`` only ever
+    seeds REPLACE.
     """
 
     def __init__(
@@ -1453,8 +1468,7 @@ class _SetMetadataDirectiveProps:
         if not is_multipart and not has_explicit:
             return
         head = self._head_source()
-        if has_explicit:
-            extra_args.setdefault("MetadataDirective", "REPLACE")
+        extra_args.setdefault("MetadataDirective", "REPLACE")
         for prop in _METADATA_DIRECTIVE_PROPS:
             if prop not in extra_args and prop in head:
                 extra_args[prop] = head[prop]
@@ -1467,13 +1481,31 @@ class _SetMetadataDirectiveProps:
         )
 
 
+def _mpu_inline_tagging_supported() -> bool:
+    """Whether s3transfer forwards an inline ``Tagging`` header to
+    CreateMultipartUpload.
+
+    Upstream s3transfer >= 0.19 blacklists the arg from the create call
+    (``CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST``) in favor of its
+    own ``TaggingDirective``-driven tag copy, which `_SetTags` does not use
+    because that path has no destination rollback when the tagging write
+    fails. Where the header would be silently dropped, `_SetTags` routes the
+    tag set through its post-copy PutObjectTagging instead.
+    """
+    from s3transfer.copies import CopySubmissionTask
+
+    return "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+
+
 class _SetTags:
     """Carry source tags into a multipart copy (aws subscriber port).
 
     Single-part copies inherit tags via ``TaggingDirective=COPY``; multipart
     copies read GetObjectTagging from the source and either inline the
-    percent-encoded set in the ``Tagging`` header (<= ~2 KiB) or apply it with
-    a post-copy PutObjectTagging - rolling the destination object back with a
+    percent-encoded set in the ``Tagging`` header (<= ~2 KiB, only where
+    s3transfer still forwards it to CreateMultipartUpload - see
+    `_mpu_inline_tagging_supported`) or apply it with a post-copy
+    PutObjectTagging - rolling the destination object back with a
     best-effort delete when that tagging write fails, and surfacing the
     failure on the transfer future.
     """
@@ -1506,7 +1538,8 @@ class _SetTags:
         header = "&".join(
             f"{quote(tag['Key'], safe='')}={quote(tag['Value'], safe='')}" for tag in tag_set
         )
-        if len(header.encode("utf-8")) <= _MAX_TAGGING_HEADER_SIZE:
+        fits_inline = len(header.encode("utf-8")) <= _MAX_TAGGING_HEADER_SIZE
+        if fits_inline and _mpu_inline_tagging_supported():
             extra_args["Tagging"] = header
         else:
             future.meta.user_context[_POST_TAGGING_KEY] = tag_set

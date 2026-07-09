@@ -448,13 +448,20 @@ class TestCopy:
         assert create.params["ContentType"] == "text/html"
         assert create.params["Metadata"] == {"a": "b"}
 
-    def test_multipart_default_heads_source_and_inlines_small_tags(self) -> None:
+    def test_multipart_default_heads_source_and_copies_small_tags(self) -> None:
+        # Where s3transfer still forwards inline Tagging to the create call
+        # (< upstream 0.19) the small set rides the header; where it is
+        # blacklisted the engine routes it through the post-copy
+        # PutObjectTagging instead (transfer._mpu_inline_tagging_supported).
+        inline = transfer._mpu_inline_tagging_supported()
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
         ]
+        if not inline:
+            responses.append({})  # PutObjectTagging
         source_responses: list[dict[str, Any] | Exception] = [
             {"ContentType": "text/css", "Metadata": {}},
             {"TagSet": [{"Key": "team", "Value": "a&b"}]},
@@ -469,7 +476,12 @@ class TestCopy:
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         create = calls[0]
         assert create.params["ContentType"] == "text/css"
-        assert create.params["Tagging"] == "team=a%26b"
+        if inline:
+            assert create.params["Tagging"] == "team=a%26b"
+        else:
+            assert "Tagging" not in create.params
+            assert _ops(calls)[-1] == "PutObjectTagging"
+            assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "team", "Value": "a&b"}]}
         assert transferrer.succeeded == 1
 
     def test_oversized_tags_apply_after_the_copy(self) -> None:

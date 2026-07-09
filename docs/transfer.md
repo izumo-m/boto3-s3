@@ -137,7 +137,7 @@ chain:
 |---|---|---|
 | `none` | ReplaceMetadataDirective + ReplaceTaggingDirective | Carries nothing over (sets the directive to REPLACE). s3transfer excludes the directive from CreateMultipartUpload via a blacklist |
 | `metadata-directive` | SetMetadataDirectiveProps + ReplaceTaggingDirective | Injects 7 properties (CacheControl / ContentDisposition / ContentEncoding / ContentLanguage / ContentType / Expires / Metadata) from the source HeadObject. Tags are not carried over |
-| `default` (the default) | SetMetadataDirectiveProps + SetTags | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under use the `Tagging` header, otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
+| `default` (the default) | SetMetadataDirectiveProps + SetTags | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under (and s3transfer still forwards the header - see below) use the `Tagging` header, otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
 
 - The single-shot path reuses the first HeadObject response
   (`TransferItem.head`) and **does not HEAD twice** (the same as aws-cli's reuse
@@ -147,6 +147,23 @@ chain:
   properties from the source (aws-cli's rule).
 - When `--metadata-directive` is specified, the entire chain is disabled (as in
   aws).
+- **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
+  predates this, so the port diverges from aws-cli's subscribers in two
+  guarded spots): upstream 0.19 grew its own multipart copy-props handling -
+  it strips the seven injected properties from CreateMultipartUpload unless
+  `MetadataDirective` is REPLACE, and blacklists inline `Tagging` from the
+  create call. The port therefore always sets `MetadataDirective=REPLACE` when
+  injecting (every supported s3transfer drops the directive from the create
+  call via the same blacklist, so the wire request is unchanged on older
+  versions), and probes the blacklist (`_mpu_inline_tagging_supported`) to
+  route small tag sets through the post-copy PutObjectTagging where the
+  inline header would be silently dropped. s3transfer 0.19's own
+  `TaggingDirective`-driven tag copy is deliberately not used: it has no
+  destination rollback when the tagging write fails. Its post-complete
+  tag/annotation hooks stay inert here (they require a `TaggingDirective` /
+  `AnnotationDirective` the chain never leaves on a multipart copy - `none` /
+  `metadata-directive` seed `TaggingDirective=REPLACE` with no `Tagging`,
+  which parses to an empty tag set and returns without a write).
 
 ## 5. download's incidental processing
 

@@ -35,6 +35,12 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   ``ContentLength``/sizes become ints (no output parser runs, recorder rule).
 - ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
   page-size default; rm port rule) and never show ``EncodingType``.
+- The aws-cli's inline MPU-copy ``Tagging`` expectation (a small tag set
+  riding CreateMultipartUpload) holds only where the installed s3transfer
+  forwards that header; upstream s3transfer >= 0.19 blacklists it from the
+  create call and the engine applies the set with the post-copy
+  PutObjectTagging instead. The affected tests branch on
+  ``_INLINE_MPU_TAGGING`` (the blacklist probed directly).
 - ``mock.patch`` targets translate: ``mimetypes.guess_type`` and ``os.utime``
   are identical seams; the aws-cli's ``filegenerator.get_file_stat`` (patched in
   ``vendor/aws-cli/awscli/customizations/s3/filegenerator.py``) becomes
@@ -78,6 +84,7 @@ from unittest import mock
 
 import pytest
 from boto3.s3.transfer import TransferConfig
+from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
@@ -100,6 +107,9 @@ SOURCE_KEY = "source-key"
 TARGET_BUCKET = "target-bucket"
 TARGET_KEY = "target-key"
 MULTIPART_THRESHOLD = 8 * MB
+# Whether s3transfer forwards inline Tagging to CreateMultipartUpload
+# (module docstring adaptation rule; upstream >= 0.19 blacklists it).
+_INLINE_MPU_TAGGING = "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
 
 
 def _run_cmd(
@@ -1248,19 +1258,30 @@ class TestCopyPropsDefaultCpCommand:
 
     def test_mp_copy_object(self, tmp_path: Any) -> None:
         tags = {"tag-key": "tag-value", "tag-key2": "tag-value2"}
-        _, calls = _run_cmd(
-            [
-                head_object_response(
-                    ContentLength=MULTIPART_THRESHOLD, **all_metadata_directive_props()
-                ),
-                get_object_tagging_response(tags),
-                *mp_copy_responses(),
-            ],
-            copy_command(copy_props="default"),
-        )
+        responses = [
+            head_object_response(
+                ContentLength=MULTIPART_THRESHOLD, **all_metadata_directive_props()
+            ),
+            get_object_tagging_response(tags),
+            *mp_copy_responses(),
+        ]
+        if not _INLINE_MPU_TAGGING:
+            responses.append({})  # PutObjectTagging
+        _, calls = _run_cmd(responses, copy_command(copy_props="default"))
         expected = all_metadata_directive_props()
-        expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
+        if _INLINE_MPU_TAGGING:
+            expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
         _assert_in_operations_called(calls, "CreateMultipartUpload", create_mpu_request(**expected))
+        if not _INLINE_MPU_TAGGING:
+            _assert_in_operations_called(
+                calls,
+                "PutObjectTagging",
+                {
+                    "Bucket": TARGET_BUCKET,
+                    "Key": TARGET_KEY,
+                    "Tagging": {"TagSet": get_object_tagging_response(tags)["TagSet"]},
+                },
+            )
 
     def test_mp_copy_object_no_tags(self, tmp_path: Any) -> None:
         _, calls = _run_cmd(
@@ -1297,20 +1318,31 @@ class TestCopyPropsDefaultCpCommand:
 
     def test_recursive_mp_copy_object(self, tmp_path: Any) -> None:
         tags = {"tag-key": "tag-value", "tag-key2": "tag-value2"}
-        _, calls = _run_cmd(
-            [
-                list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
-                head_object_response(**all_metadata_directive_props()),
-                get_object_tagging_response(tags),
-                *mp_copy_responses(),
-            ],
-            recursive_copy_command(copy_props="default"),
-        )
+        responses = [
+            list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
+            head_object_response(**all_metadata_directive_props()),
+            get_object_tagging_response(tags),
+            *mp_copy_responses(),
+        ]
+        if not _INLINE_MPU_TAGGING:
+            responses.append({})  # PutObjectTagging
+        _, calls = _run_cmd(responses, recursive_copy_command(copy_props="default"))
         expected = all_metadata_directive_props()
-        expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
+        if _INLINE_MPU_TAGGING:
+            expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
         _assert_in_operations_called(
             calls, "CreateMultipartUpload", create_mpu_request(key=SOURCE_KEY, **expected)
         )
+        if not _INLINE_MPU_TAGGING:
+            _assert_in_operations_called(
+                calls,
+                "PutObjectTagging",
+                {
+                    "Bucket": TARGET_BUCKET,
+                    "Key": SOURCE_KEY,
+                    "Tagging": {"TagSet": get_object_tagging_response(tags)["TagSet"]},
+                },
+            )
 
     def test_recursive_mp_copy_tags_exceed_2k(self, tmp_path: Any) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
