@@ -412,6 +412,20 @@ must stay client-stack-free).
   verified on moto (which supports the operation fully). Against real S3
   the same scenarios exit 0 on both sides - rc parity is endpoint-relative
   by design.
+- **MinIO: no S3 object annotations** (probed 2026-07 on both minio/minio
+  and pgsty/minio): the `x-amz-object-annotation-directive` header is
+  ignored (harmless - the EXCLUDE both CLIs now send on every copy rides
+  through the copy lanes unchanged, goldens unaffected) and
+  ListObjectAnnotations answers 500, so `--copy-props all` cannot be
+  exercised end-to-end. Measured against aws 2.35.18: single-part `all`
+  exits 0 on both sides (nothing annotation-related on the wire); the
+  multipart carryover fails with rc 1 and **identical stderr** on both -
+  but no e2e scenario pins it, because the bucket end state differs by
+  design (aws reads annotations before creating the upload and leaves no
+  destination; ours reads after the completed copy and leaves it -
+  transfer.md section 4) and the harness compares end states. The
+  annotations behavior is covered by the functional stubs instead
+  (`TestCopyPropsAllCpCommand` and the transferrer tests).
 
 ## 8. Running the suite on Windows (WSL2 host)
 

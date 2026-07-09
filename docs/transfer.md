@@ -176,7 +176,11 @@ chain:
   rc 1), no source `VersionId` is pinned on the reads, and a partial failure
   additionally fires s3transfer's failure cleanup - a best-effort
   AbortMultipartUpload against the already-completed upload, a NoSuchUpload
-  no-op on real S3. `copy_props=ALL`
+  no-op on real S3. The read timing also shifts the failure end state: when
+  the annotation *reads* fail (e.g. an endpoint without annotations,
+  testing.md section 7), aws-cli fails before creating the upload and leaves
+  no destination, while this path fails after the completed copy and leaves
+  the destination in place - rc and message still match. `copy_props=ALL`
   on an SDK that cannot honor it is refused at `Transferrer` construction
   with a `ConfigurationError` (CLI rc 253); the probe behind that gate is
   public: **`annotations_copy_unsupported_reason(client)`** returns the
