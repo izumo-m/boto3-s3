@@ -106,7 +106,7 @@ class TestMainExitCodes:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws s3 joins multiple unknown options with "," and NO space (the
-        # customizations command layer; verified against real aws 2.35.5), not
+        # customizations command layer; verified against real aws 2.35.18), not
         # ", ". Both option positions share this wording.
         assert cli.main(["cp", "a.txt", "s3://b/", "--foo", "--bar"]) == 252
         assert "Unknown options: --foo,--bar" in capsys.readouterr().err
@@ -226,7 +226,7 @@ class TestValidationOrder:
 
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
-    against the pinned aws 2.35.5; docs/cli.md section 6): the
+    against the pinned aws 2.35.18; docs/cli.md section 6): the
     ``--endpoint-url`` scheme check (252) -> the integer coercions (255) ->
     paramfile / shorthand / blob value resolution (252) -> the session
     profile resolution (255) -> the path/usage checks. Each test pins one

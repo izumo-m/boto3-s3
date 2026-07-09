@@ -16,7 +16,7 @@ def single_uri_usage(command: str) -> str:
     Only the ``CommandParameters`` path (rm, and the transfer family via
     :func:`two_path_usage`) prepends the ``usage:`` line; ``mb`` / ``rb``
     raise the bare form (:func:`bare_single_uri_usage`) - measured against
-    aws 2.35.5.
+    aws 2.35.18.
     """
     return f"usage: boto3-s3 {command} <S3Uri>\nError: Invalid argument type"
 

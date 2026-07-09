@@ -486,7 +486,7 @@ are subject to it only when awscrt is present (overview.md section 3, transfer.m
 Signing stays pure-Python via the pin of section 4.
 
 The validation order of `run()` (corresponding to aws's stages; the
-combined-error cases are measured against the pinned aws 2.35.5):
+combined-error cases are measured against the pinned aws 2.35.18):
 **`--endpoint-url` scheme (252**, aws validates the value at parse time) ->
 **direct-option paramfile / blob loads (252**, aws's parse-time expansion -
 covering even the string-typed integer options, so `--page-size file:///no/x`

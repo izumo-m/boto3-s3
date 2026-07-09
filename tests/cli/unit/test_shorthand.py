@@ -58,7 +58,7 @@ class TestParseMapOption:
 class TestAtEqualsParamfile:
     """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
     ``file://`` loads text, ``fileb://`` bytes, a prefix-less value passes
-    through (verified against aws 2.35.5: ``--metadata a@=file://f`` parses
+    through (verified against aws 2.35.18: ``--metadata a@=file://f`` parses
     and transfers)."""
 
     def test_plain_value_passes_through(self) -> None:

@@ -400,7 +400,7 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
         # like aws, never handed to a command parser that may define the same
         # flag. boto3-s3's top command is `aws s3`-equivalent, so this matches the
         # customizations command layer's wording (awscli customizations/commands.py
-        # joins with "," and NO space - verified against real aws 2.35.5, unlike the
+        # joins with "," and NO space - verified against real aws 2.35.18, unlike the
         # top-level clidriver.py which uses ", "), prefixed like aws's error handler
         # (errorformat.py "<prog>: [ERROR]: <msg>").
         if not suppress_usage_errors:

@@ -4,7 +4,7 @@ The established design for the `aws s3` CRT transfer engine
 (`preferred_transfer_client`) equivalent. The core of the transfer side lives in
 [`transfer.md`](./transfer.md), the CLI wiring in [`cli.md`](./cli.md) section 8, and
 the tests in [`testing.md`](./testing.md). Behavior matches aws
-2.35.5, cross-checked against MinIO and the aws-cli / boto3 /
+2.35.18, cross-checked against MinIO and the aws-cli / boto3 /
 s3transfer source.
 
 ## 1. The two-layer split of responsibilities

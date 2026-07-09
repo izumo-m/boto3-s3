@@ -4,7 +4,7 @@ The established design for the `aws s3 sync` equivalent. For the CLI-side
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
-[`testing.md`](./testing.md). Behavior matches aws 2.35.5, cross-checked
+[`testing.md`](./testing.md). Behavior matches aws 2.35.18, cross-checked
 against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline

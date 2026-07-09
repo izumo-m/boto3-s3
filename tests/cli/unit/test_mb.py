@@ -94,7 +94,7 @@ class TestUsageErrors:
         err = capsys.readouterr().err
         assert "<S3Uri>\nError: Invalid argument type" in err
         # aws's MbCommand raises the bare form - only rm's CommandParameters
-        # path gets the "usage: aws s3 <cmd> ..." prefix (measured, 2.35.5).
+        # path gets the "usage: aws s3 <cmd> ..." prefix (measured, 2.35.18).
         assert "usage:" not in err
 
     def test_bare_bucket_key_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:

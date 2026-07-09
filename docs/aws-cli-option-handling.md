@@ -9,7 +9,7 @@ share the same command machinery (see section 2.1).
 
 Reference points:
 
-- Reference CLI: **AWS CLI v2.35.5** (the pinned aws-cli). `aws s3` semantics
+- Reference CLI: **AWS CLI v2.35.18** (the pinned aws-cli). `aws s3` semantics
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's

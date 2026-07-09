@@ -151,7 +151,7 @@ def add_transfer_arguments(
         "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
     )
     parser.add_argument("--checksum-mode", choices=["ENABLED"])
-    # This set matches aws-cli 2.35.5's CHECKSUM_ALGORITHM choices verbatim
+    # This set matches aws-cli 2.35.18's CHECKSUM_ALGORITHM choices verbatim
     # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
     # SHA512 / XXHASH* because that build predates them - a version skew, not a
     # parity bug: the design tracks the aws-cli source, not whatever `aws`
@@ -189,7 +189,7 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> Non
     during argument parsing - before its bare ``int()`` coercions, the
     session profile, and every path validation - so a bad reference here
     beats a non-integer ``--page-size`` (255), a missing source (255), and a
-    bad profile (255; all measured against aws 2.35.5). Covered in place:
+    bad profile (255; all measured against aws 2.35.18). Covered in place:
     the free-string options' text paramfiles, the SSE-C key blobs, and the
     string-typed integer options (``--page-size`` / ``--progress-frequency``
     / cp's ``--expected-size``), whose loaded text feeds the later
@@ -253,7 +253,7 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     """The shared ``run()`` head, in aws's parse-to-validation order.
 
     The order is exit-code-load-bearing, identical across cp/mv/sync, and
-    measured against aws 2.35.5 on the combined-error cases: the
+    measured against aws 2.35.18 on the combined-error cases: the
     ``--endpoint-url`` scheme check (252, aws validates the value at parse
     time) -> the direct-option paramfile / blob loads (252, aws's parse-time
     expansion - it beats the coercions' 255) -> the two integer coercions
