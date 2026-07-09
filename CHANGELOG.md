@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- S3 object annotations, tracking aws-cli 2.35.18: copies now exclude
+  annotations like aws-cli does, and the new `CopyPropsMode.ALL` copies them
+  (needs botocore >= 1.43.31 and s3transfer >= 0.19; other modes still work
+  on older SDKs).
 - Multipart copies no longer lose the source's metadata and tags on upstream
   s3transfer >= 0.19 (`copy_props` now adapts to its new copy-props handling).
 - `LocalStorage(path, return_directories=…, return_symlinks=…)` (also on

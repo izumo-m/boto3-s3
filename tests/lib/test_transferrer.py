@@ -23,7 +23,12 @@ from botocore.exceptions import ClientError
 from boto3_s3 import transfer
 from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
-from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
+from boto3_s3.transfer import (
+    TransferItem,
+    Transferrer,
+    annotations_copy_unsupported_reason,
+    conditional_write_unsupported_reason,
+)
 from boto3_s3.types import (
     CopyPropsMode,
     FileInfo,
@@ -482,6 +487,75 @@ class TestCopy:
             assert "Tagging" not in create.params
             assert _ops(calls)[-1] == "PutObjectTagging"
             assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "team", "Value": "a&b"}]}
+        assert transferrer.succeeded == 1
+
+    def test_single_part_copy_excludes_annotations(self) -> None:
+        # Every copy-props mode short of ALL sends AnnotationDirective=EXCLUDE
+        # on the single-part CopyObject (the server default COPY would carry
+        # annotations over otherwise).
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=7, head={})],
+            [{}],
+            source_responses=[{"TagSet": []}],
+        )
+        assert calls[0].operation == "CopyObject"
+        assert calls[0].params["AnnotationDirective"] == "EXCLUDE"
+
+    def test_all_single_part_copy_sends_no_annotation_directive(self) -> None:
+        # copy_props=ALL rides the server-side COPY default: nothing on the wire.
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=7, head={})],
+            [{}],
+            source_responses=[{"TagSet": []}],
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+        assert calls[0].operation == "CopyObject"
+        assert "AnnotationDirective" not in calls[0].params
+
+    def test_all_multipart_copies_annotations_via_native_path(self) -> None:
+        # The multipart carryover rides s3transfer >= 0.19's _apply_annotations
+        # (AnnotationDirective=COPY in extra_args, blacklisted from the create
+        # call): list -> get -> put after the complete, ObjectIfMatch pinned to
+        # the new object's ETag (docs/transfer.md section 4).
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {"Annotations": [{"AnnotationName": "ann1"}]},
+            {"AnnotationPayload": io.BytesIO(b"payload")},
+        ]
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+        assert "AnnotationDirective" not in calls[0].params
+        assert _ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[2].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert _ops(calls)[-1] == "PutObjectAnnotation"
+        assert calls[-1].params == {
+            "Bucket": "dest-b",
+            "Key": "cp/a.bin",
+            "AnnotationName": "ann1",
+            "AnnotationPayload": b"payload",
+            "ObjectIfMatch": '"dest-etag"',
+            "VersionId": "dest-v1",
+        }
         assert transferrer.succeeded == 1
 
     def test_oversized_tags_apply_after_the_copy(self) -> None:
@@ -1198,13 +1272,15 @@ class TestCrtSubscriberCompat:
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (docs/transfer.md):
-        # the engine pair plus the --no-overwrite SDK-floor probe (section 7).
-        # A symbol added or dropped must be a deliberate __all__ / docs decision.
+        # the engine pair plus the SDK-floor probes (--no-overwrite, section 7;
+        # copy_props=ALL, section 4). A symbol added or dropped must be a
+        # deliberate __all__ / docs decision.
         from boto3_s3 import transfer
 
         assert set(transfer.__all__) == {
             "TransferItem",
             "Transferrer",
+            "annotations_copy_unsupported_reason",
             "conditional_write_unsupported_reason",
         }
         for name in transfer.__all__:
@@ -1263,3 +1339,65 @@ class TestConditionalWriteSupport:
         Transferrer(
             TransferType.UPLOAD, model_only_client({"PutObject"}), options={"no_overwrite": True}
         )
+
+
+class TestAnnotationsCopySupport:
+    """The copy_props=ALL SDK gate (docs/transfer.md section 4).
+
+    Annotations need botocore's S3 model (CopyObject.AnnotationDirective,
+    1.43.31) and s3transfer's own multipart handling (the directive in
+    CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST, 0.19); below either,
+    ALL must be refused with a clear message. The installed dev SDK satisfies
+    both, so the s3transfer side is exercised by trimming the blacklist.
+    """
+
+    def _capable_client(self) -> Any:
+        return model_only_client({"CopyObject"}, member="AnnotationDirective")
+
+    def test_reason_none_on_current_sdk(self) -> None:
+        assert annotations_copy_unsupported_reason(self._capable_client()) is None
+
+    def test_reason_names_min_botocore(self) -> None:
+        reason = annotations_copy_unsupported_reason(
+            model_only_client(set(), member="AnnotationDirective")
+        )
+        assert reason is not None
+        assert "1.43.31" in reason and "botocore" in reason
+
+    def test_reason_names_min_s3transfer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from s3transfer.copies import CopySubmissionTask
+
+        trimmed = [
+            arg
+            for arg in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+            if arg != "AnnotationDirective"
+        ]
+        monkeypatch.setattr(CopySubmissionTask, "CREATE_MULTIPART_ARGS_BLACKLIST", trimmed)
+        reason = annotations_copy_unsupported_reason(self._capable_client())
+        assert reason is not None
+        assert "0.19" in reason and "s3transfer" in reason
+
+    def test_transferrer_rejects_all_on_old_botocore(self) -> None:
+        client = model_only_client(set(), member="AnnotationDirective")
+        with pytest.raises(ConfigurationError, match=r"1\.43\.31"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options={"copy_props": CopyPropsMode.ALL},
+            )
+
+    def test_transferrer_allows_all_on_current_sdk(self) -> None:
+        client = self._capable_client()
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL},
+        )
+
+    def test_other_modes_stay_usable_on_old_botocore(self) -> None:
+        # EXCLUDE degrades silently below the annotations model; construction
+        # must not gate the default mode.
+        client = model_only_client(set(), member="AnnotationDirective")
+        Transferrer(TransferType.COPY, client, source_client=client)

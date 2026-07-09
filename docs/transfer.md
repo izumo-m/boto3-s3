@@ -138,6 +138,7 @@ chain:
 | `none` | ReplaceMetadataDirective + ReplaceTaggingDirective | Carries nothing over (sets the directive to REPLACE). s3transfer excludes the directive from CreateMultipartUpload via a blacklist |
 | `metadata-directive` | SetMetadataDirectiveProps + ReplaceTaggingDirective | Injects 7 properties (CacheControl / ContentDisposition / ContentEncoding / ContentLanguage / ContentType / Expires / Metadata) from the source HeadObject. Tags are not carried over |
 | `default` (the default) | SetMetadataDirectiveProps + SetTags | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under (and s3transfer still forwards the header - see below) use the `Tagging` header, otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
+| `all` | SetMetadataDirectiveProps + SetTags + SetAnnotations | The above + S3 object annotations (aws-cli 2.35.6+). Single-part copies carry them server-side (no `AnnotationDirective` sent, the server default is COPY); a multipart copy sets `AnnotationDirective=COPY` and rides s3transfer >= 0.19's native carryover - see the annotations bullet below |
 
 - The single-shot path reuses the first HeadObject response
   (`TransferItem.head`) and **does not HEAD twice** (the same as aws-cli's reuse
@@ -147,6 +148,41 @@ chain:
   properties from the source (aws-cli's rule).
 - When `--metadata-directive` is specified, the entire chain is disabled (as in
   aws).
+- **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
+  of `all` appends `ExcludeAnnotationDirective` (aws-cli's
+  ExcludeAnnotationDirectiveSubscriber), sending `AnnotationDirective=EXCLUDE`
+  on the CopyObject so annotations are *not* carried (the server default is
+  COPY). Two member-presence guards adapt what aws-cli does unconditionally:
+  a botocore whose CopyObject lacks the parameter skips the injection
+  silently (feature-level degradation, overview.md section 2 - copies behave
+  like pre-annotations aws-cli), and a multipart copy skips it unless
+  s3transfer blacklists the directive from CreateMultipartUpload (an older
+  s3transfer would forward it there and fail; the multipart path carries no
+  annotations anyway).
+  `all` instead *copies* annotations. Single-part copies need nothing on the
+  wire (server-side COPY default, same as aws-cli). The multipart carryover
+  rides upstream s3transfer >= 0.19's native `_apply_annotations`
+  (ListObjectAnnotations -> GetObjectAnnotation -> PutObjectAnnotation with
+  `ObjectIfMatch` pinned to the new object's ETag; partial failure fails the
+  transfer naming the succeeded/failed annotations, **no destination
+  rollback** - aws-cli's AnnotationCopyError semantics) by setting
+  `AnnotationDirective=COPY`, instead of porting aws-cli's
+  SetAnnotationsSubscriber verbatim - that subscriber needs the
+  CompleteMultipartUpload response only aws-cli's bundled s3transfer fork
+  returns. Known deviations inherent to the native path: annotation reads
+  happen after the copy completes (aws-cli reads before creating the upload),
+  the listing is unpaginated, the partial-failure stderr wording differs
+  (s3transfer's `S3CopyFailedError` vs aws-cli's AnnotationCopyError; both
+  rc 1), no source `VersionId` is pinned on the reads, and a partial failure
+  additionally fires s3transfer's failure cleanup - a best-effort
+  AbortMultipartUpload against the already-completed upload, a NoSuchUpload
+  no-op on real S3. `copy_props=ALL`
+  on an SDK that cannot honor it is refused at `Transferrer` construction
+  with a `ConfigurationError` (CLI rc 253); the probe behind that gate is
+  public: **`annotations_copy_unsupported_reason(client)`** returns the
+  rejection wording (naming botocore >= 1.43.31 / s3transfer >= 0.19 as the
+  hint) or `None`, introspecting the model and s3transfer directly,
+  version-agnostic.
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
   guarded spots): upstream 0.19 grew its own multipart copy-props handling -

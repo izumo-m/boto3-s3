@@ -246,6 +246,61 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
     )
 
 
+# Feature-level degradation (docs/overview.md section 2): S3 object
+# annotations reached botocore's S3 model in 1.43.31 and upstream s3transfer's
+# copy handling in 0.19. Both are introspected by member presence
+# (version-agnostic); the versions below only name the hint in the refusal
+# message for `copy_props=ALL`.
+_ANNOTATIONS_MIN_BOTOCORE = "1.43.31"
+_ANNOTATIONS_MIN_S3TRANSFER = "0.19.0"
+
+
+def _copy_annotations_param_supported(client: S3Client) -> bool:
+    """Whether the installed botocore's CopyObject can carry `AnnotationDirective`."""
+    members = getattr(
+        client.meta.service_model.operation_model("CopyObject").input_shape, "members", {}
+    )
+    return "AnnotationDirective" in members
+
+
+def _annotation_directive_blacklisted() -> bool:
+    """Whether s3transfer knows `AnnotationDirective` on multipart copies.
+
+    Upstream s3transfer >= 0.19 blacklists the directive from the
+    CreateMultipartUpload call and runs its own annotation carryover when it
+    is COPY; an older s3transfer would forward the directive to
+    CreateMultipartUpload (which has no such member) and fail.
+    """
+    from s3transfer.copies import CopySubmissionTask
+
+    return "AnnotationDirective" in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+
+
+def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
+    """Why the installed SDK cannot honor ``copy_props=ALL``, or ``None``.
+
+    `CopyPropsMode.ALL` copies S3 object annotations: the botocore S3 model
+    must know them on CopyObject, and the multipart carryover rides
+    s3transfer's own `AnnotationDirective` handling (>= 0.19). Both are
+    introspected directly (version-agnostic); the message names the minimum
+    versions as a hint. Returns ``None`` when the mode is supported.
+    """
+    from importlib.metadata import version
+
+    if not _copy_annotations_param_supported(client):
+        return (
+            f"copy_props=ALL requires botocore >= {_ANNOTATIONS_MIN_BOTOCORE} "
+            f"(S3 object annotations); the installed botocore is {version('botocore')}."
+        )
+    if not _annotation_directive_blacklisted():
+        return (
+            f"copy_props=ALL requires s3transfer >= {_ANNOTATIONS_MIN_S3TRANSFER} "
+            "(annotation carryover on multipart copies); the installed "
+            f"s3transfer is {version('s3transfer')}."
+        )
+    return None
+
+
 def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
@@ -544,6 +599,14 @@ class Transferrer:
                 # The environment (SDK floor) lacks the capability, not the
                 # caller's arguments: a ConfigurationError.
                 raise ConfigurationError(reason, operation=operation)
+        # copy_props=ALL gate: annotations need a capable SDK; every other
+        # mode degrades silently on an old one (docs/transfer.md section 4).
+        if transfer_type is TransferType.COPY:
+            mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
+            if mode is CopyPropsMode.ALL:
+                reason = annotations_copy_unsupported_reason(client)
+                if reason is not None:
+                    raise ConfigurationError(reason, operation=operation)
         self._on_progress = on_progress
         self._on_result = on_result
         self._capture_response = capture_response
@@ -853,8 +916,11 @@ class Transferrer:
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
         mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
+        exclude = _ExcludeAnnotationDirective(
+            item, client=self._client, multipart_threshold=self._multipart_threshold
+        )
         if mode is CopyPropsMode.NONE:
-            return [_ReplaceMetadataDirective(), _ReplaceTaggingDirective()]
+            return [_ReplaceMetadataDirective(), _ReplaceTaggingDirective(), exclude]
         metadata = _SetMetadataDirectiveProps(
             item,
             source_client=self._source_client,
@@ -862,7 +928,7 @@ class Transferrer:
             head_params=requestparams.map_head_object_params_with_copy_source_sse(self._options),
         )
         if mode is CopyPropsMode.METADATA_DIRECTIVE:
-            return [metadata, _ReplaceTaggingDirective()]
+            return [metadata, _ReplaceTaggingDirective(), exclude]
         tags = _SetTags(
             item,
             source_client=self._source_client,
@@ -870,7 +936,15 @@ class Transferrer:
             multipart_threshold=self._multipart_threshold,
             options=self._options,
         )
-        return [metadata, tags]
+        if mode is CopyPropsMode.DEFAULT:
+            return [metadata, tags, exclude]
+        # CopyPropsMode.ALL - annotations carried instead of excluded (the
+        # constructor already refused the mode on an incapable SDK).
+        return [
+            metadata,
+            tags,
+            _SetAnnotations(item, multipart_threshold=self._multipart_threshold),
+        ]
 
     # -- engine internals ----------------------------------------------------
 
@@ -1419,6 +1493,78 @@ class _ReplaceTaggingDirective:
         future.meta.call_args.extra_args.setdefault("TaggingDirective", "REPLACE")
 
 
+class _ExcludeAnnotationDirective:
+    """Every ``copy-props`` mode short of ``all``: propagate no annotations
+    (aws-cli's ExcludeAnnotationDirectiveSubscriber).
+
+    A single-part CopyObject carries S3 object annotations by default (the
+    server-side ``AnnotationDirective`` default is COPY), so an explicit
+    EXCLUDE is sent. Two capability guards adapt what aws-cli does
+    unconditionally (its bundled SDK always knows the parameter):
+
+    - a botocore whose CopyObject lacks ``AnnotationDirective`` cannot send
+      the parameter at all - the injection is skipped silently and copies
+      behave like pre-annotations aws-cli (feature-level degradation,
+      docs/overview.md section 2);
+    - on a multipart copy, an s3transfer without the directive in its create
+      blacklist would forward it to CreateMultipartUpload (no such member)
+      and fail - the multipart path does not carry annotations anyway, so the
+      injection is skipped there too.
+    """
+
+    def __init__(self, item: TransferItem, *, client: Any, multipart_threshold: int) -> None:
+        self._item = item
+        self._client = client
+        self._multipart_threshold = multipart_threshold
+
+    def on_queued(self, future: Any, **kwargs: Any) -> None:
+        if not _copy_annotations_param_supported(self._client):
+            return
+        size = self._item.size or 0
+        if size >= self._multipart_threshold and not _annotation_directive_blacklisted():
+            return
+        future.meta.call_args.extra_args["AnnotationDirective"] = "EXCLUDE"
+
+
+class _SetAnnotations:
+    """``copy-props all``: carry S3 object annotations (the role of aws-cli's
+    SetAnnotationsSubscriber, on a different mechanism).
+
+    A single-part CopyObject carries annotations server-side (the directive
+    default is COPY), so nothing is sent - the same wire behavior as aws-cli.
+    A multipart copy does not carry them; aws-cli corrects with its own
+    list/get/put subscriber, which relies on the CompleteMultipartUpload
+    response that only its bundled s3transfer fork returns. Upstream
+    s3transfer >= 0.19 ships the equivalent carryover natively
+    (`_apply_annotations`: ListObjectAnnotations -> GetObjectAnnotation ->
+    PutObjectAnnotation per annotation, ``ObjectIfMatch`` pinned to the new
+    object's ETag; partial failure raises ``S3CopyFailedError`` naming the
+    succeeded and failed annotations, with no destination rollback - the same
+    no-rollback semantics as aws-cli's AnnotationCopyError), triggered by
+    ``AnnotationDirective=COPY`` in the extra args and kept off the
+    CreateMultipartUpload call by the blacklist. So the multipart path sets
+    the directive and rides that; `Transferrer` refuses ``copy_props=ALL`` up
+    front on an SDK that cannot honor it (`annotations_copy_unsupported_reason`).
+
+    Known deviations from aws-cli's subscriber, inherent to the native path:
+    the annotation reads happen after the copy completes (aws-cli reads them
+    before submitting the CreateMultipartUpload), the listing is a single
+    unpaginated ListObjectAnnotations call, and no source ``VersionId`` is
+    pinned on the reads (s3transfer only pins one when it performed the
+    HeadObject itself, which the engine's pre-provided size and ETag skip).
+    """
+
+    def __init__(self, item: TransferItem, *, multipart_threshold: int) -> None:
+        self._item = item
+        self._multipart_threshold = multipart_threshold
+
+    def on_queued(self, future: Any, **kwargs: Any) -> None:
+        size = self._item.size or 0
+        if size < self._multipart_threshold:
+            return
+        future.meta.call_args.extra_args["AnnotationDirective"] = "COPY"
+
+
 class _SetMetadataDirectiveProps:
     """Carry source metadata into a multipart copy (aws subscriber port).
 
@@ -1584,4 +1730,9 @@ class _SetTags:
             pass
 
 
-__all__ = ["TransferItem", "Transferrer", "conditional_write_unsupported_reason"]
+__all__ = [
+    "TransferItem",
+    "Transferrer",
+    "annotations_copy_unsupported_reason",
+    "conditional_write_unsupported_reason",
+]

@@ -384,6 +384,7 @@ class TestSyncCommand:
                     "Bucket": "mybucket",
                     "Key": "mykey",
                     "RequestPayer": "requester",
+                    "AnnotationDirective": "EXCLUDE",
                 },
             ),
         ]
@@ -408,6 +409,7 @@ class TestSyncCommand:
             "Key": "mykey",
             "SSECustomerAlgorithm": "AES256",
             "SSECustomerKey": "destination-key",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     def test_s3s3_sync_with_different_sse_c_keys(self) -> None:
@@ -436,6 +438,7 @@ class TestSyncCommand:
             "SSECustomerKey": "destination-key",
             "CopySourceSSECustomerAlgorithm": "AES256",
             "CopySourceSSECustomerKey": "source-key",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     def test_request_payer_with_deletes(self) -> None:
@@ -599,6 +602,7 @@ class TestSyncCommand:
             "Bucket": "dest-bucket",
             "Key": "mykey",
             "ChecksumAlgorithm": "SHA1",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     # aws-cli: test_download_with_checksum_mode_* (one per algorithm)

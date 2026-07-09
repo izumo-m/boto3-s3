@@ -41,6 +41,15 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   create call and the engine applies the set with the post-copy
   PutObjectTagging instead. The affected tests branch on
   ``_INLINE_MPU_TAGGING`` (the blacklist probed directly).
+- ``--copy-props all``'s multipart annotation carryover rides upstream
+  s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
+  SetAnnotationsSubscriber (docs/transfer.md section 4), so the
+  TestCopyPropsAll port adapts the canned order: the annotation reads run
+  *after* CompleteMultipartUpload (aws-cli reads them before creating the
+  upload), gets and puts interleave per annotation, the listing is a single
+  unpaginated call, and no source ``VersionId`` is pinned on the reads.
+  ``get_object_annotation_response`` wraps the payload in ``io.BytesIO``
+  (the engine calls ``.read()``) where aws-cli builds a ``StreamingBody``.
 - ``mock.patch`` targets translate: ``mimetypes.guess_type`` and ``os.utime``
   are identical seams; the aws-cli's ``filegenerator.get_file_stat`` (patched in
   ``vendor/aws-cli/awscli/customizations/s3/filegenerator.py``) becomes
@@ -186,6 +195,14 @@ def get_object_tagging_response(tags: dict[str, str]) -> dict[str, Any]:
     return {"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]}
 
 
+def list_object_annotations_response(names: list[str]) -> dict[str, Any]:
+    return {"Annotations": [{"AnnotationName": name} for name in names]}
+
+
+def get_object_annotation_response(payload: bytes) -> dict[str, Any]:
+    return {"AnnotationPayload": io.BytesIO(payload)}
+
+
 def mp_copy_responses() -> list[dict[str, Any] | Exception]:
     return [create_mpu_response("upload_id"), upload_part_copy_response(), {}]
 
@@ -226,6 +243,10 @@ def copy_object_request(**override_kwargs: Any) -> dict[str, Any]:
         "Key": TARGET_KEY,
         "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
     }
+    # aws-cli's harness seeds the annotations EXCLUDE every copy-props mode
+    # short of ``all`` sends (its BaseS3TransferCommandTest does the same
+    # setdefault); tests outside the copy-props chain override explicitly.
+    override_kwargs.setdefault("AnnotationDirective", "EXCLUDE")
     params.update(override_kwargs)
     return params
 
@@ -912,6 +933,7 @@ class TestCpCommandWithRequesterPayer:
                     "Key": "mykey",
                     "CopySource": {"Bucket": "sourcebucket", "Key": "sourcekey"},
                     "RequestPayer": "requester",
+                    "AnnotationDirective": "EXCLUDE",
                 },
             ),
         ]
@@ -999,6 +1021,7 @@ class TestCpCommandWithRequesterPayer:
                     "Key": "mykey",
                     "CopySource": {"Bucket": "sourcebucket", "Key": "mykey"},
                     "RequestPayer": "requester",
+                    "AnnotationDirective": "EXCLUDE",
                 },
             ),
         ]
@@ -1075,8 +1098,17 @@ class TestCopyPropsNoneCpCommand:
             [head_object_response(), {}],
             copy_command(copy_props="none", extra="--metadata-directive COPY"),
         )
+        # --metadata-directive bypasses the copy-props subscribers entirely,
+        # so no tagging or annotation directives are set.
         _assert_in_operations_called(
-            calls, "CopyObject", copy_object_request(MetadataDirective="COPY")
+            calls,
+            "CopyObject",
+            {
+                "Bucket": TARGET_BUCKET,
+                "Key": TARGET_KEY,
+                "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+                "MetadataDirective": "COPY",
+            },
         )
 
 
@@ -1116,6 +1148,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
                 "Key": SOURCE_KEY,
                 "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
                 "TaggingDirective": "REPLACE",
+                "AnnotationDirective": "EXCLUDE",
             },
         )
 
@@ -1134,6 +1167,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
         expected = all_metadata_directive_props()
         expected["MetadataDirective"] = "REPLACE"
         expected["TaggingDirective"] = "REPLACE"
+        expected["AnnotationDirective"] = "EXCLUDE"
         expected["Metadata"] = {"key": "val-from-cmdline"}
         _assert_in_operations_called(
             calls,
@@ -1209,8 +1243,17 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             [head_object_response(), {}],
             copy_command(copy_props="metadata-directive", extra="--metadata-directive REPLACE"),
         )
+        # --metadata-directive bypasses the copy-props subscribers entirely,
+        # so no tagging or annotation directives are set.
         _assert_in_operations_called(
-            calls, "CopyObject", copy_object_request(MetadataDirective="REPLACE")
+            calls,
+            "CopyObject",
+            {
+                "Bucket": TARGET_BUCKET,
+                "Key": TARGET_KEY,
+                "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+                "MetadataDirective": "REPLACE",
+            },
         )
 
 
@@ -1253,6 +1296,7 @@ class TestCopyPropsDefaultCpCommand:
                 "Bucket": TARGET_BUCKET,
                 "Key": SOURCE_KEY,
                 "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+                "AnnotationDirective": "EXCLUDE",
             },
         )
 
@@ -1434,8 +1478,199 @@ class TestCopyPropsDefaultCpCommand:
             [head_object_response(), {}],
             copy_command(copy_props="default", extra="--metadata-directive REPLACE"),
         )
+        # --metadata-directive bypasses the copy-props subscribers entirely,
+        # so no tagging or annotation directives are set.
         _assert_in_operations_called(
-            calls, "CopyObject", copy_object_request(MetadataDirective="REPLACE")
+            calls,
+            "CopyObject",
+            {
+                "Bucket": TARGET_BUCKET,
+                "Key": TARGET_KEY,
+                "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+                "MetadataDirective": "REPLACE",
+            },
+        )
+
+
+def _annotations_sdk_supported() -> bool:
+    # --copy-props all needs the annotations SDK (the engine refuses it up
+    # front otherwise, docs/transfer.md section 4): botocore's CopyObject must
+    # know AnnotationDirective and s3transfer must handle it on multipart.
+    import botocore.session
+
+    model = botocore.session.get_session().get_service_model("s3")
+    members = getattr(model.operation_model("CopyObject").input_shape, "members", {})
+    if "AnnotationDirective" not in members:
+        return False
+    return "AnnotationDirective" in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+
+
+@pytest.mark.skipif(
+    not _annotations_sdk_supported(),
+    reason="requires the S3 annotations SDK (botocore >= 1.43.31, s3transfer >= 0.19)",
+)
+class TestCopyPropsAllCpCommand:
+    # aws-cli: TestCopyPropsAllCpCommand. The multipart carryover rides
+    # s3transfer's native _apply_annotations here - the canned order and the
+    # missing source-VersionId pin follow the module docstring's adaptation
+    # rule (docs/transfer.md section 4 records the deviations).
+    DEST_ETAG = '"dest-etag"'
+    DEST_VERSION_ID = "dest-version-id"
+    PAYLOAD = b"annotation-payload"
+
+    def mp_copy_responses_with_dest_identity(self) -> list[dict[str, Any] | Exception]:
+        return [
+            create_mpu_response("upload_id"),
+            upload_part_copy_response(),
+            {"ETag": self.DEST_ETAG, "VersionId": self.DEST_VERSION_ID},
+        ]
+
+    def test_copy_object_excludes_nothing_for_single_part(self, tmp_path: Any) -> None:
+        # A single-part copy carries annotations server-side via the
+        # AnnotationDirective, which defaults to COPY. ``all`` must not set
+        # EXCLUDE (unlike every other copy-props mode).
+        _, calls = _run_cmd([head_object_response(), {}], copy_command(copy_props="all"))
+        _assert_in_operations_called(
+            calls,
+            "CopyObject",
+            {
+                "Bucket": TARGET_BUCKET,
+                "Key": TARGET_KEY,
+                "CopySource": {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+            },
+        )
+
+    def test_mp_copy_object_copies_annotations(self, tmp_path: Any) -> None:
+        tags = {"tag-key": "tag-value"}
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response(tags),
+            *self.mp_copy_responses_with_dest_identity(),
+            list_object_annotations_response(["ann1", "ann2"]),
+            get_object_annotation_response(self.PAYLOAD),
+            {},  # PutObjectAnnotation ann1
+            get_object_annotation_response(self.PAYLOAD),
+            {},  # PutObjectAnnotation ann2
+            {},  # PutObjectTagging (post-copy on s3transfer >= 0.19)
+        ]
+        _, calls = _run_cmd(responses, copy_command(copy_props="all"))
+        assert _operations(calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "CompleteMultipartUpload",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "PutObjectAnnotation",
+            "GetObjectAnnotation",
+            "PutObjectAnnotation",
+            "PutObjectTagging",
+        ]
+        # The directive rides extra_args only; the blacklist keeps it off the
+        # CreateMultipartUpload call.
+        assert "AnnotationDirective" not in calls[2].params
+        _assert_in_operations_called(
+            calls,
+            "ListObjectAnnotations",
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+        )
+        _assert_in_operations_called(
+            calls,
+            "GetObjectAnnotation",
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY, "AnnotationName": "ann1"},
+        )
+        for name in ("ann1", "ann2"):
+            _assert_in_operations_called(
+                calls,
+                "PutObjectAnnotation",
+                {
+                    "Bucket": TARGET_BUCKET,
+                    "Key": TARGET_KEY,
+                    "AnnotationName": name,
+                    "AnnotationPayload": self.PAYLOAD,
+                    "ObjectIfMatch": self.DEST_ETAG,
+                    "VersionId": self.DEST_VERSION_ID,
+                },
+            )
+
+    def test_mp_copy_object_no_annotations(self, tmp_path: Any) -> None:
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response({}),
+            *mp_copy_responses(),
+            list_object_annotations_response([]),
+        ]
+        _, calls = _run_cmd(responses, copy_command(copy_props="all"))
+        _assert_in_operations_called(
+            calls,
+            "ListObjectAnnotations",
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+        )
+        called = _operations(calls)
+        assert "GetObjectAnnotation" not in called
+        assert "PutObjectAnnotation" not in called
+
+    def test_mp_copy_object_partial_annotation_failure(self, tmp_path: Any) -> None:
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response({}),
+            *self.mp_copy_responses_with_dest_identity(),
+            list_object_annotations_response(["ann1", "ann2"]),
+            get_object_annotation_response(self.PAYLOAD),
+            {},  # PutObjectAnnotation ann1 succeeds
+            get_object_annotation_response(self.PAYLOAD),
+            _client_error("AccessDenied", 403, "PutObjectAnnotation"),
+            # The failure surfaces inside the CompleteMultipartUpload task, so
+            # s3transfer's failure cleanup fires a best-effort
+            # AbortMultipartUpload against the already-completed upload (a
+            # NoSuchUpload no-op on real S3; aws-cli's subscriber fails after
+            # the future resolves and never aborts).
+            {},
+        ]
+        result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
+        # The destination object is not deleted on partial annotation failure
+        # (aws-cli's AnnotationCopyError semantics; s3transfer raises
+        # S3CopyFailedError naming the succeeded and failed annotations).
+        assert "DeleteObject" not in _operations(calls)
+        assert "ann1" in result.stderr
+        assert "ann2" in result.stderr
+
+    def test_mp_copy_object_copies_annotations_with_source_version_id(self, tmp_path: Any) -> None:
+        # aws-cli pins the source VersionId from the single-source HeadObject
+        # on the annotation reads; the native s3transfer path has no seam for
+        # that pin (module docstring adaptation rule), so the reads here are
+        # unversioned even though the source reports a VersionId.
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD, VersionId="src-version-id"),
+            get_object_tagging_response({}),
+            *self.mp_copy_responses_with_dest_identity(),
+            list_object_annotations_response(["ann1"]),
+            get_object_annotation_response(self.PAYLOAD),
+            {},  # PutObjectAnnotation ann1
+        ]
+        _, calls = _run_cmd(responses, copy_command(copy_props="all"))
+        _assert_in_operations_called(
+            calls,
+            "ListObjectAnnotations",
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+        )
+        _assert_in_operations_called(
+            calls,
+            "GetObjectAnnotation",
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY, "AnnotationName": "ann1"},
+        )
+        _assert_in_operations_called(
+            calls,
+            "PutObjectAnnotation",
+            {
+                "Bucket": TARGET_BUCKET,
+                "Key": TARGET_KEY,
+                "AnnotationName": "ann1",
+                "AnnotationPayload": self.PAYLOAD,
+                "ObjectIfMatch": self.DEST_ETAG,
+                "VersionId": self.DEST_VERSION_ID,
+            },
         )
 
 

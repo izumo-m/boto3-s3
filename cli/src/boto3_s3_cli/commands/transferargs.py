@@ -139,7 +139,7 @@ def add_transfer_arguments(
     add_request_payer_argument(parser)
     parser.add_argument("--metadata")
     parser.add_argument(
-        "--copy-props", choices=["none", "metadata-directive", "default"], default="default"
+        "--copy-props", choices=["none", "metadata-directive", "default", "all"], default="default"
     )
     parser.add_argument("--metadata-directive", choices=["COPY", "REPLACE"])
     if include_expected_size:

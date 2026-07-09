@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--copy-props` gains the `all` choice, copying S3 object annotations
+  (aws-cli 2.35.18 parity; needs botocore >= 1.43.31 and s3transfer >= 0.19).
+
 ## [0.4.0] - 2026-07-07
 
 - Rebuilt on boto3-s3 0.5.0 (now the required floor).

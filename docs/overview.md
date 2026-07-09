@@ -66,7 +66,13 @@ maintaining high functional compatibility (parity).
   (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
   `{"ETag": ...}` is `None` there unless `capture_response=True` supplies it
   from the captured response, and s3transfer's own `CopySourceIfMatch`
-  consistency pin on copies is absent. Everything else works at the floor.
+  consistency pin on copies is absent. S3 object annotations (GA 2026-06)
+  follow the same rule: on a botocore without the annotations model, copies
+  silently stop sending `AnnotationDirective=EXCLUDE` (behaving like
+  pre-annotations aws-cli), and `copy_props=ALL` / `--copy-props all` - which
+  needs botocore >= 1.43.31 and s3transfer >= 0.19 - is refused up front with
+  a `ConfigurationError` (transfer.md section 4). Everything else works at
+  the floor.
 
 ## 3. Design policy
 
