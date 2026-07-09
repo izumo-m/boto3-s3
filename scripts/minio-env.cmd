@@ -13,4 +13,7 @@ set "AWS_ACCESS_KEY_ID=minioadmin"
 set "AWS_SECRET_ACCESS_KEY=minioadmin"
 set "AWS_REGION=us-east-1"
 set "BOTO3_S3_E2E_BUCKET=boto3-s3-e2e"
+rem The pinned aws.exe (scripts\install-awscli.cmd) shadows any system
+rem install for the suite, mirroring how .venv/bin/aws wins on Linux.
+if exist "%LOCALAPPDATA%\boto3-s3\aws-cli\current\aws.exe" set "PATH=%LOCALAPPDATA%\boto3-s3\aws-cli\current;%PATH%"
 %*

@@ -472,14 +472,25 @@ Windows golden and its functional replay self-skips on a case-insensitive
 filesystem.
 
 **e2e on Windows.** The differential machinery works unchanged against the
-WSL2 MinIO stack: install the AWS CLI v2 MSI at the version
-`scripts/install-awscli.sh` pins (the vendored `aws-cli`'s - the section 4
-drift rationale applies to this binary too), start the stack inside WSL2
-(`scripts/compose-up.sh`), and Windows reaches it on `127.0.0.1:9000`
-through WSL2's localhost forwarding. The MinIO variables must be set in the
-**Windows** process - WSLENV propagation cannot be relied on - which is what
-`scripts/minio-env.cmd` (the `minio-env.sh` twin; a runner, because cmd
-cannot `source`) is for:
+WSL2 MinIO stack: pin `aws.exe` at the version `scripts/install-awscli.sh`
+pins (the vendored `aws-cli`'s - the section 4 drift rationale applies to
+this binary too), start the stack inside WSL2 (`scripts/compose-up.sh`), and
+Windows reaches it on `127.0.0.1:9000` through WSL2's localhost forwarding.
+`scripts\install-awscli.cmd` is `install-awscli.sh`'s Windows twin and needs
+no admin rights: it extracts the version-pinned MSI's self-contained payload
+with `msiexec /a` (an administrative extraction - no registry entries, no
+system PATH edits, any installed AWS CLI stays untouched) into
+`%LOCALAPPDATA%\boto3-s3\aws-cli\<version>` behind a stable `current`
+junction. The NTFS test copy carries no `vendor\` tree, so pass the version
+explicitly there (on a full checkout the argument is optional):
+
+    cmd.exe /c "scripts\install-awscli.cmd 2.35.18"
+
+The MinIO variables must be set in the **Windows** process - WSLENV
+propagation cannot be relied on - which is what `scripts/minio-env.cmd` (the
+`minio-env.sh` twin; a runner, because cmd cannot `source`) is for. It also
+prepends the pinned `aws.exe` to `PATH` when present, mirroring how
+`.venv/bin/aws` shadows any system `aws` on Linux:
 
     cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
 
