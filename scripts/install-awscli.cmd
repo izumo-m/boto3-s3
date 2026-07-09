@@ -62,6 +62,10 @@ rem Stable pointer for PATH (minio-env.cmd): current -> <version>. A junction
 rem needs neither admin rights nor Developer Mode (unlike a symlink).
 if exist "%root%\current" rmdir "%root%\current"
 mklink /j "%root%\current" "%dest%" >nul || exit /b 1
+"%root%\current\aws.exe" --version >nul 2>&1 || (
+    echo The extracted aws.exe failed to run: "%root%\current\aws.exe"
+    exit /b 1
+)
 for /f "delims=" %%o in ('"%root%\current\aws.exe" --version') do echo Installed: %%o
 exit /b 0
 

@@ -14,7 +14,7 @@ import io
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -1401,3 +1401,16 @@ class TestAnnotationsCopySupport:
         # must not gate the default mode.
         client = model_only_client(set(), member="AnnotationDirective")
         Transferrer(TransferType.COPY, client, source_client=client)
+
+    def test_copy_props_none_value_means_default(self) -> None:
+        # The constructor interprets the mode once; a None copy_props reads
+        # as unspecified (the falsy convention the other options follow),
+        # not a ValueError - so a permissive caller's dryrun still constructs.
+        client = model_only_client(set(), member="AnnotationDirective")
+        transferrer = Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options=cast(TransferOptions, {"copy_props": None}),
+        )
+        assert transferrer._copy_props is CopyPropsMode.DEFAULT

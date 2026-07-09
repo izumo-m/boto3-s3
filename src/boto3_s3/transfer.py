@@ -599,11 +599,17 @@ class Transferrer:
                 # The environment (SDK floor) lacks the capability, not the
                 # caller's arguments: a ConfigurationError.
                 raise ConfigurationError(reason, operation=operation)
+        # The copy-props mode is interpreted once here (a None means
+        # unspecified, like the other options' falsy checks) so a bad value
+        # fails at construction rather than at the first submit.
         # copy_props=ALL gate: annotations need a capable SDK; every other
         # mode degrades silently on an old one (docs/transfer.md section 4).
+        self._copy_props = CopyPropsMode.DEFAULT
         if transfer_type is TransferType.COPY:
-            mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
-            if mode is CopyPropsMode.ALL:
+            self._copy_props = CopyPropsMode(
+                self._options.get("copy_props") or CopyPropsMode.DEFAULT
+            )
+            if self._copy_props is CopyPropsMode.ALL:
                 reason = annotations_copy_unsupported_reason(client)
                 if reason is not None:
                     raise ConfigurationError(reason, operation=operation)
@@ -915,7 +921,7 @@ class Transferrer:
         return _DeleteSource(delete_s3_source, capture=self._capture_response)
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
-        mode = CopyPropsMode(self._options.get("copy_props", CopyPropsMode.DEFAULT))
+        mode = self._copy_props
         exclude = _ExcludeAnnotationDirective(
             item, client=self._client, multipart_threshold=self._multipart_threshold
         )
