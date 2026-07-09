@@ -46,9 +46,11 @@ maintaining high functional compatibility (parity).
 - **Python**: 3.10 and later.
 - **OS**: Linux / macOS / **Windows**.
 - **AWS SDK floor**: `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2
-  (a roughly 3-year window). These are the oldest versions the library and CLI
-  are supported against; a future release may raise the floor (when it does,
-  the back-compat shims that carry a comment to that effect can be removed).
+  (a roughly 3-year window - the SDK generation of aws-cli 2.13.0, 2023-07,
+  the oldest aws-cli this floor corresponds to). These are the oldest versions
+  the library and CLI are supported against; a future release may raise the
+  floor (when it does, the back-compat shims that carry a comment to that
+  effect can be removed).
 - **Feature-level degradation on old SDKs**: rather than emulate newer AWS
   behavior, features that depend on a newer S3 model are simply unavailable
   below the SDK version that introduced them - on a par with the awscrt extra
