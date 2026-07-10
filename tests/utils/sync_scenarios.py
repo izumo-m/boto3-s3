@@ -1,6 +1,6 @@
 """Shared ``sync`` scenarios: golden replay and e2e parity.
 
-sync reuses :class:`tests.utils.cp_scenarios.CpScenario` and its helpers -
+sync reuses ``tests.utils.cp_scenarios.CpScenario`` and its helpers -
 same workdir materialization, same remote seeding, same stdout
 normalization - plus the ``local_mtimes`` field: sync's whole point is the
 size+time judgment, so the at-both scenarios pin each side of the aws-cli

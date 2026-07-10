@@ -128,7 +128,7 @@ def run_cli_subprocess_with_stdin(
     stdin_payload: bytes | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CliResult:
-    """Like :func:`run_cli_subprocess`, feeding *stdin_payload* to the process.
+    """Like ``run_cli_subprocess``, feeding *stdin_payload* to the process.
 
     *env* overlays the inherited environment (the CRT parity lane points
     ``AWS_CONFIG_FILE`` at a ``preferred_transfer_client=crt`` profile).
@@ -146,7 +146,7 @@ def run_aws_subprocess_with_stdin(
     stdin_payload: bytes | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CliResult:
-    """Like :func:`run_aws_subprocess`, feeding *stdin_payload* to the process."""
+    """Like ``run_aws_subprocess``, feeding *stdin_payload* to the process."""
     aws = shutil.which("aws")
     if aws is None:
         pytest.fail("aws v2 binary not on PATH (required for the e2e parity suite)")
@@ -259,7 +259,7 @@ def normalize_rm_stdout(stdout: str, *, bucket: str) -> list[str]:
     """Normalize ``rm`` stdout for golden storage / cross-run comparison.
 
     The bucket name is tokenized like ``ls``, but the lines are **sorted** -
-    the opposite of :func:`normalize_ls_stdout`, deliberately: aws-cli's
+    the opposite of ``normalize_ls_stdout``, deliberately: aws-cli's
     delete lines come out in parallel-completion order, which is
     nondeterministic run to run (observed on MinIO with 30 keys), so the line
     *set* is the contract, not the order. ``rm`` stdout is delete lines only,

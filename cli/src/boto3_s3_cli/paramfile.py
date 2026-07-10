@@ -8,7 +8,7 @@ options, ``--metadata``'s pre-parse, the SSE-C blobs), the shorthand
 parser's ``@=`` operator (``shorthand.py``), and the plain-option expansion
 (``commands/base.py``'s ``expand_option_paramfile``: ls / rm ``--page-size``,
 presign ``--expires-in``). Every load failure is a
-:class:`~boto3_s3.exceptions.ValidationError` with aws's wording (rc 252).
+``ValidationError`` with aws's wording (rc 252).
 """
 
 from __future__ import annotations

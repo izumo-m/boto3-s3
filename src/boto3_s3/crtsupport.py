@@ -227,7 +227,7 @@ def create_crt_transfer_manager(
     ``--endpoint-url`` here, matching aws-cli, which passes it to the CRT
     serializer verbatim - so a custom endpoint under an AWS domain, e.g. a VPC
     interface endpoint, is honored rather than re-resolved to public S3). When
-    it is ``None`` the host-heuristic default (:func:`_derive_endpoint`) decides,
+    it is ``None`` the host-heuristic default (``_derive_endpoint``) decides,
     which is boto3-faithful for a real AWS endpoint and still pins a non-AWS
     custom host such as MinIO.
     """

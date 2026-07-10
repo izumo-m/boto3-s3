@@ -7,13 +7,13 @@ scan path, not here. Layer two is *pair decisions*: the surviving streams
 are merge-joined by compare key, then per-pair decisions select what to
 copy or delete. This module is layer two's material:
 
-- :class:`Comparator` pairs two key-ordered streams into :class:`SyncPair`
+- ``Comparator`` pairs two key-ordered streams into ``SyncPair``
   records. It is a **pure pairer** - every key on either side comes out and
   no copy/delete judgment happens here (unlike aws-cli's comparator, which
   buries its strategy calls in the merge loop; splitting them keeps each
   side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
-- A :data:`PairFilter` is the **update** judgment: a predicate over a
+- A ``PairFilter`` is the **update** judgment: a predicate over a
   both-sides pair where ``True`` re-copies the source over the destination. It
   is what ``S3.sync(update_filter=...)`` selects - the size+time default, a
   content strategy (``EtagComparison`` / ``ChecksumComparison``), or a caller's
@@ -21,22 +21,22 @@ copy or delete. This module is layer two's material:
   never faces a ``None`` side; the new (source-only) lane is governed by
   ``create_filter`` and the delete lane by ``delete_filter``, each a ``FileFilter``
   over the one side it has.
-- :func:`compare_size_time` is that size+time default (aws-cli's stock
+- ``compare_size_time`` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); it is the judgment
-  behind :class:`~boto3_s3.awsclicompare.AwsCliComparison`, the form ``S3.sync``
+  behind ``AwsCliComparison``, the form ``S3.sync``
   selects for ``update_filter=None``. The direction is read from
   ``pair.transfer_type``.
-- :class:`ContentComparison` is the shared template of the content
+- ``ContentComparison`` is the shared template of the content
   strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
   skeleton every content comparison runs before its leaf digest work - the
   guards, the ``check_size`` safeguard, and the direction dispatch - lives
   here once, so the two strategies cannot drift apart on it.
-- :func:`all_of` / :func:`any_of` compose same-signature predicates - chiefly
-  the ``filter=`` visibility predicates over :class:`~boto3_s3.types.FileInfo`
+- ``all_of`` / ``any_of`` compose same-signature predicates - chiefly
+  the ``filter=`` visibility predicates over ``FileInfo``
   (a copy strategy is *chosen*, not composed).
 
-Everything here is pure logic over :class:`~boto3_s3.types.FileInfo`; no
+Everything here is pure logic over ``FileInfo``; no
 AWS SDK module is imported.
 """
 
@@ -114,17 +114,17 @@ class ParallelFilter(Generic[_T]):
     for decide futures that need a free worker, so a bounded pool driving both
     deadlocks. The wrapped ``decide`` runs on that
     pool's threads, so it must be thread-safe;
-    :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
-    :class:`~boto3_s3.etagcompare.EtagComparison` are (read-only over their
+    ``ChecksumComparison`` and
+    ``EtagComparison`` are (read-only over their
     fields; ``ChecksumComparison``'s S3-side clients are built at construction,
     and a botocore client is safe to share for concurrent calls). A
     ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
     picklable) - the pool must be thread-based.
 
-    ``_T`` is the wrapped predicate's argument: :class:`SyncPair` for a
-    ``update_filter`` (a :data:`PairFilter`), :class:`~boto3_s3.types.FileInfo`
+    ``_T`` is the wrapped predicate's argument: ``SyncPair`` for a
+    ``update_filter`` (a ``PairFilter``), ``FileInfo``
     for ``create_filter`` / ``delete_filter`` (a
-    :data:`~boto3_s3.types.FileFilter`).
+    ``FileFilter``).
     """
 
     decide: Callable[[_T], bool]
@@ -136,7 +136,7 @@ def _byte_ordered(
 ) -> Iterator[tuple[str, FileInfo]]:
     """Dev-only pass-through that asserts a side ascends by ``compare_key``.
 
-    :meth:`Comparator.compare`'s merge-join assumes both sides arrive in UTF-8
+    ``Comparator.compare``'s merge-join assumes both sides arrive in UTF-8
     byte order (what a ``SORTABLE_SCAN`` backend promises; ``str`` order is code-point
     = byte order). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
     order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
@@ -156,7 +156,7 @@ def _byte_ordered(
 
 @dataclass(frozen=True)
 class Comparator:
-    """Merge-join two key-ordered listing streams into :class:`SyncPair`s.
+    """Merge-join two key-ordered listing streams into ``SyncPair``s.
 
     The classic sorted-merge (aws-cli ``Comparator.call``): advance whichever
     side holds the smaller key, pair equal keys, and flush the survivor once
@@ -165,7 +165,7 @@ class Comparator:
     backend's ``scan(sort=True)`` promises (S3 byte order; the local walk sorts
     to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
-    to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
+    to a ``PairFilter`` for that. ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment. Each side's backend
     already rides on its ``FileInfo`` (``pair.src.storage`` / ``pair.dest.storage``,
     stamped by the producing ``Storage.scan``), so a content ``update_filter=``
@@ -179,7 +179,7 @@ class Comparator:
         src_entries: Iterable[tuple[str, FileInfo]],
         dest_entries: Iterable[tuple[str, FileInfo]],
     ) -> Iterator[SyncPair]:
-        """Yield every key on either side as a :class:`SyncPair`.
+        """Yield every key on either side as a ``SyncPair``.
 
         ``src_entries`` / ``dest_entries`` are ``(compare_key, info)``
         streams, lazily consumed - pairing streams page-by-page listings
@@ -218,7 +218,7 @@ def compare_size_time(
     """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
 
     Not a public building block: it implements
-    :class:`~boto3_s3.awsclicompare.AwsCliComparison`, which ``S3.sync`` selects
+    ``AwsCliComparison``, which ``S3.sync`` selects
     for ``update_filter=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
     direction-asymmetric). ``S3.sync`` hands this only both-sides pairs (a
@@ -347,7 +347,7 @@ def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
     """A predicate passing only when every given predicate passes.
 
     Composes any same-signature single-argument predicates - pair filters
-    (:data:`PairFilter`) and plain ``FileInfo`` visibility predicates
+    (``PairFilter``) and plain ``FileInfo`` visibility predicates
     alike. With no predicates it always passes (like ``all([])``).
     """
 
@@ -360,7 +360,7 @@ def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
     """A predicate passing when at least one given predicate passes.
 
-    The ``or`` counterpart of :func:`all_of`. With no predicates it never
+    The ``or`` counterpart of ``all_of``. With no predicates it never
     passes (like ``any([])``).
     """
 

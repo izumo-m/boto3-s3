@@ -1,8 +1,8 @@
 """``boto3_s3.etagcompare``: an ETag content-comparison strategy for ``S3.sync``.
 
-``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
+``S3.sync``'s copy decision is a ``PairFilter`` (``True``
 copies the source). The default ``update_filter=None`` decides by size + last-modified,
-aws-cli style; :class:`EtagComparison` decides by **content**,
+aws-cli style; ``EtagComparison`` decides by **content**,
 comparing S3's ETag against the ETag the source would carry:
 
 - an s3-to-s3 (COPY) pair compares the two listings' ETags directly - both are
@@ -13,12 +13,12 @@ comparing S3's ETag against the ETag the source would carry:
   hex MD5 of the object for a
   single-part PUT, and ``MD5(concat of each part's binary MD5) + "-<n>"`` for a
   multipart upload - so the reconstruction needs the multipart part size
-  (the ``part_size`` argument, default :data:`DEFAULT_PART_SIZE`).
+  (the ``part_size`` argument, default ``DEFAULT_PART_SIZE``).
 
 This is a standalone, opt-in building block: it lives in its own module, is
 imported by submodule path (``from boto3_s3.etagcompare import EtagComparison``), and
 is **not** part of the package's lazy root re-export. Like
-:mod:`~boto3_s3.comparator` it imports no AWS SDK module at import time; the one
+``comparator`` it imports no AWS SDK module at import time; the one
 SDK touch - mirroring s3transfer's ``ChunksizeAdjuster`` so the reconstructed
 part size matches what an actual upload would chunk - is deferred into the
 compute path, so ``import boto3_s3.etagcompare`` stays SDK-free.
@@ -43,7 +43,7 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
 
 The copy decision runs on whatever thread drives the ``update_filter`` lane -
 ``sync``'s calling thread by default, or a pool worker under
-:class:`~boto3_s3.comparator.ParallelFilter` - and an upload / download pair
+``ParallelFilter`` - and an upload / download pair
 costs that thread the local read + hash: the strategy trades wall-clock for
 byte-exact comparison (the size check skips the read when the two sides' sizes
 already differ; ``ParallelFilter`` overlaps the reads instead).
@@ -69,7 +69,7 @@ DEFAULT_PART_SIZE = 8 * 1024 * 1024
 
 
 class EtagComparison(ContentComparison):
-    """A content-comparison :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
+    """A content-comparison ``PairFilter`` (``True`` = copy).
 
     Copies a pair when the destination's S3
     ETag does not match the source's content. ``S3.sync`` hands it only both-sides
@@ -86,14 +86,14 @@ class EtagComparison(ContentComparison):
     docstring). Supply it one of three ways:
 
     - ``EtagComparison(s3)`` reads it from that ``s3``'s active profile
-      (``[s3] multipart_chunksize``, falling back to :data:`DEFAULT_PART_SIZE`).
+      (``[s3] multipart_chunksize``, falling back to ``DEFAULT_PART_SIZE``).
       The read is tied to the passed ``s3`` - an explicit injection, not an
       ambient / default-session read - and happens only when no ``part_size`` is
       given.
     - ``EtagComparison(part_size=...)`` pins an explicit value. It overrides the
       ``s3``-derived default, so ``EtagComparison(s3, part_size=...)`` uses the
       explicit value and does not consult ``s3``.
-    - ``EtagComparison()`` uses :data:`DEFAULT_PART_SIZE` (boto3's 8 MiB).
+    - ``EtagComparison()`` uses ``DEFAULT_PART_SIZE`` (boto3's 8 MiB).
 
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any ETag work.
@@ -105,7 +105,7 @@ class EtagComparison(ContentComparison):
 
     An upload / download comparison reads the **readable** (non-S3) side through
     its ``Storage.open`` - any backend, not just a local file - so a read failure
-    surfaces as that backend's error (a :class:`~boto3_s3.exceptions.Boto3S3Error`
+    surfaces as that backend's error (a ``Boto3S3Error``
     for a local file removed between the listing and the compare); the s3-to-s3
     path reads nothing. A pair with no readable-side backend, or neither side an
     S3 object, is treated as differing (copy).

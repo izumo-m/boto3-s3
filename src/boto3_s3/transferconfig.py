@@ -1,6 +1,6 @@
 """``TransferConfig`` - boto3's transfer configuration plus CRT tuning fields.
 
-The library re-exports this subclass of :class:`boto3.s3.transfer.TransferConfig`
+The library re-exports this subclass of ``boto3.s3.transfer.TransferConfig``
 as its public ``TransferConfig``. The transfer engine honors
 ``preferred_transfer_client`` (``'auto'`` / ``'classic'`` / ``'crt'``) with
 boto3's own semantics (``transfer.py`` / ``crtsupport.py``; design in
@@ -20,7 +20,7 @@ no field for:
 
 The extras are plain attributes (not part of the base ``DEFAULTS`` sentinel
 machinery), default ``None`` = unset, and are ignored by the classic engine.
-A plain :class:`boto3.s3.transfer.TransferConfig` remains accepted everywhere
+A plain ``boto3.s3.transfer.TransferConfig`` remains accepted everywhere
 a config is taken - readers fall back to ``None`` for the extra fields.
 """
 

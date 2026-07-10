@@ -1,11 +1,11 @@
 """Common (global) option registration shared by every ``boto3-s3`` subcommand.
 
 These mirror ``aws s3``'s connection / auth and presentation globals (the file
-plays the role of aws-cli's ``globalargs.py``). :func:`add_common_arguments`
+plays the role of aws-cli's ``globalargs.py``). ``add_common_arguments``
 registers them on the top-level parser and on each subparser, so a global may
 sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
-connection / auth values into a boto3 client is :mod:`~boto3_s3_cli.clientfactory`'s
+connection / auth values into a boto3 client is ``clientfactory``'s
 job; this module stays SDK-free so the parse path never pays an SDK import
 (import contract, docs/imports.md). The presentation globals are accepted and
 ignored (``docs/aws-cli-option-handling.md`` section 2); ``--cli-auto-prompt``
@@ -115,7 +115,7 @@ class _VersionAction(argparse.Action):
     awkward points. ``aws --version`` emits a single line; mirroring that keeps
     the output copy-pasteable into bug reports. The line is rendered here, at
     fire time, rather than taken as a parser-build kwarg - see
-    :func:`_version_string` for why it must not run on every invocation.
+    ``_version_string`` for why it must not run on every invocation.
     """
 
     def __init__(

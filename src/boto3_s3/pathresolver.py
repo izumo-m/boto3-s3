@@ -12,7 +12,7 @@ Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
 region/verify/profile wiring of your choice - aws builds the s3control
 client in the path's region and the sts client without one); only
-:func:`has_underlying_s3_path` is callable without any client. aws-cli's
+``has_underlying_s3_path`` is callable without any client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
 This module stays SDK-free at import time (docs/imports.md): botocore is
@@ -63,7 +63,7 @@ def _split_bucket_key(path: str) -> tuple[str, str]:
 
     Deferred import: ``s3storage`` top-imports ``botocore.exceptions``, and this
     module must stay SDK-free at import time (its docstring's contract) - the
-    same pattern as :func:`_api_errors` below.
+    same pattern as ``_api_errors`` below.
     """
     from boto3_s3.s3storage import S3Storage
 
@@ -159,7 +159,7 @@ class S3PathResolver:
 
         aws lets the raw ClientError escape to its generic 254 handler
         (a failing GetCallerIdentity exits 254); the
-        library shape for that is a translated :class:`Boto3S3Error` with
+        library shape for that is a translated ``Boto3S3Error`` with
         the ClientError as its cause. Deferred import: resolving a plain
         bucket path must not load botocore.
         """

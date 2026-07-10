@@ -2,11 +2,11 @@
 
 The Storage ``scan`` path is a lazy generator, but each page fetch
 (``ListObjectsV2`` for S3, one ``os.scandir`` per directory for local) is I/O the
-consumer would otherwise block on. :func:`prefetch` runs the page iterable on a
+consumer would otherwise block on. ``prefetch`` runs the page iterable on a
 worker thread and hands back a flattened iterator, so the next page is in flight
 while the consumer processes the current one.
 
-Backpressure is bounded by a :class:`queue.Queue`: the worker blocks when the
+Backpressure is bounded by a ``queue.Queue``: the worker blocks when the
 queue is full, so a slow consumer throttles a fast producer instead of buffering
 without limit. A worker-side exception surfaces on the consumer's next pull.
 Cleanup is cooperative -- the worker checks a stop flag between puts, so a

@@ -1,17 +1,17 @@
 """The per-info transfer producers and gates cp / mv / sync share.
 
 The "producer" half of the transfer design (docs/transfer.md): turn a
-:class:`~boto3_s3.transferplan.TransferPlan` plus listing entries into
-:class:`~boto3_s3.transfer.TransferItem` objects, running the aws-cli item
+``TransferPlan`` plus listing entries into
+``TransferItem`` objects, running the aws-cli item
 gates on
 the way - the case-conflict gate, the glacier gate, the parent-reference and
 oversize warnings, and the open-route capability checks. Everything here is a
 plain function over the plan and the entry: no ``S3`` instance state is read
 (these grew up as ``S3`` methods that only ever called their siblings), so the
-orchestrator (:mod:`boto3_s3.s3`) calls them as ``producers.upload_items(...)``
+orchestrator (``boto3_s3.s3``) calls them as ``producers.upload_items(...)``
 and the producer/orchestrator boundary is physical, not just conceptual.
 
-Kept out of :mod:`boto3_s3.transfer` on purpose: the engine module is
+Kept out of ``boto3_s3.transfer`` on purpose: the engine module is
 deliberately blind to ``transferplan`` / the storage backends, while the
 producers need all of them. Like the planner, importing this module reaches
 ``botocore.exceptions`` through the backends (import contract item 3).
@@ -65,7 +65,7 @@ def walk_source_scan_options(
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
-    :func:`scan_s3_source`).
+    ``scan_s3_source``).
 
     The transfer / sync / case-gate lanes move files only, so the local
     library-extension scan knobs ``return_directories`` / ``return_symlinks`` are

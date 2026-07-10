@@ -1,6 +1,6 @@
 """Shared ``mv`` scenarios: golden replay and e2e parity (cp's contract + 1).
 
-mv reuses :class:`tests.utils.cp_scenarios.CpScenario` and its helpers
+mv reuses ``tests.utils.cp_scenarios.CpScenario`` and its helpers
 verbatim - same workdir materialization, same remote seeding, same stdout
 normalization. The one addition is runner-side, not scenario-side: the
 local **source** tree (``src/``) is captured after every run and recorded

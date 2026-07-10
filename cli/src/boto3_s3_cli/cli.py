@@ -151,7 +151,7 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     usage errors (missing subcommand, invalid choice - argparse's wording,
     remapped to 252) render exactly as the full tree renders them while the
     path stays SDK- and command-module-free. The stubs are never parsed:
-    :class:`_Stage1CommandAction` records the matched name and the verbatim
+    ``_Stage1CommandAction`` records the matched name and the verbatim
     remainder for stage 2 instead.
     """
     parser = argparse.ArgumentParser(
@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code.
 
     *ctx* carries the runtime dependencies the command resolves (the S3 client
-    factory, the auto-prompt backend); tests inject a :class:`Context` built
+    factory, the auto-prompt backend); tests inject a ``Context`` built
     around fakes. Always returns the exit code - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2.
 

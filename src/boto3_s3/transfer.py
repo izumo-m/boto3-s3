@@ -1,11 +1,11 @@
 """The ``s3transfer``-backed transfer engine: ``TransferItem`` + ``Transferrer``.
 
 One ``Transferrer`` serves one ``cp`` / ``mv`` / ``sync`` run, whose items all
-share a single :class:`TransferType` (a run moves bytes in one direction). It owns
-the ``s3transfer.manager.TransferManager`` - built via :meth:`Transferrer.prepare`
+share a single ``TransferType`` (a run moves bytes in one direction). It owns
+the ``s3transfer.manager.TransferManager`` - built via ``Transferrer.prepare``
 before a listing-driven run starts enumerating (client-event registration must
 happen-before the scan prefetch worker's traffic on the same client), at the
-first :meth:`Transferrer.submit` for a stream run, and never for a dry run (no
+first ``Transferrer.submit`` for a stream run, and never for a dry run (no
 thread pools spun up; the ``s3transfer`` module itself is imported
 earlier regardless, by ``boto3`` when a client is built) - and bridges
 completions to the library's result model:
@@ -22,7 +22,7 @@ Engine choices (parity-driven):
   ``s3transfer.manager.TransferManager`` unless the CRT manager is selected,
   and unconditionally classic for a copy run - the CRT manager has no copy,
   the same rule boto3 and aws-cli apply to s3->s3. The public
-  ``transfer_config`` type is :class:`boto3_s3.transferconfig.TransferConfig`
+  ``transfer_config`` type is ``boto3_s3.transferconfig.TransferConfig``
   (boto3's subclass plus CRT tuning fields; defaults match aws-cli: 8 MiB
   threshold/chunk, 10-way concurrency), and classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
@@ -121,7 +121,7 @@ _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
 @dataclass(slots=True, kw_only=True)
 class TransferItem:
-    """One unit of work handed to :meth:`Transferrer.submit`.
+    """One unit of work handed to ``Transferrer.submit``.
 
     ``compare_key`` is the item's operation-relative name (``transferplan.item_paths``)
     - the identity under which results and progress are reported. The
@@ -496,8 +496,8 @@ class Warner:
     reaching into the transfer engine for one. Warnings count independently of
     files (``warned > 0`` alone maps to exit code 2, aws rc model); the count is
     thread-safe because a walk worker and a transfer worker can warn at once.
-    The transfer run's :class:`Transferrer` builds one from its result context
-    and exposes it as :attr:`Transferrer.warner`.
+    The transfer run's ``Transferrer`` builds one from its result context
+    and exposes it as ``Transferrer.warner``.
     """
 
     def __init__(
@@ -544,7 +544,7 @@ class Transferrer:
     Use as a context manager around the submission loop: ``__exit__`` shuts
     the manager down - waiting for in-flight transfers on a clean exit *and*
     on an ordinary exception (aws stops submitting but lets submitted work
-    finish), cancelling them only for :class:`CancelledError` or a
+    finish), cancelling them only for ``CancelledError`` or a
     non-``Exception`` interrupt (Ctrl-C). The rollup counters are approximate
     while transfers are in flight and exact after the ``with`` block exits.
 
@@ -726,12 +726,12 @@ class Transferrer:
     # -- non-transfer outcomes ----------------------------------------------
 
     def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning through the shared sink (:attr:`warner`).
+        """Record a warning through the shared sink (``warner``).
 
         A transfer that succeeds but fails its mtime stamp produces both a
         SUCCEEDED and a WARNED record, and ``warned > 0`` alone maps to exit code
         2 (aws rc model). This engine's own warnings go here; a backend walk
-        reports directly through :attr:`warner`.
+        reports directly through ``warner``.
         """
         self._warner.warn(body, key=key)
 

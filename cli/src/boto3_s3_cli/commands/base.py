@@ -129,7 +129,7 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
     aws expands paramfile references on every plain option during argument
     parsing, so a bad reference is its ParamValidation 252. Runs in place; a
     value without a prefix (or a non-string) is untouched. For an integer
-    option use :func:`expand_integer_paramfile`, whose loaded bytes feed
+    option use ``expand_integer_paramfile``, whose loaded bytes feed
     ``int()`` rather than being rejected as a string.
     """
     _expand_string_paramfile(
@@ -145,7 +145,7 @@ def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation
     ``--page-size file:///no/x`` exits 252). Unlike the string helper it keeps
     ``fileb://`` bytes rather than rejecting them: aws feeds them to ``int()``
     too (``--page-size fileb://<5>`` succeeds, ``<abc>`` fails 255 with a
-    ``b'abc'`` repr). :func:`parse_integer_option` performs the coercion.
+    ``b'abc'`` repr). ``parse_integer_option`` performs the coercion.
     """
     value = getattr(args, option, None)
     if isinstance(value, str):
@@ -160,7 +160,7 @@ def expand_positional_paramfile(
 ) -> None:
     """aws's parse-time paramfile expansion for a positional value (252).
 
-    Same load as :func:`expand_option_paramfile` (a positional is string-typed,
+    Same load as ``expand_option_paramfile`` (a positional is string-typed,
     so ``fileb://`` bytes are the 252 type rejection), but the failure names the
     positional the way aws does - its ``cli_name`` (``paths`` for ls / rm /
     website, ``path`` for mb / rb / presign), not a ``--flag`` form (measured

@@ -1,9 +1,9 @@
 """Build boto3 clients from the parsed connection / auth globals.
 
-The execution half of the global-option surface :mod:`~boto3_s3_cli.globalargs`
-registers: :func:`build_client` turns the connection / auth values into the
+The execution half of the global-option surface ``globalargs``
+registers: ``build_client`` turns the connection / auth values into the
 boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
-section 5), and :func:`build_service_client` builds the non-S3 clients ``mv``'s
+section 5), and ``build_service_client`` builds the non-S3 clients ``mv``'s
 path validation needs (section 5.8). Everything here reaches the AWS SDK, so
 the imports are deferred into the builders - a command pays them only once it
 actually needs a client (import contract, docs/imports.md).
@@ -58,7 +58,7 @@ def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
     ``--profile`` (truthy only) > the first env var of
-    :data:`~boto3_s3_cli.globalargs.PROFILE_ENV_VARS` that is *present* > ``None``
+    ``PROFILE_ENV_VARS`` that is *present* > ``None``
     (boto3 then falls back to the ``default`` profile). The ``--profile`` guard is
     aws-cli's truthy test (its ``_handle_top_level_args`` binds the profile only
     ``if getattr(args, 'profile', False)``), so an empty ``--profile ""`` is
@@ -120,7 +120,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     """The region to build the client in, via aws-cli's region chain.
 
     Mirrors aws-cli's ``_construct_cli_region_chain``: the *explicit* value
-    (``--region``, or the caller's region for :func:`build_service_client`) >
+    (``--region``, or the caller's region for ``build_service_client``) >
     ``AWS_REGION`` env > ``AWS_DEFAULT_REGION`` env > the profile's config-file
     ``region`` > the EC2 IMDS region. Stock botocore never adopted ``AWS_REGION``
     (its region env is ``AWS_DEFAULT_REGION`` alone) and reserves its
@@ -171,8 +171,8 @@ def build_service_client(
     ``--no-sign-request`` into the *session* default client config at startup, so
     ``from_session``'s ``create_client`` inherits them; mirror that here by folding
     the same timeouts and the UNSIGNED signature into this client's ``Config``. A
-    ``None`` region resolves through the same :func:`_resolve_region` chain as
-    :func:`build_client` (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` > config > IMDS),
+    ``None`` region resolves through the same ``_resolve_region`` chain as
+    ``build_client`` (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` > config > IMDS),
     keeping the session default aws v2-shaped.
     """
     # Deferred like build_client: only a command that actually resolves
@@ -238,9 +238,9 @@ def build_client(args: argparse.Namespace) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
-    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - :func:`resolve_profile`);
+    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - ``resolve_profile``);
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS - :func:`_resolve_region`);
+    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
     kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` map to
     ``verify``. The client is handed to the library through ``S3Storage`` - the

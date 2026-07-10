@@ -16,7 +16,7 @@ corner cases the naive ``split(",")``/``partition("=")`` got wrong:
 
 Error wording is shaped on aws's parser message (``Error parsing parameter
 '<name>'``) closely enough for the stderr token contract; every parse failure
-maps to aws's usage rc (252) via :class:`ValidationError`.
+maps to aws's usage rc (252) via ``ValidationError``.
 """
 
 from __future__ import annotations

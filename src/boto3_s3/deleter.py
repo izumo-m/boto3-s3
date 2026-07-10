@@ -1,7 +1,7 @@
 """Async batched S3 object deletion: ``S3Deleter``.
 
 ``S3Deleter`` buffers listing entries (``FileInfo``) and deletes each batch with
-one ``DeleteObjects`` call (up to :data:`S3_DELETE_BATCH` keys) dispatched on a
+one ``DeleteObjects`` call (up to ``S3_DELETE_BATCH`` keys) dispatched on a
 single background worker thread, so a caller iterating ``S3Storage.scan()``
 keeps scanning while the previous batch deletes. It is the building block for
 ``S3.rm`` and ``S3.sync(delete_filter=True)``, and is usable directly.
@@ -55,7 +55,7 @@ S3_DELETE_BATCH = 1000
 class S3Deleter:
     """Buffer listing entries and delete them in batched ``DeleteObjects`` calls.
 
-    :meth:`submit` takes a :class:`~boto3_s3.types.FileInfo`; its ``key`` is the
+    ``submit`` takes a ``FileInfo``; its ``key`` is the
     FULL object key to delete, and the rest of the entry rides along untouched
     (a richer subtype - ``S3FileInfo`` with its ``etag`` - flows straight
     through). The target bucket and client come from ``storage`` - its key/prefix
@@ -70,7 +70,7 @@ class S3Deleter:
     submitted entry, in submission order within a batch (entries abandoned by
     ``close(flush=False)`` or by an error-path close get no result); rollup
     ``succeeded`` / ``failed`` / ``first_error`` are approximate while running
-    and final after :meth:`close`. The deleter never raises ``BatchError``
+    and final after ``close``. The deleter never raises ``BatchError``
     itself - the caller builds one from the rollup (``first_error`` is the
     ``__cause__`` sample).
 
@@ -138,12 +138,12 @@ class S3Deleter:
 
     @property
     def succeeded(self) -> int:
-        """Keys deleted without error. Final after :meth:`close`."""
+        """Keys deleted without error. Final after ``close``."""
         return self._succeeded
 
     @property
     def failed(self) -> int:
-        """Keys that failed to delete. Final after :meth:`close`."""
+        """Keys that failed to delete. Final after ``close``."""
         return self._failed
 
     @property

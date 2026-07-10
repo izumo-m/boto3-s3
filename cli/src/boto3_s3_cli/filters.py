@@ -4,8 +4,8 @@ aws-cli evaluates the two options as ONE ordered rule list (its
 ``AppendFilter`` action appends both to a shared ``filters`` dest) with
 last-match-wins semantics, so the interleaved command-line order is
 significant: ``--exclude '*' --include '*.txt'`` keeps only ``.txt`` while
-the reverse keeps nothing. :class:`AppendFilterAction` preserves that order;
-:func:`compile_filter` compiles a :mod:`boto3_s3.globsieve` matcher and wraps
+the reverse keeps nothing. ``AppendFilterAction`` preserves that order;
+``compile_filter`` compiles a ``boto3_s3.globsieve`` matcher and wraps
 it as the ``FileFilter`` ``S3.rm`` / ``cp`` / ``mv`` / ``sync`` consume. The
 matcher needs no root: a relative pattern matches ``info.compare_key`` and a
 root-anchored (absolute) pattern is anchored against ``info.key`` (the full
@@ -35,7 +35,7 @@ class _CaseFoldMatcher:
     case-insensitive there (overview.md section 3: case sensitivity is matched to
     aws-cli per OS). The library matchers stay byte-exact (the permissive
     building block); this CLI-layer wrapper folds both keys at match time while
-    :func:`compile_filter` lower-cases the patterns at compile time.
+    ``compile_filter`` lower-cases the patterns at compile time.
     """
 
     def __init__(self, matcher: Matcher) -> None:
@@ -100,7 +100,7 @@ def _as_file_filter(matcher: Matcher) -> FileFilter:
 def compile_filter(patterns: list[GlobPattern] | None) -> FileFilter | None:
     """Compile ordered CLI ``--exclude`` / ``--include`` patterns into a ``FileFilter``.
 
-    No root is needed: :mod:`boto3_s3.globsieve` matches a relative pattern
+    No root is needed: ``boto3_s3.globsieve`` matches a relative pattern
     against ``info.compare_key`` and a root-anchored (absolute) one against
     ``info.key`` (joined with the entry's drive / UNC anchor at match time the
     way aws-cli joins each pattern onto the per-side root). The same filter thus

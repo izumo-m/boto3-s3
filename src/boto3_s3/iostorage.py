@@ -3,7 +3,7 @@
 ``IOStorage`` adapts one caller-supplied file-like object into the ``Storage``
 contract so it can be one side of a ``cp`` transfer - the building block behind
 ``cp(s3_uri, IOStorage(buf))`` / ``cp(IOStorage(buf), s3_uri)``. It is a single
-endpoint, not a container: only :meth:`~IOStorage.open` is meaningful;
+endpoint, not a container: only ``open`` is meaningful;
 ``scan_pages`` / ``delete`` / ``get_fileinfo`` raise. The S3 side still rides ``s3transfer`` off its
 client/bucket; this side hands ``s3transfer`` the fileobj that ``open`` returns.
 
@@ -239,7 +239,7 @@ class IOStorage(Storage):
 
     @override
     def as_text(self) -> str:
-        """Return the stdio token ``"-"`` (:meth:`Storage.as_text`, display-only).
+        """Return the stdio token ``"-"`` (``Storage.as_text``, display-only).
 
         A stream has no location, so this token is for display / error messages
         only - never round-tripped. ``cp`` diverts a stream to its own path
