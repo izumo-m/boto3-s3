@@ -265,6 +265,63 @@ class TestParamfileExpansion:
         assert cli.main(["ls", "--bucket-name-prefix", "al"], ctx=ctx) == 0
         assert client.calls[0]["Prefix"] == "al"
 
+    def test_positional_missing_fileb_reference_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws expands fileb:// as well as file://, so a missing one is the same
+        # load 252 (not the 254/1 of a literal path reaching the client).
+        rc = cli.main(["ls", "fileb:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert (
+            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
+        )
+
+    def test_positional_fileb_reference_is_a_type_252(
+        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A readable fileb:// loads bytes, which botocore rejects for the
+        # string-typed positional (rc 252, byte-exact against aws 2.35.18).
+        ref = tmp_path / "u.bin"
+        ref.write_bytes(b"s3://bucket/p/")
+        rc = cli.main(["ls", f"fileb://{ref}"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert "Invalid type for parameter input, value: b'" in capsys.readouterr().err
+
+    def test_page_size_missing_fileb_reference_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The integer option loads the paramfile before int(), so a missing
+        # fileb:// is the load 252, not the bare int() coercion's 255.
+        rc = cli.main(
+            ["ls", "s3://b", "--page-size", "fileb:///no/x"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
+
+    def test_page_size_fileb_digits_coerce_to_int(self, tmp_path: Any) -> None:
+        # aws feeds the loaded bytes to int() (b"5" -> 5), so a readable
+        # digit fileb:// drives a normal listing with the coerced page size.
+        ref = tmp_path / "n.bin"
+        ref.write_bytes(b"5")
+        ctx, client = _fake_ctx([{"Contents": []}])
+        assert cli.main(["ls", "s3://b", "--page-size", f"fileb://{ref}"], ctx=ctx) == 0
+        assert client.calls[0]["PaginationConfig"]["PageSize"] == 5
+
+    def test_page_size_fileb_non_digits_is_255(
+        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A non-integer fileb:// fails int() at 255 like aws, whose ValueError
+        # repr shows the bytes form (measured: ``... base 10: b'abc'``).
+        ref = tmp_path / "bad.bin"
+        ref.write_bytes(b"abc")
+        rc = cli.main(
+            ["ls", "s3://b", "--page-size", f"fileb://{ref}"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 255
+        assert "invalid literal for int() with base 10: b'abc'" in capsys.readouterr().err
+
 
 class TestQueryValidation:
     """aws compiles --query at parse time; a bad JMESPath is its 252, ahead of

@@ -11,6 +11,7 @@ from boto3_s3_cli.commands.base import (
     Context,
     add_page_size_argument,
     add_request_payer_argument,
+    expand_integer_paramfile,
     expand_option_paramfile,
     expand_positional_paramfile,
     parse_integer_option,
@@ -48,7 +49,7 @@ class LsCommand(Command):
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
-        expand_option_paramfile(args, "page_size", operation="ls")
+        expand_integer_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay

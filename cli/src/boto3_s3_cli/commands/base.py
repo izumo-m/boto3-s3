@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # Pure-Python name (exceptions module) - safe on the parse path (import
 # contract, docs/imports.md).
-from boto3_s3 import InvalidValueError
+from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile
 from boto3_s3_cli.clientfactory import build_client, build_service_client
 
@@ -81,53 +81,94 @@ def parse_integer_option(value: object, *, operation: str) -> int:
     """
     if isinstance(value, int):  # the argparse default, already converted
         return value
+    # argparse hands us a str, a fileb:// paramfile hands us bytes; both go
+    # straight into int() the way aws does. int() coerces str and bytes alike,
+    # and its ValueError repr differs (``'abc'`` vs ``b'abc'``), so the failure
+    # message matches aws's for a file:// vs a fileb:// source.
+    text = value if isinstance(value, (str, bytes)) else str(value)
     try:
-        return int(str(value))
+        return int(text)
     except ValueError as exc:
         # InvalidValueError: main() maps it to 255 (aws's general handler),
         # not ValidationError's 252, and str(exc) mirrors aws's message.
         raise InvalidValueError(str(exc), operation=operation) from exc
 
 
-def _expand_paramfile(args: argparse.Namespace, dest: str, *, name: str, operation: str) -> None:
-    """Load a ``file://`` reference on ``args.<dest>`` in place, or leave it be.
+def _expand_string_paramfile(
+    args: argparse.Namespace, dest: str, *, name: str, operation: str
+) -> None:
+    """Load a paramfile reference on a string-typed ``args.<dest>`` in place.
 
-    Shared body of the option and positional helpers below: a value without
-    the prefix (or a non-string, e.g. an integer default) is untouched; *name*
-    is the argument name aws reports in the failure (rc 252).
+    Shared body of the string option and positional helpers below. aws expands
+    both prefixes at parse time, so a missing reference is the load 252; a
+    ``file://`` yields text, while a ``fileb://`` yields bytes that botocore
+    then rejects for a string parameter with its own 252 (measured against aws
+    2.35.18: ``value: b'...', valid types: <class 'str'>``). A value without a
+    prefix (or a non-string, e.g. an integer default) is untouched. *name* is
+    the argument name aws reports in the load failure.
     """
     value = getattr(args, dest, None)
-    if isinstance(value, str) and value.startswith("file://"):
-        loaded = paramfile.read_text_paramfile(value, name=name, operation=operation)
-        setattr(args, dest, loaded)
+    if not isinstance(value, str):
+        return
+    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    if loaded is None:
+        return
+    if isinstance(loaded, bytes):
+        raise ValidationError(
+            "Parameter validation failed:\n"
+            f"Invalid type for parameter input, value: {loaded!r}, "
+            "type: <class 'bytes'>, valid types: <class 'str'>",
+            operation=operation,
+        )
+    setattr(args, dest, loaded)
 
 
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
-    """aws's parse-time ``file://`` expansion for a plain option value (252).
+    """aws's parse-time paramfile expansion for a string-typed plain option (252).
 
     aws expands paramfile references on every plain option during argument
-    parsing - even the string-typed integer options - so a bad reference is
-    its ParamValidation 252 *before* the bare ``int()`` coercion's 255
-    (measured: ``--page-size file:///no/x`` exits 252). Runs in place; a
-    value without the prefix (or a non-string, e.g. an integer default) is
-    untouched.
+    parsing, so a bad reference is its ParamValidation 252. Runs in place; a
+    value without a prefix (or a non-string) is untouched. For an integer
+    option use :func:`expand_integer_paramfile`, whose loaded bytes feed
+    ``int()`` rather than being rejected as a string.
     """
-    _expand_paramfile(args, option, name=f"--{option.replace('_', '-')}", operation=operation)
+    _expand_string_paramfile(
+        args, option, name=f"--{option.replace('_', '-')}", operation=operation
+    )
+
+
+def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
+    """aws's parse-time paramfile expansion for a string-typed integer option (252).
+
+    aws loads the paramfile before the bare ``int()`` coercion, so a missing
+    reference is the load 252 *before* the coercion's 255 (measured:
+    ``--page-size file:///no/x`` exits 252). Unlike the string helper it keeps
+    ``fileb://`` bytes rather than rejecting them: aws feeds them to ``int()``
+    too (``--page-size fileb://<5>`` succeeds, ``<abc>`` fails 255 with a
+    ``b'abc'`` repr). :func:`parse_integer_option` performs the coercion.
+    """
+    value = getattr(args, option, None)
+    if isinstance(value, str):
+        name = f"--{option.replace('_', '-')}"
+        loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+        if loaded is not None:
+            setattr(args, option, loaded)
 
 
 def expand_positional_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
-    """aws's parse-time ``file://`` expansion for a positional value (252).
+    """aws's parse-time paramfile expansion for a positional value (252).
 
-    Same load as :func:`expand_option_paramfile`, but the failure names the
+    Same load as :func:`expand_option_paramfile` (a positional is string-typed,
+    so ``fileb://`` bytes are the 252 type rejection), but the failure names the
     positional the way aws does - its ``cli_name`` (``paths`` for ls / rm /
     website, ``path`` for mb / rb / presign), not a ``--flag`` form (measured
     against aws 2.35.18). aws's ``URIArgumentHandler`` unwraps a length-1 list
     before loading; a positional argparse captures as a single string is
     already unwrapped, so *dest* holds a plain value here.
     """
-    _expand_paramfile(args, dest, name=name, operation=operation)
+    _expand_string_paramfile(args, dest, name=name, operation=operation)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:

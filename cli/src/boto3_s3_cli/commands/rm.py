@@ -21,7 +21,7 @@ from boto3_s3_cli.commands.base import (
     Context,
     add_page_size_argument,
     add_request_payer_argument,
-    expand_option_paramfile,
+    expand_integer_paramfile,
     expand_positional_paramfile,
     parse_integer_option,
 )
@@ -95,7 +95,7 @@ class RmCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
-        expand_option_paramfile(args, "page_size", operation="rm")
+        expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         clientfactory.validate_profile(args)
         # Deferred: dispatch is the first point that needs the library's S3

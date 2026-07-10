@@ -9,7 +9,7 @@ from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
-    expand_option_paramfile,
+    expand_integer_paramfile,
     expand_positional_paramfile,
     parse_integer_option,
 )
@@ -48,7 +48,7 @@ class PresignCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="presign")
-        expand_option_paramfile(args, "expires_in", operation="presign")
+        expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay

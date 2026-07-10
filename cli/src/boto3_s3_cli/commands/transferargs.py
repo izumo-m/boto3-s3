@@ -30,7 +30,7 @@ from boto3_s3_cli import clientfactory, filters, globalargs, paramfile, shorthan
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
-    expand_option_paramfile,
+    expand_integer_paramfile,
     parse_integer_option,
 )
 from boto3_s3_cli.progress import TransferPrinter
@@ -207,7 +207,7 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     text block, then ``--progress-frequency`` and ``--page-size`` (paramfile
     then coercion). Returns the two coerced integers. ``--metadata`` (a map)
     and cp's ``--expected-size`` come later, at their own registration
-    positions (``resolve_metadata_option`` / ``expand_option_paramfile`` in
+    positions (``resolve_metadata_option`` / ``expand_integer_paramfile`` in
     ``classify_paths``). ``build_transfer_options`` consumes the resolved
     values verbatim.
     """
@@ -255,14 +255,15 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
 
 
 def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int:
-    """Expand a string-typed integer option's ``file://`` paramfile, then coerce.
+    """Expand a string-typed integer option's paramfile, then coerce.
 
     aws expands the paramfile then runs its bare ``int()`` at the option's
-    registration position (a missing ``file://`` is the load 252, a
-    non-integer the coercion 255). ``expand_option_paramfile`` handles the
-    ``file://`` (text) case; prefix-less values fall through into ``int()``.
+    registration position (a missing reference is the load 252, a non-integer
+    the coercion 255). ``expand_integer_paramfile`` loads both ``file://`` text
+    and ``fileb://`` bytes (aws feeds either to ``int()``); prefix-less values
+    fall through into ``int()``.
     """
-    expand_option_paramfile(args, dest, operation=operation)
+    expand_integer_paramfile(args, dest, operation=operation)
     return parse_integer_option(getattr(args, dest), operation=operation)
 
 
@@ -327,7 +328,7 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     page_size, progress_frequency = resolve_paramfile_values(args, operation=operation)
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
-    expand_option_paramfile(args, "expected_size", operation=operation)
+    expand_integer_paramfile(args, "expected_size", operation=operation)
     clientfactory.validate_profile(args)
     src, dest = args.paths
     src_type = identify_type(src)
