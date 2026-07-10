@@ -10,11 +10,12 @@ Built-in implementations are ``S3Storage`` and ``LocalStorage``; turning a
 job, the customization seam for adding URL schemes.
 
 Design intent (the extension goal): an application adds a data source (e.g. an
-HTTP backend) by subclassing ``Storage`` and implementing ``scan`` /
+HTTP backend) by subclassing ``Storage`` and implementing ``scan_pages`` /
 ``get_fileinfo`` / ``open`` / ``delete``, so it can act as one side of a ``cp`` /
 ``mv`` / ``sync`` transfer - the other side always S3 - with ``open`` the generic
 stream the transfer engine reads/writes for a non-built-in side, ``scan``
-enumerating it as a source, ``get_fileinfo`` resolving a single source entry, and
+(provided concretely on top of ``scan_pages``) enumerating it as a source,
+``get_fileinfo`` resolving a single source entry, and
 ``delete`` removing entries for ``mv`` / ``sync --delete``. The S3-only
 operations (``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` / ``website``) are
 **not** part of this seam: each needs an S3 bucket and accepts only an
