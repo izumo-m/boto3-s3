@@ -4,10 +4,12 @@
 the foundation of `S3.rm` and `S3.sync(delete_filter=True)`, and it can also be used
 directly. It accumulates listing entries (`FileInfo`) in a buffer and, each time
 the buffer fills (default 1000 = the `DeleteObjects` limit), hands one
-`DeleteObjects` request to
-a background worker, so the caller can keep iterating `S3Storage.scan()` while
-deletion proceeds in the background (a pipeline of one in-flight batch plus one
-buffer under construction).
+`DeleteObjects` request to a background worker. A key containing a character
+that XML 1.0 cannot represent is removed with an individual `DeleteObject`
+instead (the route aws-cli uses); compatible keys in the same buffer remain one
+batch. The caller can therefore keep iterating `S3Storage.scan()` while deletion
+proceeds in the background (a pipeline of one in-flight buffer plus one buffer
+under construction).
 
 dryrun is the responsibility of the orchestrator layer (`S3.rm` and friends); it
 never reaches the deleter.
@@ -28,7 +30,7 @@ that are not objects).
 
 | Argument / method | Description |
 |---|---|
-| `S3Deleter(storage, *, request_payer=None, on_result=None, batch_size=1000, operation="delete", capture_response=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it uses **only the client and bucket** (it ignores the key/prefix part). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `batch_size` is 1-1000 (`ValueError`). `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
+| `S3Deleter(storage, *, request_payer=None, on_result=None, batch_size=1000, operation="delete", capture_response=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it uses **only the client and bucket** (it ignores the key/prefix part). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `batch_size` is 1-1000 (`ValueError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
 | `submit(info)` | Accumulates one listing entry (`FileInfo`) into the buffer; its `key` is the **full object key** to delete, and the rest of the entry (e.g. an `S3FileInfo.etag`) rides through to its `OpResult` untouched. Auto-flushes when `batch_size` is reached. An empty `info.key` raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the entry has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
 | `flush()` | Splits the buffer into batches of `batch_size` and hands them to the worker (a complete no-op when empty). **Each dispatch first waits for the previous batch to complete** - this is the backpressure point, and the point where an unexpected worker exception is re-raised on the caller's thread (keys not yet dispatched remain intact in the buffer). After a re-raise it re-splits even if the buffer exceeds `batch_size`, so a single call never exceeds 1000 keys. |
 | `close(*, flush=True)` | flush (with `flush=False` the remaining buffer is discarded) -> wait for in-flight -> stop the worker. Idempotent. Subsequent `submit` / `flush` raise `ValidationError`. A worker exception is re-raised here too, but it closes fully regardless. Keys left in the buffer by a re-raise or by `flush=False` are discarded **without an OpResult**. |
@@ -59,16 +61,21 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 
 ## 3. Error model
 
-Success and failure are reconstructed from the `Quiet=True` response: failures
-come from `Errors[]`, and successes are synthesized as "the submitted keys minus
-the keys in `Errors[]`" (to reduce the response payload).
+For XML-compatible keys, success and failure are reconstructed from the
+`Quiet=True` response: failures come from `Errors[]`, and successes are
+synthesized as "the submitted keys minus the keys in `Errors[]`" (to reduce the
+response payload). XML-incompatible keys use `DeleteObject`, whose request
+success or translated exception directly determines the per-key result. Results
+from both routes are emitted in original submission order.
 
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key
 `DeleteObject`-shaped slot (the entry minus its `Key`, plus the shared
-`RequestCharged`) and attached to that key's `OpResult.extra_info["delete"]`, so
-the caller sees a single-object shape regardless of the batch wire form
-(docs/opresult.md). Failures are still read from `Errors[]` as below. One
+`RequestCharged`) and attached to that key's `OpResult.extra_info["delete"]`.
+The fallback route strips `ResponseMetadata` from its actual `DeleteObject`
+response and uses the same slot, so the caller sees a single-object shape
+regardless of the wire form (docs/opresult.md). Failures are still read from
+`Errors[]` as below. One
 limitation: when the same key was submitted more than once in a batch, all of
 that key's `OpResult`s share a single slot (the response's last entry for the
 key wins) - `DeleteObjects` reports per key spelling, so per-submission
@@ -93,8 +100,7 @@ mapped back to submission order.
   suffix when retries are exhausted). It carries `operation` / `bucket` / `key`
   attributes.
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
-  does not match the submitted key - e.g., newline normalization by the XML
-  parser): logs a WARNING and skips it. Owing to how the `Quiet=True` synthesis
+  does not match the submitted key): logs a WARNING and skips it. Owing to how the `Quiet=True` synthesis
   works, the key in question may be recorded as a success (a known limitation of
   the synthesis; the policy is not to silently flip it to success).
 - **request-level failure** (the `delete_objects` call itself failing): records
@@ -111,14 +117,14 @@ mapped back to submission order.
 ## 4. aws-cli parity notes
 
 - aws-cli uses only per-key `DeleteObject` and does not use the batch API
-  (`DeleteObjects`). This implementation's batching is an **accepted wire-level
-  deviation** that is observationally equivalent for ordinary keys: deleting a
-  nonexistent key is treated as "success" on both sides (just like the 204 of
-  `DeleteObject`, `DeleteObjects` returns no error either), and per-key success
-  and failure are preserved. The known difference is a key that cannot be carried
-  in the XML body of `DeleteObjects` (control characters and the like): aws-cli's
-  per-key path can delete it, but in this implementation that batch fails at the
-  request level.
+  (`DeleteObjects`). This implementation's batching is a wire-level deviation
+  that is observationally equivalent for ordinary keys: deleting a nonexistent
+  key is treated as "success" on both sides (just like the 204 of `DeleteObject`,
+  `DeleteObjects` returns no error either), and per-key success and failure are
+  preserved. A key containing XML 1.0-forbidden controls, surrogate code points,
+  or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
+  back to `DeleteObject`, preserving aws-cli behavior without sacrificing
+  batching for the other keys.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing

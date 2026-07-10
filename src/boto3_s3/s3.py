@@ -1293,9 +1293,10 @@ class S3:
         Transfers run on the engine with cp's gates (glacier, the
         parent-directory guard, the ``--case-conflict`` gate for downloads -
         applied only to pairs missing at the destination, the aws-cli slot).
-        Deletions are dispatched as they stream: batched ``DeleteObjects``
-        for an S3 destination (the ``rm`` machinery; ``request_payer``
-        forwarded), a synchronous ``Storage.delete`` for a local one
+        Deletions are dispatched as they stream: batched ``DeleteObjects`` for
+        an S3 destination, with XML-incompatible keys falling back to
+        ``DeleteObject`` (the ``rm`` machinery; ``request_payer`` forwarded),
+        a synchronous ``Storage.delete`` for a local one
         (``LocalStorage.delete``, an ``os.remove``) or a custom (open-route)
         one (through the backend's own ``delete``). ``dryrun``
         reports every would-be transfer and deletion without any API call.
@@ -1491,8 +1492,8 @@ class S3:
         - **recursive**: every object under the ``/``-normalized prefix
           (``"data"`` lists under ``"data/"``, so ``data-sibling.txt`` is not
           touched), folder markers included, deleted in batched
-          ``DeleteObjects`` calls via `S3Deleter` (a wire-level
-          deviation from aws-cli's per-key ``DeleteObject``; docs/deleter.md).
+          ``DeleteObjects`` calls via `S3Deleter`; XML-incompatible keys fall
+          back to aws-cli's per-key ``DeleteObject`` route (docs/deleter.md).
         - **bucket root, non-recursive**: lists the whole bucket but deletes
           only zero-byte ``/``-terminated "folder marker" objects (any depth)
           - aws-cli's manual-folder sweep, not a full wipe.

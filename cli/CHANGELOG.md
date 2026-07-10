@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Recursive `rm` / `rb --force` and `sync --delete` now delete control-character
+  keys like `aws s3` (via boto3-s3's per-key fallback).
 - `--copy-props` gains the `all` choice, copying S3 object annotations
   (aws-cli 2.35.18 parity; needs botocore >= 1.43.31 and s3transfer >= 0.19).
 - `file://` / `fileb://` paramfile references now expand in positional

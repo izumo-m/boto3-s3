@@ -400,6 +400,25 @@ class TestRmDeleteSlot:
         S3().rm(f"s3://{BUCKET}/d", recursive=True, on_result=cb)
         assert all(r.extra_info is None for r in out)
 
+    def test_rm_recursive_deletes_xml_incompatible_key(self, s3_client: Any) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        keys = ["d/ordinary.txt", "d/control-\x01.txt"]
+        for key in keys:
+            s3_client.put_object(Bucket=BUCKET, Key=key, Body=b"x")
+        out, cb = _sink()
+
+        S3().rm(f"s3://{BUCKET}/d", recursive=True, capture_response=True, on_result=cb)
+
+        assert {result.key for result in out} == set(keys)
+        assert all(result.outcome is OpOutcome.SUCCEEDED for result in out)
+        assert all(
+            cast("dict[str, Any]", result.extra_info)["delete"].get("DeleteMarker") is True
+            for result in out
+        )
+        assert s3_client.list_objects_v2(Bucket=BUCKET).get("KeyCount") == 0
+
 
 class TestReadSlot:
     def test_single_download_captures_get_response(self, s3_client: Any, tmp_path: Path) -> None:

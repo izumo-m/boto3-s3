@@ -1,18 +1,19 @@
 """Async batched S3 object deletion: ``S3Deleter``.
 
-``S3Deleter`` buffers listing entries (``FileInfo``) and deletes each batch with
-one ``DeleteObjects`` call (up to ``S3_DELETE_BATCH`` keys) dispatched on a
-single background worker thread, so a caller iterating ``S3Storage.scan()``
-keeps scanning while the previous batch deletes. It is the building block for
-``S3.rm`` and ``S3.sync(delete_filter=True)``, and is usable directly.
+``S3Deleter`` buffers listing entries (``FileInfo``) and dispatches them on a
+single background worker thread. XML-compatible keys share one ``DeleteObjects``
+call (up to ``S3_DELETE_BATCH`` keys); incompatible keys use ``DeleteObject``.
+A caller iterating ``S3Storage.scan()`` therefore keeps scanning while the
+previous buffer deletes. It is the building block for ``S3.rm`` and
+``S3.sync(delete_filter=True)``, and is usable directly.
 
 aws-cli note: ``aws s3 rm`` deletes one key per ``DeleteObject`` call and never
-uses the batch API. The batched ``DeleteObjects`` here is an accepted
-wire-level deviation that is observably equivalent for ordinary keys (a
-nonexistent key deletes "successfully" either way, and per-key success/failure
-is preserved via ``Quiet=True`` plus the response ``Errors[]``); the known gap
-is keys the DeleteObjects XML body cannot carry (e.g. control characters),
-which fail their whole batch here while aws-cli's per-key path deletes them.
+uses the batch API. The batched ``DeleteObjects`` here is a wire-level
+deviation that is observably equivalent for ordinary keys (a nonexistent key
+deletes "successfully" either way, and per-key success/failure is preserved via
+``Quiet=True`` plus the response ``Errors[]``). Keys that cannot be represented
+in the DeleteObjects XML 1.0 body fall back to per-key ``DeleteObject``, matching
+aws-cli instead of failing their whole batch.
 User-facing lines such as ``delete: s3://...`` are the CLI layer's job, fed by
 ``on_result``; the library only emits ``logging`` diagnostics.
 
@@ -32,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
 from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, s3_errors
-from boto3_s3.types import OpOutcome, OpResult, TransferType
+from boto3_s3.types import OpOutcome, OpResult, TransferType, strip_response_metadata
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -52,6 +53,24 @@ logger = logging.getLogger(__name__)
 S3_DELETE_BATCH = 1000
 
 
+def _delete_objects_compatible(key: str) -> bool:
+    """Whether *key* can be serialized as XML 1.0 character data.
+
+    ``DeleteObjects`` carries keys in an XML document. Botocore escapes CR/LF
+    before sending that document, but XML 1.0 still forbids the remaining C0
+    controls, surrogate code points, and the two terminal BMP noncharacters.
+    ``DeleteObject`` carries the key in the URL instead and is the same route
+    aws-cli uses for every key, so incompatible keys must take that path.
+    """
+    return all(
+        char in "\t\n\r"
+        or "\x20" <= char <= "\ud7ff"
+        or "\ue000" <= char <= "\ufffd"
+        or "\U00010000" <= char <= "\U0010ffff"
+        for char in key
+    )
+
+
 class S3Deleter:
     """Buffer listing entries and delete them in batched ``DeleteObjects`` calls.
 
@@ -61,10 +80,10 @@ class S3Deleter:
     through). The target bucket and client come from ``storage`` - its key/prefix
     part is not consulted, and the client is held for the deleter's whole
     lifetime (do not ``storage.close()`` until this deleter is closed). The
-    buffer auto-flushes at ``batch_size``; each flush runs as one
-    ``DeleteObjects`` call on the worker while the caller keeps submitting.
-    Duplicate keys within a batch are passed through as-is (dedup is the caller's
-    concern).
+    buffer auto-flushes at ``batch_size``; each flush batches its XML-compatible
+    keys and sends each incompatible key through ``DeleteObject`` on the same
+    worker while the caller keeps submitting. Duplicate keys within a batch are
+    passed through as-is (dedup is the caller's concern).
 
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
     submitted entry, in submission order within a batch (entries abandoned by
@@ -241,9 +260,31 @@ class S3Deleter:
         pending.result()
 
     def _run_batch(self, batch: list[FileInfo]) -> None:
-        """Delete one batch with a single ``DeleteObjects`` call (worker thread)."""
+        """Delete one batch, falling back for keys XML 1.0 cannot carry."""
         logger.debug("deleting %d object(s) from s3://%s", len(batch), self._bucket)
-        objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for info in batch]
+        batchable: list[tuple[int, FileInfo]] = []
+        singles: list[tuple[int, FileInfo]] = []
+        for index, info in enumerate(batch):
+            (batchable if _delete_objects_compatible(info.key) else singles).append((index, info))
+        errors: list[Boto3S3Error | None] = [None] * len(batch)
+        deletes: list[dict[str, Any] | None] = [None] * len(batch)
+
+        if batchable:
+            self._run_delete_objects(batchable, errors, deletes)
+        for index, info in singles:
+            self._run_delete_object(index, info, errors, deletes)
+
+        for index, info in enumerate(batch):
+            self._record(info, errors[index], deletes[index])
+
+    def _run_delete_objects(
+        self,
+        batch: list[tuple[int, FileInfo]],
+        errors: list[Boto3S3Error | None],
+        deletes: list[dict[str, Any] | None],
+    ) -> None:
+        """Delete the XML-compatible portion with one ``DeleteObjects`` request."""
+        objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for _, info in batch]
         # capture_response needs the per-key Deleted[] entries, which Quiet=True
         # suppresses; request the full (larger) response only then.
         quiet = not self._capture_response
@@ -255,12 +296,6 @@ class S3Deleter:
             kwargs["RequestPayer"] = self._request_payer
         failures: dict[str, Boto3S3Error]
         deleted: dict[str, dict[str, Any]] = {}
-        # Intentional aws-cli wire-level deviation: recursive rm and sync --delete
-        # use DeleteObjects batches for throughput instead of aws-cli's per-key
-        # DeleteObject. This is accepted and documented in docs/deleter.md section 4.
-        # Do not swap in per-key deletes for parity unless that design decision
-        # changes; the known non-parity case is keys that cannot be represented in
-        # the DeleteObjects XML body (e.g. some control characters).
         try:
             with s3_errors(operation=self._operation, bucket=self._bucket):
                 response = self._client.delete_objects(**kwargs)
@@ -270,13 +305,41 @@ class S3Deleter:
             # s3_errors does not translate (a programming error) propagates
             # and re-raises at the caller's next non-empty flush() or close().
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, exc)
-            failures = {info.key: exc for info in batch}
+            failures = {info.key: exc for _, info in batch}
         else:
-            failures = self._translate_errors(response.get("Errors", []), batch)
+            failures = self._translate_errors(
+                response.get("Errors", []), [info for _, info in batch]
+            )
             if self._capture_response:
                 deleted = self._delete_slots(response)
-        for info in batch:
-            self._record(info, failures.get(info.key), deleted.get(info.key))
+        for index, info in batch:
+            errors[index] = failures.get(info.key)
+            deletes[index] = deleted.get(info.key)
+
+    def _run_delete_object(
+        self,
+        index: int,
+        info: FileInfo,
+        errors: list[Boto3S3Error | None],
+        deletes: list[dict[str, Any] | None],
+    ) -> None:
+        """Delete one XML-incompatible key through aws-cli's per-key route."""
+        logger.debug(
+            "deleting XML-incompatible key with DeleteObject: s3://%s/%s",
+            self._bucket,
+            info.key,
+        )
+        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
+        if self._request_payer is not None:
+            kwargs["RequestPayer"] = self._request_payer
+        try:
+            with s3_errors(operation=self._operation, bucket=self._bucket, key=info.key):
+                response = self._client.delete_object(**kwargs)
+        except Boto3S3Error as exc:
+            errors[index] = exc
+        else:
+            if self._capture_response:
+                deletes[index] = strip_response_metadata(response)
 
     def _delete_slots(self, response: DeleteObjectsOutputTypeDef) -> dict[str, dict[str, Any]]:
         """Per-key DeleteObject-shaped slots from a non-Quiet DeleteObjects response.
@@ -306,9 +369,8 @@ class S3Deleter:
         Quiet=True: the response lists failures only, so a submitted key absent
         from the mapping is recorded as a success. An entry that cannot be
         attributed to a submitted key (no ``Key``, or a key spelled differently
-        than we sent it - the XML parser normalizes line endings, for one) is
-        logged as a warning rather than silently inverting into a success with
-        no trace.
+        than we sent it) is logged as a warning rather than silently inverting
+        into a success with no trace.
         """
         if not entries:
             return {}

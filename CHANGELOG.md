@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Recursive S3 deletion now falls back to `DeleteObject` for keys that cannot
+  be represented in a `DeleteObjects` XML body, matching aws-cli while keeping
+  ordinary keys batched.
 - S3 object annotations, tracking aws-cli 2.35.18: copies now exclude
   annotations like aws-cli does, and the new `CopyPropsMode.ALL` copies them
   (needs botocore >= 1.43.31 and s3transfer >= 0.19; other modes still work

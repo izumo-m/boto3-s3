@@ -1,9 +1,9 @@
 """Unit tests for boto3_s3.deleter.S3Deleter (batching, results, threading).
 
 Uses a hand-rolled fake S3 client (no moto dependency); the fake records each
-``delete_objects`` call (kwargs and calling thread), plays back scripted
-responses or exceptions, and can hold a call in flight on a ``threading.Event``
-gate so the async behaviors are tested deterministically.
+``delete_objects`` / ``delete_object`` call, plays back scripted responses or
+exceptions, and can hold a batch call in flight on a ``threading.Event`` gate
+so the async behaviors are tested deterministically.
 """
 
 from __future__ import annotations
@@ -36,18 +36,24 @@ from boto3_s3.deleter import S3_DELETE_BATCH
 
 
 class _FakeS3Client:
-    """Records delete_objects calls; plays back scripted responses per call.
+    """Record delete calls and play back separate batch / single scripts.
 
-    Script items: a dict is returned as the response; an Exception is raised.
-    An exhausted script returns ``{}`` (every key deleted). When ``gate`` is
-    set, the call blocks on it (after recording the call and setting
-    ``entered``) so a test can hold a batch in flight.
+    Script items return a dict or raise an Exception; an exhausted script
+    returns ``{}``. When ``gate`` is set, ``delete_objects`` blocks on it after
+    recording the call, so a test can hold a batch in flight.
     """
 
-    def __init__(self, script: list[dict[str, Any] | Exception] | None = None) -> None:
+    def __init__(
+        self,
+        script: list[dict[str, Any] | Exception] | None = None,
+        *,
+        single_script: list[dict[str, Any] | Exception] | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.single_calls: list[dict[str, Any]] = []
         self.call_threads: list[int] = []
         self.script = list(script or [])
+        self.single_script = list(single_script or [])
         self.gate: threading.Event | None = None
         self.entered = threading.Event()
 
@@ -58,6 +64,13 @@ class _FakeS3Client:
         if self.gate is not None:
             assert self.gate.wait(timeout=5.0), "test gate was never released"
         action: dict[str, Any] | Exception = self.script.pop(0) if self.script else {}
+        if isinstance(action, Exception):
+            raise action
+        return action
+
+    def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.single_calls.append(kwargs)
+        action: dict[str, Any] | Exception = self.single_script.pop(0) if self.single_script else {}
         if isinstance(action, Exception):
             raise action
         return action
@@ -76,13 +89,15 @@ def _keys(calls: list[dict[str, Any]]) -> list[list[str]]:
     return [[obj["Key"] for obj in call["Delete"]["Objects"]] for call in calls]
 
 
-def _client_error(code: str = "AccessDenied", status: int = 403) -> ClientError:
+def _client_error(
+    code: str = "AccessDenied", status: int = 403, operation: str = "DeleteObjects"
+) -> ClientError:
     return ClientError(
         {
             "Error": {"Code": code, "Message": "boom"},
             "ResponseMetadata": {"HTTPStatusCode": status},
         },
-        "DeleteObjects",
+        operation,
     )
 
 
@@ -212,6 +227,88 @@ class TestBatching:
         assert _keys(fake.calls) == [["k", "k"]]
         assert [r.key for r in results] == ["k", "k"]
         assert deleter.succeeded == 2
+
+
+class TestXmlIncompatibleFallback:
+    def test_only_xml_incompatible_keys_use_delete_object(self) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        keys = (
+            "plain",
+            "line\nbreak",
+            "carriage\rreturn",
+            "tab\tkey",
+            "control-\x01",
+            "noncharacter-\uffff",
+        )
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.close()
+
+        # Botocore escapes CR/LF before the XML body is sent; XML 1.0's
+        # forbidden controls/noncharacters alone need the per-key URL route.
+        assert _keys(fake.calls) == [["plain", "line\nbreak", "carriage\rreturn", "tab\tkey"]]
+        assert [call["Key"] for call in fake.single_calls] == [
+            "control-\x01",
+            "noncharacter-\uffff",
+        ]
+        assert [result.key for result in results] == list(keys)
+        assert all(result.outcome is OpOutcome.SUCCEEDED for result in results)
+
+    def test_all_incompatible_keys_skip_delete_objects(self) -> None:
+        fake = _FakeS3Client()
+        deleter = _deleter(fake, batch_size=10)
+        deleter.submit(_info("nul-\x00"))
+        deleter.submit(_info("form-feed-\x0c"))
+        deleter.close()
+        assert fake.calls == []
+        assert [call["Key"] for call in fake.single_calls] == ["nul-\x00", "form-feed-\x0c"]
+
+    def test_single_failure_is_attributed_without_failing_batchable_keys(self) -> None:
+        fake = _FakeS3Client(
+            single_script=[_client_error(operation="DeleteObject")],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, operation="rm")
+        deleter.submit(_info("ordinary"))
+        deleter.submit(_info("control-\x01"))
+        deleter.close()
+
+        assert [result.outcome for result in results] == [
+            OpOutcome.SUCCEEDED,
+            OpOutcome.FAILED,
+        ]
+        error = results[1].error
+        assert isinstance(error, AccessDeniedError)
+        assert error.operation == "rm"
+        assert error.key == "control-\x01"
+        assert (deleter.succeeded, deleter.failed) == (1, 1)
+
+    def test_single_forwards_request_payer_and_captures_response(self) -> None:
+        fake = _FakeS3Client(
+            single_script=[
+                {
+                    "DeleteMarker": True,
+                    "VersionId": "v1",
+                    "ResponseMetadata": {"HTTPStatusCode": 204},
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(
+            fake,
+            request_payer="requester",
+            capture_response=True,
+            on_result=results.append,
+        )
+        deleter.submit(_info("control-\x01"))
+        deleter.close()
+
+        assert fake.single_calls == [
+            {"Bucket": "bucket", "Key": "control-\x01", "RequestPayer": "requester"}
+        ]
+        assert results[0].extra_info == {"delete": {"DeleteMarker": True, "VersionId": "v1"}}
 
 
 class TestResults:

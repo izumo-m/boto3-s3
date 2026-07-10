@@ -289,8 +289,9 @@ aws-cli's behavior):
   `FileFormat.s3_format`. Because `data` is listed as `data/`, a sibling such as
   `data-sibling.txt` with the same string prefix is **not swept in**). Folder
   markers are also deletion targets. The deletion is a batch `DeleteObjects` by
-  the library's `S3Deleter` (the wire deviation from aws's per-key `DeleteObject`
-  is accepted, [`deleter.md`](./deleter.md) section 4).
+  the library's `S3Deleter`; keys that cannot be represented in its XML 1.0 body
+  fall back to aws's per-key `DeleteObject` route
+  ([`deleter.md`](./deleter.md) section 4).
 - **No key (non-recursive) = folder-marker cleanup**: it lists everything but
   **deletes only the size-0, `/`-terminated markers** (at any depth). This is not
   a full wipe (a full wipe is `--recursive`).
