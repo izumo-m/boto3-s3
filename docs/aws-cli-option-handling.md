@@ -110,7 +110,7 @@ load from disk for *any* arg, not just the SSE-C keys, all resolved at parse
 time before the command runs. `boto3-s3-cli` matches this on the positional
 too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
 `cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
-`file://`-expanded before dispatch (`expand_positional_paramfile`,
+`file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
 `commands/base.py`), and so are the free-value options `--bucket-name-prefix`
 / `--bucket-region` (`ls`) and `--index-document` / `--error-document`
 (`website`). On the transfer family (`cp` / `mv` / `sync`) the same expansion
@@ -144,6 +144,25 @@ shorthand parser (`'in <string>' requires string as left operand, not int`) -
 paramfile's rc 252 but an *existing* one is aws's rc 255, not a clean usage
 error (a `fileb://` value inside the `key@=...` shorthand form, by contrast,
 is rejected at parse like aws's schema validation - rc 252).
+
+A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
+expected) is an accepted deviation, because aws-cli's own exit code there is
+inconsistent per subcommand and driven by internal bugs rather than a defined
+behavior. aws loads the bytes into the positional and lets them flow downstream,
+where each command mishandles them differently: `mb` / `rb` / `presign` reject
+the bytes early through botocore's string-parameter check (rc 252), but `rm`
+carries the bytes all the way to `DeleteObject` and exits on the *server* error
+(rc 1), while `ls` and `website` raise an uncaught `TypeError` /
+`AttributeError` inside aws's path handling (rc 255, e.g. `'int' object has no
+attribute 'startswith'`). `boto3-s3-cli` instead rejects the bytes uniformly
+with botocore's clean `Invalid type for parameter input ... valid types:
+<class 'str'>` (rc 252) for every subcommand - matching aws on `mb` / `rb` /
+`presign` and diverging on `rm` (1) / `ls` / `website` (255). Reproducing aws's
+per-command internal crashes for this nonsensical input would mean coding to its
+bugs (and `rm`'s reach-the-server path is not faithfully reproducible from our
+architecture, which validates the URI before any request); the clean 252 is
+preferred. The missing-file case is unaffected: a `fileb:///nonexistent`
+positional is the parse-time load 252 on every subcommand, exactly like aws.
 
 ## 3. Auto-prompt / completion UI
 
