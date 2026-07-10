@@ -47,7 +47,7 @@ command -v docker >/dev/null || { echo "docker is required but not found" >&2; e
 
 exec docker run --rm --privileged \
     -v "${repo}:/repo:ro" \
-    -e "PYTEST_ARGS=${pytest_args[*]}" \
+    -e "PYTEST_ARGS=$(printf '%q ' "${pytest_args[@]}")" \
     "$image" bash -euc '
     apt-get update -qq >/dev/null && apt-get install -y -qq dosfstools >/dev/null
     # A case-insensitive loopback filesystem; the fixture creates its work dirs here.
@@ -63,7 +63,10 @@ exec docker run --rm --privileged \
     export UV_PROJECT_ENVIRONMENT=/tmp/venv UV_CACHE_DIR=/tmp/uvcache
     cd /repo
     uv sync --all-packages --frozen -q
-    echo "--- pytest (case-conflict dirs on a case-insensitive FS) ${PYTEST_ARGS} ---"
+    # PYTEST_ARGS is shell-quoted on the host (printf %q), so restore the exact
+    # argv - a -k expression with spaces stays one word - before forwarding.
     # shellcheck disable=SC2086
-    uv run pytest tests/ --ignore=tests/cli/e2e ${PYTEST_ARGS} -o cache_dir=/tmp/pcache
+    eval set -- ${PYTEST_ARGS}
+    echo "--- pytest (case-conflict dirs on a case-insensitive FS) $* ---"
+    uv run pytest tests/ --ignore=tests/cli/e2e "$@" -o cache_dir=/tmp/pcache
 '

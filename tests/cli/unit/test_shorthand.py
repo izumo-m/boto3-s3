@@ -124,3 +124,75 @@ class TestParseMapOptionErrors:
         with pytest.raises(ValidationError) as excinfo:
             _parse('{"a": 1}')
         assert "Error parsing parameter '--metadata'" in str(excinfo.value)
+
+
+class TestSyntaxErrorWordingParity:
+    """Byte-exact aws parser wording for the shorthand syntax-error paths.
+
+    Each expected string was measured against the pinned aws 2.35.18
+    (``aws s3 cp ... --metadata <input>``): aws single-quote-wraps the offending
+    character literally (not via ``repr``), prefixes the echoed input line with
+    one space, and places the caret with ``ShorthandParseError._error_location``
+    (column counted from the last newline, value split around the next one).
+    """
+
+    def test_single_quote_actual_is_literal_wrapped(self) -> None:
+        # repr would render the offending "'" as "\"'\"" - aws wraps it in bare
+        # single quotes, so the tripled quote is the byte-exact form.
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("a'=b")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Expected: '=', received: ''' for input:\n"
+            " a'=b\n"
+            " ^"
+        )
+
+    def test_leading_space_on_echoed_input_line(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(",foo=1")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Expected: '=', received: ',' for input:\n"
+            " ,foo=1\n"
+            "^"
+        )
+
+    def test_eof_branch_wording(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("foo")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Expected: '=', received: 'EOF' for input:\n"
+            " foo\n"
+            "   ^"
+        )
+
+    def test_multiline_caret_reanchored_after_last_newline(self) -> None:
+        # A shell can embed a newline in the argument; aws recomputes the column
+        # from the last newline and echoes the offending line under the caret.
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("a=b,\nc==d")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Expected: ',', received: '=' for input:\n"
+            " a=b,\n"
+            "c==d\n"
+            "  ^"
+        )
+
+    def test_unterminated_single_quote_uses_aws_regex_name(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k='a,b")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': "
+            "Expected: '<singled quoted>', received: '<none>' for input:\n"
+            " k='a,b\n"
+            "  ^"
+        )
+
+    def test_unterminated_double_quote_uses_aws_regex_name(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('k="a,b')
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': "
+            "Expected: '<double quoted>', received: '<none>' for input:\n"
+            ' k="a,b\n'
+            "  ^"
+        )

@@ -124,6 +124,29 @@ class TestSyncUpload:
             for r in results
         )
 
+    def test_source_return_knobs_do_not_leak_into_the_sync(self, tmp_path: Path) -> None:
+        # sync's local-side walk is file-only too: a LocalStorage source built with
+        # the library-extension scan knobs (return_directories / return_symlinks)
+        # still feeds the merge-join files only - no DIRECTORY record (which would
+        # manufacture a phantom pair and try to upload a directory) or unfollowed
+        # symlink leaf. Only the three files sync against the empty destination.
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"x")
+        _write(src, "sub/b.txt", b"x")
+        (src / "link.txt").symlink_to(src / "a.txt")  # a symlink leaf
+        client, calls = make_recording_client([_listing(), {}, {}, {}])
+        S3().sync(
+            LocalStorage(str(src), return_directories=True, return_symlinks=True),
+            S3Storage("s3://bucket/p", client=client),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
+        assert [call.params["Key"] for call in calls[1:]] == [
+            "p/a.txt",
+            "p/link.txt",
+            "p/sub/b.txt",
+        ]
+
     def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
@@ -299,7 +322,7 @@ class TestSyncUpload:
             (TransferType.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
-    def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
+    def test_update_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
         listing = _listing(("p/same.txt", 2))
@@ -390,46 +413,7 @@ class TestSyncUpload:
                 cancel_token=token,
             )
 
-
-class TestSyncDownload:
-    def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
-        # The aws-cli asymmetry: same-size pairs download only when the LOCAL
-        # side is newer than S3.
-        out = tmp_path / "out"
-        _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
-        _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
-        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
-        client, calls = make_recording_client([listing, _get_response(), _get_response()])
-        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
-        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
-        assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
-        assert (out / "new.txt").read_bytes() == b"payload"
-
-    def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
-        out = tmp_path / "out"
-        _write(out, "old.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
-        S3().sync(
-            S3Storage("s3://bucket/d", client=client),
-            str(out),
-            update_filter=AwsCliComparison(exact_timestamps=True),
-            transfer_config=_SERIAL,
-        )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
-
-    def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
-        out = tmp_path / "out"
-        _write(out, "touched.txt", b"xx", mtime=_NEWER)
-        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
-        S3().sync(
-            S3Storage("s3://bucket/d", client=client),
-            str(out),
-            update_filter=AwsCliComparison(size_only=True),
-            transfer_config=_SERIAL,
-        )
-        assert _ops(calls) == ["ListObjectsV2"]
-
-    def test_compare_true_recopies_every_update(self, tmp_path: Path) -> None:
+    def test_update_filter_true_recopies_every_update(self, tmp_path: Path) -> None:
         # update_filter=True forces every update (both-sides) pair through, even
         # an up-to-date one the default would skip.
         src = tmp_path / "src"
@@ -443,7 +427,7 @@ class TestSyncDownload:
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
-    def test_compare_false_is_additive_only(self, tmp_path: Path) -> None:
+    def test_update_filter_false_is_additive_only(self, tmp_path: Path) -> None:
         # update_filter=False never re-copies an existing destination (additive
         # only), but a brand-new source file still copies (create_filter default).
         src = tmp_path / "src"
@@ -505,6 +489,45 @@ class TestSyncDownload:
         assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.txt"]
+
+
+class TestSyncDownload:
+    def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
+        # The aws-cli asymmetry: same-size pairs download only when the LOCAL
+        # side is newer than S3.
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
+        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
+        client, calls = make_recording_client([listing, _get_response(), _get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
+        assert (out / "new.txt").read_bytes() == b"payload"
+
+    def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            update_filter=AwsCliComparison(exact_timestamps=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+
+    def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)
+        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            update_filter=AwsCliComparison(size_only=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
 
     def test_destination_directory_is_created_even_when_empty(self, tmp_path: Path) -> None:
         out = tmp_path / "fresh" / "nested"

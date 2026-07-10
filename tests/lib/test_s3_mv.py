@@ -18,11 +18,13 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
+from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import BatchError, ValidationError
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import OpOutcome, OpResult, TransferType
+from tests.utils.recorder import make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
 _MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
@@ -59,7 +61,6 @@ class TestStreams:
     """
 
     def test_stream_destination_downloads_then_deletes_source(self) -> None:
-        from tests.utils.recorder import make_recording_client
 
         buf = io.BytesIO()
         client, calls = make_recording_client([_head_response(), _get_response(), {}])
@@ -78,7 +79,6 @@ class TestStreams:
         ]
 
     def test_stream_destination_dryrun_moves_nothing(self) -> None:
-        from tests.utils.recorder import make_recording_client
 
         buf = io.BytesIO()
         client, calls = make_recording_client([_head_response()])
@@ -111,7 +111,6 @@ class TestSamePathGuard:
     """aws-cli's ``Cannot mv a file onto itself`` - before any client work."""
 
     def _assert_guard(self, src: str, dest: str, message: str, **kwargs: Any) -> None:
-        from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
@@ -151,7 +150,6 @@ class TestSamePathGuard:
         )
 
     def test_different_buckets_pass(self) -> None:
-        from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client([_head_response(), {}, {}])
         S3().mv(
@@ -165,7 +163,6 @@ class TestSamePathGuard:
 
 class TestUploadMove:
     def test_single_upload_deletes_the_local_source(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         src = tmp_path / "a.txt"
         src.write_bytes(b"x" * 7)
@@ -184,8 +181,6 @@ class TestUploadMove:
         assert all(result.transfer_type is TransferType.MOVE for result in results)
 
     def test_filtered_out_files_are_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
-        from boto3_s3 import GlobFilter
-        from tests.utils.recorder import make_recording_client
 
         (tmp_path / "keep.txt").write_bytes(b"k")
         (tmp_path / "skip.log").write_bytes(b"s")
@@ -204,7 +199,6 @@ class TestUploadMove:
         assert (tmp_path / "skip.log").exists()
 
     def test_dryrun_touches_nothing(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
@@ -224,7 +218,6 @@ class TestUploadMove:
 
 class TestDownloadMove:
     def test_single_download_deletes_the_source_object(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client([_head_response(), _get_response(), {}])
         results: list[OpResult] = []
@@ -242,8 +235,6 @@ class TestDownloadMove:
     def test_filtered_single_source_is_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
         # aws filters the single-object routes too: an excluded mv source
         # must not transfer - and, crucially, must not be deleted.
-        from boto3_s3 import GlobFilter
-        from tests.utils.recorder import make_recording_client
 
         drop = GlobFilter().exclude("*").compile()
         client, calls = make_recording_client([_head_response()])
@@ -258,9 +249,8 @@ class TestDownloadMove:
 
     def test_recursive_skips_markers_without_deleting_them(self, tmp_path: Path) -> None:
         # Folder markers never transfer (aws-cli filegenerator), so a move
-        # never deletes them either - `aws s3 mv --recursive` leaves `dl/m/`
+        # never deletes them either - `aws s3 mv --recursive` leaves `pre/m/`
         # in the source bucket.
-        from tests.utils.recorder import make_recording_client
 
         listing = {
             "Contents": [
@@ -279,7 +269,6 @@ class TestDownloadMove:
         assert calls[2].params == {"Bucket": "b", "Key": "pre/a.txt"}
 
     def test_glacier_warning_keeps_the_route_wording_and_the_object(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client([_head_response(StorageClass="GLACIER")])
         results: list[OpResult] = []
@@ -297,7 +286,6 @@ class TestDownloadMove:
         assert "Unable to perform download operations on GLACIER objects." in str(results[0].error)
 
     def test_no_overwrite_existing_destination_skips_without_deleting(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         target = tmp_path / "out.txt"
         target.write_bytes(b"already here")
@@ -315,7 +303,6 @@ class TestDownloadMove:
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
 
     def test_delete_failure_aggregates_into_batch_error(self, tmp_path: Path) -> None:
-        from tests.utils.recorder import make_recording_client
 
         client, calls = make_recording_client(
             [
@@ -341,7 +328,6 @@ class TestDownloadMove:
 
 class TestCopyMove:
     def test_single_copy_deletes_on_the_source_client(self) -> None:
-        from tests.utils.recorder import make_recording_client
 
         dest_client, dest_calls = make_recording_client([{}])
         source_client, source_calls = make_recording_client([_head_response(), {}])
@@ -358,7 +344,6 @@ class TestCopyMove:
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_request_payer_reaches_the_delete(self) -> None:
-        from tests.utils.recorder import make_recording_client
 
         dest_client, _ = make_recording_client([{}])
         source_client, source_calls = make_recording_client([_head_response(), {}])

@@ -7,9 +7,9 @@ import sys
 
 # Pure-Python names only on the parse path (import contract, docs/imports.md);
 # rm.py's module top level is itself SDK-free, so RmCommand is safe here.
-from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3_cli import output, usage
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3 import Boto3S3Error, InvalidValueError, ValidationError
+from boto3_s3_cli import clientfactory, globalargs, output, usage
+from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 from boto3_s3_cli.commands.rm import RmCommand
 
 # aws-cli RbCommand._force raises RuntimeError with this exact sentence when
@@ -43,6 +43,13 @@ class RbCommand(Command):
         client-construction failure (bad ``--profile`` / unresolved credentials /
         region) takes precedence over a path usage error - we build it first.
         """
+        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # (252), the --endpoint-url scheme check (252), and the positional
+        # paramfile expansion (252) all precede the client build - they beat a
+        # bad --profile (255) the way aws's parse-time load-cli-arg does.
+        globalargs.validate_query(args)
+        clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="path", operation="rb")
         # Deferred: the library's S3 entry reaches botocore; --help / --version /
         # pre-subcommand usage errors stay SDK-free (import contract,
         # docs/imports.md). A subcommand's run() may load the SDK.
@@ -58,9 +65,27 @@ class RbCommand(Command):
             # aws rb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
 
+        bucket_part, _, key_part = target[len("s3://") :].partition("/")
+        if not bucket_part:
+            # aws splits the path first: an empty bucket carrying a key is the
+            # "specify a valid bucket name only" usage error (252, ending in a
+            # bare "s3://"); an empty bucket with no key goes to delete_bucket,
+            # where botocore's client-side validation fails inside rb's local
+            # catch -> rc 1 (the same botocore-shaped line as mb / rm). Both
+            # cases are handled before construction, which S3Storage.validate()
+            # would otherwise reject with library-internal wording.
+            if key_part:
+                raise ValidationError(
+                    f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
+                    operation="rb",
+                )
+            message = usage.invalid_bucket_name_message()
+            sys.stderr.write(output.format_remove_bucket_failed(target, message) + "\n")
+            return 1
+
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
-        # non-raising construction); for "s3:///k" validate lands on 252 too, just
-        # like aws's key check.
+        # non-raising construction); a key on a valid bucket is the same usage
+        # error as above (aws's post-split key check).
         storage = S3Storage(target, client=client)
         storage.validate()
         if storage.key:
@@ -70,8 +95,11 @@ class RbCommand(Command):
             )
 
         if args.force and self._force_rm(target, args, ctx) != 0:
-            sys.stderr.write(_FORCE_FAILED + "\n")
-            return 255
+            # aws raises RuntimeError into its general handler, which prints the
+            # 'aws: [ERROR]:'-prefixed line; route it as an InvalidValueError so
+            # main emits the matching 'boto3-s3: [ERROR]:' prefix -> rc 255
+            # (the inner rm already streamed its own fatal-error line).
+            raise InvalidValueError(_FORCE_FAILED, operation="rb")
 
         try:
             S3().rb(storage)

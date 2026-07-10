@@ -1,19 +1,20 @@
 """Storage component: the abstract contract and the ``Location`` type.
 
 ``Storage`` is the abstract extension surface for one side of a data location.
-It has three operations - :meth:`scan` (enumerate), :meth:`open` (read/write a
-single object as a binary stream), :meth:`delete` - plus :meth:`as_text` (its
-canonical aws-cli path-shape token, the inverse of :meth:`S3.resolve`) and the
-``Location`` type.
+It has four operations - :meth:`scan` (enumerate), ``get_fileinfo`` (resolve a
+single entry), :meth:`open` (read/write a single object as a binary stream),
+:meth:`delete` - plus :meth:`as_text` (its canonical aws-cli path-shape token,
+the inverse of :meth:`S3.resolve`) and the ``Location`` type.
 Built-in implementations are ``S3Storage`` and ``LocalStorage``; turning a
 ``Location`` (string / path) into a concrete ``Storage`` is :meth:`S3.resolve`'s
 job, the customization seam for adding URL schemes.
 
 Design intent (the extension goal): an application adds a data source (e.g. an
-HTTP backend) by subclassing ``Storage`` and implementing ``scan`` / ``open`` /
-``delete``, so it can act as one side of a ``cp`` / ``mv`` / ``sync`` transfer -
-the other side always S3 - with ``open`` the generic stream the transfer engine
-reads/writes for a non-built-in side, ``scan`` enumerating it as a source, and
+HTTP backend) by subclassing ``Storage`` and implementing ``scan`` /
+``get_fileinfo`` / ``open`` / ``delete``, so it can act as one side of a ``cp`` /
+``mv`` / ``sync`` transfer - the other side always S3 - with ``open`` the generic
+stream the transfer engine reads/writes for a non-built-in side, ``scan``
+enumerating it as a source, ``get_fileinfo`` resolving a single source entry, and
 ``delete`` removing entries for ``mv`` / ``sync --delete``. The S3-only
 operations (``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` / ``website``) are
 **not** part of this seam: each needs an S3 bucket and accepts only an
@@ -268,8 +269,9 @@ class Storage(abc.ABC):
         ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
         pages), the local walk sorts for aws parity - so they ignore the flag.
-        ``key`` itself is the full, ``/``-separated identifier, so relativizing to
-        the scan root is the caller's job.
+        ``key`` itself is the full, ``/``-separated identifier; the root-relative
+        form is what ``compare_key`` carries - stamp it here on every entry this
+        producer yields.
         """
 
     @abc.abstractmethod
@@ -278,8 +280,9 @@ class Storage(abc.ABC):
 
         ``"rb"`` returns a readable stream; ``"wb"`` a writable one whose
         ``close()`` flushes any buffered writes (standard file semantics).
-        ``size`` is an optional total-length hint
-        for writes (lets S3 choose single-part vs multipart up front). This is
+        ``size`` is an optional total-length hint (the engine passes the entry's
+        size on both ``"rb"`` and ``"wb"`` opens); a writing backend may use it to
+        pre-allocate or choose its write strategy up front. This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path a custom backend
         (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
@@ -329,8 +332,8 @@ class Storage(abc.ABC):
 
         - present and transferable -> a ``FileInfo`` whose ``compare_key`` is the
           entry's basename;
-        - **definitively absent** (an S3 ``404``, a local ``ENOENT``) -> ``None``,
-          no warning;
+        - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)
+          -> ``None``, no warning;
         - present but not a transferable regular file (a local special device /
           FIFO / socket, or one that fails the readability probe) -> a message to
           ``on_warning`` and ``None`` (aws-cli's warn-and-skip, exit code 2);
@@ -421,4 +424,5 @@ __all__ = [
     "Location",
     "Storage",
     "StorageCapability",
+    "sieve_pages",
 ]

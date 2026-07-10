@@ -374,7 +374,13 @@ class S3Storage(Storage):
 
     @staticmethod
     def strip_scheme(path: str) -> str:
-        """Drop a leading ``s3://`` if present (aws-cli's ``split_s3_bucket_key``)."""
+        """Drop a leading ``s3://`` if present.
+
+        The scheme-strip half of aws-cli's ``split_s3_bucket_key``, which also
+        divides the rest into ``(bucket, key)``; that split half is
+        ``split_bucket_key`` here, and the two composed reproduce aws-cli's whole
+        function (as ``same_key`` does).
+        """
         if path.startswith(_S3_SCHEME):
             return path[len(_S3_SCHEME) :]
         return path
@@ -386,11 +392,15 @@ class S3Storage(Storage):
         aws-cli's ``_normalize_s3_trailing_slash``: a bucket-only URI with no
         trailing slash (``s3://bucket``, including a keyless access-point ARN)
         reads as the bucket root ``s3://bucket/`` - the form aws validates and
-        prints. A bare ``s3://`` (service root) stays as is. For raw strings
-        only (the CLI's pre-resolve inputs and ``S3PathResolver`` outputs);
-        with an ``S3Storage`` at hand, :meth:`normalized_uri` derives the same
-        form from the held state, and :meth:`format` the scheme-less root.
+        prints. A bare ``s3://`` (service root) stays as is, and - like aws-cli's
+        ``startswith('s3://')`` guard - a path that does not start with the scheme
+        is returned unchanged (never sliced blindly). For raw strings only (the
+        CLI's pre-resolve inputs and ``S3PathResolver`` outputs); with an
+        ``S3Storage`` at hand, :meth:`normalized_uri` derives the same form from
+        the held state, and :meth:`format` the scheme-less root.
         """
+        if not path.startswith(_S3_SCHEME):
+            return path
         rest = path[len(_S3_SCHEME) :]
         _bucket, key = S3Storage.split_bucket_key(rest)
         if not key and rest and not rest.endswith("/"):
@@ -475,8 +485,8 @@ class S3Storage(Storage):
         # "s3://bucket/key" (mirrors aws-cli ls/presign/website). S3.resolve stays
         # strict on purpose (a bare "bucket/key" routes to local), so cp/mv/sync can
         # still tell bare local paths from S3.
-        if not text.startswith("s3://"):
-            text = f"s3://{text}"
+        if not text.startswith(_S3_SCHEME):
+            text = f"{_S3_SCHEME}{text}"
         self._url = text
         self._bucket, self._key = _parse_s3_url(text)
         self._client = client
@@ -512,8 +522,8 @@ class S3Storage(Storage):
         (:mod:`boto3_s3.transferplan`).
         """
         if self._key:
-            return f"s3://{self._bucket}/{self._key}"
-        return f"s3://{self._bucket}"
+            return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+        return f"{_S3_SCHEME}{self._bucket}"
 
     @override
     def format(self, *, dir_op: bool) -> tuple[str, bool]:
@@ -601,6 +611,7 @@ class S3Storage(Storage):
         """
         return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
 
+    @override
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
@@ -659,7 +670,11 @@ class S3Storage(Storage):
             paging["FetchOwner"] = True
         # get_client inside the translation scope like delete / get_fileinfo, so
         # a lazy-build failure also surfaces as a Boto3S3Error on the first pull.
-        with s3_errors(operation="ls", bucket=self._bucket):
+        # operation=None: this object listing backs every recursive scan - not
+        # only ls, but also rm / cp / mv / sync source enumeration - so the calling
+        # subcommand is not known here, and stamping a fixed "ls" would mislabel
+        # the others (the service-root list_buckets below is ls-only, so it can).
+        with s3_errors(operation=None, bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
                 yield _page_to_infos(page, recursive=options.recursive, prefix=prefix, storage=self)
@@ -681,15 +696,20 @@ class S3Storage(Storage):
         ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
         when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
         floor (botocore 1.34.162) it falls back to one unpaginated
-        ``list_buckets()`` with the filters inert (docs/overview.md section 2).
-        Errors surface on the consumer's pull.
+        ``list_buckets()``, where these filters are simply never sent (inert). The
+        ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
+        1.35.42), so on a paginating botocore that predates them (1.34.162 through
+        1.35.41) passing ``name_prefix`` / ``region`` raises a
+        ``ParamValidationError`` (docs/overview.md section 2). Errors surface on the
+        consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
             if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31): the ListBuckets paginator and
-                # its Prefix / BucketRegion parameters are a late-2024 addition
-                # (botocore 1.34.162). Drop this branch once the floor reaches it.
+                # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
+                # late-2024 addition (botocore 1.34.162); its Prefix / BucketRegion
+                # input parameters came later still (botocore 1.35.42). Drop this
+                # branch once the floor reaches the paginator.
                 yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
             paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}

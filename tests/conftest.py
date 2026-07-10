@@ -28,11 +28,11 @@ from tests.utils.host import is_case_insensitive
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-#: Test-only knob: point this at a case-insensitive directory to run the
-#: ``--case-conflict`` ``*_with_existing_file`` tests on an otherwise
-#: case-sensitive host (see :func:`case_insensitive_workdir`). The ``_PYTEST_``
-#: infix marks it as test infrastructure, not a CLI/library setting; it is not
-#: ``_E2E_`` because these tests need no live endpoint.
+# Test-only knob: point this at a case-insensitive directory to run the
+# ``--case-conflict`` ``*_with_existing_file`` tests on an otherwise
+# case-sensitive host (see `case_insensitive_workdir`). The ``_PYTEST_`` infix
+# marks it as test infrastructure, not a CLI/library setting; it is not
+# ``_E2E_`` because these tests need no live endpoint.
 CASE_INSENSITIVE_DIR_ENV = "BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR"
 
 

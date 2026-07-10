@@ -53,6 +53,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -69,8 +70,9 @@ _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
 # See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
 # conflict only while the first twin is still in flight, so it needs a threaded
-# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
-# single worker (max_concurrent_requests = 1) here.
+# (non-blocking) submit running ahead of completions - aws-cli runs its whole
+# functional s3 harness with max_concurrent_requests = 1, and that single worker
+# keeps the gate deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _LIST_BASE = {"MaxKeys": 1000}
@@ -761,6 +763,8 @@ class TestSyncCaseConflict:
         assert f"Failed to download bucket/{self.upper_key}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
+        # The first (admitted) key still downloads; only the conflicting
+        # second key trips the error gate - so one GetObject is scripted.
         result, _ = _run_cmd(
             [
                 list_objects_response([self.upper_key, self.lower_key]),
@@ -780,6 +784,7 @@ class TestSyncCaseConflict:
         )
         assert f"warning: Downloading bucket/{self.upper_key}" in result.stderr
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
     def test_warn_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
@@ -819,6 +824,7 @@ class TestSyncCaseConflict:
             ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "ignore"],
         )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
     def test_ignore_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [

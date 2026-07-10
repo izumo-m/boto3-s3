@@ -12,11 +12,12 @@ flag before transfer). Plus ``identify_type`` (aws-cli's
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
 
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3_cli.commands import transferargs
 from tests.utils.fakemodel import model_only_client
 
@@ -103,6 +104,94 @@ class TestParamfile:
             transferargs.resolve_text_paramfile(
                 "file:///nonexistent/boto3_s3_xyz", "--content-type", operation="cp"
             )
+
+    def test_fileb_on_a_string_option_is_a_param_validation(self, tmp_path: Path) -> None:
+        # aws loads the fileb:// bytes and botocore rejects them for a
+        # string-typed parameter (rc 252); the wording is byte-exact and
+        # names the generic "input" parameter (measured against aws 2.35.18).
+        p = tmp_path / "ct.bin"
+        p.write_bytes(b"hi\n")
+        with pytest.raises(ValidationError) as excinfo:
+            transferargs.resolve_text_paramfile(f"fileb://{p}", "--content-type", operation="cp")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter input, value: b'hi\\n', "
+            "type: <class 'bytes'>, valid types: <class 'str'>"
+        )
+
+    def test_missing_fileb_on_a_string_option_is_the_load_252(self) -> None:
+        with pytest.raises(ValidationError, match="Unable to load paramfile"):
+            transferargs.resolve_text_paramfile(
+                "fileb:///nonexistent/boto3_s3_xyz", "--content-type", operation="cp"
+            )
+
+
+class TestGrantsParamfile:
+    """aws's URIArgumentHandler unwraps a length-1 --grants list, then applies
+    the paramfile map; a longer list or a prefix-less value stays a list."""
+
+    def test_single_element_file_prefix_is_unwrapped_and_loaded(self, tmp_path: Path) -> None:
+        p = tmp_path / "g.txt"
+        p.write_text("read=id=CANONICAL")
+        args = argparse.Namespace(grants=[f"file://{p}"])
+        transferargs._resolve_grants(args, operation="cp")
+        assert args.grants == "read=id=CANONICAL"
+
+    def test_single_element_fileb_prefix_loads_bytes(self, tmp_path: Path) -> None:
+        p = tmp_path / "g.bin"
+        p.write_bytes(b"read=id=X")
+        args = argparse.Namespace(grants=[f"fileb://{p}"])
+        transferargs._resolve_grants(args, operation="cp")
+        assert args.grants == b"read=id=X"
+
+    def test_single_element_missing_file_is_252(self) -> None:
+        args = argparse.Namespace(grants=["file:///nonexistent/boto3_s3_grants"])
+        with pytest.raises(ValidationError, match="Unable to load paramfile"):
+            transferargs._resolve_grants(args, operation="cp")
+
+    def test_single_element_without_prefix_stays_a_list(self) -> None:
+        args = argparse.Namespace(grants=["read=id=CANONICAL"])
+        transferargs._resolve_grants(args, operation="cp")
+        assert args.grants == ["read=id=CANONICAL"]
+
+    def test_multi_element_list_is_never_unwrapped(self, tmp_path: Path) -> None:
+        # aws only unwraps a length-1 list, so a second element (even a file://)
+        # keeps the whole thing a verbatim list.
+        p = tmp_path / "g.txt"
+        p.write_text("read=id=CANONICAL")
+        args = argparse.Namespace(grants=["read=id=X", f"file://{p}"])
+        transferargs._resolve_grants(args, operation="cp")
+        assert args.grants == ["read=id=X", f"file://{p}"]
+
+    def test_none_is_untouched(self) -> None:
+        args = argparse.Namespace(grants=None)
+        transferargs._resolve_grants(args, operation="cp")
+        assert args.grants is None
+
+
+class TestMetadataParamfile:
+    """A whole-value --metadata paramfile: file:// text feeds the shorthand
+    parse; fileb:// loads bytes and then aws crashes in its parser (rc 255)."""
+
+    def test_whole_value_file_prefix_feeds_the_shorthand(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.txt"
+        p.write_text("k=v")
+        args = argparse.Namespace(metadata=f"file://{p}")
+        transferargs.resolve_metadata_option(args, operation="cp")
+        assert args.metadata == {"k": "v"}
+
+    def test_whole_value_fileb_prefix_existing_is_255(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.bin"
+        p.write_bytes(b"k=v")
+        args = argparse.Namespace(metadata=f"fileb://{p}")
+        with pytest.raises(InvalidValueError) as excinfo:
+            transferargs.resolve_metadata_option(args, operation="cp")
+        assert str(excinfo.value) == "'in <string>' requires string as left operand, not int"
+
+    def test_whole_value_fileb_missing_is_the_load_252(self) -> None:
+        args = argparse.Namespace(metadata="fileb:///nonexistent/boto3_s3_md")
+        with pytest.raises(ValidationError, match="Unable to load paramfile"):
+            transferargs.resolve_metadata_option(args, operation="cp")
 
     def test_binary_file_via_text_prefix_hints_fileb(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

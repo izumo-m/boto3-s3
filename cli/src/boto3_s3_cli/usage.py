@@ -1,8 +1,10 @@
 """aws-parity usage / error strings shared across subcommands.
 
-These strings are part of the stderr contract (the parity tests compare them
-token-for-token against aws), so each wording has exactly one home here and
-the commands interpolate only their own name or value.
+Most of these strings are part of the stderr contract (the parity tests
+compare them token-for-token against aws); ``invalid_bucket_name_message`` is
+the exception - only its rc is contractual and its text is a simplified form
+(its docstring). Each wording has exactly one home here and the commands
+interpolate only their own name or value.
 """
 
 from __future__ import annotations

@@ -103,8 +103,8 @@ def _rm(
 ) -> list[OpResult]:
     """Run S3().rm with a result collector and return the OpResults.
 
-    ``page_size`` is now storage config, so it is routed to the ``S3Storage``
-    constructor rather than to ``rm``.
+    ``page_size`` is storage config, so it is passed to the ``S3Storage``
+    constructor.
     """
     results: list[OpResult] = []
     page_size = kwargs.pop("page_size", 1000)

@@ -17,7 +17,7 @@ lock-guarded rollup counters for ``BatchError``, byte progress to
 Engine choices (parity-driven):
 
 - The engine follows ``TransferConfig.preferred_transfer_client`` with
-  boto3's own semantics (``'auto'`` default; ``'auto'``/'``crt``' resolve
+  boto3's own semantics (``'auto'`` default; ``'auto'``/``'crt'`` resolve
   through ``crtsupport``, docs/crt.md): the classic
   ``s3transfer.manager.TransferManager`` unless the CRT manager is selected,
   and unconditionally classic for a copy run - the CRT manager has no copy,
@@ -39,7 +39,10 @@ Engine choices (parity-driven):
   HeadObject (the cached single-source response when available) and tags via
   GetObjectTagging, inlined under S3's ~2 KiB ``Tagging`` header budget or
   applied by a post-copy PutObjectTagging whose failure rolls back the
-  destination object.
+  destination object. S3 object annotations track the mode too: every mode
+  short of ``all`` sends ``AnnotationDirective=EXCLUDE`` so the copy carries
+  none (aws-cli's default), while ``copy_props=ALL`` carries them - riding
+  s3transfer >= 0.19's native annotation carryover on a multipart copy.
 """
 
 from __future__ import annotations
@@ -128,6 +131,13 @@ class TransferItem:
     copy never heads the source twice; ``mtime`` is the source LastModified a
     download stamps onto the local file; ``src_display`` / ``dest_display``
     are the rendered endpoints reported on ``OpResult``.
+
+    ``size`` is the transfer byte count, provided to s3transfer to skip its
+    size probe; a copy also reads it for the copy-props multipart decision, so
+    a copy item must carry it - an under-threshold value routes metadata/tags
+    down the single-part path. ``etag`` is the source object's ETag held
+    unquoted (``S3Storage`` strips the surrounding quotes); the engine
+    re-quotes it when it provides it to s3transfer.
     """
 
     compare_key: str
@@ -285,14 +295,16 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
     introspected directly (version-agnostic); the message names the minimum
     versions as a hint. Returns ``None`` when the mode is supported.
     """
-    from importlib.metadata import version
-
     if not _copy_annotations_param_supported(client):
+        from importlib.metadata import version
+
         return (
             f"copy_props=ALL requires botocore >= {_ANNOTATIONS_MIN_BOTOCORE} "
             f"(S3 object annotations); the installed botocore is {version('botocore')}."
         )
     if not _annotation_directive_blacklisted():
+        from importlib.metadata import version
+
         return (
             f"copy_props=ALL requires s3transfer >= {_ANNOTATIONS_MIN_S3TRANSFER} "
             "(annotation carryover on multipart copies); the installed "
@@ -305,7 +317,7 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
     A permission failure (EPERM - typically a file owned by another user) is
-    re-worded the way aws words it, so the resulting warning carries the
+    re-worded the way aws words it, so the resulting warning carries
     aws-cli's "attempting to modify the utime" text; every other error keeps
     its own message.
     """
@@ -366,7 +378,10 @@ class _ResponseCapture:
     the transfer's own write response. ``_build_extra_info`` drains per item.
     A multipart download issues many ranged ``GetObject`` calls, so the first
     stored read wins and the range-specific fields are dropped, leaving the
-    object-level metadata.
+    object-level metadata. That same first-stored-wins rule would let a
+    same-run content filter's source read beat the transfer's own ``GetObject``
+    to the read slot, so ``Transferrer._submit_download`` clears any read
+    already stored for the source key before it queues the download.
 
     One instance per operation, registered on the transfer client when the
     manager is built - before enumeration starts for a listing-driven run
@@ -606,10 +621,24 @@ class Transferrer:
         # mode degrades silently on an old one (docs/transfer.md section 4).
         self._copy_props = CopyPropsMode.DEFAULT
         if transfer_type is TransferType.COPY:
-            self._copy_props = CopyPropsMode(
-                self._options.get("copy_props") or CopyPropsMode.DEFAULT
-            )
-            if self._copy_props is CopyPropsMode.ALL:
+            copy_props = self._options.get("copy_props") or CopyPropsMode.DEFAULT
+            try:
+                self._copy_props = CopyPropsMode(copy_props)
+            except ValueError as exc:
+                # A bad value must not leak the enum's raw ValueError past the
+                # public API (the exception model keeps every error in the
+                # Boto3S3Error family, docs/exceptions.md); the CLI never gets
+                # here, having validated copy_props against its choices.
+                raise ValidationError(
+                    f"Invalid copy_props value: {copy_props!r}", operation=operation
+                ) from exc
+            # An explicit metadata_directive disables the whole copy-props chain
+            # (aws-cli's s3handler.CopyRequestSubmitter), so ALL never reaches the
+            # annotations path there - don't refuse the combination for a feature
+            # that won't run.
+            if self._copy_props is CopyPropsMode.ALL and not self._options.get(
+                "metadata_directive"
+            ):
                 reason = annotations_copy_unsupported_reason(client)
                 if reason is not None:
                     raise ConfigurationError(reason, operation=operation)
@@ -812,6 +841,14 @@ class Transferrer:
         )
 
     def _submit_download(self, item: TransferItem) -> None:
+        if self._capture is not None:
+            # A same-run content filter may have read this source through the
+            # run's own client (a SyncPair content update_filter via
+            # S3Storage.open(..., "rb")), recording a GetObject for the very key
+            # about to be downloaded. The read store is first-stored-wins, so
+            # drop that entry now - the transfer's own GetObject must be the read
+            # slot, not the filter's (possibly pre-change) response.
+            self._capture.pop_read(item.src_bucket, item.src_key)
         extra_args = requestparams.map_get_object_params(self._options)
         subscribers = self._common_subscribers(item)
         if item.dest_path is not None:
@@ -1089,9 +1126,10 @@ class Transferrer:
 
         Without ``capture_response`` this keeps the historical shape: the ETag as
         ``{"ETag": ...}`` from ``future.meta.etag`` - the source object's ETag that
-        boto3-s3 hands s3transfer for a copy and a download (the same as the written
-        object's except for a multipart copy); an upload has none, so ``extra_info``
-        is then ``None``. With ``capture_response`` a
+        boto3-s3 hands s3transfer for a copy and a download (not necessarily equal to
+        the written object's: a multipart copy, or a source whose ETag is not a plain
+        MD5, gives the destination a different one); an upload has none, so
+        ``extra_info`` is then ``None``. With ``capture_response`` a
         classic upload / copy also carries the full write response under ``"write"``
         (``PutObject`` / ``CopyObject`` / ``CompleteMultipartUpload``, minus
         ``ResponseMetadata``), and ``"ETag"`` is promoted from it - the written
@@ -1657,9 +1695,12 @@ class _SetTags:
     percent-encoded set in the ``Tagging`` header (<= ~2 KiB, only where
     s3transfer still forwards it to CreateMultipartUpload - see
     `_mpu_inline_tagging_supported`) or apply it with a post-copy
-    PutObjectTagging - rolling the destination object back with a
-    best-effort delete when that tagging write fails, and surfacing the
-    failure on the transfer future.
+    PutObjectTagging - rolling the destination object back with a delete
+    when that tagging write fails, then surfacing the tagging failure on the
+    transfer future. If the rollback delete itself also fails, aws-cli lets
+    that delete error escape the done callback (s3transfer swallows it) and
+    records the transfer as a success; we mirror that, leaving the future
+    settled (and, for ``mv``, letting the source delete proceed).
     """
 
     def __init__(
@@ -1726,14 +1767,13 @@ class _SetTags:
         return [{"Key": tag["Key"], "Value": tag["Value"]} for tag in response.get("TagSet", [])]
 
     def _rollback(self, bucket: str, key: str) -> None:
-        try:
-            self._dest_client.delete_object(
-                Bucket=bucket,
-                Key=key,
-                **requestparams.map_delete_object_params(self._options),
-            )
-        except Exception:
-            pass
+        # A raised delete error is left to escape on_done (matching aws-cli): the
+        # already-swallowed on_done callback keeps the future settled as success.
+        self._dest_client.delete_object(
+            Bucket=bucket,
+            Key=key,
+            **requestparams.map_delete_object_params(self._options),
+        )
 
 
 __all__ = [

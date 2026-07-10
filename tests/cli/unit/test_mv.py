@@ -238,7 +238,7 @@ class TestValidateSamePaths:
         assert [call.operation for call in calls] == ["HeadObject", "CopyObject", "DeleteObject"]
         assert "move:" in capsys.readouterr().out
 
-    def test_alias_resolution_asks_sts(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_alias_resolution_asks_sts(self) -> None:
         ctx, s3control, sts, _, _ = _resolver_ctx(bucket="underlying")
         rc = cli.main(
             ["mv", "s3://my-ap-s3alias/k.txt", "s3://underlying/k.txt", "--validate-same-s3-paths"],
@@ -272,9 +272,7 @@ class TestValidateSamePaths:
             ("sts", None),
         ]
 
-    def test_env_var_true_enables_validation(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_env_var_true_enables_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS", "true")
         ctx, s3control, _, _, _ = _resolver_ctx(bucket="underlying")
         rc = cli.main(["mv", f"s3://{_AP_ARN}/k.txt", "s3://underlying/k.txt"], ctx=ctx)

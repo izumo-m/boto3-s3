@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory, output
+from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
     expand_option_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -37,10 +38,16 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # aws's parse-time order (measured, docs/cli.md section 6): the
-        # --endpoint-url scheme check (252) and the --page-size paramfile
-        # expansion (252) both precede the bare int() coercion (255).
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # JMESPath compile (252) leads, then the --endpoint-url scheme check
+        # (252), then the paramfile expansions (252) - the positional and the
+        # bucket-listing filters as well as --page-size, all expanded at parse
+        # time - which precede the bare int() coercion (255).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="paths", operation="ls")
+        expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
+        expand_option_paramfile(args, "bucket_region", operation="ls")
         expand_option_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
         # Deferred: dispatch is the first point that needs the library's S3

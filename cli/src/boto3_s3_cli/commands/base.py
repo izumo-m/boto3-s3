@@ -34,14 +34,14 @@ if TYPE_CHECKING:
 
 
 class Context:
-    """Runtime dependencies ``main()`` hands to the dispatched :class:`Command`.
+    """Runtime dependencies ``main()`` hands to the dispatched ``Command``.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals (default: :func:`boto3_s3_cli.clientfactory.build_client`).
+    connection/auth globals (default: ``boto3_s3_cli.clientfactory.build_client``).
     Tests inject a factory returning a fake client.
     ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
     path validation needs (default:
-    :func:`boto3_s3_cli.clientfactory.build_service_client`). ``transfer_config``
+    ``boto3_s3_cli.clientfactory.build_service_client``). ``transfer_config``
     overrides the transfer engine's defaults (aws-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
@@ -89,6 +89,19 @@ def parse_integer_option(value: object, *, operation: str) -> int:
         raise InvalidValueError(str(exc), operation=operation) from exc
 
 
+def _expand_paramfile(args: argparse.Namespace, dest: str, *, name: str, operation: str) -> None:
+    """Load a ``file://`` reference on ``args.<dest>`` in place, or leave it be.
+
+    Shared body of the option and positional helpers below: a value without
+    the prefix (or a non-string, e.g. an integer default) is untouched; *name*
+    is the argument name aws reports in the failure (rc 252).
+    """
+    value = getattr(args, dest, None)
+    if isinstance(value, str) and value.startswith("file://"):
+        loaded = paramfile.read_text_paramfile(value, name=name, operation=operation)
+        setattr(args, dest, loaded)
+
+
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
     """aws's parse-time ``file://`` expansion for a plain option value (252).
 
@@ -99,22 +112,35 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
     value without the prefix (or a non-string, e.g. an integer default) is
     untouched.
     """
-    value = getattr(args, option, None)
-    if isinstance(value, str) and value.startswith("file://"):
-        loaded = paramfile.read_text_paramfile(
-            value, name=f"--{option.replace('_', '-')}", operation=operation
-        )
-        setattr(args, option, loaded)
+    _expand_paramfile(args, option, name=f"--{option.replace('_', '-')}", operation=operation)
+
+
+def expand_positional_paramfile(
+    args: argparse.Namespace, dest: str, *, name: str, operation: str
+) -> None:
+    """aws's parse-time ``file://`` expansion for a positional value (252).
+
+    Same load as :func:`expand_option_paramfile`, but the failure names the
+    positional the way aws does - its ``cli_name`` (``paths`` for ls / rm /
+    website, ``path`` for mb / rb / presign), not a ``--flag`` form (measured
+    against aws 2.35.18). aws's ``URIArgumentHandler`` unwraps a length-1 list
+    before loading; a positional argparse captures as a single string is
+    already unwrapped, so *dest* holds a plain value here.
+    """
+    _expand_paramfile(args, dest, name=name, operation=operation)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--page-size`` (shared by ls / rm and the transfer family).
 
     Not range-validated: aws-cli passes any int through and lets the server
-    decide (0 lists nothing -> rc 1; negative -> InvalidArgument -> rc 254),
-    and the exit-code charter requires matching both. No ``type=int``: a
-    non-integer must exit 255 like aws's bare ``int()`` conversion, not
-    argparse's 252 (:func:`parse_integer_option` converts at ``run()`` start).
+    decide, and the exit-code charter requires matching the resulting codes
+    (0 lists nothing -> rc 1; a negative value is the server's
+    InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
+    family, whose post-start errors are uniformly 1 - docs/cli.md sections
+    5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare
+    ``int()`` conversion, not argparse's 252 (``parse_integer_option``
+    converts at ``run()`` start).
     """
     parser.add_argument("--page-size", default=1000)
 

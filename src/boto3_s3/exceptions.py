@@ -46,7 +46,7 @@ class InvalidValueError(ValidationError):
     ``ValueError`` reaches its general exception handler (rc 255) - not the
     rc-252 usage path a parse-time rejection takes. The CLI's exit-code
     mapping keys on this subclass to preserve that distinction; library
-    consumers can still catch it as a :class:`ValidationError`.
+    consumers can still catch it as a ``ValidationError``.
     """
 
 
@@ -60,7 +60,7 @@ class ConfigurationError(Boto3S3Error):
     Raised plainly for the failures aws gives dedicated handlers (rc 253):
     unresolvable credentials / region - and for an environment lacking a
     required capability (an SDK floor, an absent awscrt). A configuration
-    that is *present but invalid* is the :class:`InvalidConfigError`
+    that is *present but invalid* is the ``InvalidConfigError``
     refinement below.
     """
 
@@ -72,9 +72,9 @@ class InvalidConfigError(ConfigurationError):
     config value, an unusable profile, partial credentials. aws reports
     these through its general exception handler (rc 255) - unlike the
     unresolvable credentials / region pair, whose dedicated handlers exit
-    253 (plain :class:`ConfigurationError` here). The CLI's exit-code
+    253 (plain ``ConfigurationError`` here). The CLI's exit-code
     mapping keys on this subclass to preserve that distinction; library
-    consumers can still catch it as a :class:`ConfigurationError`.
+    consumers can still catch it as a ``ConfigurationError``.
     """
 
 

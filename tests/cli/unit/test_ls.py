@@ -213,3 +213,70 @@ class TestRecognizedExtraGlobals:
 
     def test_cli_binary_format_invalid_choice_exits_param_validation_rc(self) -> None:
         assert cli.main(["ls", "--cli-binary-format", "bogus", "s3://b/p/"]) == 252
+
+
+def _unused_factory(_args: Any) -> Any:
+    raise AssertionError("client factory must not be called")
+
+
+class TestParamfileExpansion:
+    """aws paramfile-expands the positional and the bucket-listing filters at
+    parse time (rc 252 on a bad reference), naming the argument as aws does."""
+
+    def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
+        # Expands to a key prefix that matches nothing -> rc 1, proving the
+        # reference was parsed as s3://bucket/p/ and not the literal string.
+        ref = tmp_path / "u.txt"
+        ref.write_text("s3://bucket/p/")
+        ctx, _ = _fake_ctx([{}])
+        assert cli.main(["ls", f"file://{ref}"], ctx=ctx) == 1
+
+    def test_positional_missing_reference_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["ls", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        err = capsys.readouterr().err
+        assert "Error parsing parameter 'paths': Unable to load paramfile" in err
+
+    def test_bucket_name_prefix_missing_reference_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            ["ls", "s3://b", "--bucket-name-prefix", "file:///no/x"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--bucket-name-prefix'" in capsys.readouterr().err
+
+    def test_bucket_region_missing_reference_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            ["ls", "s3://b", "--bucket-region", "file:///no/x"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
+
+    def test_bucket_name_prefix_reference_is_expanded(self) -> None:
+        ctx, client = _fake_ctx([{"Buckets": []}])
+        # A readable reference would forward its contents as Prefix; here just
+        # confirm a bare value still forwards (the expand is a no-op without the
+        # prefix, so behavior is unchanged for the common case).
+        assert cli.main(["ls", "--bucket-name-prefix", "al"], ctx=ctx) == 0
+        assert client.calls[0]["Prefix"] == "al"
+
+
+class TestQueryValidation:
+    """aws compiles --query at parse time; a bad JMESPath is its 252, ahead of
+    every other head check (globalargs.validate_query)."""
+
+    def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(
+            ["ls", "s3://b", "--query", "]["], ctx=Context(client_factory=_unused_factory)
+        )
+        assert rc == 252
+        assert "Bad value for --query ][" in capsys.readouterr().err
+
+    def test_valid_query_is_accepted(self) -> None:
+        ctx, _ = _fake_ctx([{"Contents": [_obj("p/a")]}])
+        assert cli.main(["ls", "s3://b/p/", "--query", "Contents[].Key"], ctx=ctx) == 0

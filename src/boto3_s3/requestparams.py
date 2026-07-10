@@ -7,7 +7,7 @@ PascalCase API parameters built from the snake_case ``TransferOptions``.
 Falsy values are omitted exactly like aws-cli's truthiness gates.
 
 Only the operations the ``s3transfer``-driven path actually calls are ported
-(put/get/copy/head/list/tagging/delete); aws-cli's CreateMultipartUpload /
+(put/get/copy/head/tagging/delete); aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
@@ -107,13 +107,6 @@ def map_head_object_params_with_copy_source_sse(options: TransferOptions) -> dic
     if algorithm:
         params["SSECustomerAlgorithm"] = algorithm
         params["SSECustomerKey"] = options.get("sse_c_copy_source_key")
-    _set_request_payer_param(params, options)
-    return params
-
-
-def map_list_objects_v2_params(options: TransferOptions) -> dict[str, Any]:
-    """API params for the recursive-source listing."""
-    params: dict[str, Any] = {}
     _set_request_payer_param(params, options)
     return params
 
@@ -247,7 +240,6 @@ __all__ = [
     "map_get_object_tagging_params",
     "map_head_object_params",
     "map_head_object_params_with_copy_source_sse",
-    "map_list_objects_v2_params",
     "map_put_object_params",
     "map_put_object_tagging_params",
 ]

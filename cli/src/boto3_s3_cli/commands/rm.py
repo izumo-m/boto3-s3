@@ -15,13 +15,14 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, output, usage
+from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
     expand_option_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -87,11 +88,13 @@ class RmCommand(Command):
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
         # The aws parse-to-validation order (measured, docs/cli.md section 6):
-        # the --endpoint-url scheme check (252) and the --page-size paramfile
-        # expansion (252) beat the integer coercion (255), which beats the
-        # session profile resolution (255), which beats the path usage check
-        # below (252).
+        # the --query compile (252) leads, then the --endpoint-url scheme check
+        # (252), then the paramfile expansions (252, positional path and
+        # --page-size) beat the integer coercion (255), which beats the session
+        # profile resolution (255), which beats the path usage check below (252).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="paths", operation="rm")
         expand_option_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         clientfactory.validate_profile(args)

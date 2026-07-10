@@ -1,7 +1,7 @@
 """Port of aws-cli's functional mv tests to ``boto3-s3 mv``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_mv_command.py``
-(aws-cli 2.34.x). Test names, canned responses, and expected operations are
+(aws-cli 2.35.18). Test names, canned responses, and expected operations are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
@@ -36,7 +36,7 @@ Not ported, with reasons:
 - ``TestMvWithCRTClient`` (3 tests): the CRT data plane bypasses the botocore
   client, so the recording client cannot drive it; CRT parity is enforced by
   the e2e CRT lane instead (docs/crt.md, docs/testing.md).
-- ``TestMvRecursiveCaseConflict.test_warn_with_case_conflicts_in_s3`` is a
+- ``TestMvRecursiveCaseConflict.test_warn_with_case_conflicts_in_s3`` is an
   aws-cli ``pass`` (their threaded get/delete order is nondeterministic);
   ported here as a real test - the injected NonThreadedExecutor makes the
   per-item get-then-delete order deterministic.
@@ -49,6 +49,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -63,9 +64,9 @@ _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
 # See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
 # conflict only while the first twin is still in flight, which needs a threaded
-# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
-# single worker (max_concurrent_requests = 1) here. One worker keeps mv's
-# per-item get-then-delete order deterministic.
+# (non-blocking) submit running ahead of completions - aws-cli runs its whole
+# functional s3 harness with max_concurrent_requests = 1. That single worker also
+# keeps mv's per-item get-then-delete order deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
@@ -186,7 +187,7 @@ class TestMvCommand:
         ]
         assert "(dryrun) move: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
-    def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:
+    def test_website_redirect_ignore_paramfile(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -214,7 +215,7 @@ class TestMvCommand:
         assert calls[1].params["MetadataDirective"] == "REPLACE"
         assert calls[2].params == {"Bucket": "bucket", "Key": "key.txt"}
 
-    def test_no_metadata_directive_for_non_copy(self, tmp_path: Any) -> None:
+    def test_no_metadata_directive_for_non_copy(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -225,7 +226,7 @@ class TestMvCommand:
         assert calls[0].operation == "PutObject"
         assert "MetadataDirective" not in calls[0].params
 
-    def test_download_move_with_request_payer(self, tmp_path: Any) -> None:
+    def test_download_move_with_request_payer(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(),
@@ -334,7 +335,7 @@ class TestMvCommand:
         # The deletion is the destination rollback - the source survives.
         assert calls[6].params == {"Bucket": "bucket", "Key": "key"}
 
-    def test_upload_with_checksum_algorithm_crc32(self, tmp_path: Any) -> None:
+    def test_upload_with_checksum_algorithm_crc32(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         _, calls = _run_cmd(
@@ -344,7 +345,7 @@ class TestMvCommand:
         assert calls[0].operation == "PutObject"
         assert calls[0].params["ChecksumAlgorithm"] == "CRC32"
 
-    def test_download_with_checksum_mode_crc32(self, tmp_path: Any) -> None:
+    def test_download_with_checksum_mode_crc32(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(),
@@ -361,7 +362,7 @@ class TestMvCommand:
 class TestMvCommandNoOverwrite:
     """The aws-cli no-overwrite block of TestMvCommand (source-survival pins)."""
 
-    def test_mv_no_overwrite_flag_when_object_not_exists_on_target(self, tmp_path: Any) -> None:
+    def test_mv_no_overwrite_flag_when_object_not_exists_on_target(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         _, calls = _run_cmd([{"ETag": '"foo"'}], ["mv", full_path, "s3://bucket", "--no-overwrite"])
@@ -371,7 +372,7 @@ class TestMvCommandNoOverwrite:
         # Verify source file was deleted (move operation).
         assert not os.path.exists(full_path)
 
-    def test_mv_no_overwrite_flag_when_object_exists_on_target(self, tmp_path: Any) -> None:
+    def test_mv_no_overwrite_flag_when_object_exists_on_target(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -385,7 +386,7 @@ class TestMvCommandNoOverwrite:
         assert os.path.exists(full_path)
 
     def test_mv_no_overwrite_flag_multipart_upload_when_object_not_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
@@ -403,7 +404,7 @@ class TestMvCommandNoOverwrite:
         assert not os.path.exists(full_path)
 
     def test_mv_no_overwrite_flag_multipart_upload_when_object_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
@@ -499,7 +500,7 @@ class TestMvCommandNoOverwrite:
         assert calls[6].params == {"Bucket": "bucket1", "Key": "key1.txt"}
 
     def test_no_overwrite_flag_on_mv_download_when_single_object_exists_at_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("existing content")
@@ -511,7 +512,7 @@ class TestMvCommandNoOverwrite:
         assert (tmp_path / "foo.txt").read_text() == "existing content"
 
     def test_no_overwrite_flag_on_mv_download_when_single_object_does_not_exist_at_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         _, calls = _run_cmd(
@@ -763,7 +764,7 @@ class TestMvRecursiveCaseConflict:
     LOWER_KEY = "a.txt"
     UPPER_KEY = "A.txt"
 
-    def _cmd(self, tmp_path: Any, case_conflict: str) -> list[str]:
+    def _cmd(self, tmp_path: Path, case_conflict: str) -> list[str]:
         return [
             "mv",
             "--recursive",
@@ -773,7 +774,37 @@ class TestMvRecursiveCaseConflict:
             case_conflict,
         ]
 
-    def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+    # aws-cli: TestSyncCaseConflict.test_error_with_existing_file (test_sync_command.py)
+    def test_error_with_existing_file(self, case_insensitive_workdir: Path) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
+        result, _ = _run_cmd(
+            [list_objects_response([self.UPPER_KEY])],
+            self._cmd(case_insensitive_workdir, "error"),
+            expected_rc=1,
+        )
+        assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
+
+    # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
+    def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
+        # The first (admitted) key still downloads and its source is deleted;
+        # only the conflicting second key trips the error gate, so a single
+        # get-then-delete pair is scripted.
+        result, calls = _run_cmd(
+            [
+                list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
+                get_object_response(),
+                {},
+            ],
+            self._cmd(tmp_path, "error"),
+            expected_rc=1,
+            transfer_config=_CASE_CONFLICT_CONFIG,
+        )
+        assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
+        # Only the admitted first twin is deleted; the failed key never is.
+        assert _operations(calls) == ["ListObjectsV2", "GetObject", "DeleteObject"]
+        assert calls[2].params == {"Bucket": "bucket", "Key": self.UPPER_KEY}
+
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response(), {}],
@@ -781,8 +812,8 @@ class TestMvRecursiveCaseConflict:
         )
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
-    def test_warn_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
-        # A aws-cli `pass` (their threaded get/delete order is flaky); a single
+    def test_warn_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
+        # An aws-cli `pass` (their threaded get/delete order is flaky); a single
         # worker (_CASE_CONFLICT_CONFIG) makes ours deterministic - the conflict
         # is detected (first twin still in flight) and the order is get, delete
         # per item.
@@ -806,7 +837,16 @@ class TestMvRecursiveCaseConflict:
             "DeleteObject",
         ]
 
-    def test_skip_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+    # aws-cli: TestSyncCaseConflict.test_skip_with_existing_file (test_sync_command.py)
+    def test_skip_with_existing_file(self, case_insensitive_workdir: Path) -> None:
+        (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
+        result, _ = _run_cmd(
+            [list_objects_response([self.UPPER_KEY])],
+            self._cmd(case_insensitive_workdir, "skip"),
+        )
+        assert f"warning: Skipping bucket/{self.UPPER_KEY}" in result.stderr
+
+    def test_skip_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         result, calls = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -821,7 +861,7 @@ class TestMvRecursiveCaseConflict:
         assert _operations(calls) == ["ListObjectsV2", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "bucket", "Key": self.UPPER_KEY}
 
-    def test_ignore_with_existing_file(self, tmp_path: Any) -> None:
+    def test_ignore_with_existing_file(self, tmp_path: Path) -> None:
         (tmp_path / self.LOWER_KEY).write_text("mycontent")
         _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response(), {}],
@@ -830,7 +870,7 @@ class TestMvRecursiveCaseConflict:
 
 
 class TestS3ExpressMvRecursive:
-    def test_s3_express_error_raises_exception(self, tmp_path: Any) -> None:
+    def test_s3_express_error_raises_exception(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [],
             [
@@ -845,7 +885,7 @@ class TestS3ExpressMvRecursive:
         )
         assert "`error` is not a valid value" in result.stderr
 
-    def test_s3_express_skip_raises_exception(self, tmp_path: Any) -> None:
+    def test_s3_express_skip_raises_exception(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [],
             [

@@ -18,7 +18,6 @@ from boto3_s3.requestparams import (
     map_get_object_tagging_params,
     map_head_object_params,
     map_head_object_params_with_copy_source_sse,
-    map_list_objects_v2_params,
     map_put_object_params,
     map_put_object_tagging_params,
 )
@@ -223,10 +222,9 @@ class TestAncillaryMappers:
     def test_request_payer_only_operations(self) -> None:
         options = TransferOptions(request_payer="requester", acl="private")
         expected = {"RequestPayer": "requester"}
-        assert map_list_objects_v2_params(options) == expected
         assert map_get_object_tagging_params(options) == expected
         assert map_put_object_tagging_params(options) == expected
         assert map_delete_object_params(options) == expected
 
     def test_no_request_payer_means_empty(self) -> None:
-        assert map_list_objects_v2_params(TransferOptions()) == {}
+        assert map_get_object_tagging_params(TransferOptions()) == {}

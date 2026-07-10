@@ -13,8 +13,8 @@ from botocore.exceptions import ProfileNotFound
 
 from boto3_s3 import (
     S3,
-    ConfigurationError,
     FileKind,
+    InvalidConfigError,
     LocalStorage,
     S3Storage,
     TransferConfig,
@@ -102,30 +102,34 @@ class TestClientSeam:
         s3 = S3()
         assert s3.client() is not s3.client()
 
-    def test_build_failure_maps_to_configuration_error(
+    def test_build_failure_maps_to_invalid_config_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A build failure - e.g. AWS_PROFILE naming a missing profile - raises
-        # the translated ConfigurationError (docs/exceptions.md section 3), not
-        # the raw botocore error, like every other public-API failure.
+        # the translated error (docs/exceptions.md section 3), not the raw
+        # botocore one. ProfileNotFound refines to InvalidConfigError, not the
+        # plain ConfigurationError base; pin the exact type because the CLI
+        # maps this refinement to rc 255 (vs 253 for the base).
         def boom(*args: Any, **kwargs: Any) -> Any:
             raise ProfileNotFound(profile="missing-profile")
 
         monkeypatch.setattr(boto3, "client", boom)
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             S3().client()
+        assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
-    def test_session_build_failure_maps_to_configuration_error(self) -> None:
+    def test_session_build_failure_maps_to_invalid_config_error(self) -> None:
         # The session branch of client() is wrapped like the default-session
-        # branch: a session whose client build fails raises the translated
-        # ConfigurationError, not the raw botocore error.
+        # branch: a session whose client build fails raises the same translated
+        # InvalidConfigError refinement, not the raw botocore error.
         class _BrokenSession:
             def client(self, *args: Any, **kwargs: Any) -> Any:
                 raise ProfileNotFound(profile="missing-profile")
 
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             S3(session=cast("Any", _BrokenSession())).client()
+        assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
 

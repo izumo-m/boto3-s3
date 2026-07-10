@@ -24,6 +24,7 @@ from tests.utils.golden import (
 from tests.utils.harness import (
     assert_stderr_tokens,
     capture_bucket_state,
+    create_bucket_in_region,
     force_delete_bucket,
     normalize_rm_stdout,
     run_aws_subprocess,
@@ -37,7 +38,7 @@ def _reset(s3_client: Any, bucket: str, scenario: RbScenario) -> None:
     """Put the sibling bucket into the scenario's start state."""
     force_delete_bucket(s3_client, bucket)
     if scenario.pre_create:
-        s3_client.create_bucket(Bucket=bucket)
+        create_bucket_in_region(s3_client, bucket)
         seed_bucket(s3_client, bucket, scenario.seed)
 
 

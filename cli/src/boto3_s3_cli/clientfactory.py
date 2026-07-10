@@ -37,7 +37,7 @@ def _pin_python_sigv4_signers() -> None:
     four, reserving CRT for the asymmetric SigV4a family (aws-cli's
     ``awscli/botocore/auth.py`` ``AUTH_TYPE_MAPS``). The difference is
     user-visible: the CRT presigner renders ``X-Amz-Expires`` after
-    ``X-Amz-SignedHeaders``, so ``presign``'s URLs would diverge. Restore the
+    ``X-Amz-SignedHeaders``, so ``presign``'s URLs would diverge. Restore
     aws-cli's entries (in-place table update - botocore resolves the signer
     from this table per request, however it was imported; without awscrt
     this just re-asserts the defaults).
@@ -57,15 +57,19 @@ def _pin_python_sigv4_signers() -> None:
 def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
-    ``--profile`` > the first env var of :data:`~boto3_s3_cli.globalargs.PROFILE_ENV_VARS`
-    that is *present* > ``None`` (boto3 then falls back to the ``default``
-    profile). Mirrors aws-cli's "first present env var wins" exactly, an empty
-    value included (``AWS_PROFILE=`` selects the empty profile ->
-    ProfileNotFound, like aws), so that `aws s3` parity holds even when both env
-    vars are set. Only the CLI layer corrects this; the library (boto3.client
+    ``--profile`` (truthy only) > the first env var of
+    :data:`~boto3_s3_cli.globalargs.PROFILE_ENV_VARS` that is *present* > ``None``
+    (boto3 then falls back to the ``default`` profile). The ``--profile`` guard is
+    aws-cli's truthy test (its ``_handle_top_level_args`` binds the profile only
+    ``if getattr(args, 'profile', False)``), so an empty ``--profile ""`` is
+    ignored and the env chain wins - matching aws, which then reaches the server
+    (rc 254) rather than raising ProfileNotFound. The env chain is instead
+    present-wins, an empty value included (``AWS_PROFILE=`` selects the empty
+    profile -> ProfileNotFound, like aws), so `aws s3` parity holds even when both
+    env vars are set. Only the CLI layer corrects this; the library (boto3.client
     fallback) stays boto3/botocore-faithful and keeps stock order on purpose.
     """
-    if args.profile is not None:
+    if args.profile:
         return args.profile
     for name in PROFILE_ENV_VARS:
         if name in os.environ:
@@ -163,15 +167,19 @@ def build_service_client(
     ``None`` falls through to the session default, *not* to ``--region``,
     like aws-cli's dead-defaulted ``parameters.get('source_region', ...)``),
     and the ``--no-verify-ssl`` / ``--ca-bundle`` verify setting - no endpoint
-    override, no timeout config. A ``None`` region resolves through the same
-    :func:`_resolve_region` chain as :func:`build_client` (``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS), keeping the session default
-    aws v2-shaped.
+    override. aws resolves ``--cli-read-timeout`` / ``--cli-connect-timeout`` and
+    ``--no-sign-request`` into the *session* default client config at startup, so
+    ``from_session``'s ``create_client`` inherits them; mirror that here by folding
+    the same timeouts and the UNSIGNED signature into this client's ``Config``. A
+    ``None`` region resolves through the same :func:`_resolve_region` chain as
+    :func:`build_client` (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` > config > IMDS),
+    keeping the session default aws v2-shaped.
     """
     # Deferred like build_client: only a command that actually resolves
     # access-point paths pays the boto3 import.
     import boto3
     import botocore.session
+    from botocore import UNSIGNED
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
@@ -187,8 +195,16 @@ def build_service_client(
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
         session = boto3.Session(botocore_session=botocore_session)
         # aws's bundled botocore applies its standard/3 retry defaults to
-        # these validator clients too.
+        # these validator clients too, and its startup handlers thread the
+        # timeouts / UNSIGNED signature through the session default config that
+        # from_session's create_client inherits (build_client mirrors the same).
         service_overrides: dict[str, Any] = {"retries": _retry_defaults(botocore_session)}
+        if args.no_sign_request:
+            service_overrides["signature_version"] = UNSIGNED
+        if args.cli_read_timeout is not None:
+            service_overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
+        if args.cli_connect_timeout is not None:
+            service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
         return session.client(
             service,
             region_name=_resolve_region(region, botocore_session),

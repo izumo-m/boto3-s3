@@ -6,7 +6,8 @@ Both CLIs run against the same endpoint with a temporary
 multipart). The lane is differential - no goldens - because the CRT manager's
 stdout is byte-identical to the classic engine's (aws-cli ``s3handler`` has no
 CRT branch), so the signal is that our CRT mode agrees with aws's CRT mode on
-rc, stdout, the bucket end state, the local tree, and the download mtime.
+rc, stdout, the bucket end state, the local destination and source trees, and
+the download mtime.
 
 Gated twice: the e2e ``BOTO3_S3_E2E_BUCKET`` opt-in (conftest) and an
 ``awscrt`` import check here (the CRT manager needs it). Against a custom
@@ -73,7 +74,7 @@ def _run_side(
     s3_client: Any,
     workdir: Path,
     crt_config_file: str,
-) -> tuple[Any, list[str], list[str], list[str] | None]:
+) -> tuple[Any, list[str], list[str], list[str] | None, list[str]]:
     workdir.mkdir(parents=True, exist_ok=True)
     materialize_workdir(workdir, scenario)
     delete_under(s3_client, bucket, "")
@@ -83,6 +84,9 @@ def _run_side(
     lines = normalize_cp_stdout(result.stdout, bucket=bucket)
     remaining = remaining_keys(s3_client, bucket)
     tree = capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None
+    # The source side (empty for downloads); an mv upload must empty it, which
+    # only a live src/ capture can catch.
+    src_tree = capture_local_tree(str(workdir / "src"))
     if scenario.mtime_key is not None:
         key, rel_path = scenario.mtime_key
         last_modified = s3_client.head_object(Bucket=bucket, Key=key)["LastModified"]
@@ -90,7 +94,7 @@ def _run_side(
         assert abs(stamped - last_modified.timestamp()) < 2, (
             f"[{scenario.name}] CRT download mtime {stamped} != LastModified {last_modified}"
         )
-    return result, lines, remaining, tree
+    return result, lines, remaining, tree, src_tree
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
@@ -102,7 +106,7 @@ def test_crt_parity(
     crt_config_file: str,
 ) -> None:
     try:
-        aws_result, aws_lines, aws_remaining, aws_tree = _run_side(
+        aws_result, aws_lines, aws_remaining, aws_tree, aws_src = _run_side(
             run_aws_subprocess_with_stdin,
             scenario,
             bucket,
@@ -110,7 +114,7 @@ def test_crt_parity(
             tmp_path / "aws",
             crt_config_file,
         )
-        our_result, our_lines, our_remaining, our_tree = _run_side(
+        our_result, our_lines, our_remaining, our_tree, our_src = _run_side(
             run_cli_subprocess_with_stdin,
             scenario,
             bucket,
@@ -138,6 +142,10 @@ def test_crt_parity(
         assert our_tree == aws_tree, (
             f"[{scenario.name}] local end-state parity broken under CRT:\n"
             f"  ours: {our_tree!r}\n  aws:  {aws_tree!r}"
+        )
+        assert our_src == aws_src, (
+            f"[{scenario.name}] local source-tree parity broken under CRT:\n"
+            f"  ours: {our_src!r}\n  aws:  {aws_src!r}"
         )
         assert_stderr_tokens(
             scenario.expected_stderr_tokens_ours,

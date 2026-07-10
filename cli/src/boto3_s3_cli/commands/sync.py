@@ -42,8 +42,8 @@ class SyncCommand(Command):
         SSE-C pairings 252, and an S3 Express directory bucket on either
         side 252 ("Cannot use sync command with a directory bucket.") - all
         before any S3 client exists. A missing local source exits 255; the
-        ``--exclude`` / ``--include`` patterns compile once against the source
-        root and apply to both sides (sync.md section 1).
+        ``--exclude`` / ``--include`` patterns compile once and apply to both
+        sides (rootless anchoring; sync.md section 1).
         """
         head = transferargs.classify_paths(args, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency

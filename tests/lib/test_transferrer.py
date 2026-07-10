@@ -952,6 +952,44 @@ class TestMove:
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
+    def test_post_copy_tagging_and_rollback_both_fail_succeeds(self) -> None:
+        # aws parity: when the post-copy PutObjectTagging fails and the rollback
+        # DeleteObject also fails, aws-cli lets the delete error escape the done
+        # callback (swallowed) without flipping the future - the transfer is a
+        # success. We mirror that: the mv's source delete then proceeds.
+        big = "v" * 3000
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            _client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+            {},  # mv source-side DeleteObject
+        ]
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
+        )
+        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        # The source delete proceeds - the transfer is recorded as a success.
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
+        assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert (transferrer.succeeded, transferrer.failed) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
     def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
         client, calls = make_recording_client([])
         results: list[OpResult] = []
@@ -1164,9 +1202,12 @@ class TestStreams:
             dest_bucket="bucket",
             dest_key="streaming.txt",
         )
-        calls, _, _, transferrer = _run(TransferType.UPLOAD, [item], [{}])
+        calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
+        # The provided size reaches the future (aws ProvideSizeSubscriber) and
+        # SUCCEEDED reports it, unlike the size-less streaming upload above.
+        assert results[0].bytes_transferred == 4
 
     def test_stream_download_probes_then_writes(self) -> None:
         sink = _OpenSink()
@@ -1275,8 +1316,6 @@ class TestPublicSurface:
         # the engine pair plus the SDK-floor probes (--no-overwrite, section 7;
         # copy_props=ALL, section 4). A symbol added or dropped must be a
         # deliberate __all__ / docs decision.
-        from boto3_s3 import transfer
-
         assert set(transfer.__all__) == {
             "TransferItem",
             "Transferrer",
@@ -1396,6 +1435,19 @@ class TestAnnotationsCopySupport:
             options={"copy_props": CopyPropsMode.ALL},
         )
 
+    def test_metadata_directive_disables_the_all_gate_on_old_botocore(self) -> None:
+        # An explicit metadata_directive disables the copy-props chain entirely
+        # (aws-cli), so ALL never reaches the annotations path - the gate must
+        # not refuse the combination for a feature that won't run. aws-cli
+        # accepts `cp ... --metadata-directive REPLACE --copy-props all` here.
+        client = model_only_client(set(), member="AnnotationDirective")
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL, "metadata_directive": "REPLACE"},
+        )
+
     def test_other_modes_stay_usable_on_old_botocore(self) -> None:
         # EXCLUDE degrades silently below the annotations model; construction
         # must not gate the default mode.
@@ -1414,3 +1466,17 @@ class TestAnnotationsCopySupport:
             options=cast(TransferOptions, {"copy_props": None}),
         )
         assert transferrer._copy_props is CopyPropsMode.DEFAULT
+
+    def test_invalid_copy_props_value_raises_validation_error(self) -> None:
+        # A bad copy_props string fails the enum conversion; the constructor
+        # translates it to a Boto3S3Error-family ValidationError rather than
+        # leaking the enum's raw ValueError past the public API
+        # (docs/exceptions.md). The CLI never reaches here (choices-validated).
+        client = self._capable_client()
+        with pytest.raises(ValidationError, match="copy_props"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"copy_props": "al"}),
+            )

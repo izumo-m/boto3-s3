@@ -8,8 +8,8 @@ import sys
 # Pure-Python names only on the parse path (import contract, docs/imports.md);
 # S3 / S3Storage reach botocore and are imported in run() instead.
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3_cli import output, usage
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli import clientfactory, globalargs, output, usage
+from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
 
 class MbCommand(Command):
@@ -39,6 +39,13 @@ class MbCommand(Command):
         region) takes precedence over a path usage error - we build it first to
         match (253/255 wins over the 252).
         """
+        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # (252), the --endpoint-url scheme check (252), and the positional
+        # paramfile expansion (252) all precede the client build - they beat a
+        # bad --profile (255) the way aws's parse-time load-cli-arg does.
+        globalargs.validate_query(args)
+        clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="path", operation="mb")
         # Deferred: the library's S3 entry reaches botocore; --help / --version /
         # pre-subcommand usage errors stay SDK-free (import contract,
         # docs/imports.md). A subcommand's run() may load the SDK.
@@ -63,15 +70,18 @@ class MbCommand(Command):
             message = usage.invalid_bucket_name_message()
             sys.stderr.write(output.format_make_bucket_failed(target, message) + "\n")
             return 1
-        if bucket_part.endswith("--x-s3"):
-            # botocore is_s3express_bucket; aws rejects before any API work.
-            raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
 
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
         # ValidationError from S3Storage.validate -> rc 252, matching aws (the
         # check is deferred from the now non-raising construction).
         storage = S3Storage(target, client=client)
         storage.validate()
+        if storage.bucket.endswith("--x-s3"):
+            # botocore is_s3express_bucket on the ARN-aware bucket, ordered like
+            # aws (split_s3_bucket_key's ARN rejection runs first, inside
+            # validate); a slash-form accesspoint ARN whose name ends --x-s3 is
+            # caught here where a naive partition on the first "/" would miss it.
+            raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
         try:
             S3().mb(storage, tags=tags)

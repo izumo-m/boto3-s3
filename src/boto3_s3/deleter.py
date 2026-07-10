@@ -38,7 +38,11 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from mypy_boto3_s3 import S3Client
-    from mypy_boto3_s3.type_defs import ErrorTypeDef, ObjectIdentifierTypeDef
+    from mypy_boto3_s3.type_defs import (
+        DeleteObjectsOutputTypeDef,
+        ErrorTypeDef,
+        ObjectIdentifierTypeDef,
+    )
 
     from boto3_s3.types import FileInfo, ResultCallback
 
@@ -274,7 +278,7 @@ class S3Deleter:
         for info in batch:
             self._record(info, failures.get(info.key), deleted.get(info.key))
 
-    def _delete_slots(self, response: Any) -> dict[str, dict[str, Any]]:
+    def _delete_slots(self, response: DeleteObjectsOutputTypeDef) -> dict[str, dict[str, Any]]:
         """Per-key DeleteObject-shaped slots from a non-Quiet DeleteObjects response.
 
         capture_response reads ``Deleted[]`` (present only with ``Quiet=False``)
@@ -289,7 +293,7 @@ class S3Deleter:
             if key is None:
                 continue
             slot: dict[str, Any] = {k: v for k, v in entry.items() if k != "Key"}
-            if charged is not None:
+            if charged:
                 slot["RequestCharged"] = charged
             slots[key] = slot
         return slots

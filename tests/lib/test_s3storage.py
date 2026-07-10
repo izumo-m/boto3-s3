@@ -571,6 +571,22 @@ class TestScanErrorMapping:
             with s3_errors(operation="ls"):
                 raise KeyboardInterrupt
 
+    def test_object_scan_error_carries_no_fixed_operation(self) -> None:
+        # The recursive object listing backs ls, rm, cp, mv, and sync source
+        # enumeration alike, so the calling subcommand is unknown here: a scan
+        # failure carries operation=None rather than mislabelling the others "ls".
+        error = ClientError(
+            {
+                "Error": {"Code": "AccessDenied", "Message": "denied"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            "ListObjectsV2",
+        )
+        storage, _ = _storage(error=error)
+        with pytest.raises(AccessDeniedError) as exc_info:
+            list(storage.scan())
+        assert exc_info.value.operation is None
+
 
 class _DeleteRecordingClient:
     def __init__(self, error: Exception | None = None) -> None:
@@ -643,7 +659,7 @@ class TestArnBuckets:
 
     The whole access-point ARN - slash-separated name included - is the
     bucket; only what follows it is the key. Object Lambda and Outposts
-    *bucket* ARNs are rejected by :meth:`S3Storage.validate` (deferred from the
+    *bucket* ARNs are rejected by ``S3Storage.validate`` (deferred from the
     permissive construction) the way ``aws s3`` rejects them at parse time
     (ParamValidation -> rc 252, verified against aws-cli 2.34).
 

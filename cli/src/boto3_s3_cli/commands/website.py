@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import usage
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli import clientfactory, globalargs, usage
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_option_paramfile,
+    expand_positional_paramfile,
+)
 
 
 class WebsiteCommand(Command):
@@ -31,6 +36,15 @@ class WebsiteCommand(Command):
         ClientError-cause mapping; botocore's client-side parameter
         validation (empty bucket) is 252; client construction is 253.
         """
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # compile (252) leads, then the --endpoint-url scheme check (252), then
+        # the paramfile expansions (252) - the positional path and both document
+        # options are all expanded at parse time - before the request is built.
+        globalargs.validate_query(args)
+        clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="paths", operation="website")
+        expand_option_paramfile(args, "index_document", operation="website")
+        expand_option_paramfile(args, "error_document", operation="website")
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay
         # SDK-free (import contract, docs/imports.md).

@@ -8,6 +8,7 @@ operations, and ``StdioStorage``'s mode-driven choice of stdin / stdout.
 from __future__ import annotations
 
 import io
+import tempfile
 
 import pytest
 
@@ -61,6 +62,36 @@ class TestTextAdapter:
     def test_custom_encoding(self) -> None:
         reader = IOStorage(io.StringIO("café"), encoding="latin-1").open("k", "rb")
         assert reader.read() == "café".encode("latin-1")
+
+    def test_stateful_codec_streams_as_one_encoder_across_chunks(self) -> None:
+        # utf-16 prefixes a BOM and fixes its endianness once. A per-chunk
+        # str.encode would re-emit the BOM on every read and corrupt the upload;
+        # one incremental encoder spans every read, so the chunked bytes equal a
+        # single encode of the whole string (BOM once) and round-trip.
+        text = "a" * 70000  # exceeds _READ_CHUNK, so read() loops over chunks
+        reader = IOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
+        data = b""
+        while chunk := reader.read(8192):
+            data += chunk
+        assert data == text.encode("utf-16")
+        assert data.decode("utf-16") == text
+
+    def test_stateful_codec_read_to_eof_matches_one_encode(self) -> None:
+        # The amt=None path (read to EOF) is the same single-encoder stream.
+        text = "smørrebrød"
+        reader = IOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
+        assert reader.read() == text.encode("utf-16")
+
+    def test_non_textiobase_text_stream_is_wrapped(self) -> None:
+        # The constructor accepts any IO[str], but a text-mode
+        # SpooledTemporaryFile (like codecs.open's StreamReaderWriter) reads
+        # str without deriving from io.TextIOBase. Recognized by its encoding
+        # attribute, it is still adapted to bytes rather than passed through raw.
+        with tempfile.SpooledTemporaryFile(max_size=1024, mode="w+", encoding="utf-8") as sp:
+            sp.write("café")
+            sp.seek(0)
+            reader = IOStorage(sp).open("k", "rb")
+            assert reader.read() == "café".encode()
 
     def test_write_adapter_does_not_close_the_caller_stream(self) -> None:
         sink = io.StringIO()

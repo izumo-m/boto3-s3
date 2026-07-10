@@ -14,8 +14,9 @@ The record shape::
 Destructive commands (``rm``) additionally record ``remaining_keys`` - the
 bucket's end state after the aws run, with the seeded layout as the start
 state - because their stdout is normalized *sorted* (delete-line order is
-nondeterministic in aws); the end state pins what the sort relaxes. ``ls``
-goldens predate the field and omit it (loaded as ``None``, not compared).
+nondeterministic in aws); the end state pins what the sort relaxes. The ``ls``
+capture passes no ``remaining_keys``, so it persists as ``null`` and is not
+compared.
 Bucket-lifecycle commands (``mb`` / ``rb``) further record ``bucket_exists``
 - whether the scenario bucket exists after the run; ``remaining_keys`` is
 ``None`` when it does not (a bucket that is gone has no key listing).
@@ -37,6 +38,7 @@ import difflib
 import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -101,6 +103,37 @@ def detect_aws_version() -> str:
         return "unknown"
     proc = subprocess.run([aws, "--version"], check=False, capture_output=True, timeout=15.0)
     return proc.stdout.decode(errors="replace").strip() or "unknown"
+
+
+# The version inside an ``aws --version`` line ("aws-cli/2.35.18 Python/... ...").
+_AWS_VERSION_RE = re.compile(r"aws-cli/(\d+(?:\.\d+)*)")
+
+_VENDORED_AWSCLI_INIT = (
+    Path(__file__).resolve().parents[2] / "vendor" / "aws-cli" / "awscli" / "__init__.py"
+)
+
+
+def parse_aws_cli_version(version_line: str) -> str | None:
+    """Extract the ``2.x.y`` version from an ``aws --version`` line, or None."""
+    match = _AWS_VERSION_RE.search(version_line)
+    return match.group(1) if match else None
+
+
+@functools.lru_cache(maxsize=1)
+def pinned_aws_version() -> str | None:
+    """The aws-cli version the goldens are pinned to (the vendored submodule).
+
+    Read from the vendored ``awscli/__init__.py`` ``__version__`` - the same
+    source ``scripts/install-awscli.sh`` derives its install target from, so
+    the live ``aws`` and the goldens track one reference. ``None`` when the
+    submodule is not checked out.
+    """
+    try:
+        text = _VENDORED_AWSCLI_INIT.read_text()
+    except OSError:
+        return None
+    match = re.search(r"__version__ = '([0-9][^']*)'", text)
+    return match.group(1) if match else None
 
 
 def _dump_golden(path: Path, golden: Golden) -> Path:
@@ -180,8 +213,9 @@ def assert_matches_golden(
     ``side="ours"`` is the functional replay (boto3-s3 vs recorded aws-cli);
     ``side="aws"`` is the e2e drift check (live aws-cli vs its own recording).
     rc is always compared (exit-code charter, docs/overview.md section 3);
-    *compare_stdout* only relaxes the stdout comparison. *remaining_keys* and
-    *bucket_exists* are compared only when the golden recorded them.
+    *compare_stdout* only relaxes the stdout comparison. Every end-state
+    argument (*remaining_keys*, *bucket_exists*, *local_tree*, *head_fields*,
+    *src_tree*) is compared only when the golden recorded it.
     """
     problems: list[str] = []
     if rc != golden.rc:

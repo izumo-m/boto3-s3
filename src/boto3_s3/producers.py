@@ -33,6 +33,7 @@ from boto3_s3.types import (
     CaseConflictMode,
     FileFilter,
     FileInfo,
+    LocalScanOptions,
     S3FileInfo,
     ScanOptions,
     TransferOptions,
@@ -57,21 +58,34 @@ def walk_source_scan_options(
 
     Built from the storage's own ``default_scan_options`` - which seeds the
     source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
-    ``detect_symlink_loops``, a custom backend's own knobs, both configured on the
-    constructor) - with only the operation-inherent knobs overlaid (``recursive`` /
+    ``detect_symlink_loops`` / ``return_directories`` / ``return_symlinks``, a
+    custom backend's own knobs, all configured on the constructor) - with only the
+    operation-inherent knobs overlaid (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
     :func:`scan_s3_source`).
+
+    The transfer / sync / case-gate lanes move files only, so the local
+    library-extension scan knobs ``return_directories`` / ``return_symlinks`` are
+    pinned off here: a ``DIRECTORY`` record (the walk root leads at
+    ``compare_key == ""``) or an unfollowed symlink leaf must not enter the
+    transfer stream, where it would fail mid-flight (a directory opens with
+    ``IsADirectoryError``). Only the ``LocalStorage`` knobs are forced - the base
+    ``ScanOptions`` an S3 / custom backend returns carries no such fields. The
+    scan API an application drives directly still honors the ``return_*`` config.
     """
-    return replace(
+    options = replace(
         storage.default_scan_options(),
         recursive=recursive,
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
     )
+    if isinstance(options, LocalScanOptions):
+        options = replace(options, return_directories=False, return_symlinks=False)
+    return options
 
 
 # S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
@@ -670,10 +684,12 @@ def open_upload_items(
     does not ``open`` the source (no side effect on the backend).
 
     A single source the backend cannot resolve (``get_fileinfo`` -> ``None``)
-    raises like a missing local source - ``NotFoundError``, aws's wording
-    (rc 255: no ``ClientError`` cause) - rather than transferring nothing. A
-    recursive source is an enumeration: an empty ``scan`` yields zero items
-    (rc 0), matching an empty S3 prefix listing.
+    raises the same ``NotFoundError`` a missing local source does (aws's wording,
+    no ``ClientError`` cause) - rather than transferring nothing - but from inside
+    the generator (in-pipeline, as the items are drained), not a pre-flight check,
+    so a CLI-type consumer maps it to a fatal error (rc 1), not the pre-check's
+    rc 255. A recursive source is an enumeration: an empty ``scan`` yields zero
+    items (rc 0), matching an empty S3 prefix listing.
     """
     if plan.dir_op:
         # The recursive listing filters inside the scan (the scan_pages contract),
@@ -842,6 +858,7 @@ def cp_case_gate(
     options: TransferOptions,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
+    operation: str,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -876,7 +893,7 @@ def cp_case_gate(
             )
         )
     }
-    return CaseConflictGate(mode, dest_keys)
+    return CaseConflictGate(mode, dest_keys, operation=operation)
 
 
 def sync_case_gate(
@@ -1006,6 +1023,3 @@ def sync_transfer_item(
     if item is not None:
         item.dest_info = pair.dest
     return item
-
-
-# -- deletion ---------------------------------------------------------

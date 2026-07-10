@@ -24,10 +24,12 @@ from boto3_s3_cli.commands.base import Command, Context
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
-# docs/masking.md). The library attaches no handler on import (NullHandler
-# discipline). urllib3 is deliberately omitted: it logs no credentials, only
+# docs/masking.md). The library attaches no handler on import. "boto3_s3_cli"
+# is the counterpart of aws-cli's own "awscli" logger (clidriver._set_logging),
+# so the CLI's own debug lines (runtimeconfig's alias resolution) surface too.
+# urllib3 is deliberately omitted: it logs no credentials, only
 # connection-pool noise.
-_DEBUG_LOGGERS = ("boto3_s3", "botocore", "boto3", "s3transfer")
+_DEBUG_LOGGERS = ("boto3_s3", "boto3_s3_cli", "botocore", "boto3", "s3transfer")
 
 # aws-cli v2 exit-code conventions (awscli/constants.py). The
 # exit-code charter (docs/overview.md section 3) requires matching them; see
@@ -213,8 +215,18 @@ def _enable_debug_logging() -> None:
     # stream-logger setup. mask_secrets defaults to True, so credentials in the
     # botocore DEBUG output (signed headers, signatures, tokens) are redacted.
     from boto3_s3 import set_stream_logger
+    from boto3_s3.masking import SecretMaskingFilter
 
     for name in _DEBUG_LOGGERS:
+        # Idempotent, like aws's set_stream_logger (it removes its named
+        # handler before re-adding): the on-partial trial dispatch can reach
+        # here before the prompt re-dispatches, and the library's
+        # boto3-faithful set_stream_logger appends unconditionally - drop the
+        # previously attached masking handlers first or every line doubles.
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            if any(isinstance(f, SecretMaskingFilter) for f in handler.filters):
+                logger.removeHandler(handler)
         set_stream_logger(name, logging.DEBUG, stream=sys.stderr, mask_secrets=True)
 
 
@@ -265,8 +277,8 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     from botocore.exceptions import ClientError, NoCredentialsError, NoRegionError
 
     # Only NoCredentials / NoRegion are 253 (aws errorhandler.py dedicated
-    # handlers). PartialCredentialsError has no aws handler -> GeneralException
-    # -> 255, so it must fall through here, not map to 253.
+    # handlers). PartialCredentialsError has no aws handler ->
+    # GeneralExceptionHandler -> 255, so it must fall through here, not map to 253.
     if isinstance(exc, (NoCredentialsError, NoRegionError)):
         return _CONFIGURATION_ERROR_RC
     if isinstance(exc, ClientError):
@@ -303,7 +315,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     if mode == "on-partial":
         # Run the command as-is; only a usage error (rc 252, which aws-cli and we
         # both raise before any S3 call) falls back to prompting (aws-cli's
-        # on-partial branch, clidriver.py:277). The usage message is silenced on
+        # on-partial branch in clidriver's _do_main). The usage message is silenced on
         # this trial so the prompt isn't buried under it (aws's
         # SilenceParamValidationMsgErrorHandler).
         rc = _dispatch(raw, ctx, suppress_usage_errors=True)
@@ -362,7 +374,7 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     return _dispatch(completed, ctx)
 
 
-def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bool = False) -> int:
+def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = False) -> int:
     """Parse ``argv`` in two stages and run the matched subcommand.
 
     Stage 1 reads the globals and the subcommand name off the stub tree - no
@@ -378,7 +390,7 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
     ``on-partial`` trial run so the fall-back prompt isn't preceded by the error
     the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
-    errorhandler.py:250, injected on the on-partial path at clidriver.py:281).
+    errorhandler.py:250, injected on the on-partial path in clidriver's ``_do_main``).
     argparse writes its own message inside ``parse_*``, so the
     parses (and only the parses - they are instant, no live output to lose) are
     wrapped to discard it; the command itself still runs with stderr live.

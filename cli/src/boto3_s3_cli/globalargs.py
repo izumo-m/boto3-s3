@@ -20,6 +20,10 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+# Pure-Python name (exceptions module) - safe on the parse path (import
+# contract, docs/imports.md).
+from boto3_s3 import ValidationError
+
 # Mirrored from aws-cli (awscli/data/cli.json) so an invalid value
 # still errors the same way before the flag is ignored (option-handling section 2).
 _OUTPUT_CHOICES = ["json", "text", "table", "yaml", "yaml-stream", "off"]
@@ -35,6 +39,31 @@ _BINARY_FORMAT_CHOICES = ["base64", "raw-in-base64-out"]
 # the two CLIs would pick *different* profiles when both env vars are set.
 # The single home of that ordering; every profile read goes through it.
 PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
+
+
+def validate_query(args: argparse.Namespace) -> None:
+    """Reject an invalid ``--query`` JMESPath with aws's wording (rc 252).
+
+    aws-cli compiles ``--query`` at ``top-level-args-parsed`` (its globalargs
+    ``_resolve_query``) - before it resolves ``--endpoint-url`` and before any
+    paramfile expansion - so a bad expression is its ParamValidation 252 ahead
+    of every other head check (measured against aws 2.35.18: it beats a bad
+    ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
+    ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
+    a botocore dependency that is always importable and pulls in no SDK, and it
+    is loaded only when ``--query`` is actually present, so the parse path stays
+    SDK-free (import contract, docs/imports.md).
+    """
+    value = getattr(args, "query", None)
+    if value is None:
+        return
+    import jmespath
+    from jmespath.exceptions import JMESPathError
+
+    try:
+        jmespath.compile(value)
+    except JMESPathError as exc:
+        raise ValidationError(f"Bad value for --query {value}: {exc}") from exc
 
 
 def _pkg_version_or_unknown(pkg: str) -> str:
@@ -163,7 +192,6 @@ def add_common_arguments(
     parser.add_argument("--version", action=_VersionAction)
 
     # Opt-in interactive UI (section 3, the "autoprompt" extra); the dispatcher
-    # resolves it from raw argv before parsing.
-    parser.add_argument(
-        "--cli-auto-prompt", action="store_true", default=flag, help=argparse.SUPPRESS
-    )
+    # resolves it from raw argv before parsing. Listed in --help like its
+    # --no-cli-auto-prompt counterpart (aws shows both).
+    parser.add_argument("--cli-auto-prompt", action="store_true", default=flag)

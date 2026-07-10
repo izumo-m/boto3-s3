@@ -129,7 +129,9 @@ class TestBatching:
         assert _keys(fake.calls) == [["a", "b", "c"]]
         assert fake.calls[0]["Bucket"] == "bucket"
 
-    def test_quiet_is_always_true(self) -> None:
+    def test_quiet_true_by_default(self) -> None:
+        # Default path (no capture_response): the batch is sent Quiet so the
+        # response lists failures only, and every submitted key is synthesized.
         fake = _FakeS3Client()
         deleter = _deleter(fake)
         deleter.submit(_info("a"))
@@ -440,6 +442,9 @@ class TestCaptureSlots:
         deleter.submit(_info("prefix/a.txt"))
         deleter.submit(_info("prefix/b.txt"))
         deleter.close()
+        # capture_response flips Quiet off so the response carries Deleted[];
+        # without that the per-key slots below could not be reconstructed.
+        assert fake.calls[0]["Delete"]["Quiet"] is False
         slots = [(r.extra_info or {}).get("delete") for r in results]
         assert slots[0] == {
             "DeleteMarker": True,

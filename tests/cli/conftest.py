@@ -9,7 +9,7 @@ import pytest
 def _isolate_auto_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin ``--cli-auto-prompt`` off so a developer's config can't sway the suite.
 
-    ``cli.main`` now resolves the auto-prompt mode from ``AWS_CLI_AUTO_PROMPT`` /
+    ``cli.main`` resolves the auto-prompt mode from ``AWS_CLI_AUTO_PROMPT`` /
     the profile ``cli_auto_prompt`` on every invocation (autoprompt.md section 5). A
     machine with ``cli_auto_prompt = on`` in ``~/.aws/config`` would otherwise
     make ordinary ``cli.main`` calls try to prompt. Setting the env var off

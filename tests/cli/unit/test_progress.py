@@ -199,8 +199,8 @@ class TestCarriageReturnProtocol:
         # thread, so unthrottled chunk-rate repaints would flood both.
         clock = iter([0.0, 1.0, 1.05, 2.0])
         monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
-        with TransferPrinter() as printer:  # start consumes 0.0
-            printer.on_progress(_progress("a.txt", 1024, 4096))  # t=1.0 -> paints
+        with TransferPrinter() as printer:  # construction reads no clock
+            printer.on_progress(_progress("a.txt", 1024, 4096))  # anchors 0.0, paints t=1.0
             printer.on_progress(_progress("a.txt", 2048, 4096))  # t=1.05 -> floored
             printer.on_progress(_progress("a.txt", 4096, 4096))  # t=2.0 -> paints
         assert capsys.readouterr().out.count("Completed") == 2
@@ -210,8 +210,8 @@ class TestCarriageReturnProtocol:
     ) -> None:
         clock = iter([0.0, 1.0, 2.0, 100.0])
         monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
-        with TransferPrinter(frequency=60) as printer:  # start consumes 0.0
-            printer.on_progress(_progress("a.txt", 0, 4096))  # queued, no paint
+        with TransferPrinter(frequency=60) as printer:  # construction reads no clock
+            printer.on_progress(_progress("a.txt", 0, 4096))  # queued: anchors 0.0, no paint
             printer.on_progress(_progress("a.txt", 1024, 4096))  # t=1.0 -> paints (first)
             printer.on_progress(_progress("a.txt", 2048, 4096))  # t=2.0 -> throttled
             printer.on_progress(_progress("a.txt", 4096, 4096))  # t=100 -> paints
@@ -248,3 +248,93 @@ class TestPrinterThread:
         # the printer as a whole, deliberately.
         assert capsys.readouterr().err == ""
         assert (printer.failed, printer.warned) == (1, 0)
+
+    def test_unencodable_key_does_not_silence_the_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's uni_print re-encodes with errors='replace' when the console
+        # codepage cannot encode a key (a non-ASCII key on a cp932/ascii
+        # stream), so one unencodable line does not kill the printer. A broad
+        # "dead stream" classification would silence every following line.
+        class _AsciiStream:
+            encoding = "ascii"
+
+            def __init__(self) -> None:
+                self.written: list[str] = []
+
+            def write(self, text: str) -> int:
+                text.encode("ascii")  # raises UnicodeEncodeError on non-ASCII
+                self.written.append(text)
+                return len(text)
+
+            def flush(self) -> None:
+                pass
+
+        stream = _AsciiStream()
+        monkeypatch.setattr(sys, "stdout", stream)
+        with TransferPrinter() as printer:
+            printer.on_result(_result(OpOutcome.SUCCEEDED, src="s3://b/名前.txt", dest="s3://b/k"))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, src="s3://b/next", dest="s3://b/k2"))
+        assert not printer._output_dead
+        out = "".join(stream.written)
+        # the unencodable key was '?'-replaced, and the following line survived.
+        assert "upload: s3://b/??.txt to s3://b/k\n" in out
+        assert "upload: s3://b/next to s3://b/k2\n" in out
+
+
+class TestProgressAccounting:
+    def test_speed_anchors_at_first_progress_not_construction(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws anchors the transfer-speed denominator at the first queued result,
+        # not at printer construction (results.py _record_queued_result).
+        # Construction reads no clock; the first on_progress sets the anchor, and
+        # the speed uses (paint_time - first_progress_time).
+        clock = iter([10.0, 11.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        printer = TransferPrinter()
+        assert printer._start is None  # construction did not anchor
+        with printer:
+            printer.on_progress(_progress("a.txt", 0, 1024))  # queued at t=10 -> anchors
+            printer.on_progress(_progress("a.txt", 1024, 1024))  # t=11 -> paints, 1.0s elapsed
+        assert printer._start == 10.0
+        # 1024 bytes over 1.0s -> 1.0 KiB/s.
+        statement = capsys.readouterr().out.split("\r", 1)[0]
+        assert "(1.0 KiB/s)" in statement
+
+    def test_run_ending_in_skip_clears_residual_meter(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A run whose tail records are SKIPPED (cp/mv --no-overwrite 412 skips
+        # paint nothing and do not reset the padding) would leave the last
+        # \r-terminated meter on screen. finish() blots it out with a blank
+        # padded line ending in \r (aws _clear_progress_if_no_more_expected...).
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 10))  # queued
+            printer.on_progress(_progress("b", 0, 10))  # queued
+            printer.on_progress(_progress("a", 5, 10))  # paints a meter
+            printer.on_result(_result(OpOutcome.SKIPPED, key="a"))
+            printer.on_result(_result(OpOutcome.SKIPPED, key="b"))
+        segments = capsys.readouterr().out.split("\r")
+        assert segments[-1] == ""  # trailing \r
+        # the clear line is non-empty whitespace of the meter's width.
+        assert segments[-2] != "" and segments[-2].strip() == ""
+        assert segments[-3].startswith("Completed 5 Bytes/20 Bytes")
+        assert len(segments[-2]) == len(segments[-3])
+
+    def test_failed_backfills_untransferred_remainder(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws adds a failed file's untransferred remainder to the meter
+        # (bytes_failed_to_transfer) so byte progress still reaches the expected
+        # total. a failed at 3/10 contributes its missing 7 bytes.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 10))  # queued
+            printer.on_progress(_progress("b", 0, 10))  # queued
+            printer.on_progress(_progress("a", 3, 10))  # a partway
+            printer.on_progress(_progress("b", 10, 10))  # b done
+            printer.on_result(_result(OpOutcome.FAILED, key="a", error=RuntimeError("boom")))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="b"))
+        capsys.readouterr()
+        assert printer._done_bytes == printer._expected_bytes == 20
+        assert printer._inflight == {}

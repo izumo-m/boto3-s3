@@ -15,7 +15,7 @@ no field for:
   ``target_throughput``). The classic engine's cap stays ``max_bandwidth``.
 - ``should_stream`` / ``disk_throughput`` / ``direct_io`` - aws-cli's CRT
   file-I/O options. The pip ``s3transfer`` CRT client cannot apply them yet
-  (no ``fio_options`` parameter as of 0.17); they are accepted now and passed
+  (no ``fio_options`` parameter as of 0.19); they are accepted now and passed
   through automatically once ``create_s3_crt_client`` grows support.
 
 The extras are plain attributes (not part of the base ``DEFAULTS`` sentinel
@@ -38,8 +38,10 @@ __all__ = ["TransferConfig"]
 # unconditionally raises TypeError on the floor (breaking every cp/mv/sync,
 # even classic with no awscrt), so probe the base signature once and, when
 # absent, keep the value as a plain attribute instead - the engine reads it via
-# getattr (transfer.py), and the floor has no awscrt so it resolves to classic
-# regardless. Drop this shim once the boto3 floor is raised past 1.33.
+# getattr (transfer.py). On the floor the s3transfer (0.6.2) has no CRT surface,
+# so 'auto' falls to classic while an explicit 'crt' is rejected by crtsupport
+# (not silently downgraded). Drop this shim once the boto3 floor is raised
+# past 1.33.
 _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
     "preferred_transfer_client" in inspect.signature(Boto3TransferConfig.__init__).parameters
 )

@@ -17,7 +17,8 @@ client (docs/crt.md):
 - **endpoint**: boto3 always passes ``endpoint_url=None`` to the serializer,
   which breaks custom endpoints (MinIO et al). We derive the endpoint from
   ``client.meta.endpoint_url`` - kept for custom hosts, ``None`` for the AWS
-  default form so botocore re-resolves per request exactly like boto3.
+  default form (recognized across all botocore partitions, not just the two
+  commercial suffixes) so botocore re-resolves per request exactly like boto3.
   ``use_ssl`` follows the custom endpoint's scheme (aws-cli only honors an
   ``--endpoint-url`` argument here; deriving from the resolved client also
   covers ``AWS_ENDPOINT_URL_S3``).
@@ -133,7 +134,7 @@ def is_optimized_for_system() -> bool:
     """awscrt's host-optimization probe; ``False`` without a usable awscrt.
 
     The aws-cli auto-resolution gate (aws-cli's ``TransferManagerFactory``): a
-    host the CRT is tuned for. Separate from :func:`should_use_crt` so the
+    host the CRT is tuned for. Separate from ``should_use_crt`` so the
     CLI can port the aws-cli decision tree primitive-by-primitive.
     """
     if not has_minimum_crt_version():
@@ -148,7 +149,7 @@ def acquire_process_lock() -> bool:
 
     The lock is process-global in ``s3transfer`` (stored and reused), so the
     CLI's auto-resolution claim and the library's later
-    :func:`create_crt_transfer_manager` acquisition return the same lock.
+    ``create_crt_transfer_manager`` acquisition return the same lock.
     """
     from s3transfer.crt import acquire_crt_s3_process_lock
 
@@ -355,16 +356,50 @@ def _validate_crt_transfer_config(config: Any) -> None:
         )
 
 
+_aws_dns_suffixes_cache: frozenset[str] | None = None
+
+
+def _aws_dns_suffixes() -> frozenset[str]:
+    """The host suffixes botocore resolves AWS's own endpoints under.
+
+    Collected once (memoized) from the installed botocore's endpoint data -
+    every partition's ``dnsSuffix`` plus its dualstack / fips variant suffixes:
+    ``aws`` (amazonaws.com, api.aws), ``aws-cn`` (amazonaws.com.cn), ``aws-us-gov``,
+    ``aws-eusc`` (amazonaws.eu), and the iso partitions (c2s.ic.gov,
+    sc2s.sgov.gov, cloud.adc-e.uk, csp.hci.ic.gov). A standard endpoint in any
+    of those partitions is recognized, not just the two commercial suffixes.
+    Any host outside this set - a custom host (MinIO, gateways), or a partition
+    newer than the installed botocore - is treated as custom and pinned.
+    """
+    global _aws_dns_suffixes_cache
+    if _aws_dns_suffixes_cache is None:
+        from botocore.loaders import create_loader
+
+        suffixes: set[str] = set()
+        data = create_loader().load_data("endpoints")
+        for partition in data["partitions"]:
+            suffixes.add(partition["dnsSuffix"])
+            for variant in partition.get("defaults", {}).get("variants", []):
+                suffix = variant.get("dnsSuffix")
+                if suffix:
+                    suffixes.add(suffix)
+        _aws_dns_suffixes_cache = frozenset(suffixes)
+    return _aws_dns_suffixes_cache
+
+
 def _derive_endpoint(client: S3Client) -> str | None:
     """Custom endpoints ride into the CRT wiring; the AWS default form stays None.
 
     ``None`` keeps boto3's behavior - botocore re-resolves the AWS endpoint
     per request - while a custom host (MinIO, gateways) must be pinned or the
-    CRT client would dial the real AWS endpoint.
+    CRT client would dial the real AWS endpoint. The default form is recognized
+    across every botocore partition (see `_aws_dns_suffixes`), so a standard
+    endpoint outside the two commercial suffixes is not mistaken for a custom
+    host and needlessly pinned.
     """
     endpoint = client.meta.endpoint_url
     host = urlsplit(endpoint).hostname or ""
-    if host.endswith(".amazonaws.com") or host.endswith(".amazonaws.com.cn"):
+    if any(host == suffix or host.endswith("." + suffix) for suffix in _aws_dns_suffixes()):
         return None
     return endpoint
 

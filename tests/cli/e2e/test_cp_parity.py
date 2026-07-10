@@ -7,9 +7,11 @@ wiped between the sides and at the end. Comparison covers the unconditional
 rc (exit-code charter, docs/overview.md section 3), the masked/sorted stdout, the
 bucket end state, the local destination tree, the probe object's HeadObject
 fields, and the live per-side download-mtime assertion. ``diff_only``
-scenarios (``--sse``, GLACIER storage class, negative page size) carry
-endpoint-relative outcomes: MinIO and real S3 answer differently, both CLIs
-always agree - so the rc comparison still holds and no golden is written.
+scenarios carry outcomes that are endpoint-relative (``--sse``, GLACIER
+storage class, negative page size: MinIO and real S3 answer differently) or
+runner-relative (an uncreatable recursive destination depends on the runner's
+privileges - root creates anything); both CLIs always agree, so the rc
+comparison still holds and no golden is written.
 """
 
 from __future__ import annotations

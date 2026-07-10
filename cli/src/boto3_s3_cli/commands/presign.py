@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory
+from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     expand_option_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -40,10 +41,13 @@ class PresignCommand(Command):
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the
-        # --endpoint-url scheme check (252) and the --expires-in paramfile
-        # expansion (252) both precede the bare int() coercion (255).
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # compile (252) leads, then the --endpoint-url scheme check (252), then
+        # the paramfile expansions (252, the positional path and --expires-in)
+        # precede the bare int() coercion (255).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "path", name="path", operation="presign")
         expand_option_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
         # Deferred: dispatch is the first point that needs the library's S3

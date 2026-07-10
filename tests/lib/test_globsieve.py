@@ -1,19 +1,20 @@
-"""Unit tests for :mod:`boto3_s3.globsieve`.
+"""Unit tests for `boto3_s3.globsieve`.
 
 Three layers:
 
   - **GlobPattern**: the dataclass and its factory shorthands.
-  - **Set matchers**: each :class:`SetMatcher` returns the right
+  - **Set matchers**: each `SetMatcher` returns the right
     membership answers in isolation.
   - **compile**: the macro-shape detector picks the right
-    :class:`Matcher` backend, and the result agrees with a reference
-    AWS-CLI-style :class:`Sequential` walk for any pattern list.
+    `Matcher` backend, and the result agrees with a reference
+    AWS-CLI-style `Sequential` walk for any pattern list.
 """
 
 from __future__ import annotations
 
 import ntpath
 import posixpath
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -44,7 +45,7 @@ class TestGlobPattern:
 
     def test_pattern_is_frozen(self) -> None:
         p = GlobPattern.include("*.txt")
-        with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             p.pattern = "*.log"  # type: ignore[misc]
 
     def test_pattern_equality(self) -> None:
@@ -330,10 +331,9 @@ class TestCompileSetMatcher:
 class TestSemanticEquivalence:
     """Specialized matchers must agree with a naive last-match-wins walk.
 
-    The naive walk uses :class:`Sequential` with one
-    :class:`UnionRegex` per pattern (forced) - i.e. the same logic as
-    the AWS CLI filter loop. We compare its verdict to the specialized
-    :func:`compile` result on a battery of keys.
+    The naive walk uses `Sequential` with one `UnionRegex` per pattern
+    (forced) - i.e. the same logic as the AWS CLI filter loop. We compare its
+    verdict to the specialized `compile` result on a battery of keys.
     """
 
     @staticmethod
@@ -517,6 +517,50 @@ class TestSeparatorNormalization:
         monkeypatch.setattr(globsieve.os, "sep", "/")
         m = globsieve.compile([GlobPattern.exclude("logs\\*.txt")])
         assert m.included("logs/app.txt") is True  # '\' literal -> no match -> visible
+
+
+class TestDriveRelative:
+    """A Windows drive-relative pattern (``C:foo``) anchors to the root the way
+    aws-cli's ``os.path.join`` merges it: ``ntpath.join('C:\\root', 'C:foo') ==
+    'C:\\root\\foo'``. globsieve strips the drive at compile and matches the
+    root-relative ``compare_key`` - not the never-match literal a raw ``C:foo``
+    would be. Windows-only; on POSIX the colon is a valid filename character and
+    the pattern stays literal.
+    """
+
+    def test_windows_drive_relative_folds_to_root_relative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
+        monkeypatch.setattr(globsieve.os, "sep", "\\")
+        m = globsieve.compile([GlobPattern.exclude("C:secret")])
+        assert m.included("secret") is False  # drive dropped -> excluded root-relative
+        assert m.included("keep") is True
+        # A drive-relative directory pattern folds its separator and anchors too.
+        sub = globsieve.compile([GlobPattern.exclude("C:logs\\*")])
+        assert sub.included("logs/app.txt") is False
+        assert sub.included("data/app.txt") is True
+
+    def test_windows_drive_absolute_still_routes_to_anchored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A drive-*absolute* C:/foo keeps its drive (is_anchored) and is not
+        # stripped - it routes to Anchored and matches the full key, unchanged.
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
+        monkeypatch.setattr(globsieve.os, "sep", "\\")
+        m = globsieve.compile([GlobPattern.exclude("C:/data/keep/*")])
+        assert isinstance(m, globsieve.Anchored)
+        assert m.included("keep/a", "C:/data/keep/a") is False
+
+    def test_posix_colon_pattern_stays_a_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # On POSIX splitdrive finds no drive (the colon is a valid character), so
+        # ``C:foo`` is a literal that matches only ``C:foo`` - never stripped to
+        # ``foo`` - aws-cli-faithful there too.
+        monkeypatch.setattr(globsieve.os, "path", posixpath)
+        monkeypatch.setattr(globsieve.os, "sep", "/")
+        m = globsieve.compile([GlobPattern.exclude("C:foo")])
+        assert m.included("C:foo") is False  # matched literally
+        assert m.included("foo") is True  # not stripped to a relative pattern
 
 
 class TestGlobFilter:

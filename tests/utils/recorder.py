@@ -29,13 +29,13 @@ import boto3
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
-#: Exhaustion events, drained after every test by the root conftest's
-#: ``_fail_on_recorder_exhaustion`` fixture. The AssertionError raised at the
-#: call site is enough on a direct call path, but on the transfer path it is
-#: raised on an s3transfer worker thread where ``translate_boto_error`` folds
-#: it into an ordinary FAILED item - a failure-expecting test would then pass
-#: for the wrong reason. The fixture makes an over-called recorder loud
-#: regardless of where the AssertionError ended up.
+# Exhaustion events, drained after every test by the root conftest's
+# ``_fail_on_recorder_exhaustion`` fixture. The AssertionError raised at the
+# call site is enough on a direct call path, but on the transfer path it is
+# raised on an s3transfer worker thread where ``translate_boto_error`` folds
+# it into an ordinary FAILED item - a failure-expecting test would then pass
+# for the wrong reason. The fixture makes an over-called recorder loud
+# regardless of where the AssertionError ended up.
 exhausted_calls: list[str] = []
 
 

@@ -246,6 +246,25 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
+        name="sync_download_exact_timestamps_size_only",
+        argv=(
+            "sync",
+            f"s3://{BUCKET_TOKEN}/d",
+            "dest",
+            "--exact-timestamps",
+            "--size-only",
+        ),
+        # Both flags given, same size, local older: --size-only alone would skip
+        # (equal size), but --exact-timestamps wins over --size-only, so the skew
+        # triggers a download. The tree shows the remote body, distinguishing the
+        # two strategies' order (aws registers SizeOnly before ExactTimestamps, so
+        # the latter is applied last and wins).
+        local_src={"dest/same.txt": b"zz\n"},
+        local_mtimes={"dest/same.txt": -_DAY},
+        seed={"d/same.txt": b"xx\n"},
+        capture_tree=True,
+    ),
+    CpScenario(
         name="sync_download_delete",
         argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--delete"),
         local_src={"dest/stale.txt": b"old\n", "dest/sub/stale2.txt": b"old2\n"},

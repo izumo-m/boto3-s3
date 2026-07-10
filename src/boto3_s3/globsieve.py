@@ -128,10 +128,35 @@ def is_anchored(pattern: str) -> bool:
     patterns go to :class:`Anchored` (matched against ``full_key``), the rest
     keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
     POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
-    UNC do (a drive-relative ``C:foo`` does not, exactly as ``os.path.join``
-    treats it).
+    UNC do. A drive-relative ``C:foo`` is not anchored: :func:`compile` instead
+    strips its drive and treats it as root-relative (see
+    :func:`_strip_drive_relative`), matching aws-cli's same-drive join.
     """
     return os.path.isabs(pattern)
+
+
+def _strip_drive_relative(pattern: str) -> str:
+    """Drop a Windows drive-relative prefix (``C:foo`` -> ``foo``) so it anchors to the root.
+
+    aws-cli joins each pattern onto the operation root with ``os.path.join``; on
+    Windows a *drive-relative* right-hand side sharing the root's drive merges as
+    a plain root-relative tail (``ntpath.join('C:\\root', 'C:foo') ==
+    'C:\\root\\foo'``). globsieve has no root at compile time, so it strips the
+    drive and treats the pattern as relative, so it matches the entry's
+    root-relative ``compare_key`` the same way aws-cli's join does. An absolute
+    ``C:/foo`` keeps its drive and routes to :class:`Anchored` (untouched here); a
+    driveless pattern is returned unchanged. Windows-only: on POSIX
+    ``os.path.splitdrive`` finds no drive, so ``C:foo`` stays a literal filename
+    (the colon is a valid character), aws-cli-faithful there too. A drive-relative
+    pattern naming a *different* drive than the source root is folded to the same
+    relative tail rather than kept drive-specific (aws-cli would keep it and match
+    nothing) - a rare Windows-only corner the compile-time engine cannot
+    distinguish without the root's drive.
+    """
+    drive, rest = os.path.splitdrive(pattern)
+    if drive and not is_anchored(pattern):
+        return rest
+    return pattern
 
 
 def _normalize_sep(pattern: str) -> str:
@@ -239,10 +264,13 @@ class Anchored:
     way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
     the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
     under ``C:\\data`` -> ``C:/data/*``), and the joined form is fnmatched against
-    ``full_key``. With no ``full_key`` - an S3 listing has none - a root-anchored
-    pattern can never match, exactly like aws-cli (its s3 paths carry no anchor).
+    ``full_key``. A root-anchored pattern never matches an S3 entry, by either of
+    two routes: a bare ``included`` call passes ``full_key=None`` and the anchored
+    item is skipped; ``GlobFilter`` passes the S3 key as ``full_key``, but an S3
+    key carries no drive / anchor, so the joined absolute pattern fnmatches
+    nothing. Both track aws-cli, whose s3 paths carry no anchor.
 
-    Items are ``(PatternKind, is_anchored, payload)``: ``payload`` is the raw
+    Items are ``(PatternKind, anchored, payload)``: ``payload`` is the raw
     pattern string when anchored, else a :class:`SetMatcher` for ``compare_key``.
     """
 
@@ -251,8 +279,8 @@ class Anchored:
 
     def included(self, compare_key: str, full_key: str | None = None) -> bool:
         included = True
-        for kind, is_anchored, payload in self.items:
-            if is_anchored:
+        for kind, anchored, payload in self.items:
+            if anchored:
                 if full_key is None:
                     continue
                 assert isinstance(payload, str)
@@ -406,10 +434,13 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
 
     # Fold the host separator to '/' once, up front: keys match in '/' space, so
     # a Windows '\' in a pattern must become a separator (relative patterns as
-    # well as the anchored ones, which the Anchored matcher already folds). No-op
-    # on POSIX. See _normalize_sep for the aws-cli parity rationale.
+    # well as the anchored ones, which the Anchored matcher already folds), and
+    # drop a drive-relative drive (C:foo -> foo) so it anchors to the root the way
+    # aws-cli's join does. No-op on POSIX. See _normalize_sep / _strip_drive_relative.
     if os.sep != "/":
-        pats = tuple(GlobPattern(p.kind, _normalize_sep(p.pattern)) for p in pats)
+        pats = tuple(
+            GlobPattern(p.kind, _strip_drive_relative(_normalize_sep(p.pattern))) for p in pats
+        )
 
     if any(is_anchored(p.pattern) for p in pats):
         return Anchored(

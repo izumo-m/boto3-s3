@@ -244,6 +244,28 @@ class TestBuildClient:
             clientfactory.build_client(_parse(["--profile", "boto3_s3_from_flag"]))
         assert "boto3_s3_from_flag" in str(excinfo.value)
 
+    def test_empty_profile_flag_falls_through_to_env_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's _handle_top_level_args binds --profile only under a truthy guard,
+        # so --profile "" is ignored and the env chain wins (aws then reaches the
+        # server, rc 254, not ProfileNotFound). resolve_profile matches: the empty
+        # flag falls through to AWS_PROFILE.
+        monkeypatch.setenv("AWS_PROFILE", "boto3_s3_from_aws_profile")
+        assert clientfactory.resolve_profile(_parse(["--profile", ""])) == (
+            "boto3_s3_from_aws_profile"
+        )
+
+    def test_empty_profile_flag_with_no_env_is_the_default_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With the flag empty and no profile env, resolve_profile yields None so
+        # boto3 uses the default profile - aws reaches the server rather than
+        # failing on an empty profile name.
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
+        assert clientfactory.resolve_profile(_parse(["--profile", ""])) is None
+
     def test_partial_credentials_map_to_255_not_253(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws has no handler for PartialCredentialsError -> GeneralExceptionHandler
         # (255), unlike NoCredentials/NoRegion (253). build_client maps it to
@@ -253,4 +275,53 @@ class TestBuildClient:
         monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
         with pytest.raises(InvalidConfigError) as excinfo:
             clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        assert exit_code_for(excinfo.value) == 255
+
+
+class TestBuildServiceClient:
+    def test_timeouts_and_unsigned_are_inherited_like_from_session(self) -> None:
+        # aws threads --cli-read-timeout / --cli-connect-timeout and
+        # --no-sign-request through the session default client config at startup,
+        # so from_session's s3control/sts clients inherit them. build_service_client
+        # folds the same into the client Config.
+        from botocore import UNSIGNED
+
+        client = clientfactory.build_service_client(
+            "sts",
+            _parse(
+                [
+                    "--region",
+                    "us-east-1",
+                    "--no-sign-request",
+                    "--cli-read-timeout",
+                    "5",
+                    "--cli-connect-timeout",
+                    "7",
+                ]
+            ),
+            region="us-east-1",
+        )
+        assert client.meta.config.signature_version is UNSIGNED
+        assert client.meta.config.read_timeout == 5
+        assert client.meta.config.connect_timeout == 7
+
+    def test_zero_timeout_means_no_timeout(self) -> None:
+        # The 0 -> None ("no timeout") sentinel carries over, exactly as in
+        # build_client (botocore rejects a literal 0).
+        client = clientfactory.build_service_client(
+            "sts",
+            _parse(["--region", "us-east-1", "--cli-read-timeout", "0"]),
+            region="us-east-1",
+        )
+        assert client.meta.config.read_timeout is None
+
+    def test_noninteger_timeout_maps_to_255_not_a_parse_error(self) -> None:
+        # A non-integer timeout surfaces as InvalidValueError (rc 255) here too,
+        # matching build_client rather than crashing client creation.
+        with pytest.raises(InvalidValueError) as excinfo:
+            clientfactory.build_service_client(
+                "sts",
+                _parse(["--region", "us-east-1", "--cli-connect-timeout", "abc"]),
+                region="us-east-1",
+            )
         assert exit_code_for(excinfo.value) == 255

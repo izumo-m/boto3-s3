@@ -2,15 +2,15 @@
 
 aws-cli drives auto-completion from a prebuilt SQLite index of its command
 table. We derive the equivalent from our own ``argparse`` parser
-(:func:`boto3_s3_cli.cli.build_parser`) so there is a single source of truth for
+(``boto3_s3_cli.cli.build_parser``) so there is a single source of truth for
 the option set - the same definitions that dispatch the commands also feed
-completion, and the two cannot drift. :class:`CompletionModel` exposes the small
-query surface the ported :class:`~boto3_s3_cli.autoprompt.parser.CLIParser` and
+completion, and the two cannot drift. ``CompletionModel`` exposes the small
+query surface the ported ``CLIParser`` and
 completers need (the methods aws-cli's ``ModelIndex`` provides).
 
 Structure note: aws's hierarchy is ``aws s3 <sub>`` (three levels); ours is
 ``boto3-s3 <sub>`` (two). The parser normalizes the executable token to
-:data:`ROOT`, so globals live under ``command_name == ROOT`` and the subcommands
+``ROOT``, so globals live under ``command_name == ROOT`` and the subcommands
 hang directly off ``lineage == [ROOT]``.
 
 Pure Python - no ``prompt_toolkit``, no AWS SDK - so the whole completion
@@ -42,7 +42,7 @@ class ArgData:
 
     name: str
     type_name: str
-    nargs: object
+    nargs: int | str | None
     required: bool
     choices: tuple[str, ...] | None
     help_text: str | None
@@ -62,8 +62,8 @@ class CompletionModel:
     """The query surface the ported parser and completers consume.
 
     Methods mirror the names/semantics of aws-cli's ``ModelIndex`` so the port
-    stays faithful: :meth:`command_names`, :meth:`arg_names`,
-    :meth:`get_argument_data`, plus :meth:`global_arg_data` for the option-name
+    stays faithful: ``command_names``, ``arg_names``,
+    ``get_argument_data``, plus ``global_arg_data`` for the option-name
     completer's global injection.
     """
 
@@ -154,7 +154,7 @@ def subparser_map(parser: argparse.ArgumentParser) -> dict[str, argparse.Argumen
 
 
 def build_model() -> CompletionModel:
-    """Introspect :func:`boto3_s3_cli.cli.build_parser` into a completion model.
+    """Introspect ``boto3_s3_cli.cli.build_parser`` into a completion model.
 
     Globals are the top-level parser's options (added to every subparser via the
     shared parent, so they are filtered out of each subcommand's own option set

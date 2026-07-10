@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from boto3_s3 import GlobPattern, globsieve
@@ -57,9 +58,11 @@ class AppendFilterAction(argparse.Action):
         self,
         parser: argparse.ArgumentParser,
         namespace: argparse.Namespace,
-        values: str | Any,
+        values: str | Sequence[Any] | None,
         option_string: str | None = None,
     ) -> None:
+        # The typeshed base signature; nargs is unspecified on both options,
+        # so at runtime *values* is always a single str.
         kind = PatternKind.EXCLUDE if option_string == "--exclude" else PatternKind.INCLUDE
         items: list[GlobPattern] = getattr(namespace, self.dest, None) or []
         items.append(GlobPattern(kind, str(values)))

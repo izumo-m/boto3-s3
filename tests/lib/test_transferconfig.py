@@ -21,8 +21,8 @@ class TestSdkFloorCompat:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Regression: forwarding None for an omitted base param overwrites the
-        # base ctor's concrete default on the SDK floor (boto3 < ~1.43), so None
-        # reaches s3transfer (a TypeError on the first size comparison, and
+        # base ctor's concrete default on the SDK floor (boto3 1.28 - ~1.40), so
+        # None reaches s3transfer (a TypeError on the first size comparison, and
         # use_threads=None silently disables threading). Unset base params must
         # be omitted so the base ctor supplies its own default.
         captured: dict[str, object] = {}
@@ -124,6 +124,11 @@ class TestCrtExtras:
         assert config.should_stream is False
         assert config.disk_throughput == 1_000_000_000
         assert config.direct_io is True
+        # The extras sit past the `*` barrier: nine positional slots fill the
+        # base params through preferred_transfer_client, so a tenth positional
+        # (target_bandwidth) has no slot and raises rather than being accepted.
+        with pytest.raises(TypeError):
+            TransferConfig(1, 2, 3, 4, 5, 6, 7, 8, "auto", 100)  # pyright: ignore[reportCallIssue]
 
     def test_plain_boto3_config_reads_as_unset(self) -> None:
         # Engine code reads the extras with getattr(..., None) so a plain

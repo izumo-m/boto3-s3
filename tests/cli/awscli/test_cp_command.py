@@ -44,7 +44,7 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 - ``--copy-props all``'s multipart annotation carryover rides upstream
   s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
   SetAnnotationsSubscriber (docs/transfer.md section 4), so the
-  TestCopyPropsAll port adapts the canned order: the annotation reads run
+  TestCopyPropsAllCpCommand port adapts the canned order: the annotation reads run
   *after* CompleteMultipartUpload (aws-cli reads them before creating the
   upload), gets and puts interleave per annotation, the listing is a single
   unpaginated call, and no source ``VersionId`` is pinned on the reads.
@@ -70,24 +70,36 @@ Not ported, with reasons:
   is covered by the unit tier (``TestS3ExpressCpRecursive`` *is* ported below).
 - ``TestCpSourceRegion``: a different aws-cli harness (``BaseS3CLIRunnerTest``);
   the client wiring is covered by ``tests/cli/unit/test_cp.py``.
-- The s3s3 SSE-C matrix (4 tests with large canned sequences): the parameter
+- The s3s3 SSE-C matrix (5 tests with large canned sequences): the parameter
   mapping they pin, including the copy-source HEAD, is covered by
-  ``tests/lib/test_requestparams.py``.
+  ``tests/lib/test_requestparams.py``. The fifth,
+  ``test_cp_with_sse_c_copy_source_fileb``, additionally pins ``fileb://``
+  expansion of ``--sse-c-copy-source-key``; that expansion shares ``blob_value``
+  with ``--sse-c-key`` and is already pinned by the ported
+  ``test_cp_with_sse_c_fileb``.
 - The two s3s3 SSE-KMS *copy* tests (``test_cp_copy_with_sse_kms_and_key_id`` /
   ``..._large_file_...``): ``map_copy_object_params`` shares
   ``_set_sse_request_params`` with the upload path, so the mapping is pinned by
   ``tests/lib/test_requestparams.py`` (``test_sse_and_kms_key`` on both
   ``TestPutObjectParams`` and ``TestCopyObjectParams``); the upload SSE-KMS pair
   is ported here.
-- Storage-class variants other than STANDARD_IA / DEEP_ARCHIVE and the
-  duplicate recursive-mp prop-override cases: mechanically identical
-  siblings of ported tests.
+- Storage-class variants other than STANDARD_IA / DEEP_ARCHIVE, the
+  prop-override variants of the two copy-props classes
+  (``TestCopyPropsMetadataDirectiveCpCommand`` / ``TestCopyPropsDefaultCpCommand``:
+  the mp / recursive / recursive-mp combinations), and the recursive-mp
+  head-object-headers variant: mechanically identical siblings of ported tests.
+- ``test_cannot_use_recursive_with_stream``: the same rc 252 and "Streaming
+  currently is only compatible with non-recursive cp commands" message is
+  pinned by ``tests/cli/unit/test_cp.py``'s
+  ``test_streaming_with_recursive_is_252``.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import io
+import sys
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -106,9 +118,10 @@ _SYNC_CONFIG = TransferConfig(use_threads=False)
 # The case-conflict "two S3 twins in one listing" tests detect the conflict via
 # the gate's in-flight set, which only holds while the first twin's download is
 # still running. That needs a non-blocking (threaded) submit so the gate runs
-# ahead of completions - aws-cli's own functional tests use a single worker
-# (max_concurrent_requests = 1) for exactly this. NonThreadedExecutor would
-# complete each twin before the next is judged, emptying the set.
+# ahead of completions; NonThreadedExecutor would complete each twin before the
+# next is judged, emptying the set. aws-cli runs its whole functional s3 test
+# harness with max_concurrent_requests = 1, and that single threaded worker is
+# what keeps this gate deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 SOURCE_BUCKET = "source-bucket"
@@ -258,7 +271,7 @@ def create_mpu_request(key: str = TARGET_KEY, **override_kwargs: Any) -> dict[st
 
 
 class TestCPCommand:
-    def test_operations_used_in_upload(self, tmp_path: Any) -> None:
+    def test_operations_used_in_upload(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -269,7 +282,7 @@ class TestCPCommand:
         assert len(calls) == 1, calls
         assert calls[0].operation == "PutObject"
 
-    def test_key_name_added_when_only_bucket_provided(self, tmp_path: Any) -> None:
+    def test_key_name_added_when_only_bucket_provided(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -280,7 +293,7 @@ class TestCPCommand:
         assert calls[0].params["Key"] == "foo.txt"
         assert calls[0].params["Bucket"] == "bucket"
 
-    def test_trailing_slash_appended(self, tmp_path: Any) -> None:
+    def test_trailing_slash_appended(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         # Here we're saying s3://bucket instead of s3://bucket/: this should
@@ -293,7 +306,7 @@ class TestCPCommand:
         assert calls[0].params["Key"] == "foo.txt"
         assert calls[0].params["Bucket"] == "bucket"
 
-    def test_dryrun_upload(self, tmp_path: Any) -> None:
+    def test_dryrun_upload(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         result, calls = _run_cmd([], ["cp", full_path, "s3://bucket/key.txt", "--dryrun"])
@@ -303,7 +316,7 @@ class TestCPCommand:
             in (result.stdout)
         )
 
-    def test_error_on_same_line_as_status(self, tmp_path: Any) -> None:
+    def test_error_on_same_line_as_status(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         result, _ = _run_cmd(
@@ -316,7 +329,7 @@ class TestCPCommand:
             f"upload failed: {rendered} to s3://bucket-not-exist/key.txt An error"
         ) in result.stderr
 
-    def test_upload_grants(self, tmp_path: Any) -> None:
+    def test_upload_grants(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -346,7 +359,7 @@ class TestCPCommand:
             "Body": mock.ANY,
         }
 
-    def test_upload_expires(self, tmp_path: Any) -> None:
+    def test_upload_expires(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -361,7 +374,7 @@ class TestCPCommand:
 
     # aws-cli: test_upload_standard_ia, test_upload_deep_archive
     @pytest.mark.parametrize("storage_class", ["STANDARD_IA", "DEEP_ARCHIVE"])
-    def test_upload_storage_class(self, tmp_path: Any, storage_class: str) -> None:
+    def test_upload_storage_class(self, tmp_path: Path, storage_class: str) -> None:
         # aws-cli test_upload_standard_ia / test_upload_deep_archive (the
         # other storage-class variants are mechanically identical).
         full_path = str(tmp_path / "foo.txt")
@@ -376,7 +389,7 @@ class TestCPCommand:
         assert args["Bucket"] == "bucket"
         assert args["StorageClass"] == storage_class
 
-    def test_operations_used_in_download_file(self, tmp_path: Any) -> None:
+    def test_operations_used_in_download_file(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 {"ContentLength": 100, "LastModified": _TIME_UTC, "ETag": '"foo-1"'},
@@ -387,7 +400,7 @@ class TestCPCommand:
         # The only operations we should have called are HeadObject/GetObject.
         assert _operations(calls) == ["HeadObject", "GetObject"]
 
-    def test_operations_used_in_recursive_download(self, tmp_path: Any) -> None:
+    def test_operations_used_in_recursive_download(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [{"ETag": '"foo-1"', "Contents": [], "CommonPrefixes": []}],
             ["cp", "s3://bucket/key.txt", str(tmp_path), "--recursive"],
@@ -395,7 +408,7 @@ class TestCPCommand:
         # We called ListObjectsV2 but had no objects to download.
         assert _operations(calls) == ["ListObjectsV2"]
 
-    def test_dryrun_download(self, tmp_path: Any) -> None:
+    def test_dryrun_download(self, tmp_path: Path) -> None:
         target = str(tmp_path / "file.txt")
         result, calls = _run_cmd(
             [head_object_response()], ["cp", "s3://bucket/key.txt", target, "--dryrun"]
@@ -408,7 +421,7 @@ class TestCPCommand:
             in (result.stdout)
         )
 
-    def test_website_redirect_ignore_paramfile(self, tmp_path: Any) -> None:
+    def test_website_redirect_ignore_paramfile(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -418,7 +431,7 @@ class TestCPCommand:
         # The specified web address is used as opposed to its contents.
         assert calls[0].params["WebsiteRedirectLocation"] == "http://someserver"
 
-    def test_dryrun_copy(self, tmp_path: Any) -> None:
+    def test_dryrun_copy(self, tmp_path: Path) -> None:
         result, calls = _run_cmd(
             [head_object_response()],
             ["cp", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--dryrun"],
@@ -428,7 +441,7 @@ class TestCPCommand:
         ]
         assert "(dryrun) copy: s3://bucket/key.txt to s3://bucket/key2.txt" in result.stdout
 
-    def test_metadata_copy(self, tmp_path: Any) -> None:
+    def test_metadata_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {"ETag": '"foo-1"'}],
             ["cp", "s3://bucket/key.txt", "s3://bucket/key2.txt", "--metadata", "KeyName=Value"],
@@ -436,7 +449,7 @@ class TestCPCommand:
         assert _operations(calls) == ["HeadObject", "CopyObject"]
         assert calls[1].params["Metadata"] == {"KeyName": "Value"}
 
-    def test_metadata_copy_with_put_object(self, tmp_path: Any) -> None:
+    def test_metadata_copy_with_put_object(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -446,7 +459,7 @@ class TestCPCommand:
         assert _operations(calls) == ["PutObject"]
         assert calls[0].params["Metadata"] == {"KeyName": "Value"}
 
-    def test_metadata_copy_with_multipart_upload(self, tmp_path: Any) -> None:
+    def test_metadata_copy_with_multipart_upload(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
         _, calls = _run_cmd(
@@ -457,7 +470,7 @@ class TestCPCommand:
         assert calls[0].operation == "CreateMultipartUpload"
         assert calls[0].params["Metadata"] == {"KeyName": "Value"}
 
-    def test_metadata_directive_copy(self, tmp_path: Any) -> None:
+    def test_metadata_directive_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {"ETag": '"foo-1"'}],
             [
@@ -471,7 +484,7 @@ class TestCPCommand:
         assert _operations(calls) == ["HeadObject", "CopyObject"]
         assert calls[1].params["MetadataDirective"] == "REPLACE"
 
-    def test_no_metadata_directive_for_non_copy(self, tmp_path: Any) -> None:
+    def test_no_metadata_directive_for_non_copy(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -481,7 +494,7 @@ class TestCPCommand:
         assert _operations(calls) == ["PutObject"]
         assert "MetadataDirective" not in calls[0].params
 
-    def test_cp_succeeds_with_mimetype_errors(self, tmp_path: Any) -> None:
+    def test_cp_succeeds_with_mimetype_errors(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         with mock.patch("mimetypes.guess_type") as mock_guess_type:
@@ -495,7 +508,7 @@ class TestCPCommand:
         # just without a content type added.
         assert "ContentType" not in calls[0].params
 
-    def test_cp_fails_with_utime_errors_but_continues(self, tmp_path: Any) -> None:
+    def test_cp_fails_with_utime_errors_but_continues(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("")
         with mock.patch("os.utime") as mock_utime:
@@ -510,7 +523,7 @@ class TestCPCommand:
             )
         assert "attempting to modify the utime" in result.stderr
 
-    def test_recursive_glacier_download_with_force_glacier(self, tmp_path: Any) -> None:
+    def test_recursive_glacier_download_with_force_glacier(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 {
@@ -532,7 +545,7 @@ class TestCPCommand:
         )
         assert _operations(calls) == ["ListObjectsV2", "GetObject"]
 
-    def test_recursive_glacier_download_without_force_glacier(self, tmp_path: Any) -> None:
+    def test_recursive_glacier_download_without_force_glacier(self, tmp_path: Path) -> None:
         result, calls = _run_cmd(
             [
                 {
@@ -565,7 +578,7 @@ class TestCPCommand:
         ],
     )
     def test_warns_on_glacier_incompatible_operation(
-        self, tmp_path: Any, storage_class: str, content_length: int
+        self, tmp_path: Path, storage_class: str, content_length: int
     ) -> None:
         # aws-cli test_warns_on_{glacier,deep_arhive}_incompatible_operation
         # (+ the _for_multipart_file variants).
@@ -585,7 +598,7 @@ class TestCPCommand:
 
     # aws-cli: test_turn_off_glacier_warnings (+ _for_deep_archive)
     @pytest.mark.parametrize("storage_class", ["GLACIER", "DEEP_ARCHIVE"])
-    def test_turn_off_glacier_warnings(self, tmp_path: Any, storage_class: str) -> None:
+    def test_turn_off_glacier_warnings(self, tmp_path: Path, storage_class: str) -> None:
         result, calls = _run_cmd(
             [
                 {
@@ -599,7 +612,7 @@ class TestCPCommand:
         assert _operations(calls) == ["HeadObject"]
         assert result.stderr == ""
 
-    def test_cp_with_sse_flag(self, tmp_path: Any) -> None:
+    def test_cp_with_sse_flag(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         _, calls = _run_cmd([{}], ["cp", full_path, "s3://bucket/key.txt", "--sse"])
@@ -614,7 +627,7 @@ class TestCPCommand:
             "ServerSideEncryption": "AES256",
         }
 
-    def test_cp_with_sse_c_flag(self, tmp_path: Any) -> None:
+    def test_cp_with_sse_c_flag(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         _, calls = _run_cmd(
@@ -632,7 +645,7 @@ class TestCPCommand:
             "SSECustomerKey": "foo",
         }
 
-    def test_cp_with_sse_c_fileb(self, tmp_path: Any) -> None:
+    def test_cp_with_sse_c_fileb(self, tmp_path: Path) -> None:
         file_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         key_path = str(tmp_path / "foo.key")
@@ -664,7 +677,7 @@ class TestCPCommand:
             "SSECustomerKey": key_contents,
         }
 
-    def test_cp_upload_with_sse_kms_and_key_id(self, tmp_path: Any) -> None:
+    def test_cp_upload_with_sse_kms_and_key_id(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("contents")
         _, calls = _run_cmd(
@@ -683,7 +696,7 @@ class TestCPCommand:
             "ServerSideEncryption": "aws:kms",
         }
 
-    def test_cp_upload_large_file_with_sse_kms_and_key_id(self, tmp_path: Any) -> None:
+    def test_cp_upload_large_file_with_sse_kms_and_key_id(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
         _, calls = _run_cmd(
@@ -713,7 +726,7 @@ class TestCPCommand:
             "ServerSideEncryption": "aws:kms",
         }
 
-    def test_upload_unicode_path(self, tmp_path: Any) -> None:
+    def test_upload_unicode_path(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 {"ContentLength": 10, "LastModified": _TIME_UTC, "ETag": '"foo"'},
@@ -724,7 +737,7 @@ class TestCPCommand:
         assert "copy: s3://bucket/\u2603 to s3://bucket/\u2713" in result.stdout
         assert "Completed 10 Bytes" in result.stdout
 
-    def test_cp_with_error_and_warning_permissions(self, tmp_path: Any) -> None:
+    def test_cp_with_error_and_warning_permissions(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("bar")
         # Patch the stat helper to report an invalid timestamp (impossible to
@@ -741,7 +754,7 @@ class TestCPCommand:
 
 
 class TestCpCommandWithRequesterPayer:
-    def test_single_upload(self, tmp_path: Any) -> None:
+    def test_single_upload(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "myfile")
         (tmp_path / "myfile").write_text("mycontent")
         _, calls = _run_cmd([{}], ["cp", full_path, "s3://mybucket/mykey", "--request-payer"])
@@ -758,7 +771,7 @@ class TestCpCommandWithRequesterPayer:
             )
         ]
 
-    def test_multipart_upload(self, tmp_path: Any) -> None:
+    def test_multipart_upload(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "myfile")
         (tmp_path / "myfile").write_bytes(b"a" * 10 * MB)
         _, calls = _run_cmd(
@@ -816,7 +829,7 @@ class TestCpCommandWithRequesterPayer:
             ),
         ]
 
-    def test_recursive_upload(self, tmp_path: Any) -> None:
+    def test_recursive_upload(self, tmp_path: Path) -> None:
         (tmp_path / "myfile").write_text("mycontent")
         _, calls = _run_cmd(
             [{}], ["cp", str(tmp_path), "s3://mybucket/", "--request-payer", "--recursive"]
@@ -834,7 +847,7 @@ class TestCpCommandWithRequesterPayer:
             )
         ]
 
-    def test_single_download(self, tmp_path: Any) -> None:
+    def test_single_download(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), get_object_response()],
             ["cp", "s3://mybucket/mykey", str(tmp_path), "--request-payer"],
@@ -852,7 +865,7 @@ class TestCpCommandWithRequesterPayer:
             ("GetObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
         ]
 
-    def test_ranged_download(self, tmp_path: Any) -> None:
+    def test_ranged_download(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(ContentLength=10 * MB),
@@ -893,7 +906,7 @@ class TestCpCommandWithRequesterPayer:
             ),
         ]
 
-    def test_recursive_download(self, tmp_path: Any) -> None:
+    def test_recursive_download(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [list_objects_response(["mykey"]), get_object_response()],
             ["cp", "s3://mybucket/", str(tmp_path), "--request-payer", "--recursive"],
@@ -911,7 +924,7 @@ class TestCpCommandWithRequesterPayer:
             ("GetObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
         ]
 
-    def test_single_copy(self, tmp_path: Any) -> None:
+    def test_single_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {}],
             ["cp", "s3://sourcebucket/sourcekey", "s3://mybucket/mykey", "--request-payer"],
@@ -938,7 +951,7 @@ class TestCpCommandWithRequesterPayer:
             ),
         ]
 
-    def test_multipart_copy(self, tmp_path: Any) -> None:
+    def test_multipart_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(ContentLength=10 * MB),
@@ -999,7 +1012,7 @@ class TestCpCommandWithRequesterPayer:
             ),
         ]
 
-    def test_recursive_copy(self, tmp_path: Any) -> None:
+    def test_recursive_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [list_objects_response(["mykey"]), {}],
             ["cp", "s3://sourcebucket/", "s3://mybucket/", "--request-payer", "--recursive"],
@@ -1026,7 +1039,7 @@ class TestCpCommandWithRequesterPayer:
             ),
         ]
 
-    def test_mp_copy_object(self, tmp_path: Any) -> None:
+    def test_mp_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(ContentLength=MULTIPART_THRESHOLD),
@@ -1046,7 +1059,7 @@ class TestCpCommandWithRequesterPayer:
             {"Bucket": "sourcebucket", "Key": "mykey", "RequestPayer": "requester"},
         )
 
-    def test_mp_copy_object_with_tags_exceed_2k(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_with_tags_exceed_2k(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
         _, calls = _run_cmd(
             [
@@ -1075,7 +1088,7 @@ class TestCpCommandWithRequesterPayer:
 
 
 class TestCopyPropsNoneCpCommand:
-    def test_copy_object(self, tmp_path: Any) -> None:
+    def test_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd([head_object_response(), {}], copy_command(copy_props="none"))
         _assert_in_operations_called(
             calls,
@@ -1083,7 +1096,7 @@ class TestCopyPropsNoneCpCommand:
             copy_object_request(MetadataDirective="REPLACE", TaggingDirective="REPLACE"),
         )
 
-    def test_mp_copy_object(self, tmp_path: Any) -> None:
+    def test_mp_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(ContentLength=MULTIPART_THRESHOLD), *mp_copy_responses()],
             copy_command(copy_props="none"),
@@ -1093,7 +1106,7 @@ class TestCopyPropsNoneCpCommand:
         # engine seeds (s3transfer keeps directives off the create call).
         _assert_in_operations_called(calls, "CreateMultipartUpload", create_mpu_request())
 
-    def test_metadata_directive_disables_copy_props(self, tmp_path: Any) -> None:
+    def test_metadata_directive_disables_copy_props(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {}],
             copy_command(copy_props="none", extra="--metadata-directive COPY"),
@@ -1113,7 +1126,7 @@ class TestCopyPropsNoneCpCommand:
 
 
 class TestCopyPropsMetadataDirectiveCpCommand:
-    def test_copy_object(self, tmp_path: Any) -> None:
+    def test_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {}], copy_command(copy_props="metadata-directive")
         )
@@ -1121,7 +1134,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             calls, "CopyObject", copy_object_request(TaggingDirective="REPLACE")
         )
 
-    def test_copy_object_overrides_with_cmdline_props(self, tmp_path: Any) -> None:
+    def test_copy_object_overrides_with_cmdline_props(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(**all_metadata_directive_props()), {}],
             copy_command(
@@ -1135,7 +1148,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
         expected["ContentType"] = "content-type-from-cmdline"
         _assert_in_operations_called(calls, "CopyObject", copy_object_request(**expected))
 
-    def test_recursive_copy_object(self, tmp_path: Any) -> None:
+    def test_recursive_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [list_objects_response(keys=[SOURCE_KEY]), {}, {}],
             recursive_copy_command(copy_props="metadata-directive"),
@@ -1152,7 +1165,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             },
         )
 
-    def test_recursive_copy_object_overrides_with_cmdline_props(self, tmp_path: Any) -> None:
+    def test_recursive_copy_object_overrides_with_cmdline_props(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY]),
@@ -1180,7 +1193,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             },
         )
 
-    def test_recursive_copy_maps_additional_head_object_headers(self, tmp_path: Any) -> None:
+    def test_recursive_copy_maps_additional_head_object_headers(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY]),
@@ -1198,7 +1211,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY, "RequestPayer": "requester"},
         )
 
-    def test_mp_copy_object(self, tmp_path: Any) -> None:
+    def test_mp_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(
@@ -1212,7 +1225,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             calls, "CreateMultipartUpload", create_mpu_request(**all_metadata_directive_props())
         )
 
-    def test_recursive_mp_copy(self, tmp_path: Any) -> None:
+    def test_recursive_mp_copy(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
@@ -1227,7 +1240,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
             create_mpu_request(key=SOURCE_KEY, **all_metadata_directive_props()),
         )
 
-    def test_fails_when_head_object_fails(self, tmp_path: Any) -> None:
+    def test_fails_when_head_object_fails(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
@@ -1238,7 +1251,7 @@ class TestCopyPropsMetadataDirectiveCpCommand:
         )
         assert "NoSuchKey" in result.stderr
 
-    def test_metadata_directive_disables_copy_props(self, tmp_path: Any) -> None:
+    def test_metadata_directive_disables_copy_props(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {}],
             copy_command(copy_props="metadata-directive", extra="--metadata-directive REPLACE"),
@@ -1258,17 +1271,17 @@ class TestCopyPropsMetadataDirectiveCpCommand:
 
 
 class TestCopyPropsDefaultCpCommand:
-    def test_copy_object(self, tmp_path: Any) -> None:
+    def test_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd([head_object_response(), {}], copy_command(copy_props="default"))
         # The CopyObject should have no additional parameters other than
         # copy source, bucket, and key.
         _assert_in_operations_called(calls, "CopyObject", copy_object_request())
 
-    def test_is_default_value(self, tmp_path: Any) -> None:
+    def test_is_default_value(self, tmp_path: Path) -> None:
         _, calls = _run_cmd([head_object_response(), {}], copy_command(copy_props=None))
         _assert_in_operations_called(calls, "CopyObject", copy_object_request())
 
-    def test_copy_object_with_prop_overrides(self, tmp_path: Any) -> None:
+    def test_copy_object_with_prop_overrides(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(**all_metadata_directive_props()), {}],
             copy_command(
@@ -1280,7 +1293,7 @@ class TestCopyPropsDefaultCpCommand:
         expected["MetadataDirective"] = "REPLACE"
         _assert_in_operations_called(calls, "CopyObject", copy_object_request(**expected))
 
-    def test_recursive_copy_object(self, tmp_path: Any) -> None:
+    def test_recursive_copy_object(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY]),
@@ -1300,7 +1313,7 @@ class TestCopyPropsDefaultCpCommand:
             },
         )
 
-    def test_mp_copy_object(self, tmp_path: Any) -> None:
+    def test_mp_copy_object(self, tmp_path: Path) -> None:
         tags = {"tag-key": "tag-value", "tag-key2": "tag-value2"}
         responses = [
             head_object_response(
@@ -1327,7 +1340,7 @@ class TestCopyPropsDefaultCpCommand:
                 },
             )
 
-    def test_mp_copy_object_no_tags(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_no_tags(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(ContentLength=MULTIPART_THRESHOLD),
@@ -1338,7 +1351,7 @@ class TestCopyPropsDefaultCpCommand:
         )
         _assert_in_operations_called(calls, "CreateMultipartUpload", create_mpu_request())
 
-    def test_mp_copy_object_tags_exceed_2k(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_tags_exceed_2k(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
         _, calls = _run_cmd(
             [
@@ -1360,7 +1373,7 @@ class TestCopyPropsDefaultCpCommand:
             },
         )
 
-    def test_recursive_mp_copy_object(self, tmp_path: Any) -> None:
+    def test_recursive_mp_copy_object(self, tmp_path: Path) -> None:
         tags = {"tag-key": "tag-value", "tag-key2": "tag-value2"}
         responses = [
             list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
@@ -1388,7 +1401,7 @@ class TestCopyPropsDefaultCpCommand:
                 },
             )
 
-    def test_recursive_mp_copy_tags_exceed_2k(self, tmp_path: Any) -> None:
+    def test_recursive_mp_copy_tags_exceed_2k(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
         _, calls = _run_cmd(
             [
@@ -1413,7 +1426,7 @@ class TestCopyPropsDefaultCpCommand:
             },
         )
 
-    def test_fails_when_head_object_fails(self, tmp_path: Any) -> None:
+    def test_fails_when_head_object_fails(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 list_objects_response(keys=[SOURCE_KEY], Size=MULTIPART_THRESHOLD),
@@ -1424,7 +1437,7 @@ class TestCopyPropsDefaultCpCommand:
         )
         assert "NoSuchKey" in result.stderr
 
-    def test_fails_when_get_tagging_object_fails(self, tmp_path: Any) -> None:
+    def test_fails_when_get_tagging_object_fails(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 head_object_response(ContentLength=MULTIPART_THRESHOLD),
@@ -1435,7 +1448,7 @@ class TestCopyPropsDefaultCpCommand:
         )
         assert "AccessDenied" in result.stderr
 
-    def test_fails_and_cleans_up_when_put_tagging_object_fails(self, tmp_path: Any) -> None:
+    def test_fails_and_cleans_up_when_put_tagging_object_fails(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
         result, calls = _run_cmd(
             [
@@ -1453,7 +1466,7 @@ class TestCopyPropsDefaultCpCommand:
             calls, "DeleteObject", {"Bucket": TARGET_BUCKET, "Key": TARGET_KEY}
         )
 
-    def test_clean_up_uses_requester_payer(self, tmp_path: Any) -> None:
+    def test_clean_up_uses_requester_payer(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
         result, calls = _run_cmd(
             [
@@ -1473,7 +1486,7 @@ class TestCopyPropsDefaultCpCommand:
             {"Bucket": TARGET_BUCKET, "Key": TARGET_KEY, "RequestPayer": "requester"},
         )
 
-    def test_metadata_directive_disables_copy_props(self, tmp_path: Any) -> None:
+    def test_metadata_directive_disables_copy_props(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {}],
             copy_command(copy_props="default", extra="--metadata-directive REPLACE"),
@@ -1525,7 +1538,7 @@ class TestCopyPropsAllCpCommand:
             {"ETag": self.DEST_ETAG, "VersionId": self.DEST_VERSION_ID},
         ]
 
-    def test_copy_object_excludes_nothing_for_single_part(self, tmp_path: Any) -> None:
+    def test_copy_object_excludes_nothing_for_single_part(self, tmp_path: Path) -> None:
         # A single-part copy carries annotations server-side via the
         # AnnotationDirective, which defaults to COPY. ``all`` must not set
         # EXCLUDE (unlike every other copy-props mode).
@@ -1540,7 +1553,7 @@ class TestCopyPropsAllCpCommand:
             },
         )
 
-    def test_mp_copy_object_copies_annotations(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_copies_annotations(self, tmp_path: Path) -> None:
         tags = {"tag-key": "tag-value"}
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
@@ -1594,7 +1607,7 @@ class TestCopyPropsAllCpCommand:
                 },
             )
 
-    def test_mp_copy_object_no_annotations(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_no_annotations(self, tmp_path: Path) -> None:
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
             get_object_tagging_response({}),
@@ -1611,7 +1624,7 @@ class TestCopyPropsAllCpCommand:
         assert "GetObjectAnnotation" not in called
         assert "PutObjectAnnotation" not in called
 
-    def test_mp_copy_object_partial_annotation_failure(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_partial_annotation_failure(self, tmp_path: Path) -> None:
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
             get_object_tagging_response({}),
@@ -1636,7 +1649,7 @@ class TestCopyPropsAllCpCommand:
         assert "ann1" in result.stderr
         assert "ann2" in result.stderr
 
-    def test_mp_copy_object_copies_annotations_with_source_version_id(self, tmp_path: Any) -> None:
+    def test_mp_copy_object_copies_annotations_with_source_version_id(self, tmp_path: Path) -> None:
         # aws-cli pins the source VersionId from the single-source HeadObject
         # on the annotation reads; the native s3transfer path has no seam for
         # that pin (module docstring adaptation rule), so the reads here are
@@ -1696,7 +1709,7 @@ class _StdoutShim:
 class TestCPCommandNoOverwrite:
     """The aws-cli no-overwrite block of TestCPCommand."""
 
-    def test_no_overwrite_flag_when_object_not_exists_on_target(self, tmp_path: Any) -> None:
+    def test_no_overwrite_flag_when_object_not_exists_on_target(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -1707,7 +1720,7 @@ class TestCPCommandNoOverwrite:
         assert calls[0].operation == "PutObject"
         assert calls[0].params["IfNoneMatch"] == "*"
 
-    def test_no_overwrite_flag_when_object_exists_on_target(self, tmp_path: Any) -> None:
+    def test_no_overwrite_flag_when_object_exists_on_target(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
         _, calls = _run_cmd(
@@ -1719,7 +1732,7 @@ class TestCPCommandNoOverwrite:
         assert calls[0].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_multipart_upload_when_object_not_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
@@ -1736,7 +1749,7 @@ class TestCPCommandNoOverwrite:
         assert calls[3].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_multipart_upload_when_object_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
@@ -1761,7 +1774,7 @@ class TestCPCommandNoOverwrite:
         assert calls[3].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_on_copy_when_small_object_does_not_exist_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         _, calls = _run_cmd(
             [head_object_response(ContentLength=5), {}],
@@ -1771,7 +1784,7 @@ class TestCPCommandNoOverwrite:
         assert calls[1].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_on_copy_when_small_object_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         _, calls = _run_cmd(
             [
@@ -1784,7 +1797,7 @@ class TestCPCommandNoOverwrite:
         assert calls[1].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_on_copy_when_large_object_exists_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         _, calls = _run_cmd(
             [
@@ -1810,7 +1823,7 @@ class TestCPCommandNoOverwrite:
         assert calls[5].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_on_copy_when_large_object_does_not_exist_on_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         _, calls = _run_cmd(
             [
@@ -1834,26 +1847,27 @@ class TestCPCommandNoOverwrite:
         assert calls[5].params["IfNoneMatch"] == "*"
 
     def test_no_overwrite_flag_on_download_when_single_object_already_exists_at_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("existing content")
         _, calls = _run_cmd(
             [head_object_response()],
-            ["cp", "s3://bucket/key.txt", full_path, "--no-overwrite"],
+            ["cp", "s3://bucket/foo.txt", full_path, "--no-overwrite"],
         )
         assert _operations(calls) == ["HeadObject"]
         assert (tmp_path / "foo.txt").read_text() == "existing content"
 
     def test_no_overwrite_flag_on_download_when_single_object_does_not_exist_at_target(
-        self, tmp_path: Any
+        self, tmp_path: Path
     ) -> None:
         full_path = str(tmp_path / "foo.txt")
         _, calls = _run_cmd(
             [head_object_response(), get_object_response()],
-            ["cp", "s3://bucket/key.txt", full_path, "--no-overwrite"],
+            ["cp", "s3://bucket/foo.txt", full_path, "--no-overwrite"],
         )
         assert _operations(calls) == ["HeadObject", "GetObject"]
+        assert (tmp_path / "foo.txt").read_text() == "foo"
 
 
 class TestStreamingCPCommand:
@@ -1965,7 +1979,7 @@ class TestCPCommandChecksums:
             "XXHASH128",
         ],
     )
-    def test_upload_with_checksum_algorithm(self, tmp_path: Any, algorithm: str) -> None:
+    def test_upload_with_checksum_algorithm(self, tmp_path: Path, algorithm: str) -> None:
         # aws-cli test_upload_with_checksum_algorithm_* (the recorder sits
         # above botocore's checksum *calculation*, so even algorithms the
         # stock botocore cannot compute record their parameter here).
@@ -1978,7 +1992,7 @@ class TestCPCommandChecksums:
         assert calls[0].params["ChecksumAlgorithm"] == algorithm
 
     # aws-cli: TestCPCommand.test_multipart_upload_with_checksum_algorithm_crc32
-    def test_multipart_upload_with_checksum_algorithm_crc32(self, tmp_path: Any) -> None:
+    def test_multipart_upload_with_checksum_algorithm_crc32(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_bytes(b"a" * 10 * MB)
         _, calls = _run_cmd(
@@ -2001,7 +2015,7 @@ class TestCPCommandChecksums:
         assert {"ETag": "foo-e2", "ChecksumCRC32": "foo-2", "PartNumber": mock.ANY} in parts
 
     # aws-cli: TestCPCommand.test_copy_with_checksum_algorithm_crc32
-    def test_copy_with_checksum_algorithm_crc32(self, tmp_path: Any) -> None:
+    def test_copy_with_checksum_algorithm_crc32(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [head_object_response(), {"ETag": "foo-1", "ChecksumCRC32": "Tq0H4g=="}],
             [
@@ -2017,7 +2031,7 @@ class TestCPCommandChecksums:
 
     # aws-cli: TestCPCommand.test_download_with_checksum_mode_crc32, _crc32c
     @pytest.mark.parametrize("checksum_field", ["ChecksumCRC32", "ChecksumCRC32C"])
-    def test_download_with_checksum_mode(self, tmp_path: Any, checksum_field: str) -> None:
+    def test_download_with_checksum_mode(self, tmp_path: Path, checksum_field: str) -> None:
         _, calls = _run_cmd(
             [
                 head_object_response(),
@@ -2037,13 +2051,13 @@ class TestCpRecursiveCaseConflict:
     LOWER_KEY = "a.txt"
     UPPER_KEY = "A.txt"
 
-    def _cmd(self, tmp_path: Any, case_conflict: str | None = None) -> list[str]:
+    def _cmd(self, tmp_path: Path, case_conflict: str | None = None) -> list[str]:
         argv = ["cp", "--recursive", "s3://bucket", str(tmp_path)]
         if case_conflict is not None:
             argv += ["--case-conflict", case_conflict]
         return argv
 
-    def test_ignore_by_default(self, tmp_path: Any) -> None:
+    def test_ignore_by_default(self, tmp_path: Path) -> None:
         (tmp_path / self.LOWER_KEY).write_text("mycontent")
         # Note there's no --case-conflict param.
         result, _ = _run_cmd(
@@ -2054,7 +2068,7 @@ class TestCpRecursiveCaseConflict:
         assert not result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_error_with_existing_file (test_sync_command.py)
-    def test_error_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+    def test_error_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY])],
@@ -2064,7 +2078,7 @@ class TestCpRecursiveCaseConflict:
         assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
-    def test_error_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+    def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         # The first (admitted) key still downloads; only the conflicting
         # second key trips the error gate - so one GetObject is scripted.
         result, _ = _run_cmd(
@@ -2076,7 +2090,7 @@ class TestCpRecursiveCaseConflict:
         assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_warn_with_existing_file (test_sync_command.py)
-    def test_warn_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+    def test_warn_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response()],
@@ -2085,7 +2099,8 @@ class TestCpRecursiveCaseConflict:
         assert f"warning: Downloading bucket/{self.UPPER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_warn_with_case_conflicts_in_s3 (test_sync_command.py)
-    def test_warn_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
+    def test_warn_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -2098,7 +2113,7 @@ class TestCpRecursiveCaseConflict:
         assert f"warning: Downloading bucket/{self.LOWER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_skip_with_existing_file (test_sync_command.py)
-    def test_skip_with_existing_file(self, case_insensitive_workdir: Any) -> None:
+    def test_skip_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY])], self._cmd(case_insensitive_workdir, "skip")
@@ -2106,7 +2121,7 @@ class TestCpRecursiveCaseConflict:
         assert f"warning: Skipping bucket/{self.UPPER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_skip_with_case_conflicts_in_s3 (test_sync_command.py)
-    def test_skip_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+    def test_skip_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -2118,7 +2133,7 @@ class TestCpRecursiveCaseConflict:
         assert f"warning: Skipping bucket/{self.LOWER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_ignore_with_existing_file (test_sync_command.py)
-    def test_ignore_with_existing_file(self, tmp_path: Any) -> None:
+    def test_ignore_with_existing_file(self, tmp_path: Path) -> None:
         (tmp_path / self.LOWER_KEY).write_text("mycontent")
         _run_cmd(
             [list_objects_response([self.UPPER_KEY]), get_object_response()],
@@ -2126,7 +2141,8 @@ class TestCpRecursiveCaseConflict:
         )
 
     # aws-cli: TestSyncCaseConflict.test_ignore_with_case_conflicts_in_s3 (test_sync_command.py)
-    def test_ignore_with_case_conflicts_in_s3(self, tmp_path: Any) -> None:
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
+    def test_ignore_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -2138,7 +2154,7 @@ class TestCpRecursiveCaseConflict:
 
 
 class TestS3ExpressCpRecursive:
-    def test_s3_express_error_raises_exception(self, tmp_path: Any) -> None:
+    def test_s3_express_error_raises_exception(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [],
             [
@@ -2153,7 +2169,7 @@ class TestS3ExpressCpRecursive:
         )
         assert "`error` is not a valid value" in result.stderr
 
-    def test_s3_express_skip_raises_exception(self, tmp_path: Any) -> None:
+    def test_s3_express_skip_raises_exception(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [],
             [
@@ -2168,7 +2184,8 @@ class TestS3ExpressCpRecursive:
         )
         assert "`skip` is not a valid value" in result.stderr
 
-    def test_s3_express_warn_emits_warning(self, tmp_path: Any) -> None:
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
+    def test_s3_express_warn_emits_warning(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
                 list_objects_response(["a.txt", "A.txt"]),

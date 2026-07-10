@@ -4,8 +4,9 @@
 ``set_stream_logger`` is the boto3-faithful entry that attaches a stream handler
 (carrying the masking filter, when ``mask_secrets``) so a caller enabling debug
 output never leaks signatures, access keys, session tokens, SSO bearer /
-sso-oidc tokens, SSE-C keys, STS-response credentials, the hex byte-dumps a
-signature-mismatch error body echoes, or proxy credentials. The
+sso-oidc tokens, web-identity / SAML STS request tokens, SSE-C keys,
+STS-response credentials, the hex byte-dumps a signature-mismatch error body
+echoes, or proxy credentials. The
 module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
 - so the CLI can import it on the ``--debug`` path without breaking the import
 contract (docs/imports.md).
@@ -16,8 +17,8 @@ Signature / X-Amz-Security-Token - and parsed response bodies, and s3transfer
 logs each task's kwargs including ``extra_args`` with the raw ``SSECustomerKey``,
 all at DEBUG), so masking lives in a logging filter on the handler, not in an
 ``http.client`` patch (the wire dump only
-appears when ``http.client.debuglevel`` is raised, which this project never
-does).
+appears when ``http.client.HTTPConnection.debuglevel`` is raised, which this
+project never does).
 
 Replacement notation follows the only masking precedent in aws-cli / boto3,
 ``botocore.httpsession.mask_proxy_url`` (``***``): every secret value is
@@ -38,7 +39,10 @@ MASK = "***"
 """Marker substituted for a masked value (matches ``mask_proxy_url``)."""
 
 MASK_MIN_LEN = 16
-"""Access Key IDs shorter than this are fully masked rather than tail-revealed."""
+"""Minimum length for a value to be masked at all. Access Key IDs shorter than
+this are fully masked rather than tail-revealed, and an ``extra_secrets`` literal
+shorter than this is skipped entirely (a stray short string cannot blank out
+swaths of the log)."""
 
 MASK_REVEAL_LEN = 4
 """Trailing characters of the Access Key ID left visible (account identification)."""
@@ -107,6 +111,21 @@ _SSO_OIDC_BODY_JSON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# AssumeRoleWithWebIdentity / AssumeRoleWithSAML request tokens (full mask). The
+# web-identity flow (role_arn + web_identity_token_file, EKS IRSA) exchanges a
+# raw JWT for role credentials through the *unsigned* AssumeRoleWithWebIdentity
+# API, so the token alone - with the RoleArn botocore logs on the same DEBUG line
+# - mints credentials (a bearer-grade request secret). botocore logs the
+# request_dict at DEBUG ("Making request ... with params: %s"); STS is
+# query-protocol, so the body renders as a dict (``'WebIdentityToken': '<jwt>'``)
+# and, defensively, the urlencoded query form (``WebIdentityToken=<jwt>``).
+# AssumeRoleWithSAML's SAMLAssertion is the same-shape secret and rides along.
+_WEB_IDENTITY_TOKEN_RE = re.compile(
+    r"(?P<key>['\"]?(?:WebIdentityToken|SAMLAssertion)['\"]?\s*[:=]\s*(?:b?['\"])?)"
+    rf"(?P<val>{_TOKEN_VALUE})",
+    re.IGNORECASE,
+)
+
 # SSE-C customer key (full mask): the base64 customer key is the symmetric
 # encryption key (a true secret). botocore puts it in the signed request header
 # ``x-amz-server-side-encryption-customer-key`` (and the copy-source variant),
@@ -165,6 +184,12 @@ _BYTE_DUMP_RE = re.compile(
     r"(?P<key><(?:CanonicalRequestBytes|StringToSignBytes)>)(?P<val>[^<]*)", re.IGNORECASE
 )
 
+# The client signature echoed back in a SignatureDoesNotMatch (403) body as
+# ``<SignatureProvided>`` (beside the byte-dumps above). The header/query-form
+# _SIGNATURE_RE matches ``Signature=`` / ``Signature:`` only, never this XML
+# element, so the echoed signature is masked here.
+_SIGNATURE_PROVIDED_RE = re.compile(r"(?P<key><SignatureProvided>)(?P<val>[^<]*)", re.IGNORECASE)
+
 # Proxy URL credentials (``scheme://user:pass@host`` -> ``scheme://***:***@host``),
 # the exact shape ``botocore.httpsession.mask_proxy_url`` masks. The scheme body
 # is length-capped ({0,31}): an unbounded greedy run backtracks O(n^2) over any
@@ -209,11 +234,13 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SECURITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSO_BEARER_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSO_OIDC_BODY_JSON_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _WEB_IDENTITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_JSON_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SIGNATURE_PROVIDED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
     # Before _ACCESS_KEY_ID_RE so the kept ``AWS <id>:`` prefix is tail-revealed.
     text = _SIGV2_AUTH_HEADER_RE.sub(lambda m: m.group("key") + MASK, text)
@@ -243,7 +270,7 @@ _EXC_FORMATTER = logging.Formatter()
 class SecretMaskingFilter(logging.Filter):
     """``logging.Filter`` that masks credential-bearing text in log records.
 
-    Rewrites each record's final formatted message via :func:`mask_text` (and,
+    Rewrites each record's final formatted message via ``mask_text`` (and,
     when the record carries one, its exception traceback) and clears its args so
     the masked text is not re-formatted. Belongs on the
     *handler* (not the logger): records propagated up from child loggers such as
@@ -288,7 +315,7 @@ def set_stream_logger(
 
     Mirrors ``boto3.set_stream_logger`` (same first three positional parameters
     and default format) but, when *mask_secrets* is true (the default),
-    attaches a :class:`SecretMaskingFilter` to the handler so the
+    attaches a ``SecretMaskingFilter`` to the handler so the
     credential-bearing records botocore emits at DEBUG (signed request headers,
     signatures, session tokens, SSO bearer / sso-oidc tokens, SSE-C keys,
     STS-response credentials, proxy URLs) are redacted before they reach the

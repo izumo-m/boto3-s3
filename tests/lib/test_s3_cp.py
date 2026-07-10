@@ -25,7 +25,6 @@ from botocore.exceptions import ClientError, ParamValidationError
 from boto3_s3 import GlobFilter, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
-    Boto3S3Error,
     CancelledError,
     NotFoundError,
     ValidationError,
@@ -35,7 +34,7 @@ from boto3_s3.localstorage import LocalStorage
 from boto3_s3.producers import CaseConflictGate
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.transfer import Transferrer
+from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
@@ -77,8 +76,6 @@ def _head_response(**extra: Any) -> dict[str, Any]:
 
 
 def _get_response(body: bytes = b"payload") -> dict[str, Any]:
-    import io
-
     return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
 
 
@@ -193,6 +190,27 @@ class TestUploadRoute:
             r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
             for r in results
         )
+
+    def test_source_return_knobs_do_not_leak_into_the_transfer(self, tmp_path: Path) -> None:
+        # A LocalStorage source configured with the library-extension scan knobs
+        # (return_directories / return_symlinks) still feeds the transfer a
+        # file-only stream: the walk_source_scan_options overlay pins them off, so
+        # no DIRECTORY record (the root leads a raw scan at compare_key "") or
+        # unfollowed symlink leaf enters the upload - only the three files do. Were
+        # the knobs to leak, the root/sub DIRECTORY records would open as
+        # directories and fail the transfer.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.txt").write_bytes(b"x")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "a.txt")  # a symlink leaf
+        client, calls = make_recording_client([{}, {}, {}])  # exactly the three files
+        S3().cp(
+            LocalStorage(str(tmp_path), return_directories=True, return_symlinks=True),
+            S3Storage("s3://b/t", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [call.params["Key"] for call in calls] == ["t/a.txt", "t/link.txt", "t/sub/b.txt"]
 
     def test_missing_source_raises_not_found_up_front(self, tmp_path: Path) -> None:
         missing = str(tmp_path / "nope.txt")
@@ -698,6 +716,41 @@ class TestStreamRoutes:
             )
         assert "no_overwrite is not supported for streaming downloads" in str(excinfo.value)
 
+    def test_stream_peer_must_be_s3_not_local(self, tmp_path: Path) -> None:
+        # A stream's peer must be S3; a local path on the other side is the
+        # "stream on one side" error, not the generic "cp accepts an 's3://...'"
+        # message (which reads as if cp never takes a local path). Both
+        # directions - stream upload and stream download - go through the same
+        # peer check.
+        with pytest.raises(ValidationError) as up:
+            S3().cp(IOStorage(io.BytesIO(b"x")), str(tmp_path / "out.txt"))
+        assert "the other must be s3://" in str(up.value)
+        with pytest.raises(ValidationError) as down:
+            S3().cp(str(tmp_path / "in.txt"), IOStorage(io.BytesIO()))
+        assert "the other must be s3://" in str(down.value)
+
+    def test_stream_cancel_token_stops_before_open(self) -> None:
+        # The stream route honors cancel_token like the non-stream route: a
+        # pre-cancelled token raises before the fileobj is opened or submitted,
+        # so nothing transfers and a side-effecting stream stays untouched
+        # (cancel_token is a library extension, no aws parity at stake).
+        class _SpyIO(IOStorage):
+            def __init__(self, stream: Any) -> None:
+                super().__init__(stream)
+                self.opens: list[str] = []
+
+            def open(self, key: str, mode: Any, *, size: int | None = None) -> Any:
+                self.opens.append(key)
+                return super().open(key, mode, size=size)
+
+        token = CancelToken()
+        token.cancel()
+        up = _SpyIO(io.BytesIO(b"x"))
+        client, calls = make_recording_client([])
+        with pytest.raises(CancelledError):
+            S3().cp(up, S3Storage("s3://b/k", client=client), cancel_token=token)
+        assert calls == [] and up.opens == []
+
 
 class TestNoOverwriteDownload:
     def test_existing_destination_is_a_silent_skip(self, tmp_path: Path) -> None:
@@ -823,7 +876,7 @@ class TestCaseConflictGate:
     def test_error_raises_the_awscli_failure(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         client, _ = make_recording_client([_cc_listing(), _get_response()])
-        with pytest.raises(Boto3S3Error) as excinfo:
+        with pytest.raises(ValidationError) as excinfo:
             S3().cp(
                 S3Storage("s3://b/cc/", client=client),
                 str(out),
@@ -831,6 +884,39 @@ class TestCaseConflictGate:
                 transfer_config=_CASE_CONFLICT_CONFIG,
                 **TransferOptions(case_conflict=CaseConflictMode.ERROR),
             )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
+
+    def test_error_reports_the_operation_the_gate_was_built_for(self, tmp_path: Path) -> None:
+        # cp and mv share the transfer path, so the gate must carry the running
+        # operation: a mv-driven --case-conflict error reports operation="mv",
+        # not the CaseConflictGate default ("cp").
+        out = tmp_path / "out"
+        out.mkdir()
+        plan = transferplan.plan_transfer(
+            S3Storage("s3://b/cc/"), LocalStorage(str(out)), recursive=True, operation="mv"
+        )
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.DOWNLOAD, client)
+        gate = producers.cp_case_gate(
+            plan,
+            recursive=True,
+            options=TransferOptions(case_conflict=CaseConflictMode.ERROR),
+            transferrer=transferrer,
+            item_filter=None,
+            operation="mv",
+        )
+        assert gate is not None
+        first = TransferItem(
+            compare_key="cc/A.txt", src_bucket="b", src_key="cc/A.txt", dest_path=str(out / "A.txt")
+        )
+        assert gate.blocks(first, transferrer) is False  # admitted; no twin yet
+        twin = TransferItem(
+            compare_key="cc/a.txt", src_bucket="b", src_key="cc/a.txt", dest_path=str(out / "a.txt")
+        )
+        with pytest.raises(ValidationError) as excinfo:
+            gate.blocks(twin, transferrer)
+        assert excinfo.value.operation == "mv"
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
 
     def _build_gate(
@@ -847,6 +933,7 @@ class TestCaseConflictGate:
             options=TransferOptions(case_conflict=CaseConflictMode.SKIP),
             transferrer=transferrer,
             item_filter=item_filter,
+            operation="cp",
         )
         return gate, transferrer
 

@@ -1,4 +1,4 @@
-"""``aws s3`` output formatting (``ls`` listing lines, ``rm`` delete lines).
+"""``aws s3`` output formatting (``ls`` listing, ``rm`` delete, ``mb`` / ``rb`` bucket lines).
 
 Console output identity is not contractual (``docs/aws-cli-option-handling.md``
 section 6), but the layout is kept close to aws-cli so tooling that parses its output

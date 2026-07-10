@@ -6,7 +6,7 @@ contract that motivates it:
 
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
   SDK module - ``boto3`` alone drags in ``s3transfer`` via its ``compat``
-  module, so an eager re-export taxes every importer ~100ms.
+  module, so an eager re-export taxes every importer ~120ms (docs/imports.md).
 - Reaching the ``S3`` entry point may load ``botocore.exceptions`` (error
   translation) but still neither ``boto3``, ``s3transfer``, nor botocore's
   client machinery; those wait until a default client is actually built.
@@ -60,6 +60,28 @@ class TestLibraryImportContract:
         _run_fresh(
             """
             import boto3_s3.globsieve
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_types_alone_stays_pure(self) -> None:
+        # docs/imports.md item 2-2 names types among the pure modules: the
+        # record/enum definitions must not drag in the SDK on import.
+        _run_fresh(
+            """
+            import boto3_s3.types
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_exceptions_alone_stays_pure(self) -> None:
+        # docs/imports.md item 2-2 names exceptions among the pure modules: the
+        # taxonomy is plain Python and must stay SDK-free on import.
+        _run_fresh(
+            """
+            import boto3_s3.exceptions
 
             assert not sdk_modules(), sdk_modules()
             """
@@ -159,12 +181,15 @@ class TestLibraryImportContract:
 
 class TestLazyExports:
     def test_every_public_symbol_resolves(self) -> None:
-        # Guards __all__ / _EXPORT_HOMES / TYPE_CHECKING-import drift: a name
-        # added to one but not the others fails here.
+        # Guards __all__ / _EXPORT_HOMES / TYPE_CHECKING-import drift in both
+        # directions: every __all__ name must resolve, and the resolution map
+        # (_EXPORT_HOMES, plus the two special-cased names) must carry exactly
+        # __all__ - a stale entry on either side fails here.
         import boto3_s3
 
         for name in boto3_s3.__all__:
             assert getattr(boto3_s3, name) is not None, name
+        assert set(boto3_s3._EXPORT_HOMES) | {"globsieve", "__version__"} == set(boto3_s3.__all__)
 
     def test_resolved_symbols_are_the_real_ones(self) -> None:
         import boto3_s3

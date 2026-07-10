@@ -1,7 +1,7 @@
 """Unit tests for ``S3.mb`` / ``S3.rb`` request shaping and error model.
 
 aws-cli parity facts asserted here (aws-cli MbCommand / RbCommand,
-``awscli/customizations/s3/subcommands.py:1234-1349``):
+``awscli/customizations/s3/subcommands.py:1240-1355``):
 
 - ``LocationConstraint`` is the client's region, omitted for us-east-1;
 - a bucket name ending in ``-an`` selects the account-regional namespace;

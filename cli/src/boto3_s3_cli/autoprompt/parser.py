@@ -4,11 +4,11 @@ aws-cli's ``awscli/autocomplete/parser.py``. Unlike the dispatch parser
 (``argparse``), this one tolerates incomplete input: it parses everything it
 understands and records the trailing fragment to complete, never erroring. It is
 command-agnostic; the command/option knowledge comes from the injected
-:class:`~boto3_s3_cli.autoprompt.model.CompletionModel`.
+``CompletionModel``.
 
 Adapted from the aws-cli source in two ways. First the root token: aws normalizes
 the executable to ``'aws'`` and nests services under it; we normalize to
-:data:`~boto3_s3_cli.autoprompt.model.ROOT` with the subcommands directly
+``ROOT`` with the subcommands directly
 beneath. Second, ``_handle_positional`` is tuned for completion *usability* over
 a byte-faithful port (the auto-prompt UI is charter-exempt - ``docs/autoprompt.md``
 section 2): a value typed for an option before any positional keeps ``current_param`` on
@@ -102,7 +102,7 @@ class CLIParser:
         parsed = ParsedResult()
         state, remaining_parts = self._split_to_parts(command_line, location)
         global_args = self._index.arg_names(lineage=[], command_name=ROOT)
-        current_args: list[str] | None = []
+        current_args: list[str] = []
         while remaining_parts:
             current = remaining_parts.pop(0)
             if current.startswith("--"):
@@ -178,14 +178,11 @@ class CLIParser:
         self,
         current: str,
         remaining_parts: list[str],
-        current_args: list[str] | None,
+        current_args: list[str],
         global_args: list[str],
         parsed: ParsedResult,
         state: _ParseState,
     ) -> None:
-        if current_args is None:
-            parsed.unparsed_items.append(current)
-            return
         option_name = current[2:]
         if option_name in global_args:
             state.current_param = option_name
@@ -223,7 +220,7 @@ class CLIParser:
         state: _ParseState,
         remaining_parts: list[str],
         parsed: ParsedResult,
-    ) -> list[str] | None:
+    ) -> list[str]:
         command_names = self._index.command_names(state.full_lineage)
         positional_argname = None
         if self._is_command_name(current, remaining_parts, command_names):

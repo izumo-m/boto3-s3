@@ -15,20 +15,22 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from boto3_s3 import (
     BatchError,
     CaseConflictMode,
     CopyPropsMode,
+    InvalidValueError,
     S3Storage,
     TransferOptions,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, paramfile, shorthand, usage
+from boto3_s3_cli import clientfactory, filters, globalargs, paramfile, shorthand, usage
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
+    expand_option_paramfile,
     parse_integer_option,
 )
 from boto3_s3_cli.progress import TransferPrinter
@@ -61,12 +63,17 @@ _STORAGE_CLASS_CHOICES = [
     "GLACIER_IR",
 ]
 
-# Free-string transfer options that take aws's ``file://`` (text) paramfile
-# resolution. The choices-validated options (acl / storage_class / sse / ... )
-# can't carry a ``file://`` value (argparse rejects it as an invalid choice
-# before paramfile would run), and grants is a list; ``metadata`` is resolved
-# separately before its shorthand parse. Ordered (a tuple) so the first
-# failing paramfile is deterministic.
+# The contiguous run of free-string transfer options that take aws's paramfile
+# resolution, in aws's ``TRANSFER_ARGS`` registration order (subcommands.py):
+# ``website-redirect`` through ``source-region``. Each is a string-typed
+# server parameter, so a ``file://`` reference sends the file text and a
+# ``fileb://`` one is rejected (bytes for a string parameter, 252 -
+# ``resolve_text_paramfile``). The choices-validated options (acl /
+# storage_class / sse / ... ) can't carry such a value (argparse rejects it as
+# an invalid choice first); ``sse-kms-key-id`` and ``grants`` sit earlier in
+# the registration order (resolved individually in ``resolve_paramfile_values``);
+# ``metadata`` is a map, resolved after the integer coercions. Ordered (a tuple)
+# so the first failing paramfile matches aws's option-by-option processing.
 _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
     "website_redirect",
     "content_type",
@@ -75,7 +82,7 @@ _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
     "content_encoding",
     "content_language",
     "expires",
-    "sse_kms_key_id",
+    "source_region",
 )
 
 # aws-cli's _raise_if_paths_type_incorrect_for_param's usage rendering.
@@ -175,29 +182,46 @@ def add_transfer_arguments(
 def identify_type(path: str) -> str:
     """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows.
 
-    aws-cli's ``FileFormat.identify_type``, verbatim: string classification is
-    the CLI layer's job (the library planner receives resolved ``Storage``
-    objects and never re-parses a path).
+    The same ``s3://`` test as aws-cli's ``FileFormat.identify_type`` (only the
+    classification rule is ported; aws also strips the prefix and returns a
+    ``(type, path)`` tuple). String classification is the CLI layer's job (the
+    library planner receives resolved ``Storage`` objects and never re-parses a
+    path).
     """
     return "s3" if path.startswith("s3://") else "local"
 
 
-def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> None:
-    """Resolve the direct-option paramfiles the way aws does at parse time (252).
+def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tuple[int, int]:
+    """Resolve the direct-option paramfiles and integer coercions, in aws order.
 
-    aws expands ``file://`` / ``fileb://`` references on plain option values
-    during argument parsing - before its bare ``int()`` coercions, the
-    session profile, and every path validation - so a bad reference here
-    beats a non-integer ``--page-size`` (255), a missing source (255), and a
-    bad profile (255; all measured against aws 2.35.18). Covered in place:
-    the free-string options' text paramfiles, the SSE-C key blobs, and the
-    string-typed integer options (``--page-size`` / ``--progress-frequency``
-    / cp's ``--expected-size``), whose loaded text feeds the later
-    coercions. ``--metadata`` is NOT here: its value (paramfile and
-    shorthand alike) resolves after the coercions
-    (:func:`resolve_metadata_option`; measured, the int 255 wins).
-    :func:`build_transfer_options` consumes the resolved values verbatim.
+    aws processes each argument one at a time in its ``TRANSFER_ARGS``
+    registration order (``BasicCommand.__call__``'s unpack loop): the
+    ``file://`` / ``fileb://`` paramfile expansion and, for the two
+    ``integer`` options, the bare ``int()`` coercion happen together at that
+    option's position. So a bad reference or a bad ``int()`` wins by whichever
+    option comes first - a bad ``--progress-frequency`` (255) beats a later
+    ``--page-size file://missing`` (252), while an earlier ``--content-type
+    file://missing`` (252) beats ``--page-size abc`` (255); all measured
+    against aws 2.35.18. The order here mirrors that: the SSE-C key blob,
+    ``--sse-kms-key-id``, the copy-source blob, ``--grants``, the free-string
+    text block, then ``--progress-frequency`` and ``--page-size`` (paramfile
+    then coercion). Returns the two coerced integers. ``--metadata`` (a map)
+    and cp's ``--expected-size`` come later, at their own registration
+    positions (``resolve_metadata_option`` / ``expand_option_paramfile`` in
+    ``classify_paths``). ``build_transfer_options`` consumes the resolved
+    values verbatim.
     """
+    if args.sse_c_key is not None:
+        args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+    if args.sse_kms_key_id is not None:
+        args.sse_kms_key_id = resolve_text_paramfile(
+            args.sse_kms_key_id, "--sse-kms-key-id", operation=operation
+        )
+    if args.sse_c_copy_source_key is not None:
+        args.sse_c_copy_source_key = blob_value(
+            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
+        )
+    _resolve_grants(args, operation=operation)
     for option in _PARAMFILE_TEXT_OPTIONS:
         value = getattr(args, option, None)
         if value is not None:
@@ -205,36 +229,67 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> Non
                 value, f"--{option.replace('_', '-')}", operation=operation
             )
             setattr(args, option, resolved)
-    for option in ("page_size", "progress_frequency", "expected_size"):
-        value = getattr(args, option, None)
-        if isinstance(value, str):
-            setattr(
-                args,
-                option,
-                resolve_text_paramfile(value, f"--{option.replace('_', '-')}", operation=operation),
-            )
-    if args.sse_c_key is not None:
-        args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
-    if args.sse_c_copy_source_key is not None:
-        args.sse_c_copy_source_key = blob_value(
-            args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
-        )
+    progress_frequency = _resolve_integer_option(args, "progress_frequency", operation=operation)
+    page_size = _resolve_integer_option(args, "page_size", operation=operation)
+    return page_size, progress_frequency
+
+
+def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
+    """Apply aws's single-element paramfile unwrap to ``--grants`` in place.
+
+    aws's ``URIArgumentHandler`` unwraps a length-1 list before the paramfile
+    map, so ``--grants file://g`` (a lone value) sends the file's text and
+    ``fileb://`` its bytes - the grant parser then consumes that verbatim
+    (a text file iterates character by character, bytes int by int, both
+    surfacing in-flight the way aws does). A multi-element ``--grants`` or a
+    prefix-less value stays the list argparse produced. Measured against aws
+    2.35.18: ``--grants file:///missing`` is the load 252.
+    """
+    grants: object = args.grants
+    if isinstance(grants, list):
+        items = cast("list[object]", grants)
+        if len(items) == 1 and isinstance(items[0], str):
+            loaded = paramfile.get_paramfile(items[0], name="--grants", operation=operation)
+            if loaded is not None:
+                args.grants = loaded
+
+
+def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int:
+    """Expand a string-typed integer option's ``file://`` paramfile, then coerce.
+
+    aws expands the paramfile then runs its bare ``int()`` at the option's
+    registration position (a missing ``file://`` is the load 252, a
+    non-integer the coercion 255). ``expand_option_paramfile`` handles the
+    ``file://`` (text) case; prefix-less values fall through into ``int()``.
+    """
+    expand_option_paramfile(args, dest, operation=operation)
+    return parse_integer_option(getattr(args, dest), operation=operation)
 
 
 def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
-    """Resolve ``--metadata`` in place: paramfile, then the shorthand parse (252).
+    """Resolve ``--metadata`` in place: paramfile, then the shorthand parse.
 
     Ordered *after* the integer coercions - unlike the direct-option
     paramfiles above - because aws handles the map option's value with its
     shorthand machinery (measured: ``--metadata file:///no/x --page-size
     abc`` is the coercion's 255, while a direct option's bad paramfile wins
-    with 252).
+    with 252). A ``file://`` whole-value reference loads the map text (252 on
+    a missing file); a ``fileb://`` one loads bytes and then aws crashes
+    indexing them in its shorthand parser (measured: rc 255 with this exact
+    message, the ``int`` from a bytes index reaching ``in`` a string), so a
+    missing file is still the load 252 but an existing one is the 255.
     """
-    if args.metadata is not None:
-        metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
-        args.metadata = shorthand.parse_map_option(
-            metadata_value, name="--metadata", operation=operation
+    if args.metadata is None:
+        return
+    if args.metadata.startswith("fileb://"):
+        paramfile.read_binary_paramfile(args.metadata, name="--metadata", operation=operation)
+        raise InvalidValueError(
+            "'in <string>' requires string as left operand, not int", operation=operation
         )
+    metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
+    args.metadata = shorthand.parse_map_option(
+        metadata_value, name="--metadata", operation=operation
+    )
 
 
 class TransferPaths(NamedTuple):
@@ -253,23 +308,26 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     """The shared ``run()`` head, in aws's parse-to-validation order.
 
     The order is exit-code-load-bearing, identical across cp/mv/sync, and
-    measured against aws 2.35.18 on the combined-error cases: the
-    ``--endpoint-url`` scheme check (252, aws validates the value at parse
-    time) -> the direct-option paramfile / blob loads (252, aws's parse-time
-    expansion - it beats the coercions' 255) -> the two integer coercions
-    (255, aws's bare ``int()``) -> the ``--metadata`` resolution (252,
-    paramfile + shorthand, which the coercions beat) -> the session profile
-    resolution (255: aws binds the profile at startup, so a bad ``--profile``
-    beats every post-parse usage error) -> the local-local pair gate (252).
-    Only this shared, order-stable prefix lives here - the stream / checksum /
-    SSE-C checks that follow differ in relative order per command and stay
-    with each command.
+    measured against aws 2.35.18 on the combined-error cases: the ``--query``
+    compile (252, aws resolves it at ``top-level-args-parsed``, ahead of
+    everything) -> the ``--endpoint-url`` scheme check (252, aws validates the
+    value at parse time) -> the direct-option paramfiles and the two integer
+    coercions, interleaved per aws's option-by-option order
+    (``resolve_paramfile_values``: a bad paramfile is 252, a bad ``int()`` 255,
+    and the earlier option wins) -> the ``--metadata`` resolution (252,
+    paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
+    paramfile (252) -> the session profile resolution (255: aws binds the
+    profile at startup, so a bad ``--profile`` beats every post-parse usage
+    error) -> the local-local pair gate (252). Only this shared, order-stable
+    prefix lives here - the stream / checksum / SSE-C checks that follow differ
+    in relative order per command and stay with each command.
     """
+    globalargs.validate_query(args)
     clientfactory.validate_endpoint_url(args)
-    resolve_paramfile_values(args, operation=operation)
-    page_size = parse_integer_option(args.page_size, operation=operation)
-    progress_frequency = parse_integer_option(args.progress_frequency, operation=operation)
+    page_size, progress_frequency = resolve_paramfile_values(args, operation=operation)
     resolve_metadata_option(args, operation=operation)
+    # cp-only (``--expected-size``); a no-op where the attribute is absent.
+    expand_option_paramfile(args, "expected_size", operation=operation)
     clientfactory.validate_profile(args)
     src, dest = args.paths
     src_type = identify_type(src)
@@ -413,6 +471,8 @@ def resolve_case_conflict(
             "Valid values: `warn`, `ignore`.",
             operation=operation,
         )
+    # aws emits this via ``uni_print`` with no trailing newline (measured: the
+    # message ends at ``...html.`` and the next stderr output concatenates).
     sys.stderr.write(
         "warning: Recursive copies/moves from an S3 Express directory "
         "bucket to a case-insensitive local filesystem may result in "
@@ -420,7 +480,7 @@ def resolve_case_conflict(
         "only by case. To disable this warning, set the `--case-conflict` "
         "parameter to `ignore`. For more information, see "
         "https://docs.aws.amazon.com/cli/latest/topic/"
-        "s3-case-insensitivity.html.\n"
+        "s3-case-insensitivity.html."
     )
     return CaseConflictMode.IGNORE
 
@@ -456,7 +516,7 @@ def build_transfer_options(
     ):
         if value is not None:
             # Paramfiles and shorthand are already resolved in place -
-            # :func:`classify_paths` runs at the head of every cp/mv/sync
+            # `classify_paths` runs at the head of every cp/mv/sync
             # (aws resolves them at parse time), so the values here are
             # consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
@@ -476,14 +536,25 @@ def build_transfer_options(
 
 
 def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
-    """Apply aws's ``file://`` (text) paramfile resolution to a string argument.
+    """Apply aws's paramfile resolution to a string-typed argument.
 
     aws-cli registers a global URI paramfile handler on every ``aws s3`` arg, so
     ``--content-type file://ct.txt`` (etc.) sends the *file contents*. A value
-    without the prefix passes through verbatim.
+    without a paramfile prefix passes through verbatim. A ``fileb://`` reference
+    loads bytes, which botocore then rejects for a string-typed parameter at
+    parse time (measured: rc 252, this exact wording) - a missing file is still
+    the load 252.
     """
     if value.startswith("file://"):
         return paramfile.read_text_paramfile(value, name=name, operation=operation)
+    if value.startswith("fileb://"):
+        loaded = paramfile.read_binary_paramfile(value, name=name, operation=operation)
+        raise ValidationError(
+            "Parameter validation failed:\n"
+            f"Invalid type for parameter input, value: {loaded!r}, "
+            "type: <class 'bytes'>, valid types: <class 'str'>",
+            operation=operation,
+        )
     return value
 
 
@@ -557,7 +628,7 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     held state (``Storage.format``), so the S3 side carries no client here -
     this is the throwaway used purely to derive the path shapes (roots, the
     stdin dest key). The real transfer storages (with a client) are built in
-    :func:`resolve_locations`.
+    ``resolve_locations``.
     """
     from boto3_s3 import LocalStorage, S3Storage
 
@@ -588,7 +659,7 @@ def resolve_transfer_config(args: argparse.Namespace, ctx: Context, *, paths_typ
 def build_printer(
     args: argparse.Namespace, progress_frequency: int, *, only_show_errors: bool = False
 ) -> TransferPrinter:
-    """The shared :class:`TransferPrinter` wiring.
+    """The shared ``TransferPrinter`` wiring.
 
     ``only_show_errors`` ORs into the flag for cp's stream rule (a streaming
     download owns stdout for the object bytes, so aws forces the errors-only
@@ -647,11 +718,14 @@ __all__ = [
     "finish_transfer",
     "identify_type",
     "is_s3express_path",
+    "path_storage",
     "resolve_case_conflict",
     "resolve_locations",
     "resolve_metadata_option",
     "resolve_paramfile_values",
+    "resolve_text_paramfile",
     "resolve_transfer_config",
     "validate_checksum_paths_type",
+    "validate_no_overwrite_supported",
     "validate_sse_c_pairing",
 ]

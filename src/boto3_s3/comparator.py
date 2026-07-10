@@ -116,8 +116,8 @@ class ParallelFilter(Generic[_T]):
     pool's threads, so it must be thread-safe;
     :class:`~boto3_s3.checksumcompare.ChecksumComparison` and
     :class:`~boto3_s3.etagcompare.EtagComparison` are (read-only over their
-    fields, S3-side clients built at construction; a botocore client is safe to
-    share for concurrent calls). A
+    fields; ``ChecksumComparison``'s S3-side clients are built at construction,
+    and a botocore client is safe to share for concurrent calls). A
     ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
     picklable) - the pool must be thread-based.
 
@@ -161,8 +161,9 @@ class Comparator:
     The classic sorted-merge (aws-cli ``Comparator.call``): advance whichever
     side holds the smaller key, pair equal keys, and flush the survivor once
     one side is exhausted.
-    Inputs must be ascending by compare key - that is the ``Storage.scan``
-    ordering contract (S3 byte order; the local walk sorts to match) - and
+    Inputs must be ascending by compare key - what a ``SORTABLE_SCAN``
+    backend's ``scan(sort=True)`` promises (S3 byte order; the local walk sorts
+    to match) - and
     the merge itself never compares sizes or times: feed the resulting pairs
     to a :data:`PairFilter` for that. ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment. Each side's backend

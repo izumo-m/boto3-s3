@@ -767,4 +767,7 @@ class TestS3ExpressCaseConflict:
         captured = capsys.readouterr()
         assert rc == 0
         assert "warning: Recursive copies/moves" in captured.err
+        # aws emits this via uni_print with NO trailing newline (measured); the
+        # warning is the only thing on stderr for this empty listing.
+        assert captured.err.endswith("s3-case-insensitivity.html.")
         assert [c.operation for c in calls] == ["ListObjectsV2"]

@@ -4,7 +4,7 @@
 contract so it can be one side of a ``cp`` transfer - the building block behind
 ``cp(s3_uri, IOStorage(buf))`` / ``cp(IOStorage(buf), s3_uri)``. It is a single
 endpoint, not a container: only :meth:`~IOStorage.open` is meaningful;
-``scan_pages`` / ``delete`` raise. The S3 side still rides ``s3transfer`` off its
+``scan_pages`` / ``delete`` / ``get_fileinfo`` raise. The S3 side still rides ``s3transfer`` off its
 client/bucket; this side hands ``s3transfer`` the fileobj that ``open`` returns.
 
 The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
@@ -96,23 +96,37 @@ class _NonSeekable:
 
 
 class _EncodingReader:
-    """``str`` source presented as a non-seekable binary reader (encode on read)."""
+    """``str`` source presented as a non-seekable binary reader (encode on read).
+
+    One incremental encoder spans every read (the encode mirror of
+    ``_DecodingWriter``'s incremental decode), so a stateful codec encodes as a
+    single stream - utf-16 emits its BOM once, not per chunk - and EOF flushes
+    the encoder's pending tail (``final=True``).
+    """
 
     def __init__(self, text: IO[str], encoding: str) -> None:
         self._text = text
-        self._encoding = encoding
+        self._encoder = codecs.getincrementalencoder(encoding)()
         self._buf = b""
+        self._eof = False
+
+    def _encode(self, chunk: str) -> bytes:
+        """Encode one source chunk; ``""`` (EOF) flushes the encoder's tail once."""
+        if chunk:
+            return self._encoder.encode(chunk)
+        if self._eof:
+            return b""
+        self._eof = True
+        return self._encoder.encode("", final=True)
 
     def read(self, amt: int | None = None) -> bytes:
         if amt is None or amt < 0:
-            out = self._buf + self._text.read().encode(self._encoding)
+            # Read to EOF: the rest of the text, then the encoder's final tail.
+            out = self._buf + self._encode(self._text.read()) + self._encode("")
             self._buf = b""
             return out
-        while len(self._buf) < amt:
-            chunk = self._text.read(_READ_CHUNK)
-            if not chunk:
-                break
-            self._buf += chunk.encode(self._encoding)
+        while len(self._buf) < amt and not self._eof:
+            self._buf += self._encode(self._text.read(_READ_CHUNK))
         out, self._buf = self._buf[:amt], self._buf[amt:]
         return out
 
@@ -120,6 +134,20 @@ class _EncodingReader:
         # A reader over the caller's text stream: nothing to release, and the
         # caller's stream is never closed by IOStorage.
         pass
+
+
+def _is_text_stream(stream: IO[Any]) -> bool:
+    """Whether ``stream`` trades in ``str`` (so ``open`` must adapt it to bytes).
+
+    ``io.TextIOBase`` covers the stdlib's usual text streams (``TextIOWrapper``,
+    ``StringIO``), but the constructor accepts any ``IO[str]`` - ``codecs.open``'s
+    ``StreamReaderWriter`` or a text-mode ``SpooledTemporaryFile`` read ``str``
+    without deriving from it. Those carry the text hallmark instead: an
+    ``encoding`` attribute, which no binary stream has. Without this probe such a
+    stream would pass through as "binary" and s3transfer would fail obscurely on
+    its ``str`` chunks.
+    """
+    return isinstance(stream, io.TextIOBase) or hasattr(stream, "encoding")
 
 
 class _DecodingWriter:
@@ -154,9 +182,12 @@ class IOStorage(Storage):
     downloads into the stream, ``cp(IOStorage(buf), "s3://b/k")`` uploads from it.
     ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
     the bytes land (a stream is never a move *source* - it cannot be deleted).
-    A binary stream is used as-is; a text stream is wrapped with ``encoding``
-    (default utf-8). The caller's stream is never closed by this class. As a single
-    endpoint it has no listing: :meth:`scan_pages` / :meth:`delete` raise.
+    A binary stream is used as-is; a text stream - recognized as an
+    ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
+    ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
+    with ``encoding`` (default utf-8). The caller's stream is never closed by
+    this class. As a single endpoint it has no listing: ``scan_pages`` /
+    ``delete`` / ``get_fileinfo`` raise.
 
     ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
     I/O (both directions, chosen per ``open`` call), with no listing or deletion.
@@ -180,7 +211,7 @@ class IOStorage(Storage):
         """
         stream = self._stream
         assert stream is not None  # plain IOStorage always holds a stream
-        if isinstance(stream, io.TextIOBase):
+        if _is_text_stream(stream):
             adapter = (
                 _EncodingReader(stream, self._encoding)
                 if mode == "rb"

@@ -179,3 +179,57 @@ class TestWebsiteExitCodeShape:
         rc = cli.main(["website", "s3://no-such", "--index-document", "i.html"], ctx=_ctx(client))
         assert rc == 254
         assert "NoSuchBucket" in capsys.readouterr().err
+
+
+def _unused_factory(_args: Any) -> Any:
+    raise AssertionError("client factory must not be called")
+
+
+class TestWebsiteParamfileAndQuery:
+    """aws expands the positional path and both document options via file:// at
+    parse time and compiles --query there; a bad reference / expression is its
+    252 before the request is built."""
+
+    def test_index_document_file_reference_is_expanded(self, tmp_path: Any) -> None:
+        ref = tmp_path / "i.txt"
+        ref.write_text("home.html")
+        client = _FakeWebsiteClient()
+        assert (
+            cli.main(["website", "s3://b", "--index-document", f"file://{ref}"], ctx=_ctx(client))
+            == 0
+        )
+        assert client.calls[0]["WebsiteConfiguration"] == {"IndexDocument": {"Suffix": "home.html"}}
+
+    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["website", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert (
+            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
+        )
+
+    def test_index_document_missing_paramfile_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            ["website", "s3://b", "--index-document", "file:///no/x"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--index-document'" in capsys.readouterr().err
+
+    def test_error_document_missing_paramfile_is_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            ["website", "s3://b", "--error-document", "file:///no/x"],
+            ctx=Context(client_factory=_unused_factory),
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--error-document'" in capsys.readouterr().err
+
+    def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(
+            ["website", "s3://b", "--query", "]["], ctx=Context(client_factory=_unused_factory)
+        )
+        assert rc == 252
+        assert "Bad value for --query ][" in capsys.readouterr().err

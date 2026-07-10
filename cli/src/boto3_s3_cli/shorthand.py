@@ -105,9 +105,12 @@ class _Parser:
     """Recursive-descent flat-map parser mirroring aws-cli's ``ShorthandParser``.
 
     Scoped to flat scalar maps plus the ``@=`` paramfile operator (the shapes
-    ``--metadata`` accepts); the explicit-list ``[...]`` / hash ``{...}``
-    constructs are not handled. The returned dict preserves insertion order,
-    so a caller can keep the user's pair order.
+    ``--metadata`` accepts); the explicit-list ``[...]`` / hash ``{...}`` /
+    csv-list (``a=b,c``) constructs are not handled. On those non-scalar
+    shapes the rc still matches aws (252, measured), but the stderr wording
+    differs: aws parses them and then fails its schema validation, while this
+    parser raises a syntax error. The returned dict preserves insertion
+    order, so a caller can keep the user's pair order.
     """
 
     def __init__(self, value: str, *, name: str, operation: str) -> None:
@@ -170,9 +173,11 @@ class _Parser:
             return ""
         first = self._value[self._index]
         if first == "'":
-            return self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'")
+            # "singled quoted" reproduces aws-cli's _NamedRegex name verbatim
+            # (typo included) so the unterminated-quote wording matches byte for byte.
+            return self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
         if first == '"':
-            return self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"')
+            return self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
         return self._first_value_unquoted()
 
     def _first_value_unquoted(self) -> str:
@@ -183,11 +188,11 @@ class _Parser:
         self._index += len(consumed)
         return consumed.replace("\\,", ",").rstrip()
 
-    def _consume_quoted(self, regex: re.Pattern[str], *, escaped_char: str) -> str:
+    def _consume_quoted(self, regex: re.Pattern[str], *, escaped_char: str, name: str) -> str:
         match = regex.match(self._value[self._index :])
         if match is None:
             raise _ShorthandParseError(
-                f"Expected: closing {escaped_char!r}, received: '<none>' for input:\n"
+                f"Expected: '<{name}>', received: '<none>' for input:\n "
                 f"{self._error_marker(self._index)}"
             )
         consumed = match.group(0)
@@ -201,12 +206,13 @@ class _Parser:
             self._consume_whitespace()
         if self._at_eof():
             raise _ShorthandParseError(
-                f"Expected: {char!r}, received: 'EOF' for input:\n{self._error_marker(self._index)}"
+                f"Expected: '{char}', received: 'EOF' for input:\n "
+                f"{self._error_marker(self._index)}"
             )
         actual = self._value[self._index]
         if actual != char:
             raise _ShorthandParseError(
-                f"Expected: {char!r}, received: {actual!r} for input:\n"
+                f"Expected: '{char}', received: '{actual}' for input:\n "
                 f"{self._error_marker(self._index)}"
             )
         self._index += 1
@@ -221,9 +227,18 @@ class _Parser:
         return self._index >= len(self._value)
 
     def _error_marker(self, index: int) -> str:
-        # aws-cli caret-line layout for a single-line input (shorthand CLI tokens
-        # carry no newlines, so the multi-line variant is not reproduced).
-        return f"{self._value}\n{' ' * index}^"
+        # aws-cli ShorthandParseError._error_location: place the caret under the
+        # offending column. A shell can embed newlines in an argument, so count
+        # the column from the last newline before `index` and split the value
+        # into consumed / remaining around the next newline after it.
+        value = self._value
+        consumed, remaining, num_spaces = value, "", index
+        if "\n" in value[:index]:
+            num_spaces = index - value[:index].rindex("\n") - 1
+        if "\n" in value[index:]:
+            next_newline = index + value[index:].index("\n")
+            consumed, remaining = value[:next_newline], value[next_newline:]
+        return f"{consumed}\n{' ' * num_spaces}^{remaining}"
 
 
 __all__ = ["parse_map_option"]

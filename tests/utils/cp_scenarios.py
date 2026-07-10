@@ -36,6 +36,7 @@ from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 __all__ = [
     "SCENARIOS",
@@ -129,9 +130,8 @@ class CpScenario(BaseScenario):
     undefined_on_case_insensitive_dest: bool = False
 
 
-def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
+def materialize_workdir(workdir: Path, scenario: CpScenario) -> None:
     """Create the scenario's local source tree (plus the standing ``dest/``)."""
-    import os
     import time
 
     (workdir / "dest").mkdir(parents=True, exist_ok=True)
@@ -807,12 +807,3 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("Failed to download", "differs only by case"),
     ),
 )
-
-
-__all__ = [
-    "SCENARIOS",
-    "CpScenario",
-    "materialize_workdir",
-    "resolve_argv",
-    "seed_remote",
-]

@@ -1,7 +1,7 @@
 """Port of aws-cli's functional website tests to ``boto3-s3 website``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_website_command.py``
-(aws-cli 2.34.x snapshot). Test names, argv, and expected params are
+(aws-cli 2.35.18). Test names, argv, and expected params are
 kept verbatim so the file stays diffable against the aws-cli original; the
 aws-cli harness's ``assert_params_for_cmd`` becomes the recording client
 (``tests/utils/recorder.py``) plus an explicit rc/params assert, like the
