@@ -90,9 +90,17 @@ also read as `'auto'`) with the same rules as boto3.
   client (the S3 connection model in [`overview.md`](./overview.md)), it derives
   the CRT wiring from the client.
   - region = `client.meta.region_name`
-  - endpoint = `None` if `client.meta.endpoint_url` is an AWS-default form
-    (boto3-faithful - botocore re-resolves it per request); if it is custom
-    (MinIO, etc.) that value is passed to the serializer. "AWS-default" is
+  - endpoint = the caller's explicit endpoint when one is threaded in, else the
+    host heuristic. The CLI passes its `--endpoint-url` down (`S3(endpoint_url=)`
+    -> `Transferrer(crt_endpoint=)` -> `create_crt_transfer_manager(endpoint=)`),
+    and that value is honored verbatim - matching aws-cli, whose CRT serializer
+    is handed `params['endpoint_url']` as-is, so a custom endpoint that sits
+    under an AWS domain (a VPC interface endpoint, a directly-named FIPS /
+    dualstack host) is pinned rather than re-resolved to public S3. With no
+    explicit endpoint (`endpoint=None`, the default and every non-CLI caller),
+    `_derive_endpoint` falls back to the host form of `client.meta.endpoint_url`:
+    `None` for an AWS-default form (boto3-faithful - botocore re-resolves it per
+    request), the value itself for a custom host (MinIO, etc.). "AWS-default" is
     recognized across every partition the installed botocore knows, not just
     the two commercial suffixes: `_aws_dns_suffixes` collects, once, every
     partition's `dnsSuffix` plus its dualstack/fips variant suffixes straight
@@ -100,16 +108,13 @@ also read as `'auto'`) with the same rules as boto3.
     `api.aws`), china, gov, the eusc `amazonaws.eu`, and the iso partitions
     (`c2s.ic.gov`, `sc2s.sgov.gov`, `cloud.adc-e.uk`, `csp.hci.ic.gov`) - so a
     standard endpoint in any of them re-resolves like boto3 instead of being
-    needlessly pinned. The residual limit is what that set cannot cover: a
-    host in a partition newer than the installed botocore, or a genuinely
-    custom/gateway host, is pinned either way - and because boto3 always
-    passes `None`, that is the one point where deriving the endpoint from the
-    client (our improvement) can disagree with boto3's own behavior, not just
-    with aws-cli's. aws-cli looks only at the `--endpoint-url` argument and
-    has a known bug where, with only the env `AWS_ENDPOINT_URL_S3` set, it
-    makes a TLS connection over http and dies with `AWS_IO_SOCKET_CLOSED`; we
-    do not hit it because we derive from the resolved
-    `client.meta.endpoint_url`.
+    needlessly pinned. The heuristic's residual limit is what that set cannot
+    cover on its own: absent the explicit signal, a custom host *under* an AWS
+    suffix would be dropped to `None`, which is exactly why the CLI threads
+    `--endpoint-url` through. aws-cli itself has a known bug where, with only the
+    env `AWS_ENDPOINT_URL_S3` set, it makes a TLS connection over http and dies
+    with `AWS_IO_SOCKET_CLOSED`; we do not hit it because we derive from the
+    resolved `client.meta.endpoint_url`.
   - use_ssl = the endpoint's scheme is other than `http`
   - verify = the client's TLS verification setting (`--no-verify-ssl` /
     `--ca-bundle`). Via the private botocore attribute

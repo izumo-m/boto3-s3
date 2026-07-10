@@ -214,15 +214,25 @@ def should_use_crt(preferred: str) -> bool:
     return False
 
 
-def create_crt_transfer_manager(client: S3Client, config: Any | None) -> Any | None:
+def create_crt_transfer_manager(
+    client: S3Client, config: Any | None, *, endpoint: str | None = None
+) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
 
     ``None`` means the boto3-faithful fallbacks fired: the cross-process lock
     is held elsewhere, or the process singleton was created for a different
     region / credentials / endpoint / signing mode.
+
+    ``endpoint`` is the caller's explicit endpoint (the CLI threads its
+    ``--endpoint-url`` here, matching aws-cli, which passes it to the CRT
+    serializer verbatim - so a custom endpoint under an AWS domain, e.g. a VPC
+    interface endpoint, is honored rather than re-resolved to public S3). When
+    it is ``None`` the host-heuristic default (:func:`_derive_endpoint`) decides,
+    which is boto3-faithful for a real AWS endpoint and still pins a non-AWS
+    custom host such as MinIO.
     """
-    crt_s3_client = _get_crt_s3_client(client, config)
-    if not _is_compatible_request(client, crt_s3_client):
+    crt_s3_client = _get_crt_s3_client(client, config, endpoint)
+    if not _is_compatible_request(client, crt_s3_client, endpoint):
         return None
     assert crt_s3_client is not None
     from s3transfer.crt import CRTTransferManager
@@ -252,18 +262,20 @@ def create_crt_transfer_manager(client: S3Client, config: Any | None) -> Any | N
     return CRTTransferManager(**kwargs)
 
 
-def _get_crt_s3_client(client: S3Client, config: Any | None) -> _CrtS3Client | None:
+def _get_crt_s3_client(
+    client: S3Client, config: Any | None, endpoint: str | None
+) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(client, config)
+            serializer, crt_s3_client = _initialize(client, config, endpoint)
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
     return _crt_s3_client
 
 
 def _initialize(
-    client: S3Client, config: Any | None
+    client: S3Client, config: Any | None, endpoint: str | None
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     from s3transfer.crt import (
         BotocoreCRTRequestSerializer,
@@ -281,7 +293,7 @@ def _initialize(
     from botocore.session import Session
 
     region = client.meta.region_name
-    endpoint_url = _derive_endpoint(client)
+    endpoint_url = _resolve_endpoint(client, endpoint)
     serializer = BotocoreCRTRequestSerializer(
         Session(), {"region_name": region, "endpoint_url": endpoint_url}
     )
@@ -304,13 +316,15 @@ def _initialize(
     return serializer, _CrtS3Client(crt_client, lock, region, endpoint_url, cred_wrapper)
 
 
-def _is_compatible_request(client: S3Client, crt_s3_client: _CrtS3Client | None) -> bool:
+def _is_compatible_request(
+    client: S3Client, crt_s3_client: _CrtS3Client | None, endpoint: str | None
+) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint/signing pins."""
     if crt_s3_client is None:
         return False
     if client.meta.region_name != crt_s3_client.region:
         return False
-    if _derive_endpoint(client) != crt_s3_client.endpoint_url:
+    if _resolve_endpoint(client, endpoint) != crt_s3_client.endpoint_url:
         return False
     if _is_unsigned(client):
         return crt_s3_client.cred_wrapper is None
@@ -402,6 +416,19 @@ def _derive_endpoint(client: S3Client) -> str | None:
     if any(host == suffix or host.endswith("." + suffix) for suffix in _aws_dns_suffixes()):
         return None
     return endpoint
+
+
+def _resolve_endpoint(client: S3Client, endpoint: str | None) -> str | None:
+    """The endpoint the CRT client pins for this request.
+
+    An explicit ``endpoint`` (the caller's ``--endpoint-url``) is honored
+    verbatim, matching aws-cli - so a custom endpoint that happens to sit under
+    an AWS DNS suffix (a VPC interface endpoint, a FIPS / dualstack host the user
+    named directly, ...) is pinned rather than dropped. ``None`` (no explicit
+    endpoint) falls back to the host heuristic, which is boto3-faithful for a
+    resolved AWS endpoint and still pins a non-AWS custom host such as MinIO.
+    """
+    return _derive_endpoint(client) if endpoint is None else endpoint
 
 
 def _derive_use_ssl(endpoint_url: str | None) -> bool:

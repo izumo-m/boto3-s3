@@ -582,6 +582,7 @@ class Transferrer:
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
         capture_response: bool = False,
+        crt_endpoint: str | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -645,6 +646,10 @@ class Transferrer:
         self._on_progress = on_progress
         self._on_result = on_result
         self._capture_response = capture_response
+        # The caller's explicit endpoint (the CLI's --endpoint-url), threaded to
+        # the CRT engine so it pins a custom endpoint the host heuristic would
+        # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
+        self._crt_endpoint = crt_endpoint
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
@@ -1040,7 +1045,9 @@ class Transferrer:
         if not crtsupport.should_use_crt(str(preferred)):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
-        return crtsupport.create_crt_transfer_manager(self._client, self._transfer_config)
+        return crtsupport.create_crt_transfer_manager(
+            self._client, self._transfer_config, endpoint=self._crt_endpoint
+        )
 
     def _create_classic_manager(self) -> Any:
         from s3transfer.manager import TransferConfig as S3TransferConfig

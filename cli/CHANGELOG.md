@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored.
 - Closer `aws s3` parity in transfer progress output, shorthand syntax-error
   messages, `rb` error wording, and empty-`--profile` handling.
+- The CRT transfer engine now honors an explicit `--endpoint-url` under an AWS
+  domain (e.g. a VPC interface endpoint) instead of re-resolving to public S3.
 
 ## [0.4.0] - 2026-07-07
 

@@ -144,7 +144,7 @@ class CpCommand(Command):
             expected_size = None
             if src == "-" and args.expected_size is not None:
                 expected_size = int(args.expected_size)
-            S3().cp(
+            S3(endpoint_url=args.endpoint_url).cp(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,

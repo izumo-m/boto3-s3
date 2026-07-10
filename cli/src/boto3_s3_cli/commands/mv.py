@@ -116,7 +116,7 @@ class MvCommand(Command):
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:
-            S3().mv(
+            S3(endpoint_url=args.endpoint_url).mv(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,

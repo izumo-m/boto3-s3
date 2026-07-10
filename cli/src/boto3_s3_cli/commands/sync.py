@@ -109,7 +109,7 @@ class SyncCommand(Command):
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:
-            S3().sync(
+            S3(endpoint_url=args.endpoint_url).sync(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 delete_filter=args.delete,

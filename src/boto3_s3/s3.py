@@ -902,6 +902,7 @@ class S3:
             on_progress=on_progress,
             on_result=on_result,
             capture_response=capture_response,
+            crt_endpoint=self._endpoint_url,
         )
         # After the Transferrer: the gate's destination membership scan warns
         # into the shared rollup (aws's reverse enumeration shares the result
@@ -1080,6 +1081,7 @@ class S3:
             on_progress=on_progress,
             on_result=on_result,
             capture_response=capture_response,
+            crt_endpoint=self._endpoint_url,
         )
         with transferrer:
             if dryrun:
@@ -1386,6 +1388,7 @@ class S3:
             on_progress=on_progress,
             on_result=on_result,
             capture_response=capture_response,
+            crt_endpoint=self._endpoint_url,
         )
         deletes = _SyncDeletes(
             dest_storage,
