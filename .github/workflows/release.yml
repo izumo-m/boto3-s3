@@ -2,7 +2,9 @@
 # The two workspace packages are versioned independently; the tag selects which.
 #   boto3-s3-v<version>      -> publishes the boto3-s3 library
 #   boto3-s3-cli-v<version>  -> publishes the boto3-s3-cli CLI
-# A manual run (workflow_dispatch) can target TestPyPI for a dry run.
+# A manual run (workflow_dispatch) targets TestPyPI for a dry run; the
+# production index is reachable only through a tag push, which enforces the
+# tag <-> pyproject version check below.
 # See docs/release.md for the full procedure and one-time setup.
 name: release
 
@@ -21,13 +23,12 @@ on:
           - boto3-s3
           - boto3-s3-cli
       repository:
-        description: Target index
+        description: Target index (dry runs only; production publishes are tag-driven)
         required: true
         default: testpypi
         type: choice
         options:
           - testpypi
-          - pypi
 
 permissions: {}
 
@@ -69,6 +70,13 @@ jobs:
             package="${REF_NAME%-v*}"
             tag_version="${REF_NAME##*-v}"
             repository="pypi"
+            # A degenerate tag like 'boto3-s3-v' would leave tag_version empty
+            # and slip past the version check below; only a dispatch run may
+            # run without a tag version.
+            if [ -z "$tag_version" ]; then
+              echo "::error::tag '$REF_NAME' has no version after '-v'"
+              exit 1
+            fi
           fi
           case "$package" in
             boto3-s3) pyproject="pyproject.toml" ;;
@@ -101,6 +109,7 @@ jobs:
           import json
           import sys
           import tomllib
+          import urllib.error
           import urllib.request
 
           from packaging.requirements import Requirement
@@ -110,8 +119,13 @@ jobs:
               deps = tomllib.load(fh)["project"]["dependencies"]
           req = next(r for r in map(Requirement, deps) if r.name == "boto3-s3")
           host = "https://test.pypi.org" if sys.argv[1] == "testpypi" else "https://pypi.org"
-          with urllib.request.urlopen(f"{host}/pypi/boto3-s3/json") as resp:
-              releases = json.load(resp)["releases"]
+          try:
+              with urllib.request.urlopen(f"{host}/pypi/boto3-s3/json") as resp:
+                  releases = json.load(resp)["releases"]
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  sys.exit(f"no boto3-s3 project on {host}; publish the library first (docs/release.md)")
+              raise
           live = [v for v, files in releases.items() if files and not all(f.get("yanked") for f in files)]
           ok = sorted(req.specifier.filter(live), key=Version)
           if not ok:

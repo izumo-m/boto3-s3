@@ -15,7 +15,8 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 - `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
 - `tests/` — the test suite (see [`docs/testing.md`](docs/testing.md)).
 - `docs/` — design and reference documentation.
-- `scripts/` — helpers for the local MinIO stack.
+- `scripts/` — helpers for the e2e environment (the local MinIO stack and the
+  pinned aws-cli install).
 
 ## Setup
 
@@ -31,8 +32,11 @@ Prerequisites:
 Install the workspace and its dev tools into a local virtualenv:
 
 ```bash
-uv sync
+uv sync --all-packages
 ```
+
+(A bare `uv sync` installs only the library; without the `cli` workspace member
+the `tests/cli` suite fails at collection.)
 
 Run any tool through `uv run` so it uses that environment, e.g. `uv run pytest`.
 

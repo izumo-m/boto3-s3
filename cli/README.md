@@ -106,8 +106,9 @@ boto3-s3 ls s3://my-bucket --profile prod --region eu-west-1
 
 Transfer tuning is read from the profile's `[s3]` section in `~/.aws/config`
 (`max_concurrent_requests`, `multipart_threshold`, `multipart_chunksize`,
-`max_queue_size`, `max_bandwidth`, `io_chunksize`, `preferred_transfer_client`),
-exactly as `aws s3` reads it.
+`max_queue_size`, `max_bandwidth`, `io_chunksize`, `preferred_transfer_client`,
+plus the CRT-mode keys `target_bandwidth`, `should_stream`, `disk_throughput`,
+and `direct_io`), exactly as `aws s3` reads it.
 
 `--debug` turns on wire-level logging with credentials (signatures, access-key
 ids, session tokens) masked by default.

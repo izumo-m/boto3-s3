@@ -62,9 +62,6 @@ dev = [
 [tool.uv.workspace]
 members = ["cli"]
 
-[tool.uv.sources]
-boto3-s3 = { workspace = true }
-
 [tool.ruff]
 line-length = 100
 target-version = "py310"

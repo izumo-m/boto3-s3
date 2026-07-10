@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--copy-props` gains the `all` choice, copying S3 object annotations
   (aws-cli 2.35.18 parity; needs botocore >= 1.43.31 and s3transfer >= 0.19).
+- `file://` paramfile references now expand in positional arguments and in the
+  `mb` / `rb` / `presign` / `ls` / `rm` / `website` options, matching `aws s3`.
+- An invalid `--query` expression now exits 252 like `aws s3` instead of being
+  ignored.
+- Closer `aws s3` parity in transfer progress output, shorthand syntax-error
+  messages, `rb` error wording, and empty-`--profile` handling.
 
 ## [0.4.0] - 2026-07-07
 

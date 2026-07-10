@@ -135,6 +135,7 @@ name = "boto3-s3-cli"
 version = "0.4.0"
 source = { editable = "cli" }
 dependencies = [
+    { name = "boto3" },
     { name = "boto3-s3" },
     { name = "botocore" },
 ]
@@ -149,6 +150,7 @@ crt = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.28" },
     { name = "boto3-s3", editable = "." },
     { name = "boto3-s3", extras = ["crt"], marker = "extra == 'crt'", editable = "." },
     { name = "botocore", specifier = ">=1.31" },

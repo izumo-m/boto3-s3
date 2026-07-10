@@ -25,9 +25,18 @@ if [[ "$current" == "$target" ]]; then
     exit 0
 fi
 
+arch=$(uname -m)
+case "$arch" in
+    x86_64 | aarch64) ;;
+    *)
+        echo "$0: unsupported architecture '$arch' (aws-cli v2 ships Linux x86_64 and aarch64 only)" >&2
+        exit 1
+        ;;
+esac
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${target}.zip"
+url="https://awscli.amazonaws.com/awscli-exe-linux-${arch}-${target}.zip"
 echo "Downloading aws-cli $target (was: ${current:-none})"
 curl -fsSL "$url" -o "$tmp/awscliv2.zip"
 unzip -q -d "$tmp" "$tmp/awscliv2.zip"

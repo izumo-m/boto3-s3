@@ -344,7 +344,8 @@ for the `Storage` contract, capabilities, and a worked example.
 
 ## Errors
 
-Every failure is a `Boto3S3Error` subclass — catch the root to catch them all.
+Every failure is a `Boto3S3Error` (usually one of the subclasses below) — catch
+the root to catch them all.
 
 | Exception | Raised when |
 | --- | --- |
@@ -355,7 +356,7 @@ Every failure is a `Boto3S3Error` subclass — catch the root to catch them all.
 | `AccessDeniedError` | Permission denied (S3 403, local `PermissionError`). |
 | `TransportError` | Network or local I/O failure (connection, timeout, `OSError`). |
 | `CancelledError` | Cancelled via `CancelToken`. |
-| `BatchError` | Raised once at the end of a batch op (`cp -r` / `mv -r` / `rm -r` / `sync`) when at least one item failed. |
+| `BatchError` | Raised once at the end of a `cp` / `mv` / `rm` / `sync` run when at least one item failed — single-item runs included; an error before the run starts (validation, resolution) raises its category error directly. |
 
 `BatchError` carries summary counts (`succeeded` / `failed` / `warned` /
 `skipped` / `total`); the per-item detail arrives live through `on_result`.
@@ -380,7 +381,9 @@ set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
 - **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2. A few
   options need a newer SDK and are simply unavailable below it rather than
   emulated — conditional writes (`no_overwrite`), the `CRC64NVME` checksum, the
-  `ls` bucket-name / bucket-region filters, `mb` with `tags=`, and the
+  `ls` bucket-name / bucket-region filters, `mb` with `tags=`,
+  `copy_props="all"` (needs `botocore` >= 1.43.31 and `s3transfer` >= 0.19;
+  refused with `ConfigurationError` below that), and the
   copy/download source-ETag extras (`OpResult.extra_info`'s `{"ETag": ...}`
   needs `capture_response=True` on an old s3transfer, and its
   `CopySourceIfMatch` consistency pin on copies is absent). CRT features need

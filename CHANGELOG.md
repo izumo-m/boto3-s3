@@ -16,12 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the walk root included, at `compare_key == ""`) and/or symlinks as
   unfollowed leaves; `follow_symlinks` keeps meaning traversal only, so all
   combinations compose. Defaults off = aws parity.
-  `LocalFileGenerator.scan_children` / `classify_child` now take the scan
-  `options` instead of a bare `follow_symlinks`.
-- A walk whose `entry_stat_result` override reports a symlink (an lstat-style
-  walker) now emits that entry as a vetting-free leaf; the old readability
-  probe opened the link target, which Windows refuses for a directory symlink
-  (the entry was silently dropped there).
+- An lstat-style walker's symlink entries are no longer silently dropped on
+  Windows.
+- Assorted correctness and aws-parity fixes from a project-wide quality review
+  (CRT endpoint recognition beyond the commercial partitions, copy-props edge
+  cases, local-walk boundary handling).
 
 ## [0.5.0] - 2026-07-07
 
