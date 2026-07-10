@@ -132,9 +132,9 @@ argparse; it layers an independent completer pipeline on top.
 |---|---|---|
 | `model.py` | introspects `cli.build_parser()` to build the completion model (subcommand names / option names / nargs / required / help / **choices** / positional arguments). Separates global from command-specific | pure Python |
 | `parser.py` | a port of aws-cli `CLIParser` / `ParsedResult` (parses partial input without erroring). Normalizes the root to the two-level hierarchy of `boto3-s3`. `_handle_positional` is adjusted at two points for usability (section 3 reachability) | pure Python |
-| `completers.py` | `CompletionResult` / `AutoCompleter` (adopts the first completer to return non-None) / `fuzzy_filter` plus each completer (name / region / profile / file:// / choices) | pure Python (botocore is lazily imported only when completing region/profile) |
+| `completers.py` | `CompletionResult` / `AutoCompleter` (adopts the first completer to return non-None) / `fuzzy_filter` plus each completer (name / region / profile / file:// / choices) | pure Python (boto3 - and the botocore / s3transfer chain it pulls in - is lazily imported only when completing region/profile) |
 | `prompter.py` | the `AutoPrompter` ABC (`prompt_for_args(argv)->argv`). The injection point | pure Python |
-| `prompt.py` | the `prompt_toolkit` implementation. The `CompletionResult`->`prompt_toolkit.Completion` adapter (excludes auto-prompt flags + dedup + required first) and the `PromptSession` loop | **`prompt_toolkit`** |
+| `prompt.py` | the `prompt_toolkit` implementation. The `CompletionResult`->`prompt_toolkit.completion.Completion` adapter (excludes auto-prompt flags + dedup + required first) and the `PromptSession` loop | **`prompt_toolkit`** |
 
 **Single source = argparse**: the option set is derived from the argparse
 definition, so it does not drift (guaranteed by the test
@@ -144,8 +144,9 @@ upholds.
 
 **Lazy import**: `model.py` / `parser.py` / `completers.py` are pure Python.
 Only `prompt.py` imports `prompt_toolkit`, and that import happens only when
-`--cli-auto-prompt` actually fires. The botocore used for region/profile
-completion is likewise lazily imported when the completer fires. `--help` /
+`--cli-auto-prompt` actually fires. The boto3 used for region/profile
+completion (and the botocore / s3transfer chain it pulls in) is likewise
+lazily imported when the completer fires. `--help` /
 `--version` / usage / normal dispatch touch neither the `autoprompt` package nor
 `prompt_toolkit` (the import contract, [`imports.md`](./imports.md); guaranteed
 by `test_import_contract.py`).
@@ -222,6 +223,13 @@ error path (section 4, `test_import_contract.py`). The active profile is `--prof
 resolution (abbreviations, nesting), but it is sufficient for this interactive
 setting that is outside the charter.
 
+Consulting `--profile` here is a deliberate deviation from aws-cli: at
+auto-prompt resolution aws has not yet applied `--profile` to the session, so it
+reads `cli_auto_prompt` from the env-derived profile only. Preferring `--profile`
+means a `cli_auto_prompt` set only under a `[profile X]` section fires the prompt
+on `--profile X` for us but not for aws - an intentional usability preference,
+admissible because the auto-prompt UI is charter-exempt.
+
 **Difference when prompt_toolkit is absent** (section 6): an explicit flag gets the
 install guidance + 252. The env/config-driven case **silently falls back to
 normal dispatch** (a missing optional dependency must not break every command).
@@ -264,7 +272,7 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
   set.
 - **Wiring**: mutual exclusion 252, missing-dep (stub `find_spec`) guidance +
   252, re-dispatch via an injected prompter, `--help` precedence,
-  `--no-cli-auto-prompt` no-op.
+  `--no-cli-auto-prompt` triggering no prompt.
 - **Mode resolution (Phase 2)**: env on/off/invalid, config file (`[default]` /
   `[profile X]`, `AWS_CONFIG_FILE`), env > config precedence, explicit flag >
   env, on-partial (valid = no prompt / usage error = prompt), config-driven AND

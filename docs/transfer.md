@@ -14,7 +14,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` / the backends |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
-| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behaviour (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `return_directories` / `return_symlinks`) is set on the same constructor; `LoopDetector` guards symlink cycles |
+| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `return_directories` / `return_symlinks`) is set on the same constructor; `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
@@ -37,7 +37,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   do not use `boto3.s3.transfer.create_transfer_manager` and hold manager
   creation ourselves in order to control subscriber wiring, lazy creation, and
   the IfNoneMatch patch.
-- The public type is `TransferConfig` from [`transferconfig.py`](./crt.md)
+- The public type is `TransferConfig` from `transferconfig.py`
   (a subclass of boto3's that adds the CRT tuning fields; the defaults are the
   same as aws-cli - 8 MiB threshold / 8 MiB chunk / concurrency 10). As in
   boto3, classic maps `use_threads=False` to `NonThreadedExecutor` (a
@@ -68,8 +68,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   no lock - so the mutation must happen-before the scan prefetch worker starts
   fetching pages with the same client (aws-cli likewise builds its
   TransferManager before the file generator starts). A dryrun never calls
-  `prepare()`: no manager is built, and s3transfer is not even imported (the
-  discipline of [`imports.md`](./imports.md)).
+  `prepare()`: no manager is built (the s3transfer module itself is imported
+  regardless, by boto3 when a client is built - [`imports.md`](./imports.md)).
 - **Backpressure is delegated to s3transfer**: the bounded semaphore of
   `TransferConfig.max_request_queue_size` (default 1000) blocks the submit
   thread when it is full. This is the same mechanism aws-cli relies on; we keep
@@ -135,9 +135,9 @@ chain:
 
 | `copy_props` | subscribers | behavior |
 |---|---|---|
-| `none` | ReplaceMetadataDirective + ReplaceTaggingDirective | Carries nothing over (sets the directive to REPLACE). s3transfer excludes the directive from CreateMultipartUpload via a blacklist |
-| `metadata-directive` | SetMetadataDirectiveProps + ReplaceTaggingDirective | Injects 7 properties (CacheControl / ContentDisposition / ContentEncoding / ContentLanguage / ContentType / Expires / Metadata) from the source HeadObject. Tags are not carried over |
-| `default` (the default) | SetMetadataDirectiveProps + SetTags | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under (and s3transfer still forwards the header - see below) use the `Tagging` header, otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
+| `none` | ReplaceMetadataDirective + ReplaceTaggingDirective + ExcludeAnnotationDirective | Carries nothing over (sets the directive to REPLACE). s3transfer excludes the directive from CreateMultipartUpload via a blacklist |
+| `metadata-directive` | SetMetadataDirectiveProps + ReplaceTaggingDirective + ExcludeAnnotationDirective | Injects 7 properties (CacheControl / ContentDisposition / ContentEncoding / ContentLanguage / ContentType / Expires / Metadata) from the source HeadObject. Tags are not carried over |
+| `default` (the default) | SetMetadataDirectiveProps + SetTags + ExcludeAnnotationDirective | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under (and s3transfer still forwards the header - see below) use the `Tagging` header, otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
 | `all` | SetMetadataDirectiveProps + SetTags + SetAnnotations | The above + S3 object annotations (aws-cli 2.35.6+). Single-part copies carry them server-side (no `AnnotationDirective` sent, the server default is COPY); a multipart copy sets `AnnotationDirective=COPY` and rides s3transfer >= 0.19's native carryover - see the annotations bullet below |
 
 - The single-shot path reuses the first HeadObject response
@@ -148,8 +148,24 @@ chain:
   properties from the source (aws-cli's rule).
 - When `--metadata-directive` is specified, the entire chain is disabled (as in
   aws).
+- **Double failure on the post-copy tagging rollback** (`default` / `all`,
+  multipart only): if the post-copy `PutObjectTagging` fails and the
+  best-effort rollback `DeleteObject` *also* fails, the rollback's own
+  exception is left to propagate out of the subscriber's `on_done` uncaught -
+  the same shape as aws-cli's `SetTagsSubscriber._on_success`. s3transfer runs
+  each `on_done` subscriber in its own try/except and only logs an escaping
+  one, so `future.set_exception` (the line right after the rollback call) never
+  runs and the future is left in whatever state it already had - success,
+  since the transfer itself completed. The item is therefore reported
+  **SUCCEEDED (rc 0)**, with the destination left as the multipart copy
+  produced it (no tags, since a multipart copy never carries them natively)
+  rather than either fully tagged or deleted, and for `mv` the source-delete
+  subscriber (which sits after this one in the chain) still runs and removes
+  the source. This mirrors aws-cli's own double-failure outcome rather than
+  being a gap to close - the exit-code charter (overview.md section 3) is what
+  requires reproducing it, not just tolerating it.
 - **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
-  of `all` appends `ExcludeAnnotationDirective` (aws-cli's
+  of `all` appends `_ExcludeAnnotationDirective` (aws-cli's
   ExcludeAnnotationDirectiveSubscriber), sending `AnnotationDirective=EXCLUDE`
   on the CopyObject so annotations are *not* carried (the server default is
   COPY). Two member-presence guards adapt what aws-cli does unconditionally:
@@ -186,7 +202,12 @@ chain:
   public: **`annotations_copy_unsupported_reason(client)`** returns the
   rejection wording (naming botocore >= 1.43.31 / s3transfer >= 0.19 as the
   hint) or `None`, introspecting the model and s3transfer directly,
-  version-agnostic.
+  version-agnostic. The gate only runs when `metadata_directive` is unset -
+  an explicit `--metadata-directive` disables the whole copy-props chain
+  (the bullet above) before the annotations path is ever reached, so
+  `cp ... --metadata-directive REPLACE --copy-props all` is accepted at rc 0
+  even on an SDK that cannot honor annotations, the same as aws-cli (which
+  never touches `AnnotationDirective` on that path either).
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
   guarded spots): upstream 0.19 grew its own multipart copy-props handling -
@@ -200,10 +221,13 @@ chain:
   inline header would be silently dropped. s3transfer 0.19's own
   `TaggingDirective`-driven tag copy is deliberately not used: it has no
   destination rollback when the tagging write fails. Its post-complete
-  tag/annotation hooks stay inert here (they require a `TaggingDirective` /
-  `AnnotationDirective` the chain never leaves on a multipart copy - `none` /
-  `metadata-directive` seed `TaggingDirective=REPLACE` with no `Tagging`,
-  which parses to an empty tag set and returns without a write).
+  tag/annotation hooks stay inert here (outside `all`'s deliberate
+  `AnnotationDirective=COPY` ride above): `_apply_tags` writes only on a
+  `TaggingDirective` of COPY, or REPLACE with a non-empty `Tagging` - `none` /
+  `metadata-directive` leave REPLACE with no `Tagging`, which parses to an
+  empty tag set and returns without a write, and `default` leaves no directive
+  at all - and `_apply_annotations` fires only on the `AnnotationDirective=COPY`
+  that `all` alone sends (the other modes send EXCLUDE).
 
 ## 5. download's incidental processing
 
@@ -286,11 +310,12 @@ dest-existence check for download. We ported the same three faces:
 - **download**: at the enumeration stage, if `os.path.exists(dest)` then a silent
   skip (does not issue the request itself = the cp form of aws-cli's
   `_warn_if_file_exists_with_no_overwrite`).
-- **Idempotent patch to pip s3transfer**: the pip build of s3transfer (<=0.17)
-  does not have `IfNoneMatch` in its allow-table (the fork bundled with aws-cli
-  does). On the first manager creation, `Transferrer` **idempotently appends** it
-  to `ALLOWED_UPLOAD_ARGS` / `ALLOWED_COPY_ARGS` / the multipart blocklist / the
-  COMPLETE list (harmless even if a future s3transfer adds native support).
+- **Idempotent patch to pip s3transfer**: the pip build of s3transfer has not
+  shipped `IfNoneMatch` in its allow-table (still absent as of 0.19; the fork
+  bundled with aws-cli has it). On the first manager creation, `Transferrer`
+  **idempotently appends** it to `ALLOWED_UPLOAD_ARGS` / `ALLOWED_COPY_ARGS` /
+  the multipart blocklist / the COMPLETE list (harmless even if a future
+  s3transfer adds native support).
 - **SDK floor gate** (the overview.md section 2 degradation): the write op's S3
   model must define the `IfNoneMatch` input member (PutObject /
   CompleteMultipartUpload for uploads, CopyObject for copies), which older
@@ -342,6 +367,27 @@ dest-existence check for download. We ported the same three faces:
   (`LocalStorage(path, follow_symlinks=…, detect_symlink_loops=…)`) and seeded into
   every scan by `default_scan_options`, not passed per operation (the CLI bakes
   `--follow-symlinks` into the storage it builds).
+- **fd-relative walk boundary fallback**: the fast walk vets each entry through
+  the owning directory's fd (`fstatat`/`openat`, `localstorage.py`'s
+  `have_dir_fd` path), which re-anchors resolution one level at a time and so
+  hides what aws-cli's own full-path `stat` would trip on - an ancestor
+  symlink chain crossing `SYMLOOP_MAX`, or a path crossing `PATH_MAX` - and can
+  admit a leaf the transfer then fails to open (rc 1) where aws warn-skips it
+  at enumeration (rc 2, `File does not exist.`). Only near either boundary
+  (`sym_depth` for a symlink leaf, the full path's length for any leaf - both
+  floors sit well below the real OS limits, so an ordinary walk never reaches
+  them) does the walk re-run the full-path warning battery
+  (`LocalFileGenerator.crosses_full_path_boundary`) and drop a leaf it would
+  warn away, so the two agree. Two known residuals: `sym_depth` counts one
+  hop per *followed symlinked directory* descended, not the actual number of
+  links the kernel resolves for a chain of nested symlinks in one hop, so it
+  can undercount relative to the real `SYMLOOP_MAX` counter in an adversarial,
+  deeply-chained layout (the floor's margin below the OS limit is what keeps
+  this from mattering in practice); and on Windows there is no `ELOOP`, so
+  only the path-length boundary applies (confirmed by
+  `test_symlink_cycle_descent_warns_like_aws` / `..._at_the_cycle_boundary_...`
+  in `tests/lib/test_localstorage_walk.py`, which pin the warn-not-admit
+  behavior without depending on the exact host-dependent depth).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore` = the application condition of aws-cli's
   `_modify_instructions_for_case_conflicts`): aws builds this with the sync

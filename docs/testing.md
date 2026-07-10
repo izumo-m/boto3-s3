@@ -229,9 +229,26 @@ For **presign** the golden is one normalized URL line
 path-style and the endpoint is masked (`<ENDPOINT>` - the functional replay
 runs with no endpoint override while the capture used MinIO's IP endpoint),
 and the time/credential-dependent query values are masked (`X-Amz-Date`,
-`X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`,
-whose region/service scope stays - `--region` must reach the credential
-scope). Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
+`X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`). The
+credential scope's region/service segment is compared, not blanket-masked -
+the **endpoint policy**, in two steps:
+
+- **step 1** (golden stability, `presign_scope_mask_region` +
+  `normalize_presign_stdout(mask_region=...)`): the scope region folds to
+  `<REGION>` only when it equals the environment default (`AWS_REGION` /
+  `AWS_DEFAULT_REGION`), so a golden captured against one e2e region replays
+  against any other. An explicit `--region` that differs from the default is
+  left raw - that region is the scenario's whole point, and when it happens to
+  coincide with the default nothing is masked either, so the golden still
+  reflects it.
+- **step 2** (e2e-only, `presign_scope_region`): masking a golden's region is
+  a golden-stability concession, not license to stop checking it - the e2e
+  suite pulls the raw, unmasked scope region straight out of both sides'
+  stdout from the *same run* and asserts aws's and ours are equal, so the
+  region the two CLIs actually signed with stays under test even where step
+  1's golden comparison would hide a divergence.
+
+Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
 key path are compared verbatim. The functional replay needs no moto backend
 (presign never contacts a server) and deletes `AWS_SESSION_TOKEN` for the
 run - the root conftest exports one, which would add an
@@ -357,11 +374,13 @@ rename, a parametrized merge of several aws-cli tests, a method from a different
 aws-cli class or file, or `none` for a boto3-s3 addition), or above a class when
 a whole block was carved out of one aws-cli class under the same method names.
 The comment references the aws-cli test by logical `Class.method` name - or just
-the method name when the origin is in the same class - never a vendored path. The presign port freezes botocore's signing clock
-through the `get_current_datetime` seam - patched in both modules that
-bind it, `botocore.auth` and (when awscrt is importable - the dev
-environment always is, section 4) `botocore.crt.auth` - and keeps
-aws-cli's expected URLs - frozen-time signatures included - bit-for-bit.
+the method name when the origin is in the same class - never a vendored path.
+
+The presign port freezes botocore's signing clock through the
+`get_current_datetime` seam - patched in both modules that bind it,
+`botocore.auth` and (when awscrt is importable - the dev environment always
+is, section 4) `botocore.crt.auth` - and keeps aws-cli's expected URLs -
+frozen-time signatures included - bit-for-bit.
 The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
 against the positional canned list, and rewrites aws-cli's expected

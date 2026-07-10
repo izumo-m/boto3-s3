@@ -39,8 +39,9 @@ dest listing -- filter (visibility) --+        |
   symmetric, the other per-side automatically); see globsieve.md. Folder markers
   (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
   produces them - either way sync neither transfers nor deletes markers. The
-  implementation is `ScanOptions.filter` (S3 side, pruned at the listing-page
-  stage) and the filter immediately after the local walk.
+  implementation is `ScanOptions.filter` on both sides (the S3 listing prunes
+  at the listing-page stage; the local walk applies the predicate inline
+  during the walk).
 - **Pair-decision layer** (after merge, per `SyncPair`): every decision that
   looks at both sides - size / timestamp / ETag, etc. - lives here. The default
   is aws-compatible, and this is the only layer an application swaps.

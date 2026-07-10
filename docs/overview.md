@@ -58,11 +58,16 @@ maintaining high functional compatibility (parity).
   (conditional writes / `IfNoneMatch`, GA 2024-11) needs a late-2024 botocore,
   and `--checksum-algorithm CRC64NVME` needs a botocore that ships that
   algorithm. The bucket-listing filters `ls --bucket-name-prefix` /
-  `--bucket-region` (paginated `ListBuckets`, late 2024 / botocore 1.34.162)
-  are likewise silently inert below that botocore - `ls` itself still works,
-  falling back to an unpaginated `ListBuckets`. Two more degradations at the
-  floor: `mb --tags` / `mb --bucket-name-prefix`-era CreateBucket parameters
-  (`CreateBucketConfiguration.Tags` / `Location`) fail client-side with a clean
+  `--bucket-region` need the paginated `ListBuckets` (late 2024 / botocore
+  1.34.162); below it `ls` still works, falling back to an unpaginated
+  `ListBuckets` where the filters are silently inert. Their `Prefix` /
+  `BucketRegion` request parameters landed later still (botocore 1.35.42), so on
+  a paginating botocore that predates them (1.34.162 through 1.35.41) passing the
+  filters raises a client-side `ParamValidationError` rather than being inert.
+  Two more degradations at the
+  floor: the newer CreateBucket parameters `mb` can send - `--tags`'s
+  `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
+  account-regional namespace bucket selects - fail client-side with a clean
   ParamValidationError on a botocore that predates them; and without a modern
   s3transfer the engine cannot pre-provide the copy/download source ETag
   (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
@@ -105,8 +110,9 @@ maintaining high functional compatibility (parity).
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
   are only two exceptions.
   1. Extension options that do not exist in `aws s3` (e.g., the CLI's own
-     `--help` / `-h` / `--version`, which aws-cli instead exposes as a `help`
-     subcommand)
+     `--help` / `-h`, which aws-cli instead exposes as a `help` subcommand,
+     and `--version`, which aws-cli offers only as the top-level
+     `aws --version`, not under `aws s3`)
   2. When it depends on a feature that is hard to realize (e.g., the CLI's
      interactive UI)
 

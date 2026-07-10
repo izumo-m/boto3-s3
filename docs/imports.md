@@ -48,6 +48,9 @@ to overview.md's "performance equal to or better").
    match aws's client-before-path-validation ordering; this too is within the
    contract (the subcommand is determined and running). The contract test pins
    both halves (section 6).
+   `prompt_toolkit` (the `autoprompt` extra) is a forbidden root on the same
+   paths: it is not imported until `--cli-auto-prompt` actually fires - never
+   on `--help` / usage errors / normal dispatch.
    Exception: `--cli-auto-prompt` derives its completion model from the full
    parser (`build_parser()`, which imports every command module) - a cost only
    the interactive prompt pays (it is charter-exempt anyway).

@@ -71,8 +71,11 @@ also read as `'auto'`) with the same rules as boto3.
   `paths_type=='s3s3' -> classic`.
 - **`should_use_crt`** (a port of boto3's `_should_use_crt`): an explicit
   `'crt'` combined with a missing or too-old awscrt (below 0.19.18) raises a
-  `MissingDependencyException` (boto3's wording); CRT is attempted when
-  `(is_optimized and 'auto') or 'crt'`.
+  `MissingDependencyException` (boto3's wording); an explicit `'crt'` on an
+  s3transfer below 0.8.0 (no CRT surface at the supported floor 0.6.2) also
+  raises `MissingDependencyException` - a branch boto3 does not have, with its
+  own wording (`'auto'` degrades to classic there instead); CRT is attempted
+  when `(is_optimized and 'auto') or 'crt'`.
 - **`create_crt_transfer_manager`** (a port of boto3's `get_crt_s3_client` +
   singleton): lazily creates the process-singleton CRT client + serializer. If
   the lock is held by another process, it returns `None` = classic fallback. A
@@ -87,14 +90,25 @@ also read as `'auto'`) with the same rules as boto3.
   client (the S3 connection model in [`overview.md`](./overview.md)), it derives
   the CRT wiring from the client.
   - region = `client.meta.region_name`
-  - endpoint = `None` if `client.meta.endpoint_url` is the AWS-default form (an
-    `amazonaws.com`-family suffix) (boto3-faithful - botocore re-resolves it per
-    request); if it is custom (MinIO, etc.) that value is passed to the
-    serializer. boto3 always passes `None`, so it **does not work with a custom
-    endpoint** (our improvement). aws-cli looks only at the `--endpoint-url`
-    argument and has a known bug where, with only the env `AWS_ENDPOINT_URL_S3`
-    set, it makes a TLS connection over http and dies with
-    `AWS_IO_SOCKET_CLOSED`; we do not hit it because we derive from the resolved
+  - endpoint = `None` if `client.meta.endpoint_url` is an AWS-default form
+    (boto3-faithful - botocore re-resolves it per request); if it is custom
+    (MinIO, etc.) that value is passed to the serializer. "AWS-default" is
+    recognized across every partition the installed botocore knows, not just
+    the two commercial suffixes: `_aws_dns_suffixes` collects, once, every
+    partition's `dnsSuffix` plus its dualstack/fips variant suffixes straight
+    from botocore's own endpoint data - commercial (`amazonaws.com`,
+    `api.aws`), china, gov, the eusc `amazonaws.eu`, and the iso partitions
+    (`c2s.ic.gov`, `sc2s.sgov.gov`, `cloud.adc-e.uk`, `csp.hci.ic.gov`) - so a
+    standard endpoint in any of them re-resolves like boto3 instead of being
+    needlessly pinned. The residual limit is what that set cannot cover: a
+    host in a partition newer than the installed botocore, or a genuinely
+    custom/gateway host, is pinned either way - and because boto3 always
+    passes `None`, that is the one point where deriving the endpoint from the
+    client (our improvement) can disagree with boto3's own behavior, not just
+    with aws-cli's. aws-cli looks only at the `--endpoint-url` argument and
+    has a known bug where, with only the env `AWS_ENDPOINT_URL_S3` set, it
+    makes a TLS connection over http and dies with `AWS_IO_SOCKET_CLOSED`; we
+    do not hit it because we derive from the resolved
     `client.meta.endpoint_url`.
   - use_ssl = the endpoint's scheme is other than `http`
   - verify = the client's TLS verification setting (`--no-verify-ssl` /
@@ -138,9 +152,7 @@ A verbatim port of `RuntimeConfig` from aws-cli `transferconfig.py`
 `800Kb/s`), and bools, resolves the `default` -> `classic` alias, and validates
 invalid values. The wording for invalid values is byte-for-byte, raised as the
 library's `InvalidConfigError` - aws-cli's class of the same name reaches the
-general handler with rc 255; ours maps to 255 too (exceptions.md section 2). This also closes the existing
-gap where classic's `multipart_threshold` and the like did not take effect from
-`~/.aws/config`.
+general handler with rc 255; ours maps to 255 too (exceptions.md section 2).
 
 ### The decision tree (`resolve_transfer_client`)
 

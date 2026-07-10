@@ -16,6 +16,28 @@ What ships is the `version` in that package's `pyproject.toml`, **not** the tag.
 The tag only triggers the run and must agree with it, or the workflow stops and
 publishes nothing. So edit `pyproject.toml` first, then tag to match.
 
+## One-time setup
+
+Trusted Publishing needs matching registrations on the GitHub side and the
+index side; no API token is stored anywhere.
+
+1. **GitHub environments**: create `pypi` and `testpypi` in the repository
+   settings (Settings > Environments; empty, no protection rules required).
+   The workflow's `environment:` resolves to one of them - a tag push always
+   uses `pypi`, a `workflow_dispatch` dry run selects - and the OIDC token
+   names the environment, which (Test)PyPI verifies.
+2. **(Test)PyPI trusted publishers**: on PyPI, register a trusted publisher
+   for **each package** (`boto3-s3` and `boto3-s3-cli`): owner `izumo-m`,
+   repository `boto3-s3`, workflow `release.yml`, environment `pypi`. On
+   TestPyPI, the same two registrations with environment `testpypi` (needed
+   only for dry runs). A package that has never been uploaded is registered
+   as a *pending* publisher; the project name is claimed on its first
+   publish.
+
+The environment name registered on (Test)PyPI must match the workflow's
+`environment:` value exactly, or the token exchange is refused and nothing
+uploads.
+
 ## Releasing
 
 Work happens on `develop`; releases are cut on `main`, and the tag lives on
