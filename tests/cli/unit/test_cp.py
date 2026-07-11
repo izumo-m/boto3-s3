@@ -63,6 +63,22 @@ def _failing_factory_ctx() -> Context:
 
 
 class TestUsageErrors:
+    def test_annotation_copy_mode_is_not_a_cli_option(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            [
+                "cp",
+                "s3://src-b/key",
+                "s3://dest-b/key",
+                "--annotation-copy-mode",
+                "deferred",
+            ],
+            ctx=_failing_factory_ctx(),
+        )
+        assert rc == 252
+        assert "Unknown options: --annotation-copy-mode,deferred" in capsys.readouterr().err
+
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["cp", "a.txt", "b.txt"], ctx=_failing_factory_ctx())
         assert rc == 252

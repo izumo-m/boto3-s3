@@ -14,10 +14,12 @@ from boto3_s3.exceptions import ValidationError
 from boto3_s3.requestparams import (
     map_copy_object_params,
     map_delete_object_params,
+    map_get_object_annotation_params,
     map_get_object_params,
     map_get_object_tagging_params,
     map_head_object_params,
     map_head_object_params_with_copy_source_sse,
+    map_list_object_annotations_params,
     map_put_object_params,
     map_put_object_tagging_params,
 )
@@ -223,8 +225,12 @@ class TestAncillaryMappers:
         options = TransferOptions(request_payer="requester", acl="private")
         expected = {"RequestPayer": "requester"}
         assert map_get_object_tagging_params(options) == expected
+        assert map_list_object_annotations_params(options) == expected
+        assert map_get_object_annotation_params(options) == expected
         assert map_put_object_tagging_params(options) == expected
         assert map_delete_object_params(options) == expected
 
     def test_no_request_payer_means_empty(self) -> None:
         assert map_get_object_tagging_params(TransferOptions()) == {}
+        assert map_list_object_annotations_params(TransferOptions()) == {}
+        assert map_get_object_annotation_params(TransferOptions()) == {}

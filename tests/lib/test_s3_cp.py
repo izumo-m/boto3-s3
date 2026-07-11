@@ -37,9 +37,11 @@ from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
+    AnnotationCopyMode,
     CancelMode,
     CancelToken,
     CaseConflictMode,
+    CopyPropsMode,
     FileFilter,
     FileInfo,
     OpOutcome,
@@ -678,6 +680,34 @@ class TestCopyRoute:
         params = dest_calls[0].params
         assert params["Metadata"] == {"k": "v"}
         assert params["MetadataDirective"] == "REPLACE"
+
+    def test_annotation_read_failure_precedes_destination_creation(self) -> None:
+        src_client, src_calls = make_recording_client(
+            [
+                _head_response(ContentLength=9 * 1024 * 1024),
+                {"TagSet": []},
+                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+            ]
+        )
+        dest_client, dest_calls = make_recording_client([])
+
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://src-b/d/a.txt", client=src_client),
+                S3Storage("s3://dest-b/cp/", client=dest_client),
+                transfer_config=_SYNC,
+                **TransferOptions(
+                    copy_props=CopyPropsMode.ALL,
+                    annotation_copy_mode=AnnotationCopyMode.PRELOAD_MEMORY,
+                ),
+            )
+
+        assert _ops(src_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+        ]
+        assert dest_calls == []
 
 
 class TestStreamRoutes:

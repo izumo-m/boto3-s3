@@ -29,7 +29,9 @@ from boto3_s3.transfer import (
     annotations_copy_unsupported_reason,
     conditional_write_unsupported_reason,
 )
+from boto3_s3.transferconfig import TransferConfig as LibraryTransferConfig
 from boto3_s3.types import (
+    AnnotationCopyMode,
     CopyPropsMode,
     FileInfo,
     OpOutcome,
@@ -514,11 +516,9 @@ class TestCopy:
         assert calls[0].operation == "CopyObject"
         assert "AnnotationDirective" not in calls[0].params
 
-    def test_all_multipart_copies_annotations_via_native_path(self) -> None:
-        # The multipart carryover rides s3transfer >= 0.19's _apply_annotations
-        # (AnnotationDirective=COPY in extra_args, blacklisted from the create
-        # call): list -> get -> put after the complete, ObjectIfMatch pinned to
-        # the new object's ETag (docs/transfer.md section 4).
+    def test_all_multipart_default_preloads_then_uses_native_write_path(self) -> None:
+        # Reads are completed before submission. s3transfer >= 0.19 still owns
+        # the post-complete writes and pins ObjectIfMatch to the new ETag.
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
@@ -557,6 +557,202 @@ class TestCopy:
             "VersionId": "dest-v1",
         }
         assert transferrer.succeeded == 1
+
+    def test_all_multipart_deferred_read_failure_happens_after_destination(self) -> None:
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                {},  # native-path failure cleanup AbortMultipartUpload
+            ],
+            source_responses=[
+                {},
+                {"TagSet": []},
+                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+            ),
+        )
+
+        assert _ops(source_calls)[-1] == "ListObjectAnnotations"
+        assert _ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "UploadPartCopy",
+            "CompleteMultipartUpload",
+            "AbortMultipartUpload",
+        ]
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_default_read_failure_leaves_no_destination(self) -> None:
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"'},
+            {},  # native-path failure cleanup AbortMultipartUpload
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+        ]
+
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+
+        assert _ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+        ]
+        assert calls == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_preload_lists_all_pages_before_reading_payloads(self) -> None:
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"'},
+            {},
+            {},
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {"TagSet": []},
+            {
+                "Annotations": [{"AnnotationName": "ann1"}],
+                "NextContinuationToken": "next",
+            },
+            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"AnnotationPayload": io.BytesIO(b"one")},
+            {"AnnotationPayload": io.BytesIO(b"two")},
+        ]
+
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={"VersionId": "src-v1"})],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                request_payer="requester",
+            ),
+        )
+
+        assert _ops(source_calls) == [
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[1].params == {
+            "Bucket": "src-b",
+            "Key": "d/a.bin",
+            "RequestPayer": "requester",
+            "VersionId": "src-v1",
+        }
+        assert source_calls[2].params["ContinuationToken"] == "next"
+        assert source_calls[3].params["AnnotationName"] == "ann1"
+        assert source_calls[4].params["AnnotationName"] == "ann2"
+        assert [call.params["AnnotationPayload"] for call in calls[-2:]] == [b"one", b"two"]
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_tempfile_mode_cleans_its_configured_directory(
+        self, tmp_path: Path
+    ) -> None:
+        calls, _, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={})],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                {},
+                {},
+            ],
+            source_responses=[
+                {"TagSet": []},
+                {
+                    "Annotations": [
+                        {"AnnotationName": "ann1"},
+                        {"AnnotationName": "ann2"},
+                    ]
+                },
+                {"AnnotationPayload": io.BytesIO(b"first")},
+                {"AnnotationPayload": io.BytesIO(b"second-longer")},
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=tmp_path),
+        )
+
+        assert [call.params["AnnotationPayload"] for call in calls[-2:]] == [
+            b"first",
+            b"second-longer",
+        ]
+        assert list(tmp_path.iterdir()) == []
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_tempfile_creation_failure_leaves_no_destination(
+        self, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing"
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=[{}, {"TagSet": []}],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=missing),
+        )
+
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert calls == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_tempfile_read_failure_closes_the_file(self, tmp_path: Path) -> None:
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={})],
+            [],
+            source_responses=[
+                {"TagSet": []},
+                {"Annotations": [{"AnnotationName": "ann1"}]},
+                _client_error("AccessDenied", 403, "GetObjectAnnotation"),
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=tmp_path),
+        )
+
+        assert calls == []
+        assert list(tmp_path.iterdir()) == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
     def test_oversized_tags_apply_after_the_copy(self) -> None:
         big = "v" * 3000
@@ -1503,4 +1699,27 @@ class TestAnnotationsCopySupport:
                 client,
                 source_client=client,
                 options=cast(TransferOptions, {"copy_props": "al"}),
+            )
+
+    @pytest.mark.parametrize("mode", list(AnnotationCopyMode))
+    def test_annotation_copy_mode_accepts_every_public_mode(self, mode: AnnotationCopyMode) -> None:
+        client = self._capable_client()
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": mode},
+        )
+
+    def test_invalid_annotation_copy_mode_raises_validation_error(self) -> None:
+        client = self._capable_client()
+        with pytest.raises(ValidationError, match="annotation_copy_mode"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(
+                    TransferOptions,
+                    {"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": "preload"},
+                ),
             )

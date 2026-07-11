@@ -78,8 +78,10 @@ maintaining high functional compatibility (parity).
   silently stop sending `AnnotationDirective=EXCLUDE` (behaving like
   pre-annotations aws-cli), and `copy_props=ALL` / `--copy-props all` - which
   needs botocore >= 1.43.31 and s3transfer >= 0.19 - is refused up front with
-  a `ConfigurationError` (transfer.md section 4). Everything else works at
-  the floor.
+  a `ConfigurationError` (transfer.md section 4). On capable SDKs, multipart
+  `copy_props=ALL` preloads annotations in memory by default for aws-cli
+  failure-state parity; the library also offers temporary-file preload and
+  deferred post-copy reads. Everything else works at the floor.
 
 ## 3. Design policy
 

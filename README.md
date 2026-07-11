@@ -280,7 +280,7 @@ inside each operation and would build clients concurrently.
 ## Options
 
 `cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
-arguments, grouped here by what they control:
+arguments plus documented library extensions, grouped here by what they control:
 
 - **Metadata & headers:** `metadata`, `metadata_directive`, `copy_props`,
   `cache_control`, `content_type` / `content_disposition` / `content_encoding` /
@@ -291,6 +291,7 @@ arguments, grouped here by what they control:
 - **Integrity & write control:** `checksum_algorithm`, `checksum_mode`,
   `no_overwrite`, `case_conflict`
 - **Glacier:** `force_glacier_transfer` / `ignore_glacier_warnings`
+- **Annotation staging (library-only):** `annotation_copy_mode`
 
 ```python
 s3.cp(
@@ -305,7 +306,12 @@ s3.cp(
 
 Multipart tuning (thresholds, concurrency, bandwidth, the classic/CRT engine
 choice) is a `TransferConfig` passed as `transfer_config=`; its defaults match
-`aws s3`.
+`aws s3`. For multipart S3-to-S3 copies under `copy_props=ALL`, annotations are
+preloaded in memory by default to match aws-cli's failure timing. Library
+callers can select `AnnotationCopyMode.PRELOAD_TEMPFILE` (configured by
+`TransferConfig(annotation_temp_dir=...)`) or the lower-overhead
+`AnnotationCopyMode.DEFERRED`; the CLI deliberately exposes no corresponding
+flag.
 
 ## Filtering
 

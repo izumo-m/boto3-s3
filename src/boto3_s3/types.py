@@ -321,12 +321,29 @@ class CopyPropsMode(enum.Enum):
     annotations model - botocore >= 1.43.31 and s3transfer >= 0.19; on an older
     SDK the transfer engine refuses it up front with a `ConfigurationError`
     (every other mode degrades silently there, docs/transfer.md section 4).
+    Multipart annotation staging is selected separately by
+    `AnnotationCopyMode`.
     """
 
     NONE = "none"
     METADATA_DIRECTIVE = "metadata-directive"
     DEFAULT = "default"
     ALL = "all"
+
+
+class AnnotationCopyMode(enum.Enum):
+    """How multipart `copy_props=all` stages source annotation payloads.
+
+    `PRELOAD_MEMORY` matches aws-cli by reading every payload into memory
+    before the multipart copy starts. `PRELOAD_TEMPFILE` preserves that
+    failure timing while storing payloads in a temporary file instead.
+    `DEFERRED` uses s3transfer's native post-copy reads, reducing pre-copy
+    resource use but potentially leaving the destination when a read fails.
+    """
+
+    PRELOAD_MEMORY = "preload-memory"
+    PRELOAD_TEMPFILE = "preload-tempfile"
+    DEFERRED = "deferred"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -428,7 +445,8 @@ class TransferOptions(TypedDict, total=False):
     ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
     (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
     ``PreconditionFailed`` becomes a silent skip), and an existence check before
-    downloads.
+    downloads. `annotation_copy_mode` affects only multipart S3-to-S3 copies
+    under `copy_props=ALL`; it defaults to `PRELOAD_MEMORY` for aws-cli parity.
     """
 
     acl: str
@@ -443,6 +461,7 @@ class TransferOptions(TypedDict, total=False):
     metadata: Mapping[str, str]
     metadata_directive: str
     copy_props: CopyPropsMode
+    annotation_copy_mode: AnnotationCopyMode
     cache_control: str
     content_type: str
     content_disposition: str

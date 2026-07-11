@@ -577,6 +577,22 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType", "Metadata"),
     ),
     CpScenario(
+        # MinIO has no annotations API and rejects the pre-copy listing, while
+        # real S3 completes the copy. This live-only scenario compares both
+        # exit code and bucket end state on either endpoint; in particular,
+        # the MinIO failure must leave no cp/big.bin destination like aws-cli.
+        name="cp_copy_props_all_multipart",
+        argv=(
+            "cp",
+            f"s3://{BUCKET_TOKEN}/d/big.bin",
+            f"s3://{BUCKET_TOKEN}/cp/big.bin",
+            "--copy-props",
+            "all",
+        ),
+        seed_kwargs=_SEED_BIG_KWARGS,
+        diff_only=True,
+    ),
+    CpScenario(
         # Metadata is dropped under copy-props none; the resulting default
         # ContentType is endpoint-specific, so only Metadata is probed.
         name="cp_copy_props_none",

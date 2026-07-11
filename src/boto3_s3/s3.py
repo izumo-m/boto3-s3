@@ -805,7 +805,9 @@ class S3:
         escapes blocked on download, the >48.8 TiB upload pre-warning,
         downloads stamping the source ``LastModified`` (a stamp failure is a
         warning, not an error), copy metadata/tags propagation per
-        ``copy_props``, and a single S3 source resolved by HeadObject - a
+        `copy_props` (including the library-only `annotation_copy_mode` for
+        multipart `copy_props=ALL` staging), and a single S3 source resolved
+        by HeadObject - a
         404 raises ``NotFoundError`` with aws's rewritten ``Key "..." does
         not exist`` message. A keyless non-recursive S3 source matches
         nothing and transfers nothing (aws lists and discards; same outcome

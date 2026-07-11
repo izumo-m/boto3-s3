@@ -18,6 +18,7 @@ import sys
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from boto3_s3 import (
+    AnnotationCopyMode,
     BatchError,
     CaseConflictMode,
     CopyPropsMode,
@@ -491,6 +492,7 @@ def build_transfer_options(
 ) -> TransferOptions:
     """Translate parsed flags into the library's ``TransferOptions``."""
     options = TransferOptions(
+        annotation_copy_mode=AnnotationCopyMode.PRELOAD_MEMORY,
         copy_props=CopyPropsMode(args.copy_props),
         guess_mime_type=args.guess_mime_type,
         case_conflict=case_conflict,

@@ -125,6 +125,20 @@ def map_put_object_tagging_params(options: TransferOptions) -> dict[str, Any]:
     return params
 
 
+def map_list_object_annotations_params(options: TransferOptions) -> dict[str, Any]:
+    """API params for the pre-copy annotation listing."""
+    params: dict[str, Any] = {}
+    _set_request_payer_param(params, options)
+    return params
+
+
+def map_get_object_annotation_params(options: TransferOptions) -> dict[str, Any]:
+    """API params for a pre-copy annotation payload read."""
+    params: dict[str, Any] = {}
+    _set_request_payer_param(params, options)
+    return params
+
+
 def map_delete_object_params(options: TransferOptions) -> dict[str, Any]:
     """API params for the copy-props rollback delete (and mv's source delete)."""
     params: dict[str, Any] = {}
@@ -236,10 +250,12 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
 __all__ = [
     "map_copy_object_params",
     "map_delete_object_params",
+    "map_get_object_annotation_params",
     "map_get_object_params",
     "map_get_object_tagging_params",
     "map_head_object_params",
     "map_head_object_params_with_copy_source_sse",
+    "map_list_object_annotations_params",
     "map_put_object_params",
     "map_put_object_tagging_params",
 ]

@@ -42,15 +42,18 @@ Engine choices (parity-driven):
   destination object. S3 object annotations track the mode too: every mode
   short of ``all`` sends ``AnnotationDirective=EXCLUDE`` so the copy carries
   none (aws-cli's default), while ``copy_props=ALL`` carries them - riding
-  s3transfer >= 0.19's native annotation carryover on a multipart copy.
+  s3transfer >= 0.19's native write path on a multipart copy after the
+  selected `AnnotationCopyMode` has staged the source payloads.
 """
 
 from __future__ import annotations
 
 import errno
+import io
 import logging
 import mimetypes
 import os
+import tempfile
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -68,6 +71,7 @@ from boto3_s3.exceptions import (
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
+    AnnotationCopyMode,
     CancelMode,
     CancelToken,
     CopyPropsMode,
@@ -626,6 +630,7 @@ class Transferrer:
         # copy_props=ALL gate: annotations need a capable SDK; every other
         # mode degrades silently on an old one (docs/transfer.md section 4).
         self._copy_props = CopyPropsMode.DEFAULT
+        self._annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
         if transfer_type is TransferType.COPY:
             copy_props = self._options.get("copy_props") or CopyPropsMode.DEFAULT
             try:
@@ -637,6 +642,16 @@ class Transferrer:
                 # here, having validated copy_props against its choices.
                 raise ValidationError(
                     f"Invalid copy_props value: {copy_props!r}", operation=operation
+                ) from exc
+            annotation_copy_mode = (
+                self._options.get("annotation_copy_mode") or AnnotationCopyMode.PRELOAD_MEMORY
+            )
+            try:
+                self._annotation_copy_mode = AnnotationCopyMode(annotation_copy_mode)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"Invalid annotation_copy_mode value: {annotation_copy_mode!r}",
+                    operation=operation,
                 ) from exc
             # An explicit metadata_directive disables the whole copy-props chain
             # (aws-cli's s3handler.CopyRequestSubmitter), so ALL never reaches the
@@ -948,8 +963,10 @@ class Transferrer:
         """Map one S3 copy, including copy-props and optional source deletion."""
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
         subscribers = self._common_subscribers(item)
+        source_client: Any = self._source_client
         if not self._options.get("metadata_directive"):
-            subscribers.extend(self._copy_props_subscribers(item))
+            copy_props_subscribers, source_client = self._copy_props_subscribers(item)
+            subscribers.extend(copy_props_subscribers)
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
@@ -960,7 +977,7 @@ class Transferrer:
             key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
-            source_client=self._source_client,
+            source_client=source_client,
         )
 
     def _common_subscribers(self, item: TransferItem) -> list[Any]:
@@ -1027,14 +1044,17 @@ class Transferrer:
 
         return _DeleteSource(delete_s3_source, capture=self._capture_response)
 
-    def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
+    def _copy_props_subscribers(self, item: TransferItem) -> tuple[list[Any], Any]:
         """Translate the selected copy-props mode into ordered request subscribers."""
         mode = self._copy_props
         exclude = _ExcludeAnnotationDirective(
             item, client=self._client, multipart_threshold=self._multipart_threshold
         )
         if mode is CopyPropsMode.NONE:
-            return [_ReplaceMetadataDirective(), _ReplaceTaggingDirective(), exclude]
+            return (
+                [_ReplaceMetadataDirective(), _ReplaceTaggingDirective(), exclude],
+                self._source_client,
+            )
         metadata = _SetMetadataDirectiveProps(
             item,
             source_client=self._source_client,
@@ -1042,7 +1062,7 @@ class Transferrer:
             head_params=requestparams.map_head_object_params_with_copy_source_sse(self._options),
         )
         if mode is CopyPropsMode.METADATA_DIRECTIVE:
-            return [metadata, _ReplaceTaggingDirective(), exclude]
+            return [metadata, _ReplaceTaggingDirective(), exclude], self._source_client
         tags = _SetTags(
             item,
             source_client=self._source_client,
@@ -1051,14 +1071,22 @@ class Transferrer:
             options=self._options,
         )
         if mode is CopyPropsMode.DEFAULT:
-            return [metadata, tags, exclude]
+            return [metadata, tags, exclude], self._source_client
         # CopyPropsMode.ALL - annotations carried instead of excluded (the
         # constructor already refused the mode on an incapable SDK).
+        annotations = _SetAnnotations(
+            item,
+            source_client=self._source_client,
+            multipart_threshold=self._multipart_threshold,
+            mode=self._annotation_copy_mode,
+            options=self._options,
+            temp_dir=getattr(self._transfer_config, "annotation_temp_dir", None),
+        )
         return [
             metadata,
             tags,
-            _SetAnnotations(item, multipart_threshold=self._multipart_threshold),
-        ]
+            annotations,
+        ], annotations.source_client
 
     # -- engine internals ----------------------------------------------------
 
@@ -1659,42 +1687,178 @@ class _ExcludeAnnotationDirective:
 
 
 class _SetAnnotations:
-    """``copy-props all``: carry S3 object annotations (the role of aws-cli's
-    SetAnnotationsSubscriber, on a different mechanism).
+    """`copy-props all`: stage and carry S3 object annotations.
 
     A single-part CopyObject carries annotations server-side (the directive
     default is COPY), so nothing is sent - the same wire behavior as aws-cli.
-    A multipart copy does not carry them; aws-cli corrects with its own
-    list/get/put subscriber, which relies on the CompleteMultipartUpload
-    response that only its bundled s3transfer fork returns. Upstream
-    s3transfer >= 0.19 ships the equivalent carryover natively
-    (`_apply_annotations`: ListObjectAnnotations -> GetObjectAnnotation ->
-    PutObjectAnnotation per annotation, ``ObjectIfMatch`` pinned to the new
-    object's ETag; partial failure raises ``S3CopyFailedError`` naming the
-    succeeded and failed annotations, with no destination rollback - the same
-    no-rollback semantics as aws-cli's AnnotationCopyError), triggered by
-    ``AnnotationDirective=COPY`` in the extra args and kept off the
-    CreateMultipartUpload call by the blacklist. So the multipart path sets
-    the directive and rides that; `Transferrer` refuses ``copy_props=ALL`` up
-    front on an SDK that cannot honor it (`annotations_copy_unsupported_reason`).
-
-    Known deviations from aws-cli's subscriber, inherent to the native path:
-    the annotation reads happen after the copy completes (aws-cli reads them
-    before submitting the CreateMultipartUpload), the listing is a single
-    unpaginated ListObjectAnnotations call, and no source ``VersionId`` is
-    pinned on the reads (s3transfer only pins one when it performed the
-    HeadObject itself, which the engine's pre-provided size and ETag skip).
+    A multipart copy preloads every paginated source payload before submission
+    in the memory and tempfile modes. A per-copy source-client adapter then
+    serves those bytes to s3transfer's post-complete annotation writer, keeping
+    its destination ETag/VersionId pinning and partial-write error handling.
+    The deferred mode passes the real source client through and retains
+    s3transfer's post-copy reads. `Transferrer` refuses `copy_props=ALL` up
+    front on an SDK that cannot honor the native write path.
     """
 
-    def __init__(self, item: TransferItem, *, multipart_threshold: int) -> None:
+    def __init__(
+        self,
+        item: TransferItem,
+        *,
+        source_client: Any,
+        multipart_threshold: int,
+        mode: AnnotationCopyMode,
+        options: TransferOptions,
+        temp_dir: str | os.PathLike[str] | None,
+    ) -> None:
         self._item = item
+        self._source_client = source_client
         self._multipart_threshold = multipart_threshold
+        self._mode = mode
+        self._options = options
+        self._temp_dir = temp_dir
+        self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
+        self._preloaded_client = _PreloadedAnnotationClient(source_client, self)
+
+    @property
+    def source_client(self) -> Any:
+        """The real source client for deferred reads, otherwise the cache adapter."""
+        if self._mode is AnnotationCopyMode.DEFERRED:
+            return self._source_client
+        return self._preloaded_client
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         size = self._item.size or 0
         if size < self._multipart_threshold:
             return
+        if self._mode is not AnnotationCopyMode.DEFERRED:
+            self._preload()
         future.meta.call_args.extra_args["AnnotationDirective"] = "COPY"
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self.close()
+
+    def _preload(self) -> None:
+        """Read every source annotation into the selected pre-copy store.
+
+        List all pages and collect every name before fetching payloads, matching
+        aws-cli's ordering. Source `VersionId` and request-payer parameters are
+        pinned on the reads. Any failure closes and discards the partial store
+        before the exception prevents multipart destination creation.
+        """
+        if self._mode is AnnotationCopyMode.PRELOAD_TEMPFILE:
+            store: _MemoryAnnotationStore | _TempfileAnnotationStore = _TempfileAnnotationStore(
+                self._temp_dir
+            )
+        else:
+            store = _MemoryAnnotationStore()
+        self._store = store
+        list_params = requestparams.map_list_object_annotations_params(self._options)
+        get_params = requestparams.map_get_object_annotation_params(self._options)
+        version_id = self._item.head.get("VersionId") if self._item.head is not None else None
+        if version_id is not None:
+            list_params["VersionId"] = version_id
+            get_params["VersionId"] = version_id
+        try:
+            paginator = self._source_client.get_paginator("list_object_annotations")
+            names: list[str] = []
+            for page in paginator.paginate(
+                Bucket=self._item.src_bucket,
+                Key=self._item.src_key,
+                **list_params,
+            ):
+                for annotation in page.get("Annotations", []):
+                    names.append(annotation["AnnotationName"])
+            for name in names:
+                response = self._source_client.get_object_annotation(
+                    Bucket=self._item.src_bucket,
+                    Key=self._item.src_key,
+                    AnnotationName=name,
+                    **get_params,
+                )
+                store.add(name, response["AnnotationPayload"].read())
+        except BaseException:
+            self.close()
+            raise
+
+    def annotation_names(self) -> list[str]:
+        store = self._store
+        assert store is not None
+        return store.names()
+
+    def annotation_payload(self, name: str) -> bytes:
+        store = self._store
+        assert store is not None
+        return store.read(name)
+
+    def close(self) -> None:
+        store, self._store = self._store, None
+        if store is not None:
+            store.close()
+
+
+class _MemoryAnnotationStore:
+    """Per-copy annotation payloads retained in memory until transfer completion."""
+
+    def __init__(self) -> None:
+        self._payloads: dict[str, bytes] = {}
+
+    def add(self, name: str, payload: bytes) -> None:
+        self._payloads[name] = payload
+
+    def names(self) -> list[str]:
+        return list(self._payloads)
+
+    def read(self, name: str) -> bytes:
+        return self._payloads[name]
+
+    def close(self) -> None:
+        self._payloads.clear()
+
+
+class _TempfileAnnotationStore:
+    """Per-copy payloads packed into one auto-deleting temporary file."""
+
+    def __init__(self, directory: str | os.PathLike[str] | None) -> None:
+        self._file = tempfile.TemporaryFile(mode="w+b", dir=directory)
+        self._payloads: dict[str, tuple[int, int]] = {}
+
+    def add(self, name: str, payload: bytes) -> None:
+        self._file.seek(0, os.SEEK_END)
+        offset = self._file.tell()
+        self._file.write(payload)
+        self._payloads[name] = offset, len(payload)
+
+    def names(self) -> list[str]:
+        return list(self._payloads)
+
+    def read(self, name: str) -> bytes:
+        offset, length = self._payloads[name]
+        self._file.seek(offset)
+        return self._file.read(length)
+
+    def close(self) -> None:
+        self._payloads.clear()
+        self._file.close()
+
+
+class _PreloadedAnnotationClient:
+    """Source-client adapter serving s3transfer's annotation reads from a preload."""
+
+    def __init__(self, source_client: Any, preloader: _SetAnnotations) -> None:
+        self._source_client = source_client
+        self._preloader = preloader
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source_client, name)
+
+    def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "Annotations": [{"AnnotationName": name} for name in self._preloader.annotation_names()]
+        }
+
+    def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
+        name = kwargs["AnnotationName"]
+        return {"AnnotationPayload": io.BytesIO(self._preloader.annotation_payload(name))}
 
 
 class _SetMetadataDirectiveProps:

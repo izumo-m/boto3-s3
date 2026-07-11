@@ -1558,11 +1558,11 @@ class TestCopyPropsAllCpCommand:
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
             get_object_tagging_response(tags),
-            *self.mp_copy_responses_with_dest_identity(),
             list_object_annotations_response(["ann1", "ann2"]),
             get_object_annotation_response(self.PAYLOAD),
-            {},  # PutObjectAnnotation ann1
             get_object_annotation_response(self.PAYLOAD),
+            *self.mp_copy_responses_with_dest_identity(),
+            {},  # PutObjectAnnotation ann1
             {},  # PutObjectAnnotation ann2
             {},  # PutObjectTagging (post-copy on s3transfer >= 0.19)
         ]
@@ -1570,19 +1570,19 @@ class TestCopyPropsAllCpCommand:
         assert _operations(calls) == [
             "HeadObject",
             "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
             "CreateMultipartUpload",
             "UploadPartCopy",
             "CompleteMultipartUpload",
-            "ListObjectAnnotations",
-            "GetObjectAnnotation",
             "PutObjectAnnotation",
-            "GetObjectAnnotation",
             "PutObjectAnnotation",
             "PutObjectTagging",
         ]
         # The directive rides extra_args only; the blacklist keeps it off the
         # CreateMultipartUpload call.
-        assert "AnnotationDirective" not in calls[2].params
+        assert "AnnotationDirective" not in calls[5].params
         _assert_in_operations_called(
             calls,
             "ListObjectAnnotations",
@@ -1611,8 +1611,8 @@ class TestCopyPropsAllCpCommand:
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
             get_object_tagging_response({}),
-            *mp_copy_responses(),
             list_object_annotations_response([]),
+            *mp_copy_responses(),
         ]
         _, calls = _run_cmd(responses, copy_command(copy_props="all"))
         _assert_in_operations_called(
@@ -1624,18 +1624,36 @@ class TestCopyPropsAllCpCommand:
         assert "GetObjectAnnotation" not in called
         assert "PutObjectAnnotation" not in called
 
+    def test_mp_copy_annotation_read_failure_happens_before_destination(
+        self, tmp_path: Path
+    ) -> None:
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response({}),
+            _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+        ]
+
+        result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
+
+        assert _operations(calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+        ]
+        assert "AccessDenied" in result.stderr
+
     def test_mp_copy_object_partial_annotation_failure(self, tmp_path: Path) -> None:
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD),
             get_object_tagging_response({}),
-            *self.mp_copy_responses_with_dest_identity(),
             list_object_annotations_response(["ann1", "ann2"]),
             get_object_annotation_response(self.PAYLOAD),
-            {},  # PutObjectAnnotation ann1 succeeds
             get_object_annotation_response(self.PAYLOAD),
+            *self.mp_copy_responses_with_dest_identity(),
+            {},  # PutObjectAnnotation ann1 succeeds
             _client_error("AccessDenied", 403, "PutObjectAnnotation"),
-            # The failure surfaces inside the CompleteMultipartUpload task, so
-            # s3transfer's failure cleanup fires a best-effort
+            # The write failure surfaces inside the CompleteMultipartUpload
+            # task, so s3transfer's failure cleanup fires a best-effort
             # AbortMultipartUpload against the already-completed upload (a
             # NoSuchUpload no-op on real S3; aws-cli's subscriber fails after
             # the future resolves and never aborts).
@@ -1650,28 +1668,31 @@ class TestCopyPropsAllCpCommand:
         assert "ann2" in result.stderr
 
     def test_mp_copy_object_copies_annotations_with_source_version_id(self, tmp_path: Path) -> None:
-        # aws-cli pins the source VersionId from the single-source HeadObject
-        # on the annotation reads; the native s3transfer path has no seam for
-        # that pin (module docstring adaptation rule), so the reads here are
-        # unversioned even though the source reports a VersionId.
+        # The memory preload pins the source VersionId from the single-source
+        # HeadObject on both annotation reads, matching aws-cli.
         responses = [
             head_object_response(ContentLength=MULTIPART_THRESHOLD, VersionId="src-version-id"),
             get_object_tagging_response({}),
-            *self.mp_copy_responses_with_dest_identity(),
             list_object_annotations_response(["ann1"]),
             get_object_annotation_response(self.PAYLOAD),
+            *self.mp_copy_responses_with_dest_identity(),
             {},  # PutObjectAnnotation ann1
         ]
         _, calls = _run_cmd(responses, copy_command(copy_props="all"))
         _assert_in_operations_called(
             calls,
             "ListObjectAnnotations",
-            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY},
+            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY, "VersionId": "src-version-id"},
         )
         _assert_in_operations_called(
             calls,
             "GetObjectAnnotation",
-            {"Bucket": SOURCE_BUCKET, "Key": SOURCE_KEY, "AnnotationName": "ann1"},
+            {
+                "Bucket": SOURCE_BUCKET,
+                "Key": SOURCE_KEY,
+                "AnnotationName": "ann1",
+                "VersionId": "src-version-id",
+            },
         )
         _assert_in_operations_called(
             calls,

@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from boto3_s3.storage import Location, Storage, StorageCapability
     from boto3_s3.transferconfig import TransferConfig
     from boto3_s3.types import (
+        AnnotationCopyMode,
         CancelMode,
         CancelToken,
         CaseConflictMode,
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 __all__ = [
     "S3",
     "AccessDeniedError",
+    "AnnotationCopyMode",
     "BatchError",
     "Boto3S3Error",
     "CancelMode",
@@ -203,6 +205,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "Storage": "boto3_s3.storage",
     "StorageCapability": "boto3_s3.storage",
     "CancelToken": "boto3_s3.types",
+    "AnnotationCopyMode": "boto3_s3.types",
     "CancelMode": "boto3_s3.types",
     "CaseConflictMode": "boto3_s3.types",
     "CopyPropsMode": "boto3_s3.types",

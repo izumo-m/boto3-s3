@@ -1,19 +1,22 @@
-"""``boto3_s3.TransferConfig`` - the boto3 subclass with CRT tuning fields.
+"""`boto3_s3.TransferConfig` - the boto3 subclass with library settings.
 
 Pins the contract docs/crt.md relies on: boto3's constructor surface is
 untouched (names, order, defaults, alias attributes, the UNSET sentinel that
-distinguishes "explicit" from "defaulted" values), the CRT extras are
-keyword-only with ``None`` defaults, and a plain boto3 ``TransferConfig``
-stays accepted by readers that fall back via ``getattr``.
+distinguishes "explicit" from "defaulted" values), the extras are keyword-only
+with `None` defaults, and a plain boto3 `TransferConfig` stays accepted by
+readers that fall back via `getattr`.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 import boto3_s3
 from boto3_s3.transferconfig import TransferConfig
+from boto3_s3.types import AnnotationCopyMode
 
 
 class TestSdkFloorCompat:
@@ -54,6 +57,9 @@ class TestReExport:
 
     def test_subclasses_boto3(self) -> None:
         assert issubclass(TransferConfig, Boto3TransferConfig)
+
+    def test_annotation_copy_mode_is_public(self) -> None:
+        assert boto3_s3.AnnotationCopyMode is AnnotationCopyMode
 
 
 class TestBoto3Surface:
@@ -138,3 +144,16 @@ class TestCrtExtras:
         plain = Boto3TransferConfig()
         assert getattr(plain, "target_bandwidth", None) is None
         assert getattr(plain, "direct_io", None) is None
+
+
+class TestAnnotationTempDir:
+    def test_defaults_to_os_temp_selection(self) -> None:
+        assert TransferConfig().annotation_temp_dir is None
+
+    def test_accepts_a_library_selected_directory(self, tmp_path: Path) -> None:
+        config = TransferConfig(annotation_temp_dir=tmp_path)
+        assert config.annotation_temp_dir == tmp_path
+
+    def test_plain_boto3_config_reads_as_unset(self) -> None:
+        plain = Boto3TransferConfig()
+        assert getattr(plain, "annotation_temp_dir", None) is None

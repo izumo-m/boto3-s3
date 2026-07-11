@@ -859,3 +859,8 @@ the library. The overall design and the library side (boto3-faithful) are in
   paths_type=...)`. A test-injected `ctx.transfer_config` always takes precedence.
   `preferred_transfer_client` has no CLI option (config key only. Same as
   aws-cli).
+- **Annotation staging**: `build_transfer_options` always sets the library-only
+  `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
+  multipart source annotation before creating the destination, matching
+  aws-cli, while no new CLI option is exposed. The tempfile/deferred modes are
+  library-only until the post-1.0 CLI surface is reconsidered.

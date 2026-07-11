@@ -451,13 +451,12 @@ must stay client-stack-free).
   ListObjectAnnotations answers 500, so `--copy-props all` cannot be
   exercised end-to-end. Measured against aws 2.35.18: single-part `all`
   exits 0 on both sides (nothing annotation-related on the wire); the
-  multipart carryover fails with rc 1 and **identical stderr** on both -
-  but no e2e scenario pins it, because the bucket end state differs by
-  design (aws reads annotations before creating the upload and leaves no
-  destination; ours reads after the completed copy and leaves it -
-  transfer.md section 4) and the harness compares end states. The
-  annotations behavior is covered by the functional stubs instead
-  (`TestCopyPropsAllCpCommand` and the transferrer tests).
+  multipart carryover fails with rc 1 and **identical stderr** on both. The
+  live-only `cp_copy_props_all_multipart` scenario pins the defining end state:
+  both read annotations before CreateMultipartUpload and leave no destination.
+  Successful annotation writes, pagination, the three library staging modes,
+  and temporary-file cleanup are covered by `TestCopyPropsAllCpCommand` and
+  the library transfer tests because MinIO cannot serve those operations.
 
 ## 8. Running the suite on Windows (WSL2 host)
 
