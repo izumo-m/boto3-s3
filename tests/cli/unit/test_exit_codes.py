@@ -120,6 +120,28 @@ class _BrokenPipeClient:
 
 
 class TestMainExitCodes:
+    @pytest.mark.parametrize(
+        ("argv", "required_name"),
+        [
+            (["cp"], "paths"),
+            (["mv"], "paths"),
+            (["rm"], "paths"),
+            (["mb"], "path"),
+            (["rb"], "path"),
+            (["presign"], "path"),
+            (["website"], "paths"),
+        ],
+    )
+    def test_missing_required_path_uses_aws_argument_name(
+        self,
+        argv: list[str],
+        required_name: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        assert cli.main(argv) == 252
+        first_line = capsys.readouterr().err.splitlines()[0]
+        assert first_line.endswith(f"the following arguments are required: {required_name}")
+
     def test_unknown_option_exits_252_with_aws_wording(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -155,7 +177,7 @@ class TestMainExitCodes:
         err = capsys.readouterr().err
         assert rc == 252
         assert "An error occurred (ParamValidation):" in err
-        assert "invalid choice" in err
+        assert "argument --checksum-algorithm: Found invalid choice 'INVALID'" in err
 
     def test_missing_subcommand_exits_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert cli.main([]) == 252

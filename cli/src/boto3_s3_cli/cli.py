@@ -109,8 +109,28 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
     """Render argparse failures through aws-cli's ParamValidation envelope."""
 
+    def _aws_error_message(self, message: str) -> str:
+        """Translate the small argparse wording differences visible in aws-cli."""
+        required_prefix = "the following arguments are required: "
+        if message.startswith(required_prefix):
+            missing = message.removeprefix(required_prefix).split(", ")
+            positional_names = {
+                str(action.metavar): action.dest
+                for action in self._actions
+                if not action.option_strings and action.metavar is not None
+            }
+            return required_prefix + ", ".join(positional_names.get(name, name) for name in missing)
+
+        invalid_marker = ": invalid choice: "
+        argument, marker, remainder = message.partition(invalid_marker)
+        if marker:
+            choice, separator, _choices = remainder.rpartition(" (choose from ")
+            if separator and choice:
+                return f"{argument}: Found invalid choice {choice}"
+        return message
+
     def error(self, message: str) -> NoReturn:
-        _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
+        _write_error(self._aws_error_message(message), rc=_PARAM_VALIDATION_ERROR_RC)
         self.print_usage(sys.stderr)
         self.exit(2)
 

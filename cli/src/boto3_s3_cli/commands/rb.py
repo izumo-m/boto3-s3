@@ -26,7 +26,7 @@ class RbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rb``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>")
         parser.add_argument("--force", action="store_true")
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
@@ -48,7 +48,7 @@ class RbCommand(Command):
         # bad --profile (255) the way aws's parse-time load-cli-arg does.
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
-        expand_positional_paramfile(args, "paths", name="path", operation="rb")
+        expand_positional_paramfile(args, "path", name="path", operation="rb")
         # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3Storage
 
@@ -58,7 +58,7 @@ class RbCommand(Command):
         s3 = ctx.s3(args)
         client = s3.client()
 
-        target: str = args.paths
+        target: str = args.path
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="rb")

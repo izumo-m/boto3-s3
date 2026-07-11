@@ -20,7 +20,7 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
         parser.add_argument("--tags", action="append", nargs=2, metavar=("KEY", "VALUE"))
@@ -45,7 +45,7 @@ class MbCommand(Command):
         # bad --profile (255) the way aws's parse-time load-cli-arg does.
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
-        expand_positional_paramfile(args, "paths", name="path", operation="mb")
+        expand_positional_paramfile(args, "path", name="path", operation="mb")
         # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3Storage
 
@@ -55,7 +55,7 @@ class MbCommand(Command):
         s3 = ctx.s3(args)
         client = s3.client()
 
-        target: str = args.paths
+        target: str = args.path
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
