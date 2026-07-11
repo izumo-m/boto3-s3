@@ -128,11 +128,14 @@ def is_anchored(pattern: str) -> bool:
     patterns go to ``Anchored`` (matched against ``full_key``), the rest
     keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
     POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
-    UNC do. A drive-relative ``C:foo`` is not anchored: ``compile`` instead
-    strips its drive and treats it as root-relative (see
-    ``_strip_drive_relative``), matching aws-cli's same-drive join.
+    UNC do. Python 3.13 changed ``ntpath.isabs`` to reject a single leading
+    slash even though ``ntpath.join`` still replaces the root for that form, so
+    the explicit Windows check preserves the join semantics aws-cli uses. A
+    drive-relative ``C:foo`` is not anchored: ``compile`` instead strips its
+    drive and treats it as root-relative (see ``_strip_drive_relative``),
+    matching aws-cli's same-drive join.
     """
-    return os.path.isabs(pattern)
+    return os.path.isabs(pattern) or (os.sep == "\\" and pattern.startswith(("/", "\\")))
 
 
 def _strip_drive_relative(pattern: str) -> str:

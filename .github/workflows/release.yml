@@ -136,6 +136,14 @@ jobs:
           print(f"boto3-s3 {ok[-1]} on {host} satisfies '{req.specifier}'")
           EOF
 
+      - name: Verify source tree
+        run: |
+          uv sync --all-packages --frozen
+          uv run ruff format --check
+          uv run ruff check
+          uv run basedpyright
+          uv run pytest
+
       - name: Build
         run: uv build --package "${{ steps.target.outputs.package }}"
 

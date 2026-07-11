@@ -120,6 +120,7 @@ class _Parser:
         self._operation = operation
 
     def parse(self) -> dict[str, str | bytes]:
+        """Parse the complete flat map, rejecting duplicates with aws-cli wording."""
         params: dict[str, str | bytes] = {}
         key, val = self._keyval()
         params[key] = val
@@ -138,6 +139,7 @@ class _Parser:
         return params
 
     def _keyval(self) -> tuple[str, str | bytes]:
+        """Parse one key/value pair and resolve the optional `@=` paramfile form."""
         # No empty-key guard - aws-cli's _keyval has none: with the cursor on
         # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
         # proceeds, rc 0), and anything else fails _expect with aws's
@@ -189,6 +191,7 @@ class _Parser:
         return consumed.replace("\\,", ",").rstrip()
 
     def _consume_quoted(self, regex: re.Pattern[str], *, escaped_char: str, name: str) -> str:
+        """Consume one quoted scalar using the named aws-cli grammar fragment."""
         match = regex.match(self._value[self._index :])
         if match is None:
             raise _ShorthandParseError(
@@ -202,6 +205,7 @@ class _Parser:
         return body.replace("\\\\", "\\")
 
     def _expect(self, char: str, *, consume_whitespace: bool = False) -> None:
+        """Consume an expected delimiter or raise a caret-positioned parse error."""
         if consume_whitespace:
             self._consume_whitespace()
         if self._at_eof():

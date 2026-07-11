@@ -64,8 +64,8 @@ if TYPE_CHECKING:
     from boto3_s3.storage import Storage
     from boto3_s3.types import FileInfo, TransferType
 
+# Default multipart part size: boto3 `TransferConfig.multipart_chunksize`.
 DEFAULT_PART_SIZE = 8 * 1024 * 1024
-"""Default multipart part size - boto3 ``TransferConfig.multipart_chunksize``."""
 
 
 class EtagComparison(ContentComparison):

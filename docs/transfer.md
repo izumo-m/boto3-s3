@@ -458,18 +458,13 @@ dest-existence check for download. We ported the same three faces:
   (cli.md section 4 - for symmetry, SigV4 is pinned to pure-Python) is not switched even
   when the CRT engine is in use.
 
-## 10. Known wire divergences (invisible in the result; recorded only)
+## 10. Known wire divergence (invisible in the result; recorded only)
 
 - When `--checksum-algorithm` is unspecified, the default integrity checksum is
   `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
   injects `CRC64NVME`. Both are valid integrity checks and do not affect the
   transfer result or rc (stated explicitly in the awscli port's adaptation
   rules). When specified explicitly, the two agree.
-- A keyless non-recursive S3 source (`cp s3://bucket .`): aws enumerates the
-  whole bucket and finishes with 0 exact matches (rc 0, silent). We return the
-  same result **without enumerating** (saving request count; behavior can differ
-  only in the case where that enumeration would have hit an AccessDenied - an
-  extreme edge that we tolerate).
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 

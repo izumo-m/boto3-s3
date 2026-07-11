@@ -83,6 +83,8 @@ class TestBoto3Surface:
         # that machinery intact.
         defaulted = TransferConfig()
         explicit = TransferConfig(multipart_chunksize=16 * 1024 * 1024)
+        if not hasattr(defaulted, "get_deep_attr"):
+            pytest.skip("installed boto3 predates the CRT explicit-value sentinel")
         assert defaulted.get_deep_attr("multipart_chunksize") is TransferConfig.UNSET_DEFAULT
         assert explicit.get_deep_attr("multipart_chunksize") == 16 * 1024 * 1024
         # Reads still resolve the default through __getattribute__.

@@ -199,6 +199,7 @@ class S3Deleter:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Flush on success, or abandon unsent entries while draining active work."""
         # A body exception abandons the unsent buffer but still waits for the
         # in-flight batch; a worker error raised here then propagates with the
         # body exception chained as __context__.
@@ -275,6 +276,7 @@ class S3Deleter:
             )
 
     def _wait_pending(self) -> None:
+        """Wait for the active batch while polling for immediate cancellation."""
         pending = self._pending
         if pending is None:
             return

@@ -85,5 +85,6 @@ tags on the same merge commit — but pushes them in order, see step 3):
    git switch develop && git merge --ff-only main && git push origin develop
    ```
 
-Watch the run in the Actions tab; if it fails the version check, nothing was
-uploaded.
+Watch the run in the Actions tab. Before building, the release workflow syncs
+the locked workspace and reruns formatting, lint, type checking, and the default
+test suite; a version, dependency, or source-quality failure uploads nothing.

@@ -596,7 +596,7 @@ class LocalFileGenerator:
         notify: Callable[[str], None],
         sym_depth: int = 0,
     ) -> list[WalkChild]:
-        """One directory's vetted children as final ``WalkChild``\\ s.
+        """Return one directory's vetted children as final `WalkChild` entries.
 
         The enumeration layer (no aws-cli counterpart - aws-cli uses ``listdir``):
         it scans ``dir_path`` once with ``os.scandir``, turns each entry into

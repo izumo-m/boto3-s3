@@ -72,6 +72,7 @@ class TransferConfig(Boto3TransferConfig):
         disk_throughput: int | None = None,
         direct_io: bool | None = None,
     ) -> None:
+        """Forward explicit classic values and retain CRT settings across SDK versions."""
         # Forward each base parameter only when set, letting the base ctor supply
         # its own default. On the floor boto3 (1.28 - ~1.40) the base signature
         # carries concrete defaults; forwarding None would overwrite them and
@@ -98,7 +99,9 @@ class TransferConfig(Boto3TransferConfig):
         super().__init__(**base_kwargs)  # pyright: ignore[reportArgumentType]
         if not _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
             # Floor boto3 has no such field; keep it readable via getattr.
-            self.preferred_transfer_client = preferred_transfer_client
+            self.preferred_transfer_client = (
+                "auto" if preferred_transfer_client is None else preferred_transfer_client
+            )
         self.target_bandwidth = target_bandwidth
         self.should_stream = should_stream
         self.disk_throughput = disk_throughput

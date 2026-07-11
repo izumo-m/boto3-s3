@@ -16,8 +16,13 @@ is enforced. The exit-code charter this enforces lives in
 
 Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
-except e2e (skipped with a reason): any CI would need no Docker, since e2e
-self-skips without `BOTO3_S3_E2E_BUCKET`.
+except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
+quality gates and package builds on Linux, then runs this default suite on
+Linux, macOS, and Windows at the Python 3.10 floor, plus Python 3.14 on Linux.
+It also downgrades to the declared boto3 / botocore / s3transfer floors and
+runs the compatibility seams whose expected request models are stable at that
+SDK generation. It needs no Docker because e2e self-skips without
+`BOTO3_S3_E2E_BUCKET`.
 
 One small group needs a **case-insensitive filesystem**: the `--case-conflict`
 `*_with_existing_file` tests (aws-cli's `skip_if_case_sensitive`), where the
@@ -262,7 +267,7 @@ string alone cannot prove.
 
 ```
 scripts/compose-up.sh          # idempotent; waits for bucket init
-scripts/install-awscli.sh      # idempotent; aws-cli matching vendor/aws-cli -> .venv/bin
+scripts/install-awscli.sh      # idempotent; pinned aws-cli -> .venv/bin
 source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
 uv run pytest                  # full suite including e2e
 scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
@@ -278,8 +283,8 @@ The e2e diff is only meaningful when the live `aws` matches the version the
 goldens were captured with: the differential compares both CLIs against that
 capture, so an `aws` that adds or drops a flag (e.g. `--no-overwrite`, added
 mid-2.3x) diverges spuriously. `scripts/install-awscli.sh` pins it to the
-vendored `aws-cli` submodule's version - the source the library is ported
-against - by keeping the release zip's self-contained `dist/` and symlinking
+aws-cli source revision the library is ported against by keeping the release
+zip's self-contained `dist/` and symlinking
 `.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
 matching install is reused rather than re-downloaded).
 
@@ -374,7 +379,7 @@ rename, a parametrized merge of several aws-cli tests, a method from a different
 aws-cli class or file, or `none` for a boto3-s3 addition), or above a class when
 a whole block was carved out of one aws-cli class under the same method names.
 The comment references the aws-cli test by logical `Class.method` name - or just
-the method name when the origin is in the same class - never a vendored path.
+the method name when the origin is in the same class - never a checkout path.
 
 The presign port freezes botocore's signing clock through the
 `get_current_datetime` seam - patched in both modules that bind it,
@@ -459,12 +464,13 @@ representative:
   deployment has. Copy the working tree to an NTFS directory instead,
   excluding the platform-bound and derived trees:
 
-      rsync -a --delete --exclude .git --exclude .venv --exclude vendor \
+      rsync -a --delete --exclude .git --exclude .venv --exclude '<aws-cli-source-dir>' \
         --exclude __pycache__ --exclude out --exclude .pytest_cache \
         --exclude .ruff_cache  <repo>/  /mnt/c/tmp/boto3-s3-wintest/
 
-  (`vendor/` is reference-only for the tests - docstrings cite it, nothing
-  imports from it - so the copy stays a few MiB.)
+  Replace `<aws-cli-source-dir>` with that checkout's repository-relative path.
+  The aws-cli source is reference-only for the tests - nothing imports from it -
+  so excluding it keeps the copy to a few MiB.
 
 - **Sync with `--all-packages`.** A bare `uv sync` installs only the root
   project; without the `cli` workspace member every `boto3_s3_cli` import
@@ -492,16 +498,16 @@ filesystem.
 
 **e2e on Windows.** The differential machinery works unchanged against the
 WSL2 MinIO stack: pin `aws.exe` at the version `scripts/install-awscli.sh`
-pins (the vendored `aws-cli`'s - the section 4 drift rationale applies to
-this binary too), start the stack inside WSL2 (`scripts/compose-up.sh`), and
+pins (the reference aws-cli source version - the section 4 drift rationale
+applies to this binary too), start the stack inside WSL2 (`scripts/compose-up.sh`), and
 Windows reaches it on `127.0.0.1:9000` through WSL2's localhost forwarding.
 `scripts\install-awscli.cmd` is `install-awscli.sh`'s Windows twin and needs
 no admin rights: it extracts the version-pinned MSI's self-contained payload
 with `msiexec /a` (an administrative extraction - no registry entries, no
 system PATH edits, any installed AWS CLI stays untouched) into
 `%LOCALAPPDATA%\boto3-s3\aws-cli\<version>` behind a stable `current`
-junction. The NTFS test copy carries no `vendor\` tree, so pass the version
-explicitly there (on a full checkout the argument is optional):
+junction. The NTFS test copy carries no aws-cli source checkout, so pass the
+version explicitly there (on a full checkout the argument is optional):
 
     cmd.exe /c "scripts\install-awscli.cmd 2.35.18"
 

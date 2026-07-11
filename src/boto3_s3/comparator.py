@@ -86,8 +86,8 @@ class SyncPair:
     dest: FileInfo | None = None
 
 
+# A pair predicate: `True` performs the action the pair stands for.
 PairFilter = Callable[[SyncPair], bool]
-"""A pair predicate: ``True`` performs the action the pair stands for."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,8 +265,8 @@ def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exa
     return delta >= 0
 
 
+# Content strategies' streaming read granularity, bounding memory use.
 READ_CHUNK = 1024 * 1024
-"""The content strategies' streaming read granularity; bounds memory."""
 
 
 class ContentComparison:

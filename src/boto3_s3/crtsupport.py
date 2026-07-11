@@ -277,6 +277,7 @@ def _get_crt_s3_client(
 def _initialize(
     client: S3Client, config: Any | None, endpoint: str | None
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
+    """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
         BotocoreCRTRequestSerializer,
         acquire_crt_s3_process_lock,

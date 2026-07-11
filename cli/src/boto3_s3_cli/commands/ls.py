@@ -73,6 +73,7 @@ class LsCommand(Command):
         total_size = 0
 
         def print_result(info: FileInfo) -> None:
+            """Render one listing entry and update the optional summary totals."""
             nonlocal matched, total_objects, total_size
             matched = True
             line = output.format_entry(

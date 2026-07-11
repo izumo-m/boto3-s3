@@ -196,6 +196,7 @@ class TransferPrinter:
     # -- callbacks (worker threads: count and enqueue, never write) -----------
 
     def on_progress(self, progress: TransferProgress) -> None:
+        """Update thread-safe byte/file totals and enqueue a throttled meter snapshot."""
         snapshot: _ProgressSnapshot | None = None
         with self._lock:
             if self._start is None:
@@ -235,6 +236,7 @@ class TransferPrinter:
         self._queue.put(snapshot)
 
     def on_result(self, result: OpResult) -> None:
+        """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
         record: _ResultRecord | None = None
         with self._lock:
             if result.outcome is OpOutcome.NOTICE:
@@ -289,6 +291,7 @@ class TransferPrinter:
     # -- rendering (the printer thread) ----------------------------------------
 
     def _drain(self) -> None:
+        """Render queued records until shutdown, disabling output after stream failure."""
         while True:
             record = self._queue.get()
             if record is _SHUTDOWN:
@@ -313,6 +316,7 @@ class TransferPrinter:
                 self._output_dead = True
 
     def _render_result(self, record: _ResultRecord) -> None:
+        """Render one terminal result with aws-cli's stream and wording rules."""
         if record.outcome is OpOutcome.NOTICE:
             self._write_line(sys.stderr, record.error)
             return
@@ -332,6 +336,7 @@ class TransferPrinter:
             self._write_line(sys.stderr, f"warning: {record.error}")
 
     def _write_progress(self, snapshot: _ProgressSnapshot) -> None:
+        """Render one byte-based or file-based progress snapshot."""
         if snapshot.expected_bytes > 0:
             start = self._start if self._start is not None else snapshot.now
             elapsed = max(snapshot.now - start, 1e-9)

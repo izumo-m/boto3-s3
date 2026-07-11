@@ -98,7 +98,7 @@ _MAX_UPLOAD_SIZE_TEXT = "48.8 TiB"
 _GLACIER_STORAGE_CLASSES = ("GLACIER", "DEEP_ARCHIVE")
 
 
-def _ckey(info: FileInfo) -> str:
+def _compare_key(info: FileInfo) -> str:
     """The producer-stamped ``compare_key``, narrowed to ``str``.
 
     Every ``Storage.scan`` (listing) and ``Storage.get_fileinfo`` (single) entry
@@ -316,7 +316,7 @@ def upload_item_from_info(
 ) -> TransferItem:
     """One upload item from a walk entry (the oversize warning included)."""
     native = to_native_path(info.key)
-    compare_key = _ckey(info)
+    compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
     if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
         # aws-cli's _warn_if_too_large: warn (rendered relative) but
@@ -362,11 +362,22 @@ def s3_source_items(
         )
     elif src_storage.bucket and not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
-        # bucket and exact-matches nothing -> zero items, rc 0. Same
-        # outcome here without issuing the listing. A bucketless service root
-        # (`cp s3://`) is NOT this case: it falls to head_single, whose empty
-        # Bucket hits botocore's Invalid-bucket ParamValidation like aws.
-        return
+        # bucket and exact-matches nothing -> zero items, rc 0. Preserve the
+        # listing because its failure (notably AccessDenied) is observable.
+        # A bucketless service root (`cp s3://`) is NOT this case: it falls to
+        # head_single, whose empty Bucket hits botocore's Invalid-bucket
+        # ParamValidation like aws.
+        scan_options = replace(
+            src_storage.default_scan_options(),
+            recursive=False,
+            prefix="",
+            request_payer=options.get("request_payer"),
+        )
+        infos = (
+            info
+            for info in src_storage.scan(scan_options)
+            if f"{src_bucket}/{info.key}" == src_bucket
+        )
     else:
         infos = head_single(
             src_storage, transfer_type=transfer_type, options=options, operation=operation
@@ -413,7 +424,7 @@ def download_item_from_info(
     """One download item from a listing entry, or ``None`` once a gate
     consumed it (the gate emits its own warn/skip/notice record)."""
     src_path = f"{src_bucket}/{info.key}"
-    compare_key = _ckey(info)
+    compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_path}"
     is_s3_info = isinstance(info, S3FileInfo)
@@ -473,7 +484,7 @@ def copy_item_from_info(
     """One S3-to-S3 copy item from a listing entry, or ``None`` when the
     glacier gate consumed it."""
     src_path = f"{src_bucket}/{info.key}"
-    compare_key = _ckey(info)
+    compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_path}"
     is_s3_info = isinstance(info, S3FileInfo)
@@ -725,7 +736,7 @@ def open_upload_item(
     ``dryrun`` skips the ``open`` (the item is only reported, never
     submitted), so a dry run never reads from the backend.
     """
-    compare_key = _ckey(info)
+    compare_key = _compare_key(info)
     open_key = compare_key if plan.dir_op else ""
     dest = transferplan.dest_for(plan, compare_key)
     return TransferItem(
@@ -823,7 +834,7 @@ def open_download_item(
     ``dryrun`` skips the destination ``open`` (the item is only reported,
     never submitted), so a dry run never opens the backend for writing.
     """
-    compare_key = _ckey(info)
+    compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
     src_display = f"s3://{src_bucket}/{info.key}"
     is_s3_info = isinstance(info, S3FileInfo)
@@ -883,7 +894,7 @@ def cp_case_gate(
         return None
     # paths_type == "s3local" guarantees a LocalStorage destination here.
     dest_keys = {
-        _ckey(info)
+        _compare_key(info)
         for info in plan.dest.scan(
             walk_source_scan_options(
                 plan.dest,
@@ -948,7 +959,7 @@ def sync_entries(
             item_filter=item_filter,
             options=options,
         ):
-            yield _ckey(info), info
+            yield _compare_key(info), info
         return
     for info in storage.scan(
         walk_source_scan_options(
@@ -959,7 +970,7 @@ def sync_entries(
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
         )
     ):
-        yield _ckey(info), info
+        yield _compare_key(info), info
 
 
 def sync_transfer_item(

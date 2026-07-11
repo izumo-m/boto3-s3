@@ -688,6 +688,7 @@ class Transferrer:
         exc: BaseException | None,
         tb: object,
     ) -> None:
+        """Drain submitted work, escalating cancellation when the exit requires it."""
         if self._manager is None:
             return
         token_requests_immediate = (
@@ -731,6 +732,7 @@ class Transferrer:
                 return
 
     def _track_future(self, future: Any | None) -> None:
+        """Track a submitted future without losing a synchronous completion race."""
         if future is None:
             return
         with self._futures_lock:
@@ -871,6 +873,7 @@ class Transferrer:
                 logger.debug("closing a fileobj after a submit error failed", exc_info=True)
 
     def _submit_upload(self, item: TransferItem) -> Any | None:
+        """Map one upload and attach close, move-delete, completion, and tracking hooks."""
         # A directory source is handed through to fail like aws-cli ([Errno 21]
         # Is a directory, rc 1); botocore's default checksum wrapper would
         # otherwise open it and mask the read failure as an opaque rewind error,
@@ -902,6 +905,7 @@ class Transferrer:
         )
 
     def _submit_download(self, item: TransferItem) -> Any:
+        """Map one download and order destination, durability, and completion hooks."""
         if self._capture is not None:
             # A same-run content filter may have read this source through the
             # run's own client (a SyncPair content update_filter via
@@ -941,6 +945,7 @@ class Transferrer:
         )
 
     def _submit_copy(self, item: TransferItem) -> Any:
+        """Map one S3 copy, including copy-props and optional source deletion."""
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
         subscribers = self._common_subscribers(item)
         if not self._options.get("metadata_directive"):
@@ -959,6 +964,7 @@ class Transferrer:
         )
 
     def _common_subscribers(self, item: TransferItem) -> list[Any]:
+        """Build the size, ETag, and progress hooks shared by all transfer routes."""
         # Size and etag are provided for every kind, aws-cli-style: s3transfer
         # skips its pre-transfer HeadObject probe (downloads AND copies) only
         # when both are present. S3-sourced items always carry an etag; local
@@ -979,6 +985,7 @@ class Transferrer:
     def _completion(
         self, item: TransferItem, *, post_success: Callable[[TransferItem], None] | None = None
     ) -> _Completion:
+        """Bind an item's terminal callbacks into one s3transfer subscriber."""
         return _Completion(
             item,
             on_success=self._record_success,
@@ -1021,6 +1028,7 @@ class Transferrer:
         return _DeleteSource(delete_s3_source, capture=self._capture_response)
 
     def _copy_props_subscribers(self, item: TransferItem) -> list[Any]:
+        """Translate the selected copy-props mode into ordered request subscribers."""
         mode = self._copy_props
         exclude = _ExcludeAnnotationDirective(
             item, client=self._client, multipart_threshold=self._multipart_threshold
@@ -1055,6 +1063,7 @@ class Transferrer:
     # -- engine internals ----------------------------------------------------
 
     def _get_manager(self) -> Any:
+        """Create and cache the selected transfer manager and response capture."""
         if self._manager is None:
             # Built lazily so a dryrun never constructs a manager (no thread
             # pools, no client-event registration). Listing-driven live runs
@@ -1108,6 +1117,7 @@ class Transferrer:
         )
 
     def _create_classic_manager(self) -> Any:
+        """Build the classic s3transfer manager, honoring threaded execution config."""
         from s3transfer.manager import TransferConfig as S3TransferConfig
         from s3transfer.manager import TransferManager
 
@@ -1142,6 +1152,7 @@ class Transferrer:
         error: Boto3S3Error | None = None,
         extra_info: Mapping[str, Any] | None = None,
     ) -> OpResult:
+        """Build one public result with the run's storage and display context."""
         return OpResult(
             transfer_type=self._result_transfer_type,
             key=item.compare_key,
@@ -1168,6 +1179,7 @@ class Transferrer:
         etag: str | None = None,
         delete_response: dict[str, Any] | None = None,
     ) -> None:
+        """Count and emit a successful terminal result with captured response data."""
         # item.size is unset for an unknown-size transfer (a streaming download
         # lets s3transfer probe the object); fall back to the size s3transfer
         # resolved on the future so SUCCEEDED reports the real byte count.
@@ -1243,6 +1255,7 @@ class Transferrer:
         return None, None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
+        """Classify a terminal exception as a no-overwrite skip or failed result."""
         # Failed / skipped items surface no captured response, but the entry
         # must still leave the store (see _drain_captured).
         self._drain_captured(item)

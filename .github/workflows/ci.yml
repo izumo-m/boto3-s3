@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.11.17"
+          enable-cache: true
+      - run: uv sync --all-packages --frozen
+      - run: uv run ruff format --check
+      - run: uv run ruff check
+      - run: uv run basedpyright
+      - run: uv build --all-packages
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.10"
+          - os: windows-latest
+            python: "3.10"
+    runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.11.17"
+          enable-cache: true
+      - run: uv sync --all-packages --frozen
+      - run: uv run pytest
+
+  sdk-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.11.17"
+          enable-cache: true
+      - run: uv sync --all-packages --frozen
+      - run: uv pip install boto3==1.28.0 botocore==1.31.0 s3transfer==0.6.2
+      - name: Test SDK-floor compatibility seams
+        run: >-
+          uv run --no-sync pytest
+          tests/lib/test_transferconfig.py
+          tests/lib/test_import_contract.py
+          tests/lib/test_s3_cp.py::TestUploadRoute::test_single_upload_names_the_key_from_the_prefix
+          tests/lib/test_s3_cp.py::TestDownloadRoute::test_head_omits_checksum_mode_below_the_knob_floor
+          tests/lib/test_s3_cp.py::TestDownloadRoute::test_keyless_non_recursive_source_transfers_nothing
+          tests/lib/test_deleter.py::TestXmlIncompatibleFallback::test_only_xml_incompatible_keys_use_delete_object
+          tests/lib/test_s3storage.py::TestListBuckets::test_falls_back_to_unpaginated_list_buckets_below_the_floor

@@ -162,6 +162,7 @@ class RuntimeConfig:
                 runtime_config[attr] = human_readable_to_int(value)
 
     def _convert_human_readable_rates(self, runtime_config: dict[str, Any]) -> None:
+        """Normalize byte and bit rates, preserving aws-cli's accepted spellings."""
         for attr in self.HUMAN_READABLE_RATES:
             value = runtime_config.get(attr)
             if value is not None and not isinstance(value, int):
@@ -206,6 +207,7 @@ class RuntimeConfig:
             return False
 
     def _resolve_choice_aliases(self, runtime_config: dict[str, Any]) -> None:
+        """Replace accepted config aliases with their canonical choice values."""
         for attr in self.CHOICE_ALIASES:
             current_value = runtime_config.get(attr)
             if current_value in self.CHOICE_ALIASES[attr]:
@@ -219,6 +221,7 @@ class RuntimeConfig:
                 runtime_config[attr] = resolved_value
 
     def _validate_config(self, runtime_config: dict[str, Any]) -> None:
+        """Validate normalized positive-integer and enumerated settings."""
         self._validate_positive_integers(runtime_config)
         self._validate_choices(runtime_config)
 

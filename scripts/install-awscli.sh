@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Install the aws-cli v2 that matches the vendored aws-cli submodule into
+# Install the aws-cli v2 that matches the pinned aws-cli source revision into
 # .venv/bin, for the e2e parity suite (it finds `aws` via PATH). The live `aws`
 # then matches the source the library is ported against - and the version the
 # goldens are captured with - so parity is checked against one reference.
 #
 # Idempotent: a matching install is reused (no re-download). The target version
-# defaults to the vendored submodule's, or pass one explicitly:
+# defaults to the source checkout's version, or pass one explicitly:
 #
-#     scripts/install-awscli.sh            # match vendor/aws-cli
+#     scripts/install-awscli.sh            # match the source checkout
 #     scripts/install-awscli.sh 2.34.53    # a specific version
 #
 # Unlike `aws/install`, this just keeps the zip's self-contained `dist/` and

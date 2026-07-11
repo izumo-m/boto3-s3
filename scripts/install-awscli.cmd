@@ -1,7 +1,7 @@
 @echo off
 rem scripts/install-awscli.cmd - scripts/install-awscli.sh's Windows twin.
 rem
-rem Extracts the aws-cli v2 MSI matching the vendored aws-cli submodule into a
+rem Extracts the aws-cli v2 MSI matching the pinned aws-cli source revision into a
 rem per-user directory (no admin rights, no registry entries, no PATH edits),
 rem for the Windows e2e parity lane. scripts\minio-env.cmd prepends the stable
 rem `current` junction to PATH, so the pinned aws.exe shadows any system
@@ -9,10 +9,10 @@ rem install for the suite - mirroring how .venv/bin/aws wins on Linux.
 rem
 rem Idempotent: a matching extraction is reused (no re-download).
 rem
-rem   scripts\install-awscli.cmd            # match vendor\aws-cli (full checkout)
+rem   scripts\install-awscli.cmd            # match the source checkout
 rem   scripts\install-awscli.cmd 2.35.18    # a specific version (required on the
 rem                                         # NTFS test copy, which carries no
-rem                                         # vendor\ tree - testing.md section 8)
+rem                                         # source checkout - testing.md section 8)
 rem
 rem Uses `msiexec /a` (an administrative extraction): it unpacks the MSI's
 rem self-contained Amazon\AWSCLIV2 payload and installs nothing.
@@ -22,10 +22,10 @@ set "root=%LOCALAPPDATA%\boto3-s3\aws-cli"
 set "target=%~1"
 if defined target goto have_target
 
-rem Derive the version from the vendored submodule when present.
+rem Derive the version from the aws-cli source checkout when present.
 set "initpy=%~dp0..\vendor\aws-cli\awscli\__init__.py"
 if not exist "%initpy%" (
-    echo No version given and no vendor\aws-cli checkout found.
+    echo No version given and no local aws-cli source checkout found.
     echo Usage: scripts\install-awscli.cmd ^<version^>
     exit /b 1
 )

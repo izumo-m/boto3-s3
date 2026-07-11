@@ -464,7 +464,7 @@ class TestDownloadRoute:
         # attribute. The HEAD must go out without ChecksumMode (the
         # era-appropriate wire shape, docs/overview.md section 2), not raise.
         client, calls = make_recording_client([_head_response(), _get_response()])
-        monkeypatch.setattr(client.meta.config, "response_checksum_validation", None)
+        monkeypatch.setattr(client.meta.config, "response_checksum_validation", None, raising=False)
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
             str(tmp_path / "out.bin"),
@@ -510,11 +510,18 @@ class TestDownloadRoute:
 
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
         # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
-        # (rc 0, silent); same zero-item outcome here.
-        client, calls = make_recording_client([])
+        # (rc 0, silent). The listing itself is observable when ListBucket is
+        # denied, so it must not be optimized away.
+        client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(S3Storage("s3://bucket", client=client), str(tmp_path), on_result=results.append)
-        assert calls == []
+        assert _ops(calls) == ["ListObjectsV2"]
+        assert calls[0].params == {
+            "Bucket": "bucket",
+            "Prefix": "",
+            "Delimiter": "/",
+            "MaxKeys": 1000,
+        }
         assert results == []
 
     def test_recursive_download_drops_markers_and_parent_escapes(self, tmp_path: Path) -> None:

@@ -35,17 +35,15 @@ import re
 from collections.abc import Iterable
 from typing import TextIO
 
+# Marker substituted for a masked value (matches `mask_proxy_url`).
 MASK = "***"
-"""Marker substituted for a masked value (matches ``mask_proxy_url``)."""
 
+# Minimum length for masking. Shorter Access Key IDs are fully masked, while
+# shorter `extra_secrets` literals are ignored to avoid blanking broad log spans.
 MASK_MIN_LEN = 16
-"""Minimum length for a value to be masked at all. Access Key IDs shorter than
-this are fully masked rather than tail-revealed, and an ``extra_secrets`` literal
-shorter than this is skipped entirely (a stray short string cannot blank out
-swaths of the log)."""
 
+# Access Key ID trailing characters left visible for account identification.
 MASK_REVEAL_LEN = 4
-"""Trailing characters of the Access Key ID left visible (account identification)."""
 
 # Value terminator for matches taken from URLs, headers, and the repr() of a
 # headers dict: a run of characters that are not whitespace, a separator, or a

@@ -441,6 +441,7 @@ class _SyncDeletes:
         return self._local_first_error
 
     def submit(self, pair: SyncPair) -> None:
+        """Dispatch one destination orphan through the S3 or backend delete route."""
         info = pair.dest
         assert info is not None  # the delete lane runs only on destination-only pairs
         dest = self._dest
