@@ -12,36 +12,34 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 
 ## What it is
 
-`boto3-s3-cli` installs one command, **`boto3-s3`**, a drop-in for `aws s3` with
-every subcommand:
+`boto3-s3-cli` installs one command, **`boto3-s3`**, designed as a
+command-for-command replacement for `aws s3` with every subcommand:
 
 ```
 cp   ls   mb   mv   presign   rb   rm   sync   website
 ```
 
-It takes the same arguments and global options as `aws s3`, reads the same
-`~/.aws` configuration, and returns the same exit codes — so existing commands
-and scripts keep working: just swap `aws s3` for `boto3-s3`. Argument handling,
-configuration, and exit codes are tested for parity with `aws s3`.
+It takes the `aws s3` arguments and global options, reads the same `~/.aws`
+configuration, and treats an exit-code mismatch as a bug. Existing commands and
+scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
+handling, resulting S3 state, and exit codes are tested against `aws s3`.
 
-## Footprint & startup
+This CLI is the strict compatibility layer over the more permissive Python
+library. It applies aws-compatible path validation, configuration resolution,
+transfer defaults, output behavior, and error handling. Human-readable wording
+is not guaranteed to be byte-for-byte identical, and the interactive UI and a
+few deliberately cleaned-up aws-cli edge-case failures are documented
+exceptions.
 
-`boto3-s3-cli` is an ordinary Python package: it runs on the interpreter you
-already have and reuses your boto3 / botocore install rather than bundling its
-own. aws-cli v2 ships as a self-contained install — its own embedded Python plus a
-private copy of the SDK — and pays that bootstrap on every invocation.
+## Packaging & startup
 
-The startup gap is large. Against a local MinIO, listing a missing bucket (so the
-request itself is negligible) and printing `--version`, on one Linux machine:
-
-| Command                  | aws-cli v2 | boto3-s3-cli |
-| ------------------------ | ---------- | ------------ |
-| `ls` of a missing bucket | ~670 ms    | ~250 ms      |
-| `--version`              | ~580 ms    | ~65 ms       |
-
-Same result, same exit code — boto3-s3-cli just skips the bundle's bootstrap and
-lazy-loads only what the subcommand needs. (Figures are from one environment and
-will vary; the ratio is what's representative.)
+`boto3-s3-cli` is an ordinary Python package: it runs on the selected interpreter
+and reuses a compatible boto3 / botocore installation rather than bundling its
+own runtime. Its startup path lazy-loads the AWS SDK and command modules so
+`--help`, `--version`, and pre-dispatch usage errors avoid imports they do not
+need. Actual startup time depends on the interpreter, installation method,
+machine, and credential/configuration environment and should be measured where
+the command will run.
 
 ## Install
 
