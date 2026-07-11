@@ -33,5 +33,9 @@ Thumbs.db
 CLAUDE.local.md
 .claude/settings.local.json
 
+# Agent tools
+/.agents/
+/skills-lock.json
+
 # Local-only working notes
 /.local/
