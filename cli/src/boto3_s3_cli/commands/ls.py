@@ -56,6 +56,11 @@ class LsCommand(Command):
         # SDK-free (import contract, docs/imports.md).
         from boto3_s3 import S3, FileInfo, FileKind, S3Storage
 
+        # Intentional aws-cli bug parity: a readable positional fileb:// is
+        # still bytes here. Calling bytes.startswith(str) raises TypeError,
+        # which the general handler maps to 255.
+        if isinstance(args.paths, bytes):
+            raise TypeError("startswith first arg must be bytes or a tuple of bytes, not str")
         target: str = args.paths
         # A target with no bucket lists all buckets. aws-cli even discards a key
         # left after an empty bucket ("s3:///k"), so normalize every such form to

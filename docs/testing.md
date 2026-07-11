@@ -59,6 +59,14 @@ warnings-only path).
 Charter exceptions map naturally: extension options (e.g. `--help`) cannot
 run on the aws side, so they are unit-tested instead of diffed.
 
+`test_positional_fileb_bug_parity.py` is a dedicated drift tripwire rather
+than a golden scenario. It feeds a readable binary positional to all six
+single-path commands and asserts the explicit aws-cli bug-shaped exit codes
+before comparing the two CLIs. If aws-cli repairs one of those inconsistent
+paths, the aws-side assertion fails even if both implementations could
+otherwise be changed together; review and remove the matching compatibility
+branch instead of updating the expected code mechanically.
+
 ## 3. Golden contract
 
 A golden (`tests/cli/goldens/<cmd>/<scenario>.json`) records what the real

@@ -276,16 +276,16 @@ class TestParamfileExpansion:
             "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
         )
 
-    def test_positional_fileb_reference_is_a_type_252(
+    def test_positional_fileb_reference_reproduces_aws_type_bug_255(
         self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # A readable fileb:// loads bytes, which botocore rejects for the
-        # string-typed positional (rc 252, byte-exact against aws 2.35.18).
+        # aws-cli leaves positional bytes in ListCommand and crashes when its
+        # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
         ref = tmp_path / "u.bin"
         ref.write_bytes(b"s3://bucket/p/")
         rc = cli.main(["ls", f"fileb://{ref}"], ctx=Context(client_factory=_unused_factory))
-        assert rc == 252
-        assert "Invalid type for parameter input, value: b'" in capsys.readouterr().err
+        assert rc == 255
+        assert "startswith first arg must be bytes" in capsys.readouterr().err
 
     def test_page_size_missing_fileb_reference_is_252(
         self, capsys: pytest.CaptureFixture[str]

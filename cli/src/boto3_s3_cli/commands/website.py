@@ -53,7 +53,13 @@ class WebsiteCommand(Command):
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
-        path = args.paths
+        if isinstance(args.paths, bytes):
+            # Intentional aws-cli bug parity: WebsiteCommand declares a
+            # one-element positional list, the URI handler unwraps it to bytes,
+            # and the command indexes those bytes as though the list remained.
+            # The resulting int has no startswith(), so aws exits 255.
+            raise AttributeError("'int' object has no attribute 'startswith'")
+        path: str = args.paths
         if path.startswith("s3://"):
             path = path[len("s3://") :]
         if path.endswith("/"):

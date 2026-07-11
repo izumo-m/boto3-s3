@@ -95,6 +95,12 @@ class RmCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
+        if isinstance(args.paths, bytes):
+            # Intentional aws-cli bug parity: S3TransferCommand decodes a
+            # positional fileb:// back through the filesystem encoding before
+            # validating and executing it. This is why rm reaches its normal
+            # rc-1 operation-error path while ls / website crash at rc 255.
+            args.paths = args.paths.decode(sys.getfilesystemencoding())
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         clientfactory.validate_profile(args)

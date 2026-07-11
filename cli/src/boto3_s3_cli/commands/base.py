@@ -158,17 +158,32 @@ def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation
 def expand_positional_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
-    """aws's parse-time paramfile expansion for a positional value (252).
+    """Apply aws's command-specific positional paramfile expansion in place.
 
-    Same load as ``expand_option_paramfile`` (a positional is string-typed,
-    so ``fileb://`` bytes are the 252 type rejection), but the failure names the
-    positional the way aws does - its ``cli_name`` (``paths`` for ls / rm /
-    website, ``path`` for mb / rb / presign), not a ``--flag`` form (measured
-    against aws 2.35.18). aws's ``URIArgumentHandler`` unwraps a length-1 list
-    before loading; a positional argparse captures as a single string is
-    already unwrapped, so *dest* holds a plain value here.
+    Missing files remain the loader's rc 252 for every command. Readable
+    `fileb://` values are deliberately less uniform: aws-cli leaves the
+    bytes in the parsed positional, after which mb / rb / presign reject them
+    as string parameters (252), rm decodes them back to a path, and ls /
+    website crash in their own path handling (255). The callers retain those
+    downstream quirks so the exit codes stay compatible.
     """
-    _expand_string_paramfile(args, dest, name=name, operation=operation)
+    value = getattr(args, dest, None)
+    if not isinstance(value, str):
+        return
+    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    if loaded is None:
+        return
+    if isinstance(loaded, bytes) and operation in {"mb", "rb", "presign"}:
+        # Intentional aws-cli bug parity: these three commands happen to route
+        # positional bytes through string-parameter validation, while rm, ls,
+        # and website mishandle the same bytes differently.
+        raise ValidationError(
+            "Parameter validation failed:\n"
+            f"Invalid type for parameter input, value: {loaded!r}, "
+            "type: <class 'bytes'>, valid types: <class 'str'>",
+            operation=operation,
+        )
+    setattr(args, dest, loaded)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
