@@ -722,7 +722,8 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
 ([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
-validation failures mapped to 252 use aws-cli 2.35.18's default enhanced-style envelope,
+validation failures mapped to 252 use aws-cli 2.35.18's default enhanced-style
+envelope,
 `An error occurred (ParamValidation): <message>`. This includes argparse
 failures, unknown options, plain `ValidationError`, and the auto-prompt flag
 conflict. The program-name prefix remains outside the parity target, and

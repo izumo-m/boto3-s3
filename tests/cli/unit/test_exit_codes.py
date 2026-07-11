@@ -1,12 +1,12 @@
 """Unit tests for the aws-cli exit-code mapping (docs/cli.md section 6).
 
-``exit_code_for`` is exercised directly for each branch, and ``main`` is
+`exit_code_for` is exercised directly for each branch, and `main` is
 exercised end-to-end for the paths that do not go through a library error
 (usage errors, unknown options) plus the ClientError path through a fake
 client, so the parse -> dispatch -> error -> exit-code wiring is covered. The
-catch-all backstop (``_exit_code_for_unexpected``: a non-Boto3S3Error escaping
-a command -> 252/253/254/255) and the ``BrokenPipeError`` -> 0 handler are
-covered end-to-end through ``main`` too.
+catch-all backstop (`_exit_code_for_unexpected`: a non-Boto3S3Error escaping
+a command -> 252/253/254/255) and the `BrokenPipeError` -> 0 handler are
+covered end-to-end through `main` too.
 """
 
 from __future__ import annotations

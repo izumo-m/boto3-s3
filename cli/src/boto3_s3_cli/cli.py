@@ -98,11 +98,11 @@ else:
     _SubParsersActionBase = argparse._SubParsersAction
 
 
-def _write_error(message: object, *, code: str | None = None) -> None:
-    """Write one enhanced-format CLI error, optionally with an error code."""
+def _write_error(message: object, *, rc: int | None = None) -> None:
+    """Write one CLI error, adding the enhanced envelope required by `rc`."""
     detail = str(message)
-    if code is not None:
-        detail = f"An error occurred ({code}): {detail}"
+    if rc == _PARAM_VALIDATION_ERROR_RC:
+        detail = f"An error occurred (ParamValidation): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
 
 
@@ -110,7 +110,7 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
     """Render argparse failures through aws-cli's ParamValidation envelope."""
 
     def error(self, message: str) -> NoReturn:
-        _write_error(message, code="ParamValidation")
+        _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
         self.print_usage(sys.stderr)
         self.exit(2)
 
@@ -278,14 +278,14 @@ def exit_code_for(exc: Boto3S3Error) -> int:
 
 
 def _exit_code_for_unexpected(exc: BaseException) -> int:
-    """Map a non-``Boto3S3Error`` exception escaping a command to aws-cli's rc.
+    """Map a non-`Boto3S3Error` exception escaping a command to aws-cli's rc.
 
     Mirrors aws-cli's error-handler chain for exceptions that reach the entry
     point (errorhandler.py): a raw botocore parameter-validation failure is
-    252, a credential / region resolution failure is 253, a ``ClientError`` is
-    254, and everything else is the general 255 (``GeneralExceptionHandler``).
-    The common paths are already translated into ``Boto3S3Error`` (the library's
-    ``s3_errors`` and the CLI's ``build_client``); this is the catch-all so no
+    252, a credential / region resolution failure is 253, a `ClientError` is
+    254, and everything else is the general 255 (`GeneralExceptionHandler`).
+    The common paths are already translated into `Boto3S3Error` (the library's
+    `s3_errors` and the CLI's `build_client`); this is the catch-all so no
     path can crash the CLI with a traceback (rc 1), which the exit-code charter
     forbids (docs/overview.md section 3).
     """
@@ -329,7 +329,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(
             "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
-            code="ParamValidation",
+            rc=_PARAM_VALIDATION_ERROR_RC,
         )
         return _PARAM_VALIDATION_ERROR_RC
     mode = resolve.resolve_auto_prompt_mode(raw)
@@ -440,7 +440,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # top-level clidriver.py which uses ", "), prefixed like aws's error handler
         # (errorformat.py "<prog>: [ERROR]: <msg>").
         if not suppress_usage_errors:
-            _write_error(f"Unknown options: {','.join(extras)}", code="ParamValidation")
+            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
 
     rest: list[str] = getattr(args, _REST_DEST, None) or []
@@ -458,7 +458,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # aws-cli wording again ("," with no space) - exercised by the ported
         # test_errors_out_with_extra_arguments.
         if not suppress_usage_errors:
-            _write_error(f"Unknown options: {','.join(extras)}", code="ParamValidation")
+            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
 
     if getattr(args, "debug", False):
@@ -469,8 +469,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
-            code = "ParamValidation" if rc == _PARAM_VALIDATION_ERROR_RC else None
-            _write_error(exc, code=code)
+            _write_error(exc, rc=rc)
         return rc
     except BrokenPipeError:
         return 0
@@ -490,6 +489,5 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
         # they still propagate (Ctrl-C keeps its default rc 130).
         rc = _exit_code_for_unexpected(exc)
-        code = "ParamValidation" if rc == _PARAM_VALIDATION_ERROR_RC else None
-        _write_error(exc, code=code)
+        _write_error(exc, rc=rc)
         return rc
