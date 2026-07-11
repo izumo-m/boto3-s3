@@ -23,12 +23,11 @@ section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 
 from __future__ import annotations
 
-import argparse
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from boto3_s3 import ConfigurationError, InvalidConfigError
-from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
+from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
 
 if TYPE_CHECKING:
     from boto3_s3 import TransferConfig
@@ -252,27 +251,21 @@ class RuntimeConfig:
         )
 
 
-def load_scoped_s3_config(args: argparse.Namespace) -> dict[str, Any]:
-    """Read the profile's ``[s3]`` section (aws-cli's ``_get_runtime_config`` read).
+def load_scoped_s3_config(config: AwsConfig) -> dict[str, Any]:
+    """Read aws-cli's known ``[s3]`` keys from an `S3`-bound config reader.
 
-    The scoped config honors ``--profile``, ``AWS_CONFIG_FILE`` and botocore's
-    nested ``s3 =`` INI syntax. The profile is resolved through aws-cli's
-    precedence (``--profile`` > ``AWS_PROFILE`` > ``AWS_DEFAULT_PROFILE`` -
-    ``boto3_s3_cli.clientfactory.resolve_profile``), the same as the client this
-    transfer uses (``build_client``): a bare
-    ``boto3.Session(profile_name=None)`` would inherit stock botocore's reversed
-    env order, so the ``[s3]`` section could be read from a *different* profile
-    than the client when both env vars are set (botocore #1725). Deferred boto3
-    import: only commands that reach the transfer pipeline pay it (they are about
-    to build a client through the same session machinery anyway).
+    The caller obtains *config* from `S3.aws_config`, so the active profile,
+    config file, and parsed config cache are those of the exact session the
+    command's clients use. Unknown ``[s3]`` keys are intentionally ignored,
+    matching `build_transfer_config`, which consumes only aws-cli's declared
+    runtime keys.
     """
-    import boto3
-
-    from boto3_s3_cli.clientfactory import resolve_profile
-
-    session = boto3.Session(profile_name=resolve_profile(args))
-    scoped: Any = session._session.get_scoped_config()  # pyright: ignore[reportPrivateUsage] # aws-cli reads the same botocore session surface
-    return dict(scoped.get("s3", {}))
+    scoped: dict[str, Any] = {}
+    for key in DEFAULTS:
+        value = config.get_str(f"s3.{key}")
+        if value is not None:
+            scoped[key] = value
+    return scoped
 
 
 def resolve_transfer_client(

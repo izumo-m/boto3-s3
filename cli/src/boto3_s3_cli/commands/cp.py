@@ -42,7 +42,7 @@ class CpCommand(Command):
         stdin) prints one ``fatal error:`` line, and a warnings-only run
         exits 2. The boundary is the ``S3().cp`` call.
         """
-        head = transferargs.classify_paths(args, operation="cp")
+        head = transferargs.classify_paths(args, ctx, operation="cp")
         page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
@@ -79,9 +79,10 @@ class CpCommand(Command):
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
 
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
-        client = ctx.client_factory(args)
+        s3 = head.s3
+        client = s3.client()
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
         # writes; reject up front (rc 252) on an older one (docs/overview.md
         # section 2). Placed after the client exists so its model can be probed.
@@ -114,6 +115,7 @@ class CpCommand(Command):
             src_location, dest_location = transferargs.resolve_locations(
                 args,
                 ctx,
+                s3,
                 client,
                 src,
                 dest,
@@ -125,7 +127,7 @@ class CpCommand(Command):
         item_filter = None
         if not is_stream:
             item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
         printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)
@@ -139,7 +141,7 @@ class CpCommand(Command):
             expected_size = None
             if src == "-" and args.expected_size is not None:
                 expected_size = int(args.expected_size)
-            S3(endpoint_url=args.endpoint_url).cp(
+            s3.cp(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,

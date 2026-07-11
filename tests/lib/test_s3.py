@@ -181,6 +181,10 @@ class TestClientSeam:
         session = boto3.Session(region_name="ap-northeast-1")
         assert S3(session=session).client().meta.region_name == "ap-northeast-1"
 
+    def test_session_is_the_instance_default(self) -> None:
+        session = boto3.Session(region_name="ap-northeast-1")
+        assert S3(session=session).session is session
+
     def test_fresh_client_each_call(self) -> None:
         # Documented contract: a fresh client per call, owned by the caller.
         s3 = S3()

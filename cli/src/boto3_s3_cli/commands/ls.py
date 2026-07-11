@@ -52,7 +52,7 @@ class LsCommand(Command):
         expand_integer_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, FileInfo, FileKind, S3Storage
+        from boto3_s3 import FileInfo, FileKind, S3Storage
 
         # Intentional aws-cli bug parity: a readable positional fileb:// is
         # still bytes here. Calling bytes.startswith(str) raises TypeError,
@@ -67,7 +67,8 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
-        storage = S3Storage(target, client=ctx.client_factory(args), page_size=page_size)
+        s3 = ctx.s3(args)
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 
@@ -87,7 +88,7 @@ class LsCommand(Command):
                 total_objects += 1
                 total_size += info.size or 0
 
-        S3().ls(
+        s3.ls(
             storage,
             on_result=print_result,
             recursive=args.recursive,

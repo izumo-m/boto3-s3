@@ -607,6 +607,11 @@ class S3:
         # idempotent cache - concurrent first calls recompute the same reader.
         self._aws_config: AwsConfig | None = None
 
+    @property
+    def session(self) -> Session | None:
+        """The session that supplies this instance's default clients and AWS config."""
+        return self._session
+
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
 

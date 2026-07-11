@@ -42,7 +42,7 @@ class SyncCommand(Command):
         ``--exclude`` / ``--include`` patterns compile once and apply to both
         sides (rootless anchoring; sync.md section 1).
         """
-        head = transferargs.classify_paths(args, operation="sync")
+        head = transferargs.classify_paths(args, ctx, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
@@ -80,12 +80,12 @@ class SyncCommand(Command):
         )
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
 
-        from boto3_s3 import S3
-
-        client = ctx.client_factory(args)
+        s3 = head.s3
+        client = s3.client()
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
+            s3,
             client,
             src,
             dest,
@@ -99,11 +99,11 @@ class SyncCommand(Command):
         # compare_key, an absolute one its full key, so the same filter prunes
         # the source and destination per-side (globsieve.Anchored).
         item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:
-            S3(endpoint_url=args.endpoint_url).sync(
+            s3.sync(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 delete_filter=args.delete,

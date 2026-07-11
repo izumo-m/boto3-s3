@@ -15,9 +15,10 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 
-from boto3_s3 import ConfigurationError
+from boto3_s3 import S3, ConfigurationError
 from boto3_s3 import crtsupport as crtsupport
 from boto3_s3_cli import runtimeconfig
 from boto3_s3_cli.cli import exit_code_for
@@ -228,7 +229,7 @@ class TestResolveTransferConfig:
 
         injected = TransferConfig(use_threads=False)
         ctx = Context(transfer_config=injected)
-        result = transferargs.resolve_transfer_config(self._args(), ctx, paths_type="locals3")
+        result = transferargs.resolve_transfer_config(ctx, S3(), paths_type="locals3")
         assert result is injected
 
     def test_reads_scoped_config_when_not_injected(
@@ -238,7 +239,8 @@ class TestResolveTransferConfig:
         config_file.write_text("[default]\ns3 =\n  multipart_threshold = 7\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
         ctx = Context()  # no transfer_config
-        result = transferargs.resolve_transfer_config(self._args(), ctx, paths_type="locals3")
+        s3 = S3(session=boto3.Session())
+        result = transferargs.resolve_transfer_config(ctx, s3, paths_type="locals3")
         assert result.multipart_threshold == 7
         assert result.preferred_transfer_client == "classic"  # conftest pins is_optimized False
 
@@ -250,6 +252,42 @@ class TestWiring:
         client, calls = make_recording_client(parsed_responses)
         # No transfer_config injected: the scoped-config path runs.
         return Context(client_factory=lambda _args: client), calls
+
+    def test_client_and_runtime_config_share_the_context_s3_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[default]\ns3 =\n  multipart_threshold = 8MB\n"
+            "[profile bound]\ns3 =\n  multipart_threshold = 1\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        source = tmp_path / "small.txt"
+        source.write_bytes(b"hello")
+        client, calls = make_recording_client([{"UploadId": "id"}, {"ETag": '"p1"'}, {}])
+
+        class BoundS3(S3):
+            def client(self) -> Any:
+                return client
+
+        s3 = BoundS3(session=boto3.Session(profile_name="bound"))
+
+        import botocore.session
+
+        def unexpected_session(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the command must reuse the session bound to S3")
+
+        monkeypatch.setattr(botocore.session, "Session", unexpected_session)
+        ctx = Context(s3_factory=lambda _args: s3)
+
+        result = run_cli_in_process(["cp", str(source), "s3://bucket/key"], ctx=ctx)
+
+        assert result.rc == 0, (result.stderr, calls)
+        assert [call.operation for call in calls] == [
+            "CreateMultipartUpload",
+            "UploadPart",
+            "CompleteMultipartUpload",
+        ]
 
     def test_multipart_threshold_from_s3_config_forces_multipart(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

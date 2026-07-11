@@ -51,13 +51,14 @@ class PresignCommand(Command):
         expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; S3Storage takes both forms too.
-        storage = S3Storage(args.path, client=ctx.client_factory(args))
+        s3 = ctx.s3(args)
+        storage = S3Storage(args.path, client=s3.client())
         storage.validate()
-        url = S3().presign(storage, expires_in=expires_in)
+        url = s3.presign(storage, expires_in=expires_in)
         sys.stdout.write(url + "\n")
         return 0

@@ -36,7 +36,7 @@ from boto3_s3_cli.progress import TransferPrinter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from boto3_s3 import LocalStorage
+    from boto3_s3 import S3, LocalStorage
     from boto3_s3_cli.commands.base import Context
 
 # aws-cli choice lists (subcommands.py ACL / STORAGE_CLASS).
@@ -301,9 +301,10 @@ class TransferPaths(NamedTuple):
     src_type: str
     dest_type: str
     paths_type: str  # "locals3" | "s3local" | "s3s3" on the CLI surface
+    s3: S3
 
 
-def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths:
+def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) -> TransferPaths:
     """The shared ``run()`` head, in aws's parse-to-validation order.
 
     The order is exit-code-load-bearing, identical across cp/mv/sync, and
@@ -327,14 +328,21 @@ def classify_paths(args: argparse.Namespace, *, operation: str) -> TransferPaths
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
     expand_integer_paramfile(args, "expected_size", operation=operation)
-    clientfactory.validate_profile(args)
+    s3 = ctx.s3(args)
     src, dest = args.paths
     src_type = identify_type(src)
     dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
     return TransferPaths(
-        page_size, progress_frequency, src, dest, src_type, dest_type, src_type + dest_type
+        page_size,
+        progress_frequency,
+        src,
+        dest,
+        src_type,
+        dest_type,
+        src_type + dest_type,
+        s3,
     )
 
 
@@ -574,6 +582,7 @@ def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
 def resolve_locations(
     args: argparse.Namespace,
     ctx: Context,
+    s3: S3,
     client: Any,
     src: str,
     dest: str,
@@ -615,7 +624,7 @@ def resolve_locations(
         source_args = argparse.Namespace(**vars(args))
         source_args.region = args.source_region
         source_args.endpoint_url = None
-        source_client = ctx.client_factory(source_args)
+        source_client = ctx.client(source_args, s3)
     return _s3(src, source_client), _s3(dest, client)
 
 
@@ -633,22 +642,23 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
 
 
-def resolve_transfer_config(args: argparse.Namespace, ctx: Context, *, paths_type: str) -> Any:
+def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     """The transfer config for this run: the injected one, else from ``[s3]``.
 
     A test-injected ``ctx.transfer_config`` always wins (the existing
-    determinism lever). Otherwise the profile's ``[s3]`` section is read,
-    parsed (aws-cli's ``RuntimeConfig``), and turned into a ``TransferConfig``
-    whose ``preferred_transfer_client`` carries the aws-faithful engine
-    decision (``runtimeconfig.resolve_transfer_client``). Reading ``[s3]`` here
-    - past the usage (252) and missing-source (255) validations - matches
-    aws's ordering (an invalid ``[s3]`` value loses to both).
+    determinism lever). Otherwise the profile's ``[s3]`` section is read from
+    the exact session bound to *s3*, parsed (aws-cli's ``RuntimeConfig``), and
+    turned into a ``TransferConfig`` whose ``preferred_transfer_client`` carries
+    the aws-faithful engine decision (``runtimeconfig.resolve_transfer_client``).
+    Reading ``[s3]`` here - past the usage (252) and missing-source (255)
+    validations - matches aws's ordering (an invalid ``[s3]`` value loses to
+    both).
     """
     if ctx.transfer_config is not None:
         return ctx.transfer_config
     from boto3_s3_cli import runtimeconfig
 
-    scoped = runtimeconfig.load_scoped_s3_config(args)
+    scoped = runtimeconfig.load_scoped_s3_config(s3.aws_config())
     runtime_config = runtimeconfig.RuntimeConfig().build_config(**scoped)
     resolved = runtimeconfig.resolve_transfer_client(runtime_config, paths_type=paths_type)
     return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)

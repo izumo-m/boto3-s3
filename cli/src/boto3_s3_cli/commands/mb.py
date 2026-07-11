@@ -47,12 +47,13 @@ class MbCommand(Command):
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="path", operation="mb")
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks below (it reaches main's
         # exit-code mapping: config -> 253, other botocore -> 255).
-        client = ctx.client_factory(args)
+        s3 = ctx.s3(args)
+        client = s3.client()
 
         target: str = args.paths
         if not target.startswith("s3://"):
@@ -82,7 +83,7 @@ class MbCommand(Command):
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
         try:
-            S3().mb(storage, tags=tags)
+            s3.mb(storage, tags=tags)
         except Boto3S3Error as exc:
             sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
             return 1

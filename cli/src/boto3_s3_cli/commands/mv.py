@@ -8,6 +8,7 @@ import sys
 
 # Loaded only once mv is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import (
+    S3,
     NotFoundError,
     S3PathResolver,
     S3Storage,
@@ -57,7 +58,7 @@ class MvCommand(Command):
         all before any S3 client exists. Resolution failures keep their
         class: an unresolvable path 252, a failing s3control/sts call 254.
         """
-        head = transferargs.classify_paths(args, operation="mv")
+        head = transferargs.classify_paths(args, ctx, operation="mv")
         page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
@@ -70,7 +71,7 @@ class MvCommand(Command):
             )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         if paths_type == "s3s3":
-            self._validate_same_paths(args, ctx, src, dest)
+            self._validate_same_paths(args, ctx, head.s3, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
         if src_type == "local" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
@@ -86,9 +87,8 @@ class MvCommand(Command):
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
 
-        from boto3_s3 import S3
-
-        client = ctx.client_factory(args)
+        s3 = head.s3
+        client = s3.client()
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
         # writes; reject up front (rc 252) on an older one (docs/overview.md
         # section 2). Placed after the client exists so its model can be probed.
@@ -98,6 +98,7 @@ class MvCommand(Command):
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
+            s3,
             client,
             src,
             dest,
@@ -107,11 +108,11 @@ class MvCommand(Command):
         )
 
         item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:
-            S3(endpoint_url=args.endpoint_url).mv(
+            s3.mv(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 recursive=args.recursive,
@@ -126,7 +127,9 @@ class MvCommand(Command):
         return transferargs.finish_transfer(printer, quiet=args.quiet, run=run_mv)
 
     @staticmethod
-    def _validate_same_paths(args: argparse.Namespace, ctx: Context, src: str, dest: str) -> None:
+    def _validate_same_paths(
+        args: argparse.Namespace, ctx: Context, s3: S3, src: str, dest: str
+    ) -> None:
         """The mv s3->s3 validation block (aws-cli's ``_validate_path_args`` head).
 
         Always: the textual onto-itself guard on the keyless-normalized URIs
@@ -154,12 +157,12 @@ class MvCommand(Command):
         )
         if enabled:
             src_resolver = S3PathResolver(
-                ctx.service_client_factory("s3control", args, region=args.source_region),
-                ctx.service_client_factory("sts", args),
+                ctx.service_client("s3control", args, s3, region=args.source_region),
+                ctx.service_client("sts", args, s3),
             )
             dest_resolver = S3PathResolver(
-                ctx.service_client_factory("s3control", args, region=args.region),
-                ctx.service_client_factory("sts", args),
+                ctx.service_client("s3control", args, s3, region=args.region),
+                ctx.service_client("sts", args, s3),
             )
             src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
             dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)

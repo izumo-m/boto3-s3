@@ -50,12 +50,13 @@ class RbCommand(Command):
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="path", operation="rb")
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks (config -> 253, other
         # botocore -> 255), then validate the path.
-        client = ctx.client_factory(args)
+        s3 = ctx.s3(args)
+        client = s3.client()
 
         target: str = args.paths
         if not target.startswith("s3://"):
@@ -99,7 +100,7 @@ class RbCommand(Command):
             raise InvalidValueError(_FORCE_FAILED, operation="rb")
 
         try:
-            S3().rb(storage)
+            s3.rb(storage)
         except Boto3S3Error as exc:
             sys.stderr.write(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1

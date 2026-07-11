@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile
-from boto3_s3_cli.clientfactory import build_client, build_service_client
+from boto3_s3_cli.clientfactory import (
+    build_client,
+    build_s3,
+    build_service_client,
+    validate_profile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,9 +29,11 @@ if TYPE_CHECKING:
     from boto3.s3.transfer import TransferConfig
     from mypy_boto3_s3 import S3Client
 
+    from boto3_s3 import S3
     from boto3_s3_cli.autoprompt.prompter import AutoPrompter
 
     ClientFactory = Callable[[argparse.Namespace], S3Client]
+    S3Factory = Callable[[argparse.Namespace], S3]
     # (service, args, *, region=None) -> a boto3 client for that service;
     # mv's --validate-same-s3-paths builds its s3control/sts clients here.
     ServiceClientFactory = Callable[..., Any]
@@ -53,6 +60,7 @@ class Context:
         self,
         *,
         client_factory: ClientFactory | None = None,
+        s3_factory: S3Factory | None = None,
         service_client_factory: ServiceClientFactory | None = None,
         transfer_config: TransferConfig | None = None,
         auto_prompter: AutoPrompter | None = None,
@@ -60,11 +68,52 @@ class Context:
         self.client_factory: ClientFactory = (
             build_client if client_factory is None else client_factory
         )
+        self._client_factory_injected = client_factory is not None
+        self._s3_factory = s3_factory
         self.service_client_factory: ServiceClientFactory = (
             build_service_client if service_client_factory is None else service_client_factory
         )
+        self._service_client_factory_injected = service_client_factory is not None
         self.transfer_config: TransferConfig | None = transfer_config
         self.auto_prompter: AutoPrompter | None = auto_prompter
+
+    def s3(self, args: argparse.Namespace) -> S3:
+        """Build the command's `S3`, adapting an injected client factory if present."""
+        if self._s3_factory is not None:
+            return self._s3_factory(args)
+
+        from boto3_s3 import S3
+
+        if not self._client_factory_injected:
+            return build_s3(args)
+
+        validate_profile(args)
+        client_factory = self.client_factory
+
+        class InjectedClientS3(S3):
+            def client(self) -> S3Client:
+                return client_factory(args)
+
+        return InjectedClientS3()
+
+    def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
+        """Build an additional S3 client from the command's bound session."""
+        if self._client_factory_injected:
+            return self.client_factory(args)
+        return build_client(args, session=s3.session)
+
+    def service_client(
+        self,
+        service: str,
+        args: argparse.Namespace,
+        s3: S3,
+        *,
+        region: str | None = None,
+    ) -> Any:
+        """Build a non-S3 client from the command's bound session."""
+        if self._service_client_factory_injected:
+            return self.service_client_factory(service, args, region=region)
+        return build_service_client(service, args, region=region, session=s3.session)
 
 
 def parse_integer_option(value: object, *, operation: str) -> int:

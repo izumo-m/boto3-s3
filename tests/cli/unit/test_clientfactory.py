@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,23 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 
 class TestBuildClient:
+    def test_build_s3_binds_client_and_config_to_one_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[profile bound]\nregion = ap-northeast-1\ns3 =\n  multipart_threshold = 17\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        args = _parse(["--profile", "bound", "--endpoint-url", "http://localhost:9000"])
+
+        s3 = clientfactory.build_s3(args)
+
+        assert s3.session is not None
+        assert s3.session.profile_name == "bound"
+        assert s3.client().meta.endpoint_url == "http://localhost:9000"
+        assert s3.aws_config().get_str("s3.multipart_threshold") == "17"
+
     def test_region_and_endpoint_applied(self) -> None:
         args = _parse(["--region", "us-west-2", "--endpoint-url", "http://localhost:9000"])
         client = clientfactory.build_client(args)

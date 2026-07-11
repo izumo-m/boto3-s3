@@ -19,8 +19,11 @@ from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, 
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
+    from boto3.session import Session as Boto3Session
     from botocore.session import Session as BotocoreSession
     from mypy_boto3_s3 import S3Client
+
+    from boto3_s3 import S3
 
 
 def _pin_python_sigv4_signers() -> None:
@@ -111,6 +114,33 @@ def validate_profile(args: argparse.Namespace) -> None:
         raise InvalidConfigError(str(exc)) from exc
 
 
+def build_session(args: argparse.Namespace) -> Boto3Session:
+    """Build and validate the one boto3 session owned by a CLI `S3` command."""
+    import boto3
+    import botocore.session
+    from botocore.exceptions import BotoCoreError
+
+    try:
+        botocore_session = botocore.session.Session(profile=resolve_profile(args))
+        botocore_session.get_scoped_config()
+        return boto3.Session(botocore_session=botocore_session)
+    except BotoCoreError as exc:
+        raise InvalidConfigError(str(exc)) from exc
+
+
+def build_s3(args: argparse.Namespace) -> S3:
+    """Build the command's `S3`, binding client and config reads to one session."""
+    from boto3_s3 import S3
+
+    session = build_session(args)
+
+    class CliS3(S3):
+        def client(self) -> S3Client:
+            return build_client(args, session=session)
+
+    return CliS3(session=session)
+
+
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
     """The region to build the client in, via aws-cli's region chain.
 
@@ -151,7 +181,11 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
 
 
 def build_service_client(
-    service: str, args: argparse.Namespace, *, region: str | None = None
+    service: str,
+    args: argparse.Namespace,
+    *,
+    region: str | None = None,
+    session: Boto3Session | None = None,
 ) -> Any:
     """Build a non-S3 service client for path validation (``mv``'s resolver).
 
@@ -186,8 +220,11 @@ def build_service_client(
     # a bad --profile); translate them so they reach the exit-code mapping
     # instead of escaping as an uncaught traceback (see build_client).
     try:
-        botocore_session = botocore.session.Session(profile=resolve_profile(args))
-        session = boto3.Session(botocore_session=botocore_session)
+        if session is None:
+            botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            session = boto3.Session(botocore_session=botocore_session)
+        else:
+            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         # aws's bundled botocore applies its standard/3 retry defaults to
         # these validator clients too, and its startup handlers thread the
         # timeouts / UNSIGNED signature through the session default config that
@@ -228,7 +265,7 @@ def _coerce_cli_timeout(value: str) -> int | None:
         raise InvalidValueError(str(exc)) from exc
 
 
-def build_client(args: argparse.Namespace) -> S3Client:
+def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
@@ -287,10 +324,13 @@ def build_client(args: argparse.Namespace) -> S3Client:
     # ConfigurationError [253], the rest -> InvalidConfigError [255]) instead of
     # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
     try:
-        botocore_session = botocore.session.Session(profile=resolve_profile(args))
+        if session is None:
+            botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            session = boto3.Session(botocore_session=botocore_session)
+        else:
+            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         overrides["retries"] = _retry_defaults(botocore_session)
         config = Config(**overrides)
-        session = boto3.Session(botocore_session=botocore_session)
         return session.client(
             "s3",
             region_name=_resolve_region(args.region, botocore_session),

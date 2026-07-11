@@ -10,14 +10,14 @@ scoped-config read.
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 
-from boto3_s3 import InvalidConfigError
+from boto3_s3 import S3, InvalidConfigError
 from boto3_s3_cli import runtimeconfig
 
 
@@ -156,8 +156,8 @@ class TestErrorWording:
 
 
 class TestLoadScopedS3Config:
-    def _args(self, profile: str | None = None) -> argparse.Namespace:
-        return argparse.Namespace(profile=profile)
+    def _config(self, profile: str | None = None):
+        return S3(session=boto3.Session(profile_name=profile)).aws_config()
 
     def _write(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> None:
         config = tmp_path / "config"
@@ -172,17 +172,30 @@ class TestLoadScopedS3Config:
             monkeypatch,
             "[default]\ns3 =\n  preferred_transfer_client = crt\n  multipart_threshold = 10MB\n",
         )
-        scoped = runtimeconfig.load_scoped_s3_config(self._args())
+        scoped = runtimeconfig.load_scoped_s3_config(self._config())
         assert scoped == {
             "preferred_transfer_client": "crt",
             "multipart_threshold": "10MB",
         }
 
+    def test_reads_from_the_s3_instances_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "[default]\ns3 =\n  preferred_transfer_client = crt\n"
+            "[profile alt]\ns3 =\n  preferred_transfer_client = classic\n",
+        )
+        scoped = runtimeconfig.load_scoped_s3_config(self._config("alt"))
+
+        assert scoped == {"preferred_transfer_client": "classic"}
+
     def test_missing_section_is_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._write(tmp_path, monkeypatch, "[default]\nregion = us-east-1\n")
-        assert runtimeconfig.load_scoped_s3_config(self._args()) == {}
+        assert runtimeconfig.load_scoped_s3_config(self._config()) == {}
 
     def test_profile_selects_its_own_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -193,17 +206,15 @@ class TestLoadScopedS3Config:
             "[default]\ns3 =\n  preferred_transfer_client = crt\n"
             "[profile alt]\ns3 =\n  preferred_transfer_client = classic\n",
         )
-        scoped = runtimeconfig.load_scoped_s3_config(self._args(profile="alt"))
+        scoped = runtimeconfig.load_scoped_s3_config(self._config("alt"))
         assert scoped == {"preferred_transfer_client": "classic"}
 
-    def test_env_profile_precedence_matches_aws(
+    def test_bound_session_wins_over_ambient_profile(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # With no --profile, the scoped ``[s3]`` read must honor aws-cli's env
-        # precedence (AWS_PROFILE > AWS_DEFAULT_PROFILE), the same as the client
-        # this transfer uses. A bare boto3.Session(profile_name=None) would adopt
-        # stock botocore's reversed order and read the wrong profile's section
-        # (botocore #1725) - a charter-breaking exit-code divergence.
+        # Runtime config must not resolve a second ambient session. The S3-bound
+        # session is authoritative even when the process environment names a
+        # different profile.
         self._write(
             tmp_path,
             monkeypatch,
@@ -212,5 +223,5 @@ class TestLoadScopedS3Config:
         )
         monkeypatch.setenv("AWS_PROFILE", "aws_profile")
         monkeypatch.setenv("AWS_DEFAULT_PROFILE", "aws_default_profile")
-        scoped = runtimeconfig.load_scoped_s3_config(self._args())
+        scoped = runtimeconfig.load_scoped_s3_config(self._config("aws_profile"))
         assert scoped == {"preferred_transfer_client": "crt"}

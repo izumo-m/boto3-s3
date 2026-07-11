@@ -102,10 +102,10 @@ class RmCommand(Command):
             args.paths = args.paths.decode(sys.getfilesystemencoding())
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
-        clientfactory.validate_profile(args)
+        s3 = ctx.s3(args)
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore).
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         target: str = args.paths
         if not target.startswith("s3://"):
@@ -131,7 +131,7 @@ class RmCommand(Command):
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
         # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
         # from the now non-raising construction) through main -> rc 252, matching aws.
-        storage = S3Storage(target, client=ctx.client_factory(args), page_size=page_size)
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
 
         item_filter = filters.compile_filter(args.filters)
@@ -139,7 +139,7 @@ class RmCommand(Command):
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )
         try:
-            S3().rm(
+            s3.rm(
                 storage,
                 recursive=args.recursive,
                 filter=item_filter,

@@ -46,7 +46,7 @@ class WebsiteCommand(Command):
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
         # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
@@ -63,7 +63,8 @@ class WebsiteCommand(Command):
         if path.endswith("/"):
             path = path[:-1]
 
-        storage = S3Storage(f"s3://{path}", client=ctx.client_factory(args))
+        s3 = ctx.s3(args)
+        storage = S3Storage(f"s3://{path}", client=s3.client())
         storage.validate()
         if path.endswith("/") or storage.key:
             # S3Storage splits "b/k" where aws would send the whole string as
@@ -76,7 +77,7 @@ class WebsiteCommand(Command):
                 usage.invalid_bucket_name_message(path),
                 operation="website",
             )
-        S3().website(
+        s3.website(
             storage,
             index_document=args.index_document,
             error_document=args.error_document,
