@@ -262,6 +262,12 @@ wording, ordering, or exact content between the two tools and between
 `boto3-s3-cli` releases. Parity is defined on S3 object state, return
 values, and error conditions, not on console formatting.
 
+The program name is explicitly outside the parity target. The root command
+tokens `aws` and `boto3-s3`, and output derived from them - for example usage
+lines and the `aws: [ERROR]:` / `boto3-s3: [ERROR]:` prefixes - are expected to
+differ. Comparisons may ignore or substitute the root command name while still
+checking the surrounding message on a best-effort basis.
+
 Two deliberate output-pipeline deviations sit under this umbrella
 (`progress.py`; the rendering thread itself mirrors aws-cli's
 `ResultProcessor`):
