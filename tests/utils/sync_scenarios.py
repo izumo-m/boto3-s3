@@ -186,7 +186,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         local_src={"src/a.txt": b"alpha\n"},
         expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
         expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
-        diff_only=True,
     ),
     CpScenario(
         name="sync_upload_no_overwrite",
@@ -364,7 +363,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed={"cs/a.txt": b"alpha\n"},
         expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
         expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
-        diff_only=True,
     ),
     CpScenario(
         name="sync_copy_content_type",
