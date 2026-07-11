@@ -832,7 +832,16 @@ class Transferrer:
         )
 
     def dryrun(self, item: TransferItem) -> None:
-        """Report what a dry run would have transferred (no API calls)."""
+        """Validate per-item request parameters, then report without an API call.
+
+        aws-cli still runs its request-parameter mapper for a dry run. This is
+        observable for options such as malformed `grants`, whose validation is
+        deliberately deferred until an upload or copy item reaches the pipeline.
+        """
+        if self._transfer_type is TransferType.UPLOAD:
+            requestparams.map_put_object_params(self._options, self._operation)
+        elif self._transfer_type is TransferType.COPY:
+            requestparams.map_copy_object_params(self._options, self._operation)
         self._emit(self._result(item, OpOutcome.DRYRUN))
 
     # -- submission ----------------------------------------------------------

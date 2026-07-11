@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Added aws-cli-compatible annotation preloading and fixed command-specific positional `fileb://`, deletion, CRT endpoint, validation, progress, and error-output parity.
+- Added aws-cli-compatible annotation preloading and fixed command-specific positional `fileb://`, dry-run validation, deletion, CRT endpoint, progress, and error-output parity.
 
 ## [0.4.0] - 2026-07-07
 

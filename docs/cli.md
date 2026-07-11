@@ -531,7 +531,9 @@ unconditionally) -> the SSE-C pair / `--case-conflict` Express branch (252)
 lines have already been emitted by on_result), any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
-`--expected-size`, an absent stdin, and case-conflict `error` are also here), a
+`--expected-size`, an absent stdin, and case-conflict `error` are also here;
+malformed `--grants` remains fatal under `--dryrun` because aws-cli maps each
+dry-run item's request parameters), a
 normal return is **2** if the warned count > 0, else 0.
 
 **Output** (`TransferPrinter`, aws-cli `ResultPrinter` shape): success

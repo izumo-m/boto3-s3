@@ -173,6 +173,57 @@ class TestGeneralErrors:
 
 
 class TestOutputShapes:
+    def test_upload_dryrun_validates_grants_before_reporting(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([_listing()])
+
+        rc = cli.main(
+            [
+                "sync",
+                str(src),
+                "s3://b/p",
+                "--grants",
+                "invalid",
+                "--dryrun",
+                "--no-progress",
+            ],
+            ctx=_ctx(client),
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert captured.err == "fatal error: grants should be of the form permission=principal\n"
+        assert _ops(calls) == ["ListObjectsV2"]
+
+    def test_copy_dryrun_validates_grants_before_reporting(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client, calls = make_recording_client([_listing(("src/a.txt", 1)), _listing()])
+
+        rc = cli.main(
+            [
+                "sync",
+                "s3://b/src",
+                "s3://b/dest",
+                "--grants",
+                "invalid",
+                "--dryrun",
+                "--no-progress",
+            ],
+            ctx=_ctx(client),
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert captured.err == "fatal error: grants should be of the form permission=principal\n"
+        assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
+
     def test_upload_line_and_rc(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         src = tmp_path / "src"
         src.mkdir()

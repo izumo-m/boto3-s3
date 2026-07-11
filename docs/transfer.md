@@ -70,6 +70,10 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   TransferManager before the file generator starts). A dryrun never calls
   `prepare()`: no manager is built (the s3transfer module itself is imported
   regardless, by boto3 when a client is built - [`imports.md`](./imports.md)).
+  It does still run the upload/copy request-parameter mapper for each item
+  before reporting `DRYRUN`, matching aws-cli's deferred validation of options
+  such as malformed grants. Validation performed only by an actual SDK submit
+  remains skipped.
 - **Backpressure is delegated to s3transfer**: the bounded semaphore of
   `TransferConfig.max_request_queue_size` (default 1000) blocks the submit
   thread when it is full. This is the same mechanism aws-cli relies on; we keep
