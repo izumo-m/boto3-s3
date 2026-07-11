@@ -306,7 +306,9 @@ class TestAutoPromptWiring:
     def test_mutual_exclusion_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"])
         assert rc == 252
-        assert "cannot be specified at the same time" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "An error occurred (ParamValidation):" in err
+        assert "cannot be specified at the same time" in err
 
     def test_missing_prompt_toolkit_rejects_with_install_hint(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

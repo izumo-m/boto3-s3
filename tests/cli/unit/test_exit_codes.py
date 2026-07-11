@@ -5,8 +5,8 @@ exercised end-to-end for the paths that do not go through a library error
 (usage errors, unknown options) plus the ClientError path through a fake
 client, so the parse -> dispatch -> error -> exit-code wiring is covered. The
 catch-all backstop (``_exit_code_for_unexpected``: a non-Boto3S3Error escaping
-a command -> 253/254/255) and the ``BrokenPipeError`` -> 0 handler are covered
-end-to-end through ``main`` too.
+a command -> 252/253/254/255) and the ``BrokenPipeError`` -> 0 handler are
+covered end-to-end through ``main`` too.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from botocore.exceptions import (
     ClientError,
     NoCredentialsError,
     NoRegionError,
+    ParamValidationError,
     PartialCredentialsError,
 )
 
@@ -125,6 +126,7 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "--extra-argument-foo", "s3://bucket/p/"])
         err = capsys.readouterr().err
         assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
         assert "Unknown options" in err
         assert "--extra-argument-foo" in err
 
@@ -145,6 +147,15 @@ class TestMainExitCodes:
         assert rc == 252
         assert "Unknown options" in err
         assert "stray" in err
+
+    def test_invalid_choice_exits_252_with_param_validation_wrapper(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["sync", ".", "s3://bucket/p/", "--checksum-algorithm", "INVALID"])
+        err = capsys.readouterr().err
+        assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
+        assert "invalid choice" in err
 
     def test_missing_subcommand_exits_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert cli.main([]) == 252
@@ -179,6 +190,7 @@ class TestMainExitCodes:
             # 255, NOT 253 (only NoCredentials / NoRegion are 253).
             (PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"), 255),
             (_client_error("AccessDenied", 403), 254),
+            (ParamValidationError(report="Invalid bucket name"), 252),
             (RuntimeError("boom"), 255),
         ],
     )
@@ -187,8 +199,9 @@ class TestMainExitCodes:
     ) -> None:
         # Defense in depth (_exit_code_for_unexpected): a non-Boto3S3Error that
         # escapes command.run untranslated must still map through aws-cli's
-        # handler chain (NoCredentials/NoRegion 253, ClientError 254, else 255)
-        # without a traceback (the exit-code charter, docs/overview.md section 3).
+        # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
+        # ClientError 254, else 255) without a traceback (the exit-code charter,
+        # docs/overview.md section 3).
         # The client factory raising is the cleanest injection - ls.run calls
         # ctx.client_factory(args) directly, so the raw error escapes run.
         def factory(_args: Any) -> Any:
@@ -198,6 +211,8 @@ class TestMainExitCodes:
         err = capsys.readouterr().err
         assert rc == expected_rc
         assert "boto3-s3:" in err
+        if expected_rc == 252:
+            assert "An error occurred (ParamValidation):" in err
         assert "Traceback" not in err
 
     def test_broken_pipe_from_a_command_exits_0(self) -> None:

@@ -88,6 +88,7 @@ class TestUsageErrors:
         )
         assert rc == 252
         err = capsys.readouterr().err
+        assert "An error occurred (ParamValidation):" in err
         assert "Expected checksum-algorithm parameter" in err
         assert "Instead, received <S3Uri> <LocalPath>." in err
 

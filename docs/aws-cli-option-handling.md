@@ -83,9 +83,11 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 `aws s3 ... --color on` therefore produces no color, and `boto3-s3-cli`
 matches that.
 
-`--cli-error-format` controls the top-level CLI exception rendering;
-`boto3-s3-cli` does not guarantee byte-for-byte console identity with
-aws-cli (see section 6), so it accepts the flag and ignores it.
+`--cli-error-format` controls the top-level CLI exception rendering in
+aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli 2.35.18's
+default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
+table renderings remain outside the parity target. In particular, parameter
+validation failures use `An error occurred (ParamValidation): <message>`.
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -267,6 +269,13 @@ tokens `aws` and `boto3-s3`, and output derived from them - for example usage
 lines and the `aws: [ERROR]:` / `boto3-s3: [ERROR]:` prefixes - are expected to
 differ. Comparisons may ignore or substitute the root command name while still
 checking the surrounding message on a best-effort basis.
+
+The default enhanced-style parameter-validation envelope is reproduced where
+practical: parser failures, unknown options, path/option validation failures,
+and auto-prompt flag conflicts use
+`An error occurred (ParamValidation): <message>`. This target is the default
+output of aws-cli 2.35.18; selecting another `--cli-error-format` does not alter
+`boto3-s3-cli` output, as described in section 2.1.
 
 Two deliberate output-pipeline deviations sit under this umbrella
 (`progress.py`; the rendering thread itself mirrors aws-cli's

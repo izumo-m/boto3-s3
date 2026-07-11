@@ -721,10 +721,13 @@ the **refining subclasses are checked before their parents**: aws routes a
 post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
-([`exceptions.md`](./exceptions.md) section 2). The **message wording** of a
-usage error may stay as argparse's, except for an unknown option (`Unknown
-options: ...` = the same shape as aws-cli) - what the charter requires is the exit
-code, and a byte-for-byte match of the console output is not guaranteed.
+([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
+validation failures mapped to 252 use aws-cli 2.35.18's default enhanced-style envelope,
+`An error occurred (ParamValidation): <message>`. This includes argparse
+failures, unknown options, plain `ValidationError`, and the auto-prompt flag
+conflict. The program-name prefix remains outside the parity target, and
+alternate `--cli-error-format` renderings are not implemented
+([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start
