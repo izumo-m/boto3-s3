@@ -45,9 +45,7 @@ class WebsiteCommand(Command):
         expand_positional_paramfile(args, "paths", name="paths", operation="website")
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
+        # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3, S3Storage
 
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing

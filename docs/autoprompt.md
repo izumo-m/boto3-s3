@@ -146,10 +146,11 @@ upholds.
 Only `prompt.py` imports `prompt_toolkit`, and that import happens only when
 `--cli-auto-prompt` actually fires. The boto3 used for region/profile
 completion (and the botocore / s3transfer chain it pulls in) is likewise
-lazily imported when the completer fires. `--help` /
-`--version` / usage / normal dispatch touch neither the `autoprompt` package nor
-`prompt_toolkit` (the import contract, [`imports.md`](./imports.md); guaranteed
-by `test_import_contract.py`).
+lazily imported when the completer fires. Top-level `--help` / `--version`
+currently touch neither the `autoprompt` package nor `prompt_toolkit`; this is
+an implementation detail outside the AWS SDK import contract
+([`imports.md`](./imports.md)). Normal dispatch and usage-error paths have no
+SDK import guarantee.
 
 The completer order (adopt the first non-None): Region -> Profile -> ModelIndex ->
 FilePath -> Choices. ModelIndex returns None while an option value is being typed
@@ -214,11 +215,11 @@ Behavior per mode:
   result (both the parser stage and the usage validation inside `run()`).
 - **off** -> normal dispatch.
 
-**config/env reading is SDK-free**: env comes from `os.environ`, and profile
+**config/env reading currently uses no SDK**: env comes from `os.environ`, and profile
 config is read with `configparser` from the relevant section (`[default]` or
 `[profile <name>]`) of `~/.aws/config` (`AWS_CONFIG_FILE` takes precedence).
-Since botocore is not imported, the import contract is upheld even on the usage
-error path (section 4, `test_import_contract.py`). The active profile is `--profile` >
+This is an implementation detail, not an import guarantee for usage-error
+paths. The active profile is `--profile` >
 `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` > `default`. This is not botocore's full
 resolution (abbreviations, nesting), but it is sufficient for this interactive
 setting that is outside the charter.
@@ -281,9 +282,9 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
   machine's `~/.aws/config`, and each test overrides it with setenv/delenv.
 - **prompt_toolkit adapter**: `Completion` conversion, override exclusion,
   display_meta (importorskip).
-- **Import contract**: add `prompt_toolkit` to the forbidden roots. Explicitly
-  inject `AWS_CLI_AUTO_PROMPT=off` into the subprocess to guarantee that the
-  usage path does not stray into the prompt branch via config.
+- **Top-level exits**: import-contract subprocesses inject
+  `AWS_CLI_AUTO_PROMPT=off` so ambient configuration cannot divert top-level
+  help/version into the prompt.
 
 The interactive prompt loop itself is outside the scope of golden/e2e (the
 harness is non-tty; aws places auto-prompt outside parity for the same reason).

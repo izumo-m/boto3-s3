@@ -4,10 +4,7 @@
 (aws-cli's ``subcommands.py``); this module is that shared list and the
 validation/translation steps the three commands run in the same order.
 This module loads only once its command is determined (stage 2 of the lazy
-dispatch, docs/imports.md), so top-level imports may reach
-``botocore.exceptions`` (via ``S3Storage``); the ``boto3`` / ``s3transfer``
-client stack stays deferred into the functions that build a client or an
-engine.
+dispatch). Top-level imports may therefore reach the AWS SDK.
 """
 
 from __future__ import annotations
@@ -425,8 +422,7 @@ def validate_no_overwrite_supported(
     usable on an old botocore (back-compat floor, docs/overview.md section 2)."""
     if not no_overwrite or paths_type not in ("locals3", "s3s3"):
         return
-    # Deferred: introspects botocore via the client's model; the parse path
-    # stays SDK-free (import contract, docs/imports.md).
+    # Import only when the installed client's model must be inspected.
     from boto3_s3.transfer import conditional_write_unsupported_reason
 
     reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")
@@ -596,8 +592,7 @@ def resolve_locations(
     ``--source-region`` the source side gets its own client in that region with the
     ``--endpoint-url`` override dropped (aws-cli ClientFactory).
     """
-    # Deferred: S3Storage's chain reaches botocore; --help and usage errors
-    # stay SDK-free (import contract, docs/imports.md).
+    # Import the storage implementations when locations are resolved.
     from boto3_s3 import LocalStorage, S3Storage
 
     def _s3(arg: str, client_for: Any) -> S3Storage:

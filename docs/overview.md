@@ -164,8 +164,8 @@ written here.
 - [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
   comparator, the per-lane `create_filter` / `update_filter` / `delete_filter`
   axis).
-- [`imports.md`](./imports.md) - import discipline (lazy re-export, lazy SDK
-  loading, the contract for the CLI startup path).
+- [`imports.md`](./imports.md) - import discipline (lazy root re-exports and the
+  SDK-free top-level CLI help/version exits).
 - [`masking.md`](./masking.md) - credential masking for debug logs
   (`set_stream_logger`, `SecretMaskingFilter`, parity of the replacement
   notation).

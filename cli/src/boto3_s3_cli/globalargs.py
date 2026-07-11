@@ -6,8 +6,7 @@ registers them on the top-level parser and on each subparser, so a global may
 sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
 connection / auth values into a boto3 client is ``clientfactory``'s
-job; this module stays SDK-free so the parse path never pays an SDK import
-(import contract, docs/imports.md). The presentation globals are accepted and
+job. The presentation globals are accepted and
 ignored (``docs/aws-cli-option-handling.md`` section 2); ``--cli-auto-prompt``
 launches the interactive prompt, resolved from raw argv by the dispatcher
 before parsing (section 3).
@@ -20,8 +19,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-# Pure-Python name (exceptions module) - safe on the parse path (import
-# contract, docs/imports.md).
+# Pure-Python name from the exceptions module.
 from boto3_s3 import ValidationError
 
 # Mirrored from aws-cli (awscli/data/cli.json) so an invalid value
@@ -50,9 +48,8 @@ def validate_query(args: argparse.Namespace) -> None:
     of every other head check (measured against aws 2.35.18: it beats a bad
     ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
     ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
-    a botocore dependency that is always importable and pulls in no SDK, and it
-    is loaded only when ``--query`` is actually present, so the parse path stays
-    SDK-free (import contract, docs/imports.md).
+    a botocore dependency that is always importable, and it is loaded only when
+    ``--query`` is actually present.
     """
     value = getattr(args, "query", None)
     if value is None:
@@ -90,9 +87,8 @@ def _version_string() -> str:
     and OS ``boto3-s3`` runs on. The two distributions are versioned
     independently, so each token is resolved on its own.
 
-    Only called when ``--version`` fires: the metadata lookups cost ~20ms to
-    import, which every other invocation must not pay (import contract,
-    docs/imports.md). The boto3/botocore tokens come from distribution
+    Only called when ``--version`` fires, avoiding the metadata lookup on
+    other invocations. The boto3/botocore tokens come from distribution
     metadata, not from importing the packages.
     """
     import platform

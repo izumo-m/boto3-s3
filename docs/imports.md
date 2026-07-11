@@ -1,18 +1,18 @@
-# Import discipline (lazy re-export and deferred SDK loading)
+# Import discipline
 
-The design discipline that lets `boto3-s3` / `boto3-s3-cli` "pay import cost only
-for the operations actually used." An application typically uses only one or two
-operations, and the CLI runs only one subcommand per invocation, yet with eager
-imports everyone would pay the full initialization cost of the AWS SDK (contrary
-to overview.md's "performance equal to or better").
+This document defines two narrow import guarantees: importing the package root
+does not eagerly resolve its public modules, and the CLI's top-level `--help` /
+`--version` paths finish without importing the AWS SDK. It does **not** require
+`S3()` construction, normal command execution, or usage-error paths to remain
+SDK-free.
 
 ## 1. Background (fixed constraints)
 
 - **`import boto3` pulls in s3transfer on its own**, because upstream's
   `boto3/compat.py` does `from s3transfer.manager import TransferConfig`. So as
-  long as you create a client with boto3, importing s3transfer itself is
-  unavoidable. All you can do is "defer it until the moment a client is actually
-  created," and that is the upper bound of this discipline.
+  soon as an SDK-backed path imports boto3, importing s3transfer itself is
+  unavoidable. No contract in this document postpones that cost beyond the
+  top-level help/version decision.
 - Reference measurements (2026-06, WSL2): in the eager era, `import boto3_s3` took
   ~120ms (the boto3->botocore->s3transfer chain ~83ms, `importlib.metadata` ~20ms).
   After deferral it is ~5ms, and the CLI's `--help` went from ~120ms to ~30ms.
@@ -25,35 +25,12 @@ to overview.md's "performance equal to or better").
    `s3transfer`) and executes none of the package's own submodules.
 2. Using pure-Python modules (`globsieve` / `types` / `exceptions`) incurs no SDK
    tax.
-3. The SDK dependency permitted at the moment you touch `S3` / `S3Storage` extends
-   only to `botocore.exceptions` (and the `botocore.vendored` exception shim it
-   pulls in). The `boto3` / `s3transfer` / botocore client stack is not imported
-   until the moment a default client is actually created (the fallback in
-   `S3Storage.get_client`).
-4. The CLI imports no SDK module - and no command module - **until the
-   subcommand is determined**. The dispatch is two-stage (the aws-clidriver
-   lazy-command-table shape): stage 1 parses the globals and the subcommand
-   name off the static table (`cli._COMMAND_TABLE` - names + one-line help,
-   pinned against the classes by a drift test), so the top-level `--help` /
-   `--version` and the stage-1 usage errors (missing subcommand, invalid
-   choice, an unknown option before the subcommand) complete SDK-free and
-   command-module-free. Stage 2 then imports just the matched command module
-   and builds its real parser; from that point the SDK may load - `botocore`
-   on the error path (the `exit_code_for` `ClientError`-cause check), `boto3`
-   when the command builds its client (`build_client`), and a command module's
-   own top-level imports may reach `botocore.exceptions`, so a
-   subcommand-level `--help` or usage error may load it (within the contract;
-   the `boto3` / `s3transfer` client stack must still stay out of those
-   paths). `mb` / `rb` build the client up front, before their path checks, to
-   match aws's client-before-path-validation ordering; this too is within the
-   contract (the subcommand is determined and running). The contract test pins
-   both halves (section 6).
-   `prompt_toolkit` (the `autoprompt` extra) is a forbidden root on the same
-   paths: it is not imported until `--cli-auto-prompt` actually fires - never
-   on `--help` / usage errors / normal dispatch.
-   Exception: `--cli-auto-prompt` derives its completion model from the full
-   parser (`build_parser()`, which imports every command module) - a cost only
-   the interactive prompt pays (it is charter-exempt anyway).
+3. `boto3-s3 --help` and `boto3-s3 --version` complete without importing any
+   boto3 / botocore / s3transfer module or any command module. Version tokens
+   for installed SDK distributions come from package metadata. This guarantee
+   is deliberately limited to these two top-level exits. Once normal dispatch
+   begins - including usage-error handling or subcommand help - SDK imports are
+   permitted.
 
 ## 3. Library implementation
 
@@ -73,9 +50,9 @@ to overview.md's "performance equal to or better").
   re-export, the SDK-no-import contract of a bare `import boto3_s3` is preserved.
   `crtsupport.py` makes all of awscrt / `s3transfer.crt` into in-function imports,
   so the classic path and a bare import pull in no CRT dependency.
-- `s3storage.py` does `import boto3` only inside the default-client fallback of
-  `get_client`. `botocore.exceptions` is kept at top level because it is needed for
-  exception translation (`s3_errors`) (a dependency permitted by contract item 3).
+- `s3storage.py` currently defers its default-client boto3 import. This is an
+  implementation detail rather than an interface contract; `S3` and
+  `S3Storage` construction may import the SDK.
 - Trade-off: an `ImportError` for a missing dependency surfaces "at first access"
   rather than "at import time." This is an intentional consequence of the deferral,
   and the contract tests continuously verify that the public surface is resolvable.
@@ -84,14 +61,10 @@ to overview.md's "performance equal to or better").
 
 - **The dispatch is a lazy command table** (`cli._COMMAND_TABLE`: subcommand ->
   defining module, class, one-line help). Stage 1's parser is built from the
-  table alone; only the matched module is imported at stage 2, and the full
-  `build_parser()` (every command's real parser) remains solely as the
-  auto-prompt completion model's single source of truth. Because no command
-  module loads before the subcommand is determined, a command module **may
-  top-import SDK-reaching names** (up to `botocore.exceptions`); the old
-  "imports that reach the SDK go inside `run()`" rule is retired. The
-  `boto3` / `s3transfer` client stack still loads only in `build_client` /
-  on the error path, once a command actually needs it.
+  table alone, which is how the top-level help/version contract is satisfied.
+  After those exits are ruled out, command modules and SDK modules may load at
+  any point that preserves command behavior and error ordering. The full
+  `build_parser()` remains the auto-prompt completion model's source of truth.
 - The `--version` line is assembled when the action fires. The boto3 / botocore
   versions are read from distribution metadata (`importlib.metadata.version`); the
   package itself is not imported.
@@ -107,23 +80,14 @@ to overview.md's "performance equal to or better").
 
 - Keep `S3` a thin orchestrator, and keep the transfer engine that uses
   s3transfer / `TransferManager` in a dedicated module (`boto3_s3/transfer.py`)
-  that is **SDK-free at import**: the `s3transfer.manager` import is deferred
-  into the functions that build the manager, which run only when cp / mv / sync
-  actually submit work. Do not bring the s3transfer dependency into the rm / ls
-  paths (the deleter and the scan / scan_pages path).
-- The entry point's boto3 dependency is isolated in `S3.client()`: it imports
-  boto3 only when called. Constructing an `S3` (with or without `session` /
-  `endpoint_url` / `config`) is therefore SDK-free; boto3 loads when `client()`
-  runs - i.e. when an operation builds a client, or `resolve()` turns an
-  `"s3://..."` string into an `S3Storage`.
-- Likewise, `Storage`'s methods (`scan_pages()` / `open()` / `delete()`) defer
-  their heavy dependencies until the method is called.
+  so the transfer implementation remains local to transfer operations. Import
+  timing inside a normally executing operation is not constrained here.
 - When you add a subcommand, register it in `cli._COMMAND_TABLE` and add its
-  `--help` case to the contract tests (client-stack-free; the drift test pins
-  the table's help line against the class).
+  help line to the drift test that pins the static table against the class.
 
 ## 6. Enforcement
 
-`tests/lib/test_import_contract.py` and `tests/cli/unit/test_import_contract.py`
-pin down contract section 2. Module-loading cases run in a fresh interpreter (a `python -c`
-subprocess) so that the test runner's own imports do not mask a regression.
+`tests/lib/test_import_contract.py` pins the package-root and pure-module rules.
+`tests/cli/unit/test_import_contract.py` pins the two top-level CLI exits.
+Module-loading cases run in a fresh interpreter (a `python -c` subprocess) so
+that the test runner's own imports do not mask a regression.

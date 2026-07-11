@@ -583,9 +583,8 @@ class S3Storage(Storage):
         section 1).
         """
         if self._client is None:
-            # Deferred: only the default-client fallback needs boto3, and
-            # importing it pulls in s3transfer too (import contract,
-            # docs/imports.md). Callers passing a client never load it here.
+            # Only the default-client fallback needs boto3. Callers passing a
+            # client never load it here.
             import boto3
 
             # operation=None: no subcommand is in scope at build time.

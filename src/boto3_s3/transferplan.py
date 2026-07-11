@@ -21,9 +21,8 @@ polymorphic ``Storage.format``, while the *route* is classified by concrete
 type (``isinstance`` against ``S3Storage`` / ``LocalStorage``; any other
 ``Storage`` is a custom, ``open``-routed backend - the engine reaches into the
 built-in classes' own API, so only they can take the built-in routes).
-Importing this module therefore reaches ``botocore.exceptions`` through
-``s3storage`` (the dependency import contract item 3 permits for the
-``S3Storage`` surface).
+Importing this module therefore currently reaches ``botocore.exceptions``
+through ``s3storage``. That timing is not part of the import contract.
 
 S3 paths inside a ``TransferPlan`` use aws-cli's internal
 ``bucket/key`` form (scheme stripped); local paths are native (``os.sep``).

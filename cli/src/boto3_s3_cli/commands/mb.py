@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Pure-Python names only on the parse path (import contract, docs/imports.md);
-# S3 / S3Storage reach botocore and are imported in run() instead.
+# Keep the module-level imports limited to the names used while configuring the
+# command; execution-only storage types are imported in `run()`.
 from boto3_s3 import Boto3S3Error, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
@@ -46,9 +46,7 @@ class MbCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="path", operation="mb")
-        # Deferred: the library's S3 entry reaches botocore; --help / --version /
-        # pre-subcommand usage errors stay SDK-free (import contract,
-        # docs/imports.md). A subcommand's run() may load the SDK.
+        # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3, S3Storage
 
         # Build the client up front, like aws's super()._run_main(), so a

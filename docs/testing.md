@@ -408,18 +408,15 @@ and skip on default Linux ones.
 
 ## 6. Import contract
 
-`tests/lib/test_import_contract.py` and `tests/cli/unit/test_import_contract.py`
-pin the lazy-import policy ([`imports.md`](./imports.md)): `import boto3_s3`
-- and the CLI's stage-1 paths (the top-level `--help` / `--version` and the
-pre-dispatch usage errors) - load no boto3 / botocore / s3transfer module;
-reaching the `S3` entry point, a determined subcommand's `--help`, or its
-post-parse usage errors may load botocore, never the boto3 / s3transfer
-client stack. Module-loading cases run in fresh
-interpreters (`python -c` subprocesses) so imports already made by the test
-runner can't mask a regression; a resolve-every-symbol case guards the
-three-way `__all__` / `TYPE_CHECKING` / `_EXPORT_HOMES` mirror in the lazy
-`__init__`. When a subcommand is added, extend the CLI cases (its `--help`
-must stay client-stack-free).
+`tests/lib/test_import_contract.py` pins the lazy package root and explicitly
+pure modules. `tests/cli/unit/test_import_contract.py` pins the CLI's two narrow
+guarantees: top-level `--help` and `--version` load no boto3 / botocore /
+s3transfer module or command module. Normal dispatch, usage errors,
+subcommand help, and `S3()` construction have no SDK-free contract.
+Module-loading cases run in fresh interpreters (`python -c` subprocesses) so
+imports already made by the test runner cannot mask a regression; a
+resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
+`_EXPORT_HOMES` mirror in the lazy `__init__`.
 
 ## 7. Known limitations
 

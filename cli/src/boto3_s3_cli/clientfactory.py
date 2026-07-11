@@ -4,9 +4,7 @@ The execution half of the global-option surface ``globalargs``
 registers: ``build_client`` turns the connection / auth values into the
 boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
 section 5), and ``build_service_client`` builds the non-S3 clients ``mv``'s
-path validation needs (section 5.8). Everything here reaches the AWS SDK, so
-the imports are deferred into the builders - a command pays them only once it
-actually needs a client (import contract, docs/imports.md).
+path validation needs (section 5.8). Everything here reaches the AWS SDK.
 """
 
 from __future__ import annotations
@@ -16,8 +14,7 @@ import os
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-# Pure-Python names (exceptions module) - safe on the parse path (import
-# contract, docs/imports.md).
+# These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
@@ -103,9 +100,7 @@ def validate_profile(args: argparse.Namespace) -> None:
     config reads (ProfileNotFound -> its general handler, rc 255) ahead of
     every post-parse usage error (252) - while an unresolvable *region* does
     NOT fail here (aws defers it to request time). Mirror the ordering by
-    forcing one scoped-config read on a session bound to the resolved
-    profile; the boto3 / s3transfer client stack stays unloaded (import
-    contract, docs/imports.md).
+    forcing one scoped-config read on a session bound to the resolved profile.
     """
     import botocore.session
     from botocore.exceptions import BotoCoreError
@@ -134,8 +129,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     """
     if explicit is not None:
         return explicit
-    # Deferred like the SDK imports in the builders below (import contract,
-    # docs/imports.md): the providers are only reached once a client is built.
+    # Import the providers only when region resolution needs them.
     from botocore.configprovider import (
         ChainProvider,
         EnvironmentProvider,
@@ -246,9 +240,8 @@ def build_client(args: argparse.Namespace) -> S3Client:
     ``verify``. The client is handed to the library through ``S3Storage`` - the
     library never rebuilds connection settings itself.
     """
-    # Deferred: importing boto3 drags in botocore and s3transfer (~100ms), so
-    # it happens only once a command actually needs a client; --help/--version
-    # and usage errors never reach it (import contract, docs/imports.md).
+    # Importing boto3 drags in botocore and s3transfer. The top-level
+    # --help/--version exits return before this normal-dispatch path.
     import boto3
     import botocore.session
     from botocore import UNSIGNED

@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Pure-Python names only (exceptions / types modules) - safe on the parse
-# path; S3 / S3Storage reach botocore and are imported in run() instead
-# (import contract, docs/imports.md).
+# Keep the module-level imports limited to the names used while configuring the
+# command; execution-only storage types are imported in `run()`.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,

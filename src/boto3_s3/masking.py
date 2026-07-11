@@ -8,8 +8,7 @@ sso-oidc tokens, web-identity / SAML STS request tokens, SSE-C keys,
 STS-response credentials, the hex byte-dumps a signature-mismatch error body
 echoes, or proxy credentials. The
 module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
-- so the CLI can import it on the ``--debug`` path without breaking the import
-contract (docs/imports.md).
+- so importing it on the ``--debug`` path adds no AWS SDK dependency of its own.
 
 The credential leak under ``--debug`` flows through the Python ``logging``
 system (botocore logs the signed ``AWSPreparedRequest`` - Authorization /

@@ -13,8 +13,7 @@ import argparse
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
-# Pure-Python name (exceptions module) - safe on the parse path (import
-# contract, docs/imports.md).
+# These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile
 from boto3_s3_cli.clientfactory import build_client, build_service_client

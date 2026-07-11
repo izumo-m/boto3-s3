@@ -45,8 +45,8 @@ solidified design is added here.
 
 | module | role |
 |---|---|
-| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape, docs/imports.md section 2 item 4): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
-| `globalargs.py` | Common option definitions (the parent; SDK-free, the parse-path half - the aws-cli `globalargs.py` counterpart) |
+| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
+| `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
@@ -750,8 +750,7 @@ the client in `super()._run_main()` ahead of the scheme / empty / `--x-s3` / key
 checks), so a client-construction failure takes precedence over a path usage
 error - e.g. `mb badpath --profile <bad>` is the construction error's 255, not
 the scheme 252, exactly like aws. (This means an `mb` / `rb` path usage error
-loads `boto3`; that is within the import contract, which keeps only the
-pre-dispatch paths SDK-free - docs/imports.md section 2.) Client creation is
+loads `boto3`; the import contract does not constrain usage-error paths.) Client creation is
 outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
 as a traceback - `NoCredentialsError` /
@@ -786,18 +785,12 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 
 ## 7. Import discipline (startup cost)
 
-Until the subcommand is determined (stage 1 of the two-stage dispatch), no
-AWS SDK module (boto3 / botocore / s3transfer), no command module, and no
-**`prompt_toolkit`** loads - so the top-level `--help` / `--version` and the
-stage-1 usage errors stay SDK-free. Once the subcommand is determined, a
-command module may top-import names that reach `botocore.exceptions`, and its
-`run()` may load botocore (the profile resolution, the error path); the
-boto3 / s3transfer **client stack** still loads only in `build_client` /
-`build_service_client`. The contract and the implementation as a whole are in
-[`imports.md`](./imports.md) (section 2 item 4 - the old "SDK imports go
-inside `run()`" rule is retired); enforcement is in
-`tests/cli/unit/test_import_contract.py` (the forbidden roots include
-`prompt_toolkit`). The key points on the CLI side:
+The top-level `--help` and `--version` exits load no AWS SDK module (boto3 /
+botocore / s3transfer) and no command module. This is the full CLI import
+contract: after normal dispatch begins, SDK imports are permitted, including on
+usage errors and subcommand help. [`imports.md`](./imports.md) defines the
+contract and `tests/cli/unit/test_import_contract.py` enforces the two exits.
+The key implementation points are:
 
 - The `--version` line is assembled when the action fires, and the boto3 /
   botocore versions are read from the distribution metadata (the package proper is

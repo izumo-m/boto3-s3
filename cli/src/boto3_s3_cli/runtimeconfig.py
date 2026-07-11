@@ -183,8 +183,7 @@ class RuntimeConfig:
                     )
 
     def _convert_booleans(self, runtime_config: dict[str, Any]) -> None:
-        # Deferred botocore import: parsing runs on the transfer path only,
-        # never on --help/usage (import contract, docs/imports.md).
+        # Import botocore only when converting an actual runtime config.
         from botocore.utils import ensure_boolean
 
         for attr in self.BOOLEANS:

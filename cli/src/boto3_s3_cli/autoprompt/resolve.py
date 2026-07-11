@@ -1,12 +1,10 @@
-"""Resolve whether ``--cli-auto-prompt`` fires, SDK-free (the pre-parse step).
+"""Resolve whether ``--cli-auto-prompt`` fires during the pre-parse step.
 
 The dispatcher consults this before argparse runs - like aws-cli's
 ``resolve_auto_prompt_mode`` (aws-cli's ``clidriver.py``) - so the prompt can
 fire even without a subcommand and its env / config chain is honored. Only
-``os.environ`` + ``configparser`` are read, never the SDK or ``prompt_toolkit``,
-so every usage-error path stays import-clean (import contract,
-docs/imports.md). The interactive prompt itself (``prompt``) stays a lazy,
-opt-in import.
+``os.environ`` + ``configparser`` are read, never the SDK or ``prompt_toolkit``.
+The interactive prompt itself (``prompt``) stays a lazy, opt-in import.
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ __all__ = ["__version__"]
 def __getattr__(name: str) -> Any:
     """Resolve ``__version__`` on first access (PEP 562).
 
-    importlib.metadata costs ~20ms to import; deferring it keeps that off
-    every CLI start (import contract, docs/imports.md).
+    importlib.metadata costs ~20ms to import; deferring it avoids that cost
+    until the version is requested.
     """
     if name == "__version__":
         from importlib.metadata import PackageNotFoundError, version

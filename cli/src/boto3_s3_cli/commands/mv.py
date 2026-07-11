@@ -6,9 +6,7 @@ import argparse
 import os
 import sys
 
-# Loaded only once mv is determined (stage 2 of the lazy dispatch,
-# docs/imports.md), so S3Storage's grammar may sit at top level; the boto3
-# client stack still loads in run() via the client factory.
+# Loaded only once mv is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import (
     NotFoundError,
     S3PathResolver,
@@ -88,9 +86,6 @@ class MvCommand(Command):
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
 
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
         from boto3_s3 import S3
 
         client = ctx.client_factory(args)

@@ -51,9 +51,7 @@ class LsCommand(Command):
         expand_option_paramfile(args, "bucket_region", operation="ls")
         expand_integer_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
+        # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3, FileInfo, FileKind, S3Storage
 
         # Intentional aws-cli bug parity: a readable positional fileb:// is

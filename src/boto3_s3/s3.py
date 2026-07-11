@@ -627,8 +627,9 @@ class S3:
                 return self._session.client(
                     "s3", endpoint_url=self._endpoint_url, config=self._config
                 )
-            # Deferred: only this SDK-touching seam loads boto3 (import contract,
-            # docs/imports.md); constructing an `S3` stays SDK-free.
+            # Import locally so callers that only use SDK-independent modules
+            # do not pay for boto3. `S3` construction itself has no SDK-free
+            # contract (docs/imports.md).
             import boto3
 
             return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
@@ -667,8 +668,7 @@ class S3:
         ``[s3]`` semantics on top of these values (the defaults table, validation,
         the engine decision) is the CLI distribution's job, not the library's.
         """
-        # Deferred: the reader's botocore touch (and the boto3 default session)
-        # load only when a caller actually asks (import contract, docs/imports.md).
+        # Load the optional config reader only when a caller asks for it.
         from boto3_s3.awsconfig import AwsConfig
 
         if self._aws_config is None:

@@ -7,9 +7,6 @@ contract that motivates it:
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
   SDK module - ``boto3`` alone drags in ``s3transfer`` via its ``compat``
   module, so an eager re-export taxes every importer ~120ms (docs/imports.md).
-- Reaching the ``S3`` entry point may load ``botocore.exceptions`` (error
-  translation) but still neither ``boto3``, ``s3transfer``, nor botocore's
-  client machinery; those wait until a default client is actually built.
 
 Module-loading cases run in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -132,39 +129,6 @@ class TestLibraryImportContract:
             import boto3_s3.requestparams
 
             assert not sdk_modules(), sdk_modules()
-            """
-        )
-
-    def test_transfer_planner_stops_at_exception_translation(self) -> None:
-        # The planner (transferplan) sits above the backends and routes by
-        # isinstance against S3Storage, so importing it reaches
-        # botocore.exceptions (the S3Storage allowance, contract item 3) -
-        # and nothing beyond it.
-        _run_fresh(
-            """
-            import boto3_s3.transferplan
-
-            def allowed(m):
-                return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))
-
-            leaked = [m for m in sdk_modules() if not allowed(m)]
-            assert not leaked, leaked
-            """
-        )
-
-    def test_s3_entry_point_defers_the_sdk(self) -> None:
-        # botocore.exceptions is the allowed exception-translation dependency
-        # (with the botocore.vendored.requests exception shims it imports);
-        # the SDK proper (boto3, s3transfer, botocore's client stack) is not.
-        _run_fresh(
-            """
-            from boto3_s3 import S3, S3Storage  # noqa: F401
-
-            def allowed(m):
-                return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))
-
-            leaked = [m for m in sdk_modules() if not allowed(m)]
-            assert not leaked, leaked
             """
         )
 

@@ -5,10 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once sync is determined (stage 2 of the lazy dispatch), so these
-# may reach botocore.exceptions - transferargs does, through S3Storage (import
-# contract, docs/imports.md); the boto3 / s3transfer client stack still waits
-# for build_client.
+# Loaded only once sync is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
@@ -83,9 +80,6 @@ class SyncCommand(Command):
         )
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
 
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
         from boto3_s3 import S3
 
         client = ctx.client_factory(args)

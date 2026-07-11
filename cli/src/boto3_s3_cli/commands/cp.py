@@ -5,10 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once cp is determined (stage 2 of the lazy dispatch), so these
-# may reach botocore.exceptions - transferplan does, through the backends
-# (import contract, docs/imports.md); the boto3 / s3transfer client stack
-# still waits for build_client.
+# Loaded only once cp is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
@@ -81,9 +78,7 @@ class CpCommand(Command):
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
 
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
+        # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3, S3Storage
 
         client = ctx.client_factory(args)

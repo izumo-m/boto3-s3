@@ -13,8 +13,9 @@ and the producer/orchestrator boundary is physical, not just conceptual.
 
 Kept out of ``boto3_s3.transfer`` on purpose: the engine module is
 deliberately blind to ``transferplan`` / the storage backends, while the
-producers need all of them. Like the planner, importing this module reaches
-``botocore.exceptions`` through the backends (import contract item 3).
+producers need all of them. Like the planner, importing this module currently
+reaches ``botocore.exceptions`` through the backends; that timing is not an
+interface guarantee.
 """
 
 from __future__ import annotations

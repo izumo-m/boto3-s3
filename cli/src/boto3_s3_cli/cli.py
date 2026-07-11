@@ -242,9 +242,8 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     ``[s3]`` value, an unusable profile) through its general handler, not the
     dedicated 252 / 253 ones.
     """
-    # Deferred so the parse-only paths never load botocore (import contract,
-    # docs/imports.md): when a ClientError cause can exist botocore is already
-    # loaded, so this re-import is free on the paths that matter.
+    # Import locally because this mapping is the only code here that needs the
+    # concrete botocore exception type.
     from botocore.exceptions import ClientError
 
     if isinstance(exc.__cause__, ClientError):
@@ -272,8 +271,7 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     this is the catch-all so no path can crash the CLI with a traceback (rc 1),
     which the exit-code charter forbids (docs/overview.md section 3).
     """
-    # Deferred: botocore is already loaded once a command has run far enough to
-    # raise one of these (import contract, docs/imports.md).
+    # Import locally because only unexpected command failures need these types.
     from botocore.exceptions import ClientError, NoCredentialsError, NoRegionError
 
     # Only NoCredentials / NoRegion are 253 (aws errorhandler.py dedicated
@@ -377,9 +375,10 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
 def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = False) -> int:
     """Parse ``argv`` in two stages and run the matched subcommand.
 
-    Stage 1 reads the globals and the subcommand name off the stub tree - no
-    command module is imported, so ``--help`` / ``--version`` and the
-    stage-1 usage errors stay SDK-free (import contract, docs/imports.md).
+    Stage 1 reads the globals and the subcommand name off the stub tree. Its
+    static metadata lets top-level ``--help`` / ``--version`` exit without
+    importing a command module or the AWS SDK (import contract,
+    docs/imports.md).
     Stage 2 imports just the matched command's module, builds its real parser,
     and parses the stub-captured remainder into the stage-1 namespace (the
     suppressed-defaults parent keeps pre-subcommand globals intact). Once the
