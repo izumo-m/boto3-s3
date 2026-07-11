@@ -305,6 +305,25 @@ class TestIsAnchored:
         assert globsieve.is_anchored("data/*") is False
         assert globsieve.is_anchored("*.txt") is False
 
+    def test_windows_single_separator_keeps_join_semantics_after_python_313(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_isabs = ntpath.isabs
+
+        def python_313_isabs(pattern: str) -> bool:
+            if pattern.startswith(("/", "\\")) and not pattern.startswith(("//", "\\\\")):
+                return False
+            return real_isabs(pattern)
+
+        monkeypatch.setattr(globsieve.os, "path", ntpath)
+        monkeypatch.setattr(globsieve.os, "sep", "\\")
+        monkeypatch.setattr(ntpath, "isabs", python_313_isabs)
+
+        assert globsieve.is_anchored("/data/secret/*") is True
+        assert globsieve.is_anchored("\\data\\secret\\*") is True
+        assert globsieve.is_anchored("C:/data/secret/*") is True
+        assert globsieve.is_anchored("data/secret/*") is False
+
 
 class TestCompileSetMatcher:
     def test_uniform_shapes_pick_the_dedicated_matcher(self) -> None:

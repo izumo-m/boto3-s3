@@ -369,7 +369,9 @@ def s3_source_items(
         # ParamValidation like aws.
         scan_options = replace(
             src_storage.default_scan_options(),
-            recursive=False,
+            # BucketLister does not send a Delimiter on this aws-cli route,
+            # even though the transfer itself is non-recursive.
+            recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
         )

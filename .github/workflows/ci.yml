@@ -38,7 +38,7 @@ jobs:
           - os: macos-latest
             python: "3.10"
           - os: windows-latest
-            python: "3.10"
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     env:
       UV_PYTHON: ${{ matrix.python }}
@@ -60,7 +60,8 @@ jobs:
           version: "0.11.17"
           enable-cache: true
       - run: uv sync --all-packages --frozen
-      - run: uv pip install boto3==1.28.0 botocore==1.31.0 s3transfer==0.6.2
+      - name: Resolve direct dependencies at their declared floors
+        run: uv pip install --resolution lowest-direct --reinstall -e . -e cli
       - name: Test SDK-floor compatibility seams
         run: >-
           uv run --no-sync pytest
@@ -71,3 +72,7 @@ jobs:
           tests/lib/test_s3_cp.py::TestDownloadRoute::test_keyless_non_recursive_source_transfers_nothing
           tests/lib/test_deleter.py::TestXmlIncompatibleFallback::test_only_xml_incompatible_keys_use_delete_object
           tests/lib/test_s3storage.py::TestListBuckets::test_falls_back_to_unpaginated_list_buckets_below_the_floor
+          tests/cli/unit/test_import_contract.py
+          tests/cli/unit/test_library_surface.py
+          tests/cli/unit/test_cp.py::TestSuccessShapes::test_upload_prints_the_result_line_and_guesses_content_type
+          tests/cli/unit/test_ls.py::TestLs::test_lists_objects_with_basenames

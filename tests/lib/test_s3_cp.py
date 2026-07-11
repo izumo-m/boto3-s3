@@ -519,7 +519,6 @@ class TestDownloadRoute:
         assert calls[0].params == {
             "Bucket": "bucket",
             "Prefix": "",
-            "Delimiter": "/",
             "MaxKeys": 1000,
         }
         assert results == []

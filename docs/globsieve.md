@@ -64,9 +64,12 @@ aws-cli joins every pattern onto the operation root with `os.path.join` and
 fnmatches the result against the entry's full path (`filters.py`). `os.path.join`
 *drops* the root for an absolute right-hand side, so an absolute pattern is
 effectively matched against the full path and a relative one against its
-root-relative tail. globsieve mirrors that split: a pattern is **anchored** iff
-`os.path.isabs` (POSIX `/foo`; Windows also `\foo` / `C:/foo` / UNC), and the
-`Anchored` matcher joins each anchored pattern onto the entry's `full_key`
+root-relative tail. globsieve mirrors that split: a pattern is **anchored** when
+`os.path.isabs` says so (POSIX `/foo`; Windows `C:/foo` / UNC), plus the Windows
+single-leading-separator forms `/foo` and `\foo`. The explicit Windows check is
+needed on Python 3.13+, where `ntpath.isabs` stopped recognizing those forms even
+though `ntpath.join` still replaces the root as aws-cli relies on. The `Anchored`
+matcher joins each anchored pattern onto the entry's `full_key`
 (`os.path.join(full_key, pattern)`, lending the entry's drive / UNC anchor to a
 driveless-absolute pattern exactly like aws-cli) before fnmatching `full_key`.
 An anchored pattern can never match an S3 entry, by either of two routes: a bare
