@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `S3.ls` now delivers entries through `on_result`; all batch operations share
+  graceful or best-effort immediate cancellation through `CancelToken`.
 - Recursive S3 deletion now falls back to `DeleteObject` for keys that cannot
   be represented in a `DeleteObjects` XML body, matching aws-cli while keeping
   ordinary keys batched.

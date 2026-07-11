@@ -76,8 +76,13 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   no in-flight window of our own.
 - context manager: on normal completion and on a **normal exception** (a fatal
   in mid-enumeration) it performs a graceful shutdown (submitted transfers run
-  to completion = aws's behavior). Only `CancelledError` (`CancelToken`) and the
-  `KeyboardInterrupt` family cancel in-flight transfers.
+  to completion = aws's behavior). `CancelMode.GRACEFUL` has the same drain
+  behavior after stopping new submissions. `CancelMode.IMMEDIATE` additionally
+  calls `cancel()` on the active top-level transfer futures; futures already
+  running may still finish. Active futures are tracked only until their done
+  subscriber fires, keeping cancellation tracking bounded by concurrency rather
+  than total item count. `KeyboardInterrupt` keeps the manager's direct
+  best-effort cancellation path.
 
 ## 3. Subscriber composition (follows the order of aws-cli `s3handler`)
 
@@ -106,7 +111,7 @@ the SDK at module import time.
 6. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
    before `_Completion` (the same slot where aws-cli places the DeleteSource
    family ahead of the Done recorder).
-7. `_Completion` (**always last**) - bridges the future's result to the rollup
+7. `_Completion` - bridges the future's result to the rollup
    (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
    a successful download it post-success stamps the mtime (section 5). Each
    record carries the item's listing entries (`src_info` / `dest_info`) and the
@@ -118,9 +123,11 @@ the SDK at module import time.
    the PutObject response is discarded), so an upload's `extra_info` is `None`.
    `capture_response` layers the written / read object's own response on top
    ([`opresult.md`](./opresult.md)).
+8. `_ForgetFuture` (**always last**) - removes the settled top-level future
+   from the run's bounded immediate-cancellation set.
 
 Items 3-6 are route-conditional (download / copy / mv only); the always-present
-spine is 1-2 then 7 (the numbering is the slot order, not a single chain that
+spine is 1-2 then 7-8 (the numbering is the slot order, not a single chain that
 every transfer runs end to end).
 
 `on_result` / `on_progress` are **called from s3transfer's worker threads**

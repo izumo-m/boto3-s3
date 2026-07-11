@@ -54,7 +54,7 @@ class LsCommand(Command):
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore); --help and usage errors stay
         # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, FileKind, S3Storage
+        from boto3_s3 import S3, FileInfo, FileKind, S3Storage
 
         target: str = args.paths
         # A target with no bucket lists all buckets. aws-cli even discards a key
@@ -71,13 +71,9 @@ class LsCommand(Command):
         matched = False
         total_objects = 0
         total_size = 0
-        for info in S3().ls(
-            storage,
-            recursive=args.recursive,
-            request_payer=args.request_payer,
-            bucket_name_prefix=args.bucket_name_prefix,
-            bucket_region=args.bucket_region,
-        ):
+
+        def print_result(info: FileInfo) -> None:
+            nonlocal matched, total_objects, total_size
             matched = True
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
@@ -86,6 +82,15 @@ class LsCommand(Command):
             if info.kind is FileKind.FILE:
                 total_objects += 1
                 total_size += info.size or 0
+
+        S3().ls(
+            storage,
+            on_result=print_result,
+            recursive=args.recursive,
+            request_payer=args.request_payer,
+            bucket_name_prefix=args.bucket_name_prefix,
+            bucket_region=args.bucket_region,
+        )
 
         if args.summarize:
             sys.stdout.write(

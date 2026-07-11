@@ -41,7 +41,7 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
-`-- CancelledError          # caller-initiated abort (CancelToken.cancel()).
+`-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
                             #   Unrelated to the CancelledError of asyncio / concurrent.futures
 ```
 
@@ -89,6 +89,16 @@ class Boto3S3Error(Exception):
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
 | an SDK floor missing a capability (`no_overwrite` on an old botocore) | `ConfigurationError` |
 | `CancelToken.cancel()` | `CancelledError` |
+
+`CancelToken.cancel()` defaults to `CancelMode.GRACEFUL`: operations stop
+accepting new work, discard work not yet accepted, drain accepted work, reclaim
+their workers, and then raise `CancelledError`. Passing
+`mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
+pending and in-flight futures. Synchronous external I/O already running cannot
+be killed safely and may still finish. Cancellation is monotonic and idempotent:
+an immediate request upgrades graceful cancellation, and later requests never
+downgrade it. `on_result` may call `cancel()`; it only changes token state and
+never shuts an engine down from the callback's worker thread.
 
 Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of

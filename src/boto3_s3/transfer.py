@@ -68,6 +68,8 @@ from boto3_s3.exceptions import (
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import s3_errors, translate_boto_error
 from boto3_s3.types import (
+    CancelMode,
+    CancelToken,
     CopyPropsMode,
     FileInfo,
     OpOutcome,
@@ -544,9 +546,11 @@ class Transferrer:
     Use as a context manager around the submission loop: ``__exit__`` shuts
     the manager down - waiting for in-flight transfers on a clean exit *and*
     on an ordinary exception (aws stops submitting but lets submitted work
-    finish), cancelling them only for ``CancelledError`` or a
-    non-``Exception`` interrupt (Ctrl-C). The rollup counters are approximate
-    while transfers are in flight and exact after the ``with`` block exits.
+    finish). A `CancelledError` backed by a graceful `CancelToken` drains too;
+    immediate mode asks tracked futures to cancel, while a non-`Exception`
+    interrupt (Ctrl-C) uses the manager's direct cancellation path. The rollup
+    counters are approximate while transfers are in flight and exact after the
+    `with` block exits.
 
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
@@ -581,6 +585,7 @@ class Transferrer:
         is_move: bool = False,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
+        cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt_endpoint: str | None = None,
     ) -> None:
@@ -645,6 +650,7 @@ class Transferrer:
                     raise ConfigurationError(reason, operation=operation)
         self._on_progress = on_progress
         self._on_result = on_result
+        self._cancel_token = cancel_token
         self._capture_response = capture_response
         # The caller's explicit endpoint (the CLI's --endpoint-url), threaded to
         # the CRT engine so it pins a custom endpoint the host heuristic would
@@ -653,6 +659,9 @@ class Transferrer:
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
+        self._futures_lock = threading.Lock()
+        self._futures: set[Any] = set()
+        self._shutdown_done = threading.Event()
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
@@ -681,12 +690,28 @@ class Transferrer:
     ) -> None:
         if self._manager is None:
             return
-        cancel = exc is not None and (
-            isinstance(exc, CancelledError) or not isinstance(exc, Exception)
+        token_requests_immediate = (
+            self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE
         )
+        cancel = exc is not None and (
+            token_requests_immediate
+            or (isinstance(exc, CancelledError) and self._cancel_token is None)
+            or not isinstance(exc, Exception)
+        )
+        watcher: threading.Thread | None = None
+        if self._cancel_token is not None and not cancel:
+            watcher = threading.Thread(
+                target=self._watch_for_immediate_cancel,
+                name="boto3-s3-cancel",
+                daemon=True,
+            )
+            watcher.start()
         try:
             self._manager.shutdown(cancel=cancel)
         finally:
+            self._shutdown_done.set()
+            if watcher is not None:
+                watcher.join()
             if self._capture is not None:
                 # After shutdown every transfer is drained, so no request is
                 # emitting on the client while the capture handlers are removed.
@@ -695,6 +720,35 @@ class Transferrer:
                 # unregister with stragglers in flight than to leave the handlers
                 # feeding _store forever on a longer-lived client.
                 self._capture.unregister(self._client)
+
+    def _watch_for_immediate_cancel(self) -> None:
+        """Cancel tracked futures if the token escalates while shutdown drains."""
+        token = self._cancel_token
+        assert token is not None
+        while not self._shutdown_done.wait(0.1):
+            if token.mode is CancelMode.IMMEDIATE:
+                self._cancel_futures()
+                return
+
+    def _track_future(self, future: Any | None) -> None:
+        if future is None:
+            return
+        with self._futures_lock:
+            self._futures.add(future)
+        # A non-threaded manager may finish before submit() returns and before
+        # _ForgetFuture can remove it. Re-check after insertion to close that race.
+        if future.done():
+            self._forget_future(future)
+
+    def _forget_future(self, future: Any) -> None:
+        with self._futures_lock:
+            self._futures.discard(future)
+
+    def _cancel_futures(self) -> None:
+        with self._futures_lock:
+            futures = tuple(self._futures)
+        for future in futures:
+            future.cancel()
 
     # -- rollup (approximate until the with block exits) --------------------
 
@@ -790,11 +844,12 @@ class Transferrer:
         """
         try:
             if self._transfer_type is TransferType.UPLOAD:
-                self._submit_upload(item)
+                future = self._submit_upload(item)
             elif self._transfer_type is TransferType.DOWNLOAD:
-                self._submit_download(item)
+                future = self._submit_download(item)
             else:
-                self._submit_copy(item)
+                future = self._submit_copy(item)
+            self._track_future(future)
         except BaseException:
             # The producer may have opened the item's stream before handing it
             # over (the open routes / _cp_stream). A submit that raises before
@@ -815,7 +870,7 @@ class Transferrer:
             except Exception:
                 logger.debug("closing a fileobj after a submit error failed", exc_info=True)
 
-    def _submit_upload(self, item: TransferItem) -> None:
+    def _submit_upload(self, item: TransferItem) -> Any | None:
         # A directory source is handed through to fail like aws-cli ([Errno 21]
         # Is a directory, rc 1); botocore's default checksum wrapper would
         # otherwise open it and mask the read failure as an opaque rewind error,
@@ -825,7 +880,7 @@ class Transferrer:
             self._record_failure(
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
             )
-            return
+            return None
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             guessed = _guess_content_type(item.src_path or "")
@@ -837,7 +892,8 @@ class Transferrer:
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
-        self._get_manager().upload(
+        subscribers.append(_ForgetFuture(self._forget_future))
+        return self._get_manager().upload(
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -845,7 +901,7 @@ class Transferrer:
             subscribers=subscribers,
         )
 
-    def _submit_download(self, item: TransferItem) -> None:
+    def _submit_download(self, item: TransferItem) -> Any:
         if self._capture is not None:
             # A same-run content filter may have read this source through the
             # run's own client (a SyncPair content update_filter via
@@ -875,7 +931,8 @@ class Transferrer:
                 subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
-        self._get_manager().download(
+        subscribers.append(_ForgetFuture(self._forget_future))
+        return self._get_manager().download(
             bucket=item.src_bucket,
             key=item.src_key,
             fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
@@ -883,7 +940,7 @@ class Transferrer:
             subscribers=subscribers,
         )
 
-    def _submit_copy(self, item: TransferItem) -> None:
+    def _submit_copy(self, item: TransferItem) -> Any:
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
         subscribers = self._common_subscribers(item)
         if not self._options.get("metadata_directive"):
@@ -891,7 +948,8 @@ class Transferrer:
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
-        self._get_manager().copy(
+        subscribers.append(_ForgetFuture(self._forget_future))
+        return self._get_manager().copy(
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -1489,11 +1547,11 @@ class _Completion:
     """Bridge the transfer future's outcome into the rollup and ``on_result``.
 
     ``on_done`` fires after the future's done event is set, so ``result()``
-    here is non-blocking - it returns or raises the stored outcome. Runs last
-    in the subscriber list so copy-props' post-copy tagging (which may flip
-    the future to an exception) has already settled. The outcome sinks are
-    injected by ``Transferrer`` at submit time (its rollup recorders, plus
-    the download mtime stamp as ``post_success``).
+    here is non-blocking - it returns or raises the stored outcome. It is the
+    last outcome subscriber, immediately before `_ForgetFuture`, so copy-props'
+    post-copy tagging (which may flip the future to an exception) has already
+    settled. The outcome sinks are injected by `Transferrer` at submit time
+    (its rollup recorders, plus the download mtime stamp as `post_success`).
     """
 
     def __init__(
@@ -1528,6 +1586,16 @@ class _Completion:
             getattr(future.meta, "etag", None),
             future.meta.user_context.get(_DELETE_RESPONSE_KEY),
         )
+
+
+class _ForgetFuture:
+    """Remove a settled top-level future from cancellation tracking."""
+
+    def __init__(self, forget: Callable[[Any], None]) -> None:
+        self._forget = forget
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self._forget(future)
 
 
 class _ReplaceMetadataDirective:

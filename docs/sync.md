@@ -379,7 +379,11 @@ botocore client is safe to share for concurrent calls).
   throughput-only, never correctness.
 - **Errors / cancel.** A decision that raises aborts the sync (as the serial path
   does), surfacing when its result is consumed; `cancel_token` is polled between
-  pairs. In-flight decisions on the caller's pool are abandoned to it.
+  pairs. Graceful cancellation stops new pair actions and drains transfers and
+  delete batches already accepted; immediate cancellation additionally asks
+  their futures to cancel where possible. Outstanding decisions on the caller's
+  pool are always awaited before sync returns; immediate mode first calls
+  `cancel()` on each future, without shutting down the caller-owned executor.
 
 `ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
 parallel filter, so the CLI never sets it and parity is not at stake.

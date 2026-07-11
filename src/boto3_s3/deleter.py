@@ -28,12 +28,28 @@ where an unexpected worker exception re-raises on the caller thread.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import (
+    CancelledError as FutureCancelledError,
+)
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+)
+from concurrent.futures import (
+    TimeoutError as FutureTimeoutError,
+)
 from typing import TYPE_CHECKING, Any
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
 from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, s3_errors
-from boto3_s3.types import OpOutcome, OpResult, TransferType, strip_response_metadata
+from boto3_s3.types import (
+    CancelMode,
+    CancelToken,
+    OpOutcome,
+    OpResult,
+    TransferType,
+    strip_response_metadata,
+)
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -109,6 +125,7 @@ class S3Deleter:
         *,
         request_payer: str | None = None,
         on_result: ResultCallback | None = None,
+        cancel_token: CancelToken | None = None,
         batch_size: int = S3_DELETE_BATCH,
         operation: str = "delete",
         capture_response: bool = False,
@@ -135,6 +152,7 @@ class S3Deleter:
         self._bucket: str = storage.bucket
         self._request_payer = request_payer
         self._on_result = on_result
+        self._cancel_token = cancel_token
         self._batch_size = batch_size
         self._operation = operation
         self._capture_response = capture_response
@@ -199,7 +217,7 @@ class S3Deleter:
         if self._closed:
             return
         try:
-            if flush:
+            if flush and not self._cancelled():
                 self.flush()
             self._wait_pending()
         finally:
@@ -239,7 +257,11 @@ class S3Deleter:
         """
         self._ensure_open()
         while self._buffer:
+            if self._cancelled():
+                return
             self._wait_pending()
+            if self._cancelled():
+                return
             batch = self._buffer[: self._batch_size]
             del self._buffer[: self._batch_size]
             self._pending = self._executor.submit(self._run_batch, batch)
@@ -257,7 +279,19 @@ class S3Deleter:
         if pending is None:
             return
         self._pending = None  # cleared first: a failed batch is reported once
-        pending.result()
+        while True:
+            if self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE:
+                pending.cancel()
+            try:
+                pending.result(timeout=0.1)
+            except FutureTimeoutError:
+                continue
+            except FutureCancelledError:
+                return
+            return
+
+    def _cancelled(self) -> bool:
+        return self._cancel_token is not None and self._cancel_token.cancelled
 
     def _run_batch(self, batch: list[FileInfo]) -> None:
         """Delete one batch, falling back for keys XML 1.0 cannot carry."""

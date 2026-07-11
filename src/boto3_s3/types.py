@@ -33,7 +33,7 @@ class FileKind(enum.Enum):
 
 @dataclass(slots=True, kw_only=True)
 class FileInfo:
-    """Cross-backend listing entry returned by ``Storage.scan`` / ``S3.ls``.
+    """Cross-backend listing entry yielded by `Storage.scan` or delivered by `S3.ls`.
 
     One uniform type for every entry a backend can list: files, directories /
     prefixes, and buckets are distinguished by ``kind``, not by separate
@@ -370,22 +370,50 @@ class OpResult:
     extra_info: Mapping[str, Any] | None = None
 
 
-class CancelToken:
-    """Thread-safe cancellation flag handed to a blocking operation.
+class CancelMode(enum.Enum):
+    """How an operation shuts down after a `CancelToken` request.
 
-    ``cancel()`` may be called from any thread or a signal handler; the
-    operation observes it and raises ``CancelledError``.
+    `GRACEFUL` stops accepting new work and drains work already accepted by
+    the operation. `IMMEDIATE` additionally asks each engine to cancel pending
+    and in-flight work where its implementation supports cancellation; external
+    I/O already running may still have to finish.
+    """
+
+    GRACEFUL = "graceful"
+    IMMEDIATE = "immediate"
+
+
+class CancelToken:
+    """Thread-safe, monotonically escalating cancellation request.
+
+    `cancel()` may be called from any thread or a signal handler. The default
+    is graceful cancellation; a later `IMMEDIATE` request upgrades it, while a
+    later graceful request never downgrades it. The operation observes the
+    effective `mode`, performs that shutdown policy, and raises
+    `CancelledError` after reclaiming its resources.
     """
 
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._mode: CancelMode | None = None
 
-    def cancel(self) -> None:
-        self._event.set()
+    def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
+        with self._lock:
+            if self._mode is CancelMode.IMMEDIATE:
+                return
+            if self._mode is None or mode is CancelMode.IMMEDIATE:
+                self._mode = mode
+                self._event.set()
 
     @property
     def cancelled(self) -> bool:
         return self._event.is_set()
+
+    @property
+    def mode(self) -> CancelMode | None:
+        with self._lock:
+            return self._mode
 
 
 class TransferOptions(TypedDict, total=False):
@@ -434,6 +462,7 @@ class TransferOptions(TypedDict, total=False):
 
 ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
+ListingCallback = Callable[[FileInfo], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
 # visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
@@ -462,12 +491,14 @@ def strip_response_metadata(
 
 
 __all__ = [
+    "CancelMode",
     "CancelToken",
     "CaseConflictMode",
     "CopyPropsMode",
     "FileFilter",
     "FileInfo",
     "FileKind",
+    "ListingCallback",
     "LocalFileInfo",
     "LocalScanOptions",
     "OpOutcome",

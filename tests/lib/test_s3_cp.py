@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import io
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
+    CancelMode,
     CancelToken,
     CaseConflictMode,
     FileFilter,
@@ -297,6 +299,89 @@ class TestUploadRoute:
         with pytest.raises(CancelledError):
             S3().cp(str(src), S3Storage("s3://b/k", client=client), cancel_token=token)
         assert calls == []
+
+    def test_graceful_cancel_from_result_drains_submitted_transfers(self, tmp_path: Path) -> None:
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (tmp_path / name).write_bytes(name.encode())
+        client, _ = make_recording_client([])
+        calls: list[str] = []
+        release_first = threading.Event()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            calls.append(f"{operation}:{params['Key']}")
+            if len(calls) == 1:
+                assert release_first.wait(5.0)
+            return {}
+
+        client._make_api_call = api_call  # type: ignore[method-assign]
+        token = CancelToken()
+        results: list[OpResult] = []
+
+        def cancel_after_first(result: OpResult) -> None:
+            results.append(result)
+            if len(results) == 1:
+                token.cancel()
+
+        threading.Timer(0.2, release_first.set).start()
+        with pytest.raises(CancelledError):
+            S3().cp(
+                str(tmp_path),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(max_concurrency=1),
+                cancel_token=token,
+                on_result=cancel_after_first,
+            )
+
+        assert calls == ["PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"]
+        assert [result.outcome for result in results] == [
+            OpOutcome.SUCCEEDED,
+            OpOutcome.SUCCEEDED,
+            OpOutcome.SUCCEEDED,
+        ]
+
+    def test_immediate_escalation_cancels_queued_transfers(self, tmp_path: Path) -> None:
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (tmp_path / name).write_bytes(name.encode())
+        client, _ = make_recording_client([])
+        calls: list[str] = []
+        release_first = threading.Event()
+        release_running = threading.Event()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            calls.append(f"{operation}:{params['Key']}")
+            if len(calls) == 1:
+                assert release_first.wait(5.0)
+            else:
+                assert release_running.wait(5.0)
+            return {}
+
+        client._make_api_call = api_call  # type: ignore[method-assign]
+        token = CancelToken()
+
+        def cancel_after_first(_result: OpResult) -> None:
+            token.cancel()
+            threading.Timer(0.05, lambda: token.cancel(mode=CancelMode.IMMEDIATE)).start()
+            threading.Timer(0.2, release_running.set).start()
+
+        threading.Timer(0.2, release_first.set).start()
+        with pytest.raises(CancelledError):
+            S3().cp(
+                str(tmp_path),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(max_concurrency=1),
+                cancel_token=token,
+                on_result=cancel_after_first,
+            )
+
+        # The request executor may start b before a's completion callback runs;
+        # that request is accepted work and cannot be interrupted safely. c is
+        # still queued and is cancelled before it becomes an S3 request.
+        assert calls in (
+            ["PutObject:p/a.txt"],
+            ["PutObject:p/a.txt", "PutObject:p/b.txt"],
+        )
 
 
 class TestFilters:

@@ -50,7 +50,7 @@ from enum import Flag, auto
 from typing import Any, BinaryIO, ClassVar, Literal
 
 from boto3_s3.concurrency import prefetch
-from boto3_s3.types import FileInfo, ScanOptions
+from boto3_s3.types import CancelToken, FileInfo, ScanOptions
 
 
 def sieve_pages(
@@ -208,7 +208,12 @@ class Storage(abc.ABC):
         """
         return self.scan_options_type()
 
-    def scan(self, options: ScanOptions | None = None) -> Iterator[FileInfo]:
+    def scan(
+        self,
+        options: ScanOptions | None = None,
+        *,
+        cancel_token: CancelToken | None = None,
+    ) -> Iterator[FileInfo]:
         """Yield the entries under this storage as a flat ``FileInfo`` stream.
 
         A concrete wrapper around ``scan_pages``: it flattens the per-page
@@ -226,13 +231,19 @@ class Storage(abc.ABC):
         ``FileInfo.storage`` set to this backend as a safety net (only when a
         ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
         their filters see it too. Used by ``ls`` and the recursive forms of
-        ``cp`` / ``mv`` / ``rm`` / ``sync``.
+        ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
+        producer before another page pull without changing entries already
+        yielded to the consumer.
         """
         opts = options if options is not None else self.default_scan_options()
         pages = self.scan_pages(opts)
         if opts.filter is not None and not self.scan_pages_filters:
             pages = sieve_pages(pages, opts.filter)
-        with prefetch(pages, queue_size=self._scan_prefetch_pages) as items:
+        with prefetch(
+            pages,
+            queue_size=self._scan_prefetch_pages,
+            cancel_token=cancel_token,
+        ) as items:
             for info in items:
                 # Safety net: stamp the producing backend so a downstream consumer
                 # (sync's content compare via pair.src.storage, an on_result

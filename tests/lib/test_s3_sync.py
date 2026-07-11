@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -30,6 +30,7 @@ from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
+    CancelMode,
     CancelToken,
     CaseConflictMode,
     FileInfo,
@@ -702,6 +703,77 @@ class TestParallelFilter:
                 transfer_config=_SERIAL,
                 cancel_token=token,
             )
+        assert not [call for call in calls if call.operation == "PutObject"]
+
+    def test_immediate_cancel_cancels_queued_filter_decisions(self, tmp_path: Path) -> None:
+        class _SingleWorkerWindow(Executor):
+            _max_workers = 2
+
+            def __init__(self) -> None:
+                self._pool = ThreadPoolExecutor(1)
+                self.queued: list[Future[Any]] = []
+                self.queued_ready = threading.Event()
+
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                if not self.queued:
+                    future = self._pool.submit(fn, *args, **kwargs)
+                    self.queued.append(future)
+                    return future
+                future = Future[Any]()
+                self.queued.append(future)
+                self.queued_ready.set()
+                return future
+
+            def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+                self._pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"a")
+        _write(src, "b.txt", b"b")
+        client, calls = make_recording_client([_listing(), {}, {}])
+        token = CancelToken()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        decided: list[str] = []
+
+        def decide(info: FileInfo) -> bool:
+            decided.append(info.compare_key or "")
+            if len(decided) == 1:
+                first_started.set()
+                assert release_first.wait(5.0)
+            return True
+
+        cancelled_before_release = threading.Event()
+        with _SingleWorkerWindow() as pool:
+
+            def cancel() -> None:
+                assert first_started.wait(5.0)
+                assert pool.queued_ready.wait(5.0)
+                token.cancel()
+                threading.Event().wait(0.05)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                for _ in range(100):
+                    if pool.queued[1].cancelled():
+                        cancelled_before_release.set()
+                        break
+                    threading.Event().wait(0.01)
+                release_first.set()
+
+            canceller = threading.Thread(target=cancel)
+            canceller.start()
+            with pytest.raises(CancelledError):
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    create_filter=ParallelFilter(decide, executor=pool),
+                    transfer_config=_SERIAL,
+                    cancel_token=token,
+                )
+            canceller.join()
+
+        assert decided == ["a.txt"]
+        assert cancelled_before_release.is_set()
+        assert len(pool.queued) == 2 and pool.queued[1].cancelled()
         assert not [call for call in calls if call.operation == "PutObject"]
 
     def test_update_lane_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:

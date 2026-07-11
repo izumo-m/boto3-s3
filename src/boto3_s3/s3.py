@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import functools
 import os
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
-from queue import Queue
+from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar, cast
 
 from typing_extensions import Unpack
@@ -44,9 +45,11 @@ from boto3_s3.s3storage import S3Storage, s3_errors, translate_boto_error
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
+    CancelMode,
     CancelToken,
     FileFilter,
     FileInfo,
+    ListingCallback,
     OpOutcome,
     OpResult,
     ProgressCallback,
@@ -112,6 +115,11 @@ def _emit_result(
                 extra_info=extra_info,
             )
         )
+
+
+def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> None:
+    if cancel_token is not None and cancel_token.cancelled:
+        raise CancelledError(f"{operation} was cancelled", operation=operation)
 
 
 def _is_folder_marker(info: FileInfo) -> bool:
@@ -228,16 +236,33 @@ def _run_sync_pairs(
     compare-key order and the case-conflict "first key wins" becomes
     non-deterministic (a library-only knob, no ``aws s3`` parity at stake). A
     ``decide`` exception propagates here (aborting the sync) when its result is
-    consumed; ``cancel_token`` is polled between pairs.
+    consumed. `cancel_token` is polled before decisions and actions. Graceful
+    cancellation awaits outstanding decisions; immediate mode first calls
+    `cancel()` on their futures. The caller's executor is never shut down.
     """
 
-    def cancelled() -> bool:
-        return cancel_token is not None and cancel_token.cancelled
+    pending: set[Future[bool]] = set()
+
+    def stop_if_cancelled() -> None:
+        """Apply the token mode to accepted decisions, then raise cancellation."""
+        if cancel_token is None or not cancel_token.cancelled:
+            return
+        remaining = pending
+        while remaining:
+            if cancel_token.mode is CancelMode.IMMEDIATE:
+                for future in remaining:
+                    future.cancel()
+            remaining = {future for future in remaining if not future.done()}
+            if remaining:
+                time.sleep(0.1)
+        raise CancelledError("sync was cancelled", operation="sync")
 
     def lane_for(pair: SyncPair) -> _Lane | None:
         if pair.src is not None:
             return create_lane if pair.dest is None else update_lane
         return delete_lane
+
+    stop_if_cancelled()
 
     # The outstanding-decision cap is the distinct pools' worker counts summed
     # (a pool shared across lanes counts once). It bounds total in-flight futures
@@ -253,11 +278,13 @@ def _run_sync_pairs(
     }
     if not pools:
         for pair in pairs:
-            if cancelled():
-                raise CancelledError("sync was cancelled", operation="sync")
+            stop_if_cancelled()
             lane = lane_for(pair)
-            if lane is not None and lane.decide(pair):
-                lane.submit(pair)
+            if lane is not None:
+                accepted = lane.decide(pair)
+                stop_if_cancelled()
+                if accepted:
+                    lane.submit(pair)
         return
 
     cap = sum(_pool_window(pool) for pool in pools)
@@ -269,18 +296,19 @@ def _run_sync_pairs(
         # order, until one pooled decision is submitted (return True) or the
         # stream is exhausted (return False).
         for pair in pairs_iter:
-            if cancelled():
-                raise CancelledError("sync was cancelled", operation="sync")
+            stop_if_cancelled()
             lane = lane_for(pair)
             if lane is None:
                 continue
             if lane.executor is None:
-                if lane.decide(pair):
+                accepted = lane.decide(pair)
+                stop_if_cancelled()
+                if accepted:
                     lane.submit(pair)
                 continue
-            lane.executor.submit(lane.decide, pair).add_done_callback(
-                lambda f, p=pair, ln=lane: done.put((p, f, ln))
-            )
+            future = lane.executor.submit(lane.decide, pair)
+            pending.add(future)
+            future.add_done_callback(lambda f, p=pair, ln=lane: done.put((p, f, ln)))
             return True
         return False
 
@@ -288,10 +316,14 @@ def _run_sync_pairs(
     while inflight < cap and dispatch():
         inflight += 1
     while inflight:
-        if cancelled():
-            raise CancelledError("sync was cancelled", operation="sync")
-        pair, future, lane = done.get()
+        stop_if_cancelled()
+        try:
+            pair, future, lane = done.get(timeout=0.1)
+        except Empty:
+            continue
+        pending.discard(future)
         inflight -= 1
+        stop_if_cancelled()
         if future.result():
             lane.submit(pair)
         if dispatch():
@@ -372,12 +404,14 @@ class _SyncDeletes:
         request_payer: str | None,
         dryrun: bool,
         on_result: ResultCallback | None,
+        cancel_token: CancelToken | None,
         capture_response: bool = False,
     ) -> None:
         self._dest = dest_storage
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
+        self._cancel_token = cancel_token
         self._capture_response = capture_response
         self._stack: ExitStack | None = None
         self._deleter: S3Deleter | None = None
@@ -421,6 +455,7 @@ class _SyncDeletes:
                         dest,
                         request_payer=self._request_payer,
                         on_result=self._on_result,
+                        cancel_token=self._cancel_token,
                         operation="sync",
                         capture_response=self._capture_response,
                     )
@@ -645,11 +680,13 @@ class S3:
         self,
         target: Location = "s3://",
         *,
+        on_result: ListingCallback,
         recursive: bool = False,
         request_payer: str | None = None,
         bucket_name_prefix: str | None = None,
         bucket_region: str | None = None,
-    ) -> Iterator[FileInfo]:
+        cancel_token: CancelToken | None = None,
+    ) -> None:
         """List objects and common prefixes under an S3 ``target``, or all buckets.
 
         ``ls`` is S3-only (aws-cli parity): ``target`` is an ``"s3://..."`` URI
@@ -664,19 +701,41 @@ class S3:
         aws-cli). The listing page size (object and bucket listings alike) is the
         ``S3Storage``'s own ``page_size`` config (its constructor) - pass a
         configured ``S3Storage`` as ``target`` to tune it. A non-S3 ``Location``
-        raises ``ValidationError``. The target is validated eagerly; iteration is
-        lazy.
+        raises ``ValidationError``. The target is validated eagerly. Entries are
+        delivered in listing order to `on_result` on the calling thread.
+
+        `cancel_token` may be cancelled from `on_result` or another thread.
+        Cancellation stops entry delivery, drops prefetched pages, waits for a
+        page request already in progress, reclaims the prefetch worker, and then
+        raises `CancelledError`. Both cancellation modes therefore have the
+        same effect for listing: synchronous S3 page requests cannot be aborted
+        safely once started.
         """
         storage = self._resolve_s3_target(target, operation="ls")
+        _raise_if_cancelled(cancel_token, "ls")
         if not storage.bucket:
-            return storage.list_buckets(name_prefix=bucket_name_prefix, region=bucket_region)
-        return storage.scan(
-            replace(
-                storage.default_scan_options(),
-                recursive=recursive,
-                request_payer=request_payer,
+            items = storage.list_buckets(name_prefix=bucket_name_prefix, region=bucket_region)
+        else:
+            items = storage.scan(
+                replace(
+                    storage.default_scan_options(),
+                    recursive=recursive,
+                    request_payer=request_payer,
+                ),
+                cancel_token=cancel_token,
             )
-        )
+        try:
+            for info in items:
+                if cancel_token is not None and cancel_token.cancelled:
+                    break
+                on_result(info)
+                if cancel_token is not None and cancel_token.cancelled:
+                    break
+        finally:
+            close = getattr(items, "close", None)
+            if close is not None:
+                close()
+        _raise_if_cancelled(cancel_token, "ls")
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         """Resolve the single ``Location`` of an S3-only op to a validated ``S3Storage``.
@@ -901,6 +960,7 @@ class S3:
             is_move=is_move,
             on_progress=on_progress,
             on_result=on_result,
+            cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
         )
@@ -968,8 +1028,7 @@ class S3:
             # item it will not submit.
             item_iter = iter(items)
             while True:
-                if cancel_token is not None and cancel_token.cancelled:
-                    raise CancelledError(f"{operation} was cancelled", operation=operation)
+                _raise_if_cancelled(cancel_token, operation)
                 try:
                     item = next(item_iter)
                 except StopIteration:
@@ -978,6 +1037,7 @@ class S3:
                     transferrer.dryrun(item)
                 else:
                     transferrer.submit(item)
+        _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
             raise BatchError(
                 f"{transferrer.failed} of "
@@ -1038,11 +1098,10 @@ class S3:
                 "no_overwrite is not supported for streaming downloads",
                 operation="cp",
             )
-        if cancel_token is not None and cancel_token.cancelled:
-            # Poll once before opening the fileobj / submitting, like the
-            # non-stream loop does before pulling each item - a pre-cancelled
-            # run transfers nothing and leaves a side-effecting stream untouched.
-            raise CancelledError("cp was cancelled", operation="cp")
+        # Poll once before opening the fileobj / submitting, like the
+        # non-stream loop does before pulling each item - a pre-cancelled
+        # run transfers nothing and leaves a side-effecting stream untouched.
+        _raise_if_cancelled(cancel_token, "cp")
         if src_is_stream:
             storage = self._stream_s3_peer(dest_storage)
             transfer_type = TransferType.UPLOAD
@@ -1080,6 +1139,7 @@ class S3:
             operation="cp",
             on_progress=on_progress,
             on_result=on_result,
+            cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
         )
@@ -1088,6 +1148,7 @@ class S3:
                 transferrer.dryrun(item)
             else:
                 transferrer.submit(item)
+        _raise_if_cancelled(cancel_token, "cp")
         if transferrer.failed:
             raise BatchError(
                 "1 of 1 transfers failed",
@@ -1308,8 +1369,10 @@ class S3:
         path ... does not exist.``); a local destination directory is
         created up front even when nothing transfers. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
-        rollup counts (first failure as ``__cause__``); ``cancel_token``
-        raises ``CancelledError`` between pairs.
+        rollup counts (first failure as ``__cause__``). `cancel_token` raises
+        `CancelledError` after shutdown: graceful mode stops new pair actions
+        and drains accepted transfers/deletes; immediate mode additionally
+        requests best-effort future cancellation.
         """
         if transfer_config is None:
             transfer_config = self._transfer_config
@@ -1388,6 +1451,7 @@ class S3:
             operation="sync",
             on_progress=on_progress,
             on_result=on_result,
+            cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
         )
@@ -1396,6 +1460,7 @@ class S3:
             request_payer=options.get("request_payer"),
             dryrun=dryrun,
             on_result=on_result,
+            cancel_token=cancel_token,
             capture_response=capture_response,
         )
         with ExitStack() as stack:
@@ -1459,6 +1524,7 @@ class S3:
                 cancel_token=cancel_token,
             )
 
+        _raise_if_cancelled(cancel_token, "sync")
         failed = transferrer.failed + deletes.failed
         if failed:
             succeeded = transferrer.succeeded + deletes.succeeded
@@ -1480,6 +1546,7 @@ class S3:
         dryrun: bool = False,
         request_payer: str | None = None,
         on_result: ResultCallback | None = None,
+        cancel_token: CancelToken | None = None,
         capture_response: bool = False,
     ) -> None:
         """Delete objects under ``target`` with ``aws s3 rm`` semantics.
@@ -1519,9 +1586,13 @@ class S3:
         counts (first failure as ``__cause__``) once at the end, exit-code
         model docs/exceptions.md section 4. Failures *before* any item work - e.g.
         the listing rejecting the bucket - raise their category error
-        directly.
+        directly. `cancel_token` may be cancelled from `on_result`: graceful
+        mode discards the unsent buffer and drains the in-flight delete batch;
+        immediate mode also cancels an unstarted batch future. Both raise
+        `CancelledError` after worker cleanup.
         """
         storage = self._resolve_s3_target(target, operation="rm")
+        _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket:
             # rm has no bucket-listing mode (scan is object listing only), so a
             # bucketless service root cannot resolve to anything to delete. aws
@@ -1541,6 +1612,7 @@ class S3:
                 capture_response=capture_response,
                 on_result=on_result,
             )
+            _raise_if_cancelled(cancel_token, "rm")
             return
 
         # Enumerating paths: full recursive delete, or the keyless
@@ -1559,18 +1631,24 @@ class S3:
 
         if dryrun:
             for info in storage.scan(options):
+                _raise_if_cancelled(cancel_token, "rm")
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
+                _raise_if_cancelled(cancel_token, "rm")
             return
 
         with S3Deleter(
             storage,
             request_payer=request_payer,
             on_result=on_result,
+            cancel_token=cancel_token,
             operation="rm",
             capture_response=capture_response,
         ) as deleter:
             for info in storage.scan(options):
+                _raise_if_cancelled(cancel_token, "rm")
                 deleter.submit(info)
+            _raise_if_cancelled(cancel_token, "rm")
+        _raise_if_cancelled(cancel_token, "rm")
         if deleter.failed:
             raise BatchError(
                 f"{deleter.failed} of {deleter.failed + deleter.succeeded} deletes failed",

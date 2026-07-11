@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import threading
 from typing import Any, cast
 
 import boto3
@@ -13,6 +14,8 @@ from botocore.exceptions import ProfileNotFound
 
 from boto3_s3 import (
     S3,
+    CancelledError,
+    CancelToken,
     FileKind,
     InvalidConfigError,
     LocalStorage,
@@ -47,39 +50,120 @@ class _FakeS3Client:
 
 
 class TestLsRouting:
+    def test_pre_cancelled_listing_makes_no_request(self) -> None:
+        client = _FakeS3Client([])
+        token = CancelToken()
+        token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=client),
+                on_result=lambda _info: None,
+                cancel_token=token,
+            )
+
+        assert client.calls == []
+
+    def test_cancel_from_on_result_stops_delivery_and_reclaims_prefetch(self) -> None:
+        pages = [
+            {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
+        ]
+        storage = S3Storage("s3://b/p/", client=_FakeS3Client(pages))
+        token = CancelToken()
+        keys: list[str] = []
+
+        def stop_after_first(info: Any) -> None:
+            keys.append(info.key)
+            token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().ls(storage, on_result=stop_after_first, cancel_token=token)
+
+        assert keys == ["p/0"]
+        assert not any(
+            thread.name == "boto3-s3-prefetch" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    def test_cancel_stops_prefetch_before_callback_returns(self) -> None:
+        second_started = threading.Event()
+        release_second = threading.Event()
+        third_started = threading.Event()
+
+        class _ControlledPaginator:
+            def paginate(self, **_kwargs: Any) -> Any:
+                def pages() -> Any:
+                    yield {"Contents": [{"Key": "p/0", "Size": 1, "LastModified": _MTIME}]}
+                    second_started.set()
+                    assert release_second.wait(5.0)
+                    yield {"Contents": [{"Key": "p/1", "Size": 1, "LastModified": _MTIME}]}
+                    third_started.set()
+                    yield {"Contents": [{"Key": "p/2", "Size": 1, "LastModified": _MTIME}]}
+
+                return pages()
+
+        class _ControlledClient(_FakeS3Client):
+            def get_paginator(self, _name: str) -> Any:
+                return _ControlledPaginator()
+
+        token = CancelToken()
+
+        def cancel_while_page_is_inflight(_info: Any) -> None:
+            assert second_started.wait(5.0)
+            token.cancel()
+            release_second.set()
+            assert not third_started.wait(0.2)
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=_ControlledClient([])),
+                on_result=cancel_while_page_is_inflight,
+                cancel_token=token,
+            )
+
     def test_s3storage_target_delegates_to_scan(self) -> None:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("s3://b/p/", client=client)
-        assert [info.key for info in S3().ls(storage)] == ["p/a"]
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
+        assert [info.key for info in infos] == ["p/a"]
 
     def test_scheme_optional_storage_delegates_to_scan(self) -> None:
         # S3Storage accepts an s3://-less "bucket/key"; ls drives its scan the same.
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("b/p/", client=client)  # no s3:// scheme
-        assert [info.key for info in S3().ls(storage)] == ["p/a"]
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
+        assert [info.key for info in infos] == ["p/a"]
 
     def test_non_s3_location_raises_eagerly(self) -> None:
         # ls() is a regular method (not a generator): a non-S3 target raises on
         # the call itself, before any iteration.
         with pytest.raises(ValidationError):
-            S3().ls(LocalStorage("/tmp/x"))
+            S3().ls(LocalStorage("/tmp/x"), on_result=lambda _info: None)
 
     def test_service_root_storage_lists_buckets(self) -> None:
         client = _FakeS3Client([{"Buckets": [{"Name": "alpha", "CreationDate": _MTIME}]}])
         storage = S3Storage("s3://", client=client)
-        infos = list(S3().ls(storage))
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
         assert [(i.key, i.kind) for i in infos] == [("alpha", FileKind.BUCKET)]
 
     def test_bucket_filters_reach_the_scan(self) -> None:
         client = _FakeS3Client([])
         storage = S3Storage("s3://", client=client)
-        list(S3().ls(storage, bucket_name_prefix="al", bucket_region="us-east-1"))
+        S3().ls(
+            storage,
+            on_result=lambda _info: None,
+            bucket_name_prefix="al",
+            bucket_region="us-east-1",
+        )
         assert client.calls[0]["Prefix"] == "al"
         assert client.calls[0]["BucketRegion"] == "us-east-1"
 
     def test_key_without_bucket_raises_eagerly(self) -> None:
         with pytest.raises(ValidationError):
-            S3().ls("s3:///key")
+            S3().ls("s3:///key", on_result=lambda _info: None)
 
 
 class TestClientSeam:

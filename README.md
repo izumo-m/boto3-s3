@@ -85,9 +85,12 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
 s3.cp("./report.csv", "s3://my-bucket/report.csv")
 s3.cp("s3://my-bucket/report.csv", "./report.csv")
 
-# List objects lazily; each item is a FileInfo (key, size, …).
-for info in s3.ls("s3://my-bucket/site/", recursive=True):
-    print(info.key, info.size)
+# List objects; each result is a FileInfo (key, size, …).
+s3.ls(
+    "s3://my-bucket/site/",
+    recursive=True,
+    on_result=lambda info: print(info.key, info.size),
+)
 
 # Delete everything under a prefix.
 s3.rm("s3://my-bucket/tmp/", recursive=True)
@@ -177,7 +180,7 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, recursive, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. The listing page size is the `S3Storage`'s own `page_size` config. |
+| `ls(target="s3://", *, on_result, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_result`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
@@ -230,8 +233,10 @@ minio = boto3.client(
     aws_access_key_id="minioadmin",
     aws_secret_access_key="minioadmin",
 )
-for info in S3().ls(S3Storage("s3://bucket/", client=minio)):
-    print(info.key)
+S3().ls(
+    S3Storage("s3://bucket/", client=minio),
+    on_result=lambda info: print(info.key),
+)
 ```
 
 The bucket part of an S3 URI may also be an access-point ARN (plain or
@@ -334,8 +339,13 @@ Batch operations stream item records instead of returning a list:
   and non-raising.
 - `on_progress(TransferProgress)` — byte-level transfer progress
   (`cp` / `mv` / `sync`; `rm` moves no bytes).
-- `cancel_token` — a `CancelToken` whose `cancel()` cooperatively stops the
-  run (`cp` / `mv` / `sync`).
+- `S3.ls(..., on_result=...)` — receives each listed `FileInfo`, in listing
+  order on the calling thread.
+- `cancel_token` — a `CancelToken` whose `cancel()` stops new work and drains
+  accepted work (`ls` / `cp` / `mv` / `rm` / `sync`). Pass
+  `mode=CancelMode.IMMEDIATE` to additionally request best-effort cancellation
+  of pending and in-flight work. A later immediate request upgrades an earlier
+  graceful request; cancellation never downgrades.
 - `dryrun=True` — reports every would-be action without any mutating call.
 
 ## Custom backends
