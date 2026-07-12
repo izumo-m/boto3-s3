@@ -114,6 +114,43 @@ s3.sync("s3://my-bucket/site/", "./site")       # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 ```
 
+Unlike `aws s3 sync`, boto3-s3 can decide updates by content instead of size +
+mtime. Pass `EtagComparison` as the update strategy to copy changed content and
+skip unchanged content even when timestamps differ:
+
+```python
+from boto3_s3.etagcompare import EtagComparison
+
+s3.sync(
+    "./site",
+    "s3://my-bucket/site/",
+    update_filter=EtagComparison(s3),
+)
+```
+
+For S3-to-S3 sync this compares the ETags already returned by the listings,
+without reading object bodies. For upload and download it reads the non-S3 side
+and reconstructs its S3-style ETag. When many existing files need that work,
+run the comparison decisions concurrently on a caller-owned thread pool:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+from boto3_s3 import ParallelFilter
+
+with ThreadPoolExecutor(max_workers=16, thread_name_prefix="sync-etag") as pool:
+    s3.sync(
+        "./site",
+        "s3://my-bucket/site/",
+        update_filter=ParallelFilter(EtagComparison(s3), executor=pool),
+    )
+```
+
+`ParallelFilter` parallelizes only the update decisions; transfers continue to
+use the transfer engine's own concurrency. Multipart part size and server-side
+encryption affect when ETags are content-comparable; see the
+[ETag comparison details](https://github.com/izumo-m/boto3-s3/blob/main/docs/sync.md#8-etag-content-comparison-etagcomparison-opt-in).
+
 `sync` makes one of three decisions per entry — the same three cases as
 `aws s3 sync`, each with its own filter:
 
