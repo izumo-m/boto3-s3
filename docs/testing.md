@@ -356,8 +356,14 @@ goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
 `s3handler` has no CRT branch), so the signal is that our CRT mode agrees
 with aws's CRT mode on rc / stdout / bucket state / local tree / download
 mtime across upload, download, mv, and sync (single-part and 9 MiB
-multipart). A separate `--debug` check pins that our side actually engaged
-the CRT engine by asserting the transfer-time breadcrumb
+multipart). The same lane covers the missing CRT-configured deletion shapes:
+single/recursive `rm` and upload/download `sync --delete`. Those cases assert
+CLI-observable parity rather than transport identity: boto3-s3 deliberately
+keeps `DeleteObject` / batched `S3Deleter` for the S3-side deletions instead of
+aws-cli's per-key CRT DELETE requests, while download sync-delete removes local
+files on both sides (deleter.md section 4). A separate `--debug` check
+pins that our side actually engaged the CRT engine by asserting the
+transfer-time breadcrumb
 `Transferrer._get_manager` emits (`transfer engine: CRTTransferManager`),
 which names the engine *after* any CRT->classic fallback - guarding against a
 silent classic fallback (the `s3transfer.crt` throughput log fires at CRT

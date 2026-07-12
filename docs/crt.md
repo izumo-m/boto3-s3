@@ -220,6 +220,13 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
+- **Deletion stays on its established non-CRT routes**: under CRT configuration,
+  single rm keeps its blind `DeleteObject`, recursive rm and S3-side
+  `sync --delete` keep `S3Deleter`'s batched `DeleteObjects`, and local-side
+  sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
+  These are the accepted deletion paths documented in deleter.md section 4;
+  the CRT e2e lane pins the charter-observable rc, output, and end states for
+  single/recursive rm and both sync-delete directions.
 - **awscrt absent x explicit crt**: an area that cannot arise because aws bundles
   awscrt. Our awscrt is an opt-in extra (`boto3-s3-cli[crt]` ->
   `boto3-s3[crt]` -> `boto3[crt]`, transfer.md section 9).

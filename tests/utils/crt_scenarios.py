@@ -1,12 +1,19 @@
 """Scenarios for the CRT-engine parity lane (``tests/cli/e2e/test_crt_parity.py``).
 
-A focused subset of the transfer surface that the CRT manager actually serves
-- upload / download / mv / sync, single-part and multipart - reusing the
+A focused subset of the CRT-configured transfer surface - upload / download /
+mv / sync / rm, including multipart and delete-bearing shapes - reusing the
 ``CpScenario`` shape and helpers. The lane runs
 both CLIs with ``preferred_transfer_client = crt`` and asserts they agree, so
 these scenarios carry no goldens (the CRT manager's stdout is identical to the
 classic engine's - aws-cli ``s3handler`` has no CRT branch - and the value is
 the live ours-vs-aws comparison under CRT mode).
+
+The delete cases port the missing intent of aws-cli's CRT rm/sync tests at the
+CLI-observable boundary. For S3 deletion, boto3-s3 deliberately keeps its
+established ``DeleteObject`` / batched ``S3Deleter`` routes rather than
+aws-cli's per-key CRT DELETE requests; download sync-delete removes local files
+on both sides (docs/deleter.md). The contract here is rc, output, and end-state
+parity rather than S3 transport identity.
 """
 
 from __future__ import annotations
@@ -48,6 +55,11 @@ _BIG_SEED_KWARGS: Mapping[str, Mapping[str, Any]] = {
 _TREE_SEED: Mapping[str, bytes] = {
     "down/a.txt": b"alpha\n",
     "down/nested/b.txt": b"beta\n",
+}
+_RM_SEED: Mapping[str, bytes] = {
+    "remove/a.txt": b"delete alpha\n",
+    "remove/nested/b.txt": b"delete beta\n",
+    "keep.txt": b"keep\n",
 }
 
 
@@ -124,5 +136,29 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=("sync", f"s3://{BUCKET_TOKEN}/down", "dest"),
         seed=_TREE_SEED,
         capture_tree=True,
+    ),
+    CpScenario(
+        name="crt_sync_upload_with_delete",
+        argv=("sync", "src", f"s3://{BUCKET_TOKEN}/synced", "--delete"),
+        local_src=_TREE_SRC,
+        seed={"synced/orphan.txt": b"delete remote orphan\n"},
+    ),
+    CpScenario(
+        name="crt_sync_download_with_delete",
+        argv=("sync", f"s3://{BUCKET_TOKEN}/down", "dest", "--delete"),
+        local_src={"dest/orphan.txt": b"delete local orphan\n"},
+        seed=_TREE_SEED,
+        capture_tree=True,
+    ),
+    # -- rm -----------------------------------------------------------------
+    CpScenario(
+        name="crt_rm_single",
+        argv=("rm", f"s3://{BUCKET_TOKEN}/remove/a.txt"),
+        seed=_RM_SEED,
+    ),
+    CpScenario(
+        name="crt_rm_recursive",
+        argv=("rm", f"s3://{BUCKET_TOKEN}/remove", "--recursive"),
+        seed=_RM_SEED,
     ),
 )
