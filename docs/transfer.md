@@ -1,6 +1,7 @@
 # Transfer engine (the design of `Transferrer` / `S3.cp` / `S3.mv`)
 
-The settled design of the byte-transfer layer for `cp` / `mv` / `sync`. For the
+This document is the settled design of the byte-transfer layer for
+`cp` / `mv` / `sync`. For the
 CLI-side behavior, see [`cli.md`](./cli.md) section 5.7 (cp) / section 5.8 (mv) / section 5.9 (sync);
 for the test structure, see [`testing.md`](./testing.md); for the exception
 model, see [`exceptions.md`](./exceptions.md). `mv` is `cp` plus source deletion
@@ -30,7 +31,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `s3transfer.manager.TransferManager` directly, or, if CRT is chosen,
   `crtsupport.create_crt_transfer_manager` ([`crt.md`](./crt.md)). **COPY
   (s3->s3) is unconditionally classic** - `CRTTransferManager` has no copy, and
-  the rule that boto3 / aws-cli also pin s3->s3 to classic. `'auto'` faithfully
+  boto3 / aws-cli likewise pin s3->s3 to classic. `'auto'` faithfully
   reproduces boto3's behavior that "CRT can be auto-selected merely because
   awscrt is importable" (on a machine where `is_optimized_for_system()` is true
   it becomes auto-CRT, just as in boto3 - that fidelity is the whole point). We
@@ -52,7 +53,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   capture_response` breadcrumb. A `_ResponseCapture` is then registered on the
   client together with the manager build (`prepare()`, below) and removed after
   the manager shuts down (so no
-  request is emitting during a registration change); its handlers are per-instance
+  request is in flight during a registration change); its handlers are per-instance
   bound methods, so register / unregister never disturb the application's or
   another run's handlers on a shared client. Being a library-only flag with no
   `aws s3` equivalent, the forcing has no parity impact.
@@ -494,7 +495,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   relabeling, every record of result / progress / warning / dryrun calls itself
   `move`.
 - **The `_DeleteSource` subscriber** (the position in section 3): performs the deletion
-  only when the future succeeded. an upload removes the source through its
+  only when the future succeeded. An upload removes the source through its
   `Storage.delete(info)` (keyed by `TransferItem.src_info`); `LocalStorage.delete`
   maps the OS error to the library taxonomy, preserving the wording aws's
   `move failed: ... [Errno 13] Permission denied: '<abs>'` form shows; download is
@@ -531,14 +532,14 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   stage - cli.md section 5.8): apply `S3Storage.same_path` to the keyless-normalized URI -
   if it is an exact match, or a `/`-terminated dest + `basename(src)`
   concatenation matches src, then `Cannot mv a file onto itself: <src> - <dest>`
-  (`ValidationError`). `--recursive` is also subject to this (aws-cli's faithful
-  false positive; the CLI maps this `ValidationError` to rc
-  252). This is a string guard and does not look at
+  (`ValidationError`). `--recursive` is also subject to this (a faithful
+  reproduction of aws-cli's false positive; the CLI maps this `ValidationError`
+  to rc 252). This is a string guard and does not look at
   identity across an access point - that resolution uses `pathresolver.py`
   (`S3PathResolver` + `has_underlying_s3_path`), which the caller uses with an
-  injected client (the CLI's `--validate-same-s3-paths`; the flag was removed
-  from the library API - because, under the connection
-  model, the library does not implicitly create the s3control / sts client).
+  injected client (the CLI's `--validate-same-s3-paths`; the library API
+  deliberately has no such flag - under the connection model, the library does
+  not implicitly create the s3control / sts client).
 - **A known local ordering difference**: aws-cli does the download's mtime stamp
   (a subscriber) -> deletion in that order, whereas we do deletion -> stamp
   (`_Completion.post_success`). The difference is observable only in the rare

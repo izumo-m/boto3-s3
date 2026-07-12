@@ -1,8 +1,8 @@
 # boto3-s3 Glossary (current state / source of truth)
 
-This document is the **established current state (source of truth)** for the
-terminology used in the `boto3-s3` project. It is authoritative so that the
-meaning of each term stays consistent across the project.
+This document is the **authoritative reference (source of truth)** for the
+terminology used in the `boto3-s3` project: each term below has one meaning,
+used consistently across code, docs, and discussion.
 
 Related: for the project overview, see [`overview.md`](./overview.md).
 
@@ -69,23 +69,22 @@ group (`aws s3`).
 
 ## General terms
 
-- **parity** - under identical settings, the functional result (the final state
-  of S3 objects, return values, error conditions) of each `aws s3` subcommand
-  matches. It does not extend to internal processing order, the exact console
-  output text, or features that cannot be embedded in a library. (Exit codes
-  are held to a stricter charter at the CLI layer; see
-  [`overview.md`](./overview.md).)
+- **parity** - under identical settings, each boto3-s3 operation produces the
+  same functional result (final state of S3 objects, return values, error
+  conditions) as the corresponding `aws s3` subcommand. Parity does not extend
+  to internal processing order, the exact console output text, or features that
+  cannot be embedded in a library. (Exit codes are held to a stricter charter
+  at the CLI layer; see [`overview.md`](./overview.md).)
 - **key** - the full, `/`-separated identifier of a listing entry (an S3 object
   key / prefix / bucket name, or a local path with the host `os.sep` translated
   to `/`). It is `/`-form on **every OS**, never the host separator, so the two
   sides of a sync share one merge/sort key space. (`FileInfo.key`.)
 - **compare key** - the **key** relative to its scan root (the full key with the
-  root prefix stripped), `/`-separated. It is what sync's merge-join pairs on and
-  what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`) is matched
-  against; it is carried on `FileInfo.compare_key`, stamped by each backend's
-  listing on every entry it yields (a `scan` contract of the backend, not
-  something the base `Storage.scan` does - see
-  [`storage.md`](./storage.md) section 2), so a custom filter can read it
-  directly. The name mirrors
+  root prefix stripped), `/`-separated. It is what sync's merge-join pairs on
+  and what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`) is
+  matched against. It is carried on `FileInfo.compare_key`: each backend's
+  listing stamps it on every entry it yields (a `scan` contract of the backend,
+  not something the base `Storage.scan` does - see [`storage.md`](./storage.md)
+  section 2), so a custom filter can read it directly. The name mirrors
   aws-cli's `FileInfo.compare_key`. Pattern form and OS handling are in
   [`globsieve.md`](./globsieve.md) section 4.

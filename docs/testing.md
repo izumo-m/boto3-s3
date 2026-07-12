@@ -1,8 +1,8 @@
 # Testing
 
-How the test suite is organized, what runs by default, and how aws-cli parity
-is enforced. The exit-code charter this enforces lives in
-[`overview.md`](./overview.md) section 3.
+This document describes how the test suite is organized, what runs by default,
+and how aws-cli parity is enforced. The exit-code charter this enforces lives
+in [`overview.md`](./overview.md) section 3.
 
 ## 1. Tiers
 
@@ -20,8 +20,8 @@ except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
 quality gates and package builds on Linux, then runs this default suite on
 Linux and macOS at the Python 3.10 floor, plus Python 3.14 on Linux and Windows.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
-runs the library and CLI compatibility seams whose expected request models are
-stable at that SDK generation. It needs no Docker because e2e self-skips without
+runs the library and CLI compatibility-seam tests whose expected request
+models are stable at that SDK generation. It needs no Docker because e2e self-skips without
 `BOTO3_S3_E2E_BUCKET`.
 
 One small group needs a **case-insensitive filesystem**: the `--case-conflict`
@@ -371,7 +371,8 @@ silent classic fallback (the `s3transfer.crt` throughput log fires at CRT
 real CRT transfer from a fallback). A further case
 (`test_crt_ignores_classic_only_config`) pins the charter: `[s3]` classic-only
 keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws, not a
-traceback. Gated by the e2e opt-in plus an `awscrt` import check. The selection matrix and `[s3]`
+traceback. The lane is gated by the e2e opt-in plus an `awscrt` import check.
+The selection matrix and `[s3]`
 parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
 `test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
 process lock monkeypatched.

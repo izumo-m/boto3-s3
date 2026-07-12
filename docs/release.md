@@ -4,7 +4,7 @@ Every package-index upload is triggered from this repo and nothing else: a
 matching tag publishes to PyPI, a manual workflow dispatch publishes only to
 TestPyPI, and an ordinary push publishes nothing. The two packages are
 versioned independently ([`overview.md`](./overview.md) section 3), and the tag
-selects which. Publishing runs in
+selects which one publishes. Publishing runs in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) via Trusted
 Publishing (OIDC), so no token is needed.
 
@@ -24,9 +24,9 @@ index side; no API token is stored anywhere.
 
 1. **GitHub environments**: create `pypi` and `testpypi` in the repository
    settings (Settings > Environments; empty, no protection rules required).
-   The workflow's `environment:` resolves to one of them - a tag push always
-   uses `pypi`, a `workflow_dispatch` dry run selects - and the OIDC token
-   names the environment, which (Test)PyPI verifies.
+   The workflow's `environment:` resolves to one of them - `pypi` for a tag
+   push, `testpypi` for a `workflow_dispatch` dry run - and the OIDC token
+   names that environment, which (Test)PyPI verifies.
 2. **(Test)PyPI trusted publishers**: on PyPI, register a trusted publisher
    for **each package** (`boto3-s3` and `boto3-s3-cli`): owner `izumo-m`,
    repository `boto3-s3`, workflow `release.yml`, environment `pypi`. On
@@ -42,13 +42,14 @@ uploads.
 ## Releasing
 
 Work happens on `develop`; releases are cut on `main`, and the tag lives on
-`main`'s merge commit. Both packages share this one line — the tag prefix selects
-which publishes — so they can go out together (two tags on one commit) or
-independently (one tag).
+`main`'s merge commit. Both packages release from this same branch line — the
+tag prefix selects which one publishes — so they can go out together (two tags
+on one commit) or independently (one tag).
 
-To release `boto3-s3` X.Y.Z (the CLI is identical with `cli/pyproject.toml`,
-`cli/CHANGELOG.md`, and a `boto3-s3-cli-vX.Y.Z` tag; a joint release puts both
-tags on the same merge commit — but pushes them in order, see step 3):
+The steps below release `boto3-s3` X.Y.Z. A CLI release follows the same steps
+with `cli/pyproject.toml`, `cli/CHANGELOG.md`, and a `boto3-s3-cli-vX.Y.Z` tag.
+A joint release puts both tags on the same merge commit, but pushes them in
+order (see step 3).
 
 1. On `develop`, make a single `chore: release X.Y.Z` commit that bumps:
    - `pyproject.toml` `version` to `X.Y.Z`
@@ -68,12 +69,12 @@ tags on the same merge commit — but pushes them in order, see step 3):
    ```
 3. Tag that merge commit and push — **this push is what publishes**. For a
    joint release, publish the **library first and wait for its Actions run to
-   finish** (the CLI's install resolves `boto3-s3` from PyPI, so the dependency
-   must exist there before the CLI lands). The workflow enforces this: a CLI
+   finish**: the CLI's install resolves `boto3-s3` from PyPI, so the dependency
+   must exist there before the CLI lands. The workflow enforces this — a CLI
    release aborts before upload unless the target index already serves a
-   `boto3-s3` version satisfying the CLI's dependency range (a TestPyPI
-   dry run of the CLI therefore also needs the library dry-published there
-   first):
+   `boto3-s3` version satisfying the CLI's dependency range. (For the same
+   reason, a TestPyPI dry run of the CLI needs the library dry-published there
+   first.)
    ```bash
    git tag boto3-s3-vX.Y.Z
    git push origin main boto3-s3-vX.Y.Z

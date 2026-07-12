@@ -1,8 +1,8 @@
 # aws-cli Option Handling
 
-How `boto3-s3` (library) and `boto3-s3-cli` (CLI) treat each `aws s3`
-option, including the ones that are recognized but do nothing and the
-ones that are not supported at all.
+This document describes how `boto3-s3` (library) and `boto3-s3-cli` (CLI)
+treat each `aws s3` option, including the ones that are recognized but do
+nothing and the ones that are not supported at all.
 
 The policy is uniform across all nine `aws s3` subcommands because they
 share the same command machinery (see section 2.1).
@@ -141,11 +141,11 @@ client-side check for a `string`-typed parameter (`Invalid type for
 parameter ...`, rc 252) rather than passing them through unchanged.
 `--metadata` is the one further exception: a *whole-value* `--metadata
 fileb://...` loads the bytes and then crashes indexing them inside aws's own
-shorthand parser (`'in <string>' requires string as left operand, not int`) -
-`boto3-s3-cli` reproduces that crash verbatim, so a missing file is still the
-paramfile's rc 252 but an *existing* one is aws's rc 255, not a clean usage
-error (a `fileb://` value inside the `key@=...` shorthand form, by contrast,
-is rejected at parse like aws's schema validation - rc 252).
+shorthand parser (`'in <string>' requires string as left operand, not int`).
+`boto3-s3-cli` reproduces that crash verbatim: a missing file is still the
+paramfile's rc 252, but an *existing* one is aws's rc 255, not a clean usage
+error. (A `fileb://` value inside the `key@=...` shorthand form, by contrast,
+is rejected at parse like aws's schema validation - rc 252.)
 
 A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
 expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally

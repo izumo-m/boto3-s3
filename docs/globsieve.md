@@ -9,16 +9,19 @@ that matches wins, and a key that matches none is included**.
 submodule path (`from boto3_s3 import globsieve` / `from boto3_s3.globsieve
 import ...`); only `GlobFilter` / `GlobPattern` are additionally re-exported at
 the package root. Because the module is this self-contained, the whole engine
-is public - the entry points (`compile`, `GlobFilter`, `GlobPattern`,
-`PatternKind`, the `Matcher` / `SetMatcher` protocols), every matcher class
-`compile` picks from (the section 2 tables), and the two building-block
-helpers: `compile_set_matcher(patterns)` (the shape-specialized `SetMatcher`
-that `IncludeOnly` / `ExcludeOnly` / `Sequential` consume; an empty list yields
-a never-matching one) and `is_anchored(pattern)` (the root-anchored/relative
-split of section 1). Kept internal: the shape predicates behind
-`compile_set_matcher`'s partitioning (`_is_literal` / `_is_pure_suffix` /
-`_is_pure_prefix`) - implementation detail of the specialization, not part of
-the semantics.
+is public:
+
+- the entry points (`compile`, `GlobFilter`, `GlobPattern`, `PatternKind`, the
+  `Matcher` / `SetMatcher` protocols);
+- every matcher class `compile` picks from (the section 2 table);
+- the two building-block helpers: `compile_set_matcher(patterns)` (the
+  shape-specialized `SetMatcher` that `IncludeOnly` / `ExcludeOnly` /
+  `Sequential` consume; an empty list yields a never-matching one) and
+  `is_anchored(pattern)` (the root-anchored/relative split of section 1).
+
+Kept internal: the shape predicates behind `compile_set_matcher`'s partitioning
+(`_is_literal` / `_is_pure_suffix` / `_is_pure_prefix`) - an implementation
+detail of the specialization, not part of the semantics.
 
 ## 1. API
 
@@ -143,14 +146,14 @@ first use).
 entry's `FileInfo` - returning True = include (a deletion target), False = skip
 (silently; as with aws, no OpResult is emitted either).
 
-The listing stamps **`info.compare_key`** on each entry - a contract the
-concrete backend's `scan_pages` producer fulfils, not the base `Storage.scan`
-(the single-key path stamps it inline): the entry's key relative to the root
-determined by `rm_filter_root(key,
-recursive=...)`. The root is, for recursive = the prefix normalized to a
-`/`-terminated form, for a single key = its parent "directory", for the bucket
-root = `""` (equivalent to the composition of aws's `filters._get_s3_root` plus
-`FileFormat.s3_format`). The relative form is what keeps `Exclude("*")`
+The listing stamps **`info.compare_key`** on each entry: the entry's key
+relative to the root that `rm_filter_root(key, recursive=...)` determines.
+(Stamping is a contract the concrete backend's `scan_pages` producer fulfils,
+not the base `Storage.scan`; the single-key path stamps it inline.) The root
+is: for recursive, the prefix normalized to a `/`-terminated form; for a single
+key, its parent "directory"; for the bucket root, `""` (equivalent to the
+composition of aws's `filters._get_s3_root` plus `FileFormat.s3_format`). The
+relative form is what keeps `Exclude("*")`
 recognized as the catch-all and the section 2 optimizations in effect; the
 bucket name does not affect the decision under either aws's join or the
 relativization, so it is not part of the root.
@@ -184,9 +187,9 @@ and the local backend applies it inside the walk (after the aws-cli vetting, so
 an excluded file still emits the warnings aws-cli would). Whatever a producer
 omits is simply absent downstream, which makes the filter's effect easy to reason
 about (the per-side `sync` semantics - a filtered source entry versus a filtered
-destination entry - are the visibility layer described below). It runs **per
-page** on the listing's prefetch worker thread (an excluded
-entry is not handed to the consumer, a page wiped out entirely never reaches the
+destination entry - are the visibility layer described below). The predicate
+runs **per page** on the listing's prefetch worker thread (an excluded entry is
+not handed to the consumer; a page wiped out entirely never reaches the
 hand-off queue), so it must be thread-safe and lightweight.
 
 The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync (all

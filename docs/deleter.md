@@ -78,12 +78,11 @@ the successful `Deleted[]` entries; each is reconstructed into a per-key
 The fallback route strips `ResponseMetadata` from its actual `DeleteObject`
 response and uses the same slot, so the caller sees a single-object shape
 regardless of the wire form (docs/opresult.md). Failures are still read from
-`Errors[]` as below. One
-limitation: when the same key was submitted more than once in a batch, all of
-that key's `OpResult`s share a single slot (the response's last entry for the
-key wins) - `DeleteObjects` reports per key spelling, so per-submission
-responses (e.g. two distinct delete markers on a versioned bucket) cannot be
-mapped back to submission order.
+`Errors[]` as below. One limitation: when the same key was submitted more than
+once in a batch, all of that key's `OpResult`s share a single slot (the
+response's last entry for the key wins). `DeleteObjects` reports per key
+spelling, so per-submission responses (e.g. two distinct delete markers on a
+versioned bucket) cannot be mapped back to submission order.
 
 - **per-key failure** (an `Errors[]` entry): the `Code` is translated into the
   taxonomy. The mapping table is **shared** with the request-level path
@@ -103,9 +102,10 @@ mapped back to submission order.
   suffix when retries are exhausted). It carries `operation` / `bucket` / `key`
   attributes.
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
-  does not match the submitted key): logs a WARNING and skips it. Owing to how the `Quiet=True` synthesis
-  works, the key in question may be recorded as a success (a known limitation of
-  the synthesis; the policy is not to silently flip it to success).
+  does not match the submitted key): logs a WARNING and skips it. Owing to how
+  the `Quiet=True` synthesis works, the key in question may still be recorded
+  as a success - a known limitation of the synthesis; the WARNING exists so
+  that flip at least leaves a trace.
 - **request-level failure** (the `delete_objects` call itself failing): records
   the `Boto3S3Error` raised by `s3storage.s3_errors` (which translates via
   `translate_boto_error`) as a failure for **every key** in that batch, and
@@ -122,9 +122,9 @@ mapped back to submission order.
 - aws-cli uses only per-key `DeleteObject` and does not use the batch API
   (`DeleteObjects`). This implementation's batching is a wire-level deviation
   that is observationally equivalent for ordinary keys: deleting a nonexistent
-  key is treated as "success" on both sides (just like the 204 of `DeleteObject`,
-  `DeleteObjects` returns no error either), and per-key success and failure are
-  preserved. A key containing XML 1.0-forbidden controls, surrogate code points,
+  key is treated as "success" on both sides (`DeleteObject` returns 204 for a
+  missing key, and `DeleteObjects` likewise reports no error), and per-key
+  success and failure are preserved. A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys.
@@ -141,14 +141,21 @@ mapped back to submission order.
 
 ## 5. Out of scope (outside this component)
 
-The sync engine and deletion on the local side (both implemented, but in the
-sync orchestrator rather than in this deleter module - `_SyncDeletes` drives an
-`S3Deleter` for an S3 dest and a synchronous `os.remove` for a local dest; see
-[`sync.md`](./sync.md) section 2 / 5), a `Deleter` ABC / `Storage.deleter()`
-factory (considered, but not adopted: sync uses `S3Deleter` directly, and the
-`Storage` ABC keeps deletion as the plain per-key `delete`), dryrun (the responsibility
-of the orchestrator layer - `S3.rm` handles it before reaching the deleter),
-the cancel token, and deletion by `VersionId`.
+Each of the following lives outside this component:
+
+- **The sync engine and local-side deletion** - implemented, but in the sync
+  orchestrator rather than in this deleter module: `_SyncDeletes` drives an
+  `S3Deleter` for an S3 dest and a synchronous `os.remove` for a local dest
+  (see [`sync.md`](./sync.md) section 2 / 5).
+- **A `Deleter` ABC / `Storage.deleter()` factory** - considered but not
+  adopted: sync uses `S3Deleter` directly, and the `Storage` ABC keeps deletion
+  as the plain per-key `delete`.
+- **dryrun** - the orchestrator layer's responsibility; `S3.rm` handles it
+  before anything reaches the deleter.
+- **The `CancelToken` machinery** - shared infrastructure
+  ([`exceptions.md`](./exceptions.md) section 3); how the deleter reacts to a
+  token is described in sections 1 and 2 above.
+- **Deletion by `VersionId`** - not provided.
 
 The wiring of `S3.rm` / CLI `rm` and the single-object `S3Storage.delete(info)` (a
 blind `DeleteObject` used by the single-shot path of a non-recursive rm) are

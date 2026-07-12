@@ -1,6 +1,6 @@
 # boto3-s3 Project Overview (current state / source of truth)
 
-This document is the **established current state (source of truth)** for the
+This document is the **authoritative reference (source of truth)** for the
 project's purpose, supported scope, and design policy, and it doubles as the
 entry point (index) for `docs/`. When the policy changes, update this document
 first.
@@ -54,34 +54,38 @@ maintaining high functional compatibility (parity).
 - **Feature-level degradation on old SDKs**: rather than emulate newer AWS
   behavior, features that depend on a newer S3 model are simply unavailable
   below the SDK version that introduced them - on a par with the awscrt extra
-  (transfer.md section 9 / crt.md section 6). Specifically, `--no-overwrite`
-  (conditional writes / `IfNoneMatch`, GA 2024-11) needs a late-2024 botocore,
-  and `--checksum-algorithm CRC64NVME` needs a botocore that ships that
-  algorithm. The bucket-listing filters `ls --bucket-name-prefix` /
-  `--bucket-region` need the paginated `ListBuckets` (late 2024 / botocore
-  1.34.162); below it `ls` still works, falling back to an unpaginated
-  `ListBuckets` where the filters are silently inert. Their `Prefix` /
-  `BucketRegion` request parameters landed later still (botocore 1.35.42), so on
-  a paginating botocore that predates them (1.34.162 through 1.35.41) passing the
-  filters raises a client-side `ParamValidationError` rather than being inert.
-  Two more degradations at the
-  floor: the newer CreateBucket parameters `mb` can send - `--tags`'s
-  `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
-  account-regional namespace bucket selects - fail client-side with a clean
-  ParamValidationError on a botocore that predates them; and without a modern
-  s3transfer the engine cannot pre-provide the copy/download source ETag
-  (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
-  `{"ETag": ...}` is `None` there unless `capture_response=True` supplies it
-  from the captured response, and s3transfer's own `CopySourceIfMatch`
-  consistency pin on copies is absent. S3 object annotations (GA 2026-06)
-  follow the same rule: on a botocore without the annotations model, copies
-  silently stop sending `AnnotationDirective=EXCLUDE` (behaving like
-  pre-annotations aws-cli), and `copy_props=ALL` / `--copy-props all` - which
-  needs botocore >= 1.43.31 and s3transfer >= 0.19 - is refused up front with
-  a `ConfigurationError` (transfer.md section 4). On capable SDKs, multipart
-  `copy_props=ALL` preloads annotations in memory by default for aws-cli
-  failure-state parity; the library also offers temporary-file preload and
-  deferred post-copy reads. Everything else works at the floor.
+  (transfer.md section 9 / crt.md section 6). Specifically:
+  - `--no-overwrite` (conditional writes / `IfNoneMatch`, GA 2024-11) needs a
+    late-2024 botocore.
+  - `--checksum-algorithm CRC64NVME` needs a botocore that ships that
+    algorithm.
+  - The bucket-listing filters `ls --bucket-name-prefix` / `--bucket-region`
+    need the paginated `ListBuckets` (late 2024 / botocore 1.34.162); below it,
+    `ls` still works, falling back to an unpaginated `ListBuckets` where the
+    filters are silently inert. Their `Prefix` / `BucketRegion` request
+    parameters landed later still (botocore 1.35.42), so on a paginating
+    botocore that predates them (1.34.162 through 1.35.41) passing the filters
+    raises a client-side `ParamValidationError` rather than being inert.
+  - The newer CreateBucket parameters `mb` can send - `--tags`'s
+    `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
+    account-regional namespace bucket selects - fail client-side with a clean
+    `ParamValidationError` on a botocore that predates them.
+  - Without a modern s3transfer, the engine cannot pre-provide the
+    copy/download source ETag (`provide_object_etag`, guarded by hasattr):
+    `OpResult.extra_info`'s `{"ETag": ...}` is `None` there unless
+    `capture_response=True` supplies it from the captured response, and
+    s3transfer's own `CopySourceIfMatch` consistency pin on copies is absent.
+  - S3 object annotations (GA 2026-06) follow the same rule: on a botocore
+    without the annotations model, copies silently stop sending
+    `AnnotationDirective=EXCLUDE` (behaving like pre-annotations aws-cli), and
+    `copy_props=ALL` / `--copy-props all` - which needs botocore >= 1.43.31 and
+    s3transfer >= 0.19 - is refused up front with a `ConfigurationError`
+    (transfer.md section 4). On capable SDKs, multipart `copy_props=ALL`
+    preloads annotations in memory by default for aws-cli failure-state parity;
+    the library also offers temporary-file preload and deferred post-copy
+    reads.
+
+  Everything else works at the floor.
 
 ## 3. Design policy
 

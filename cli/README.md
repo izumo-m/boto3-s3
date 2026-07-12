@@ -17,7 +17,7 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 - **Compact installation.** A default dependency-complete installation was
   about 31.5 MiB, compared with about 268 MiB for the corresponding aws-cli v2
   installation.
-  More importantly for Python and Lambda environments that already have boto3,
+  More importantly, in Python and Lambda environments that already have boto3,
   adding `boto3-s3-cli` increased the installed package set by only about
   2.1 MiB in the measurement below.
 - **Easy to add to AWS Lambda.** A ZIP-based Python Lambda function can include
@@ -41,17 +41,17 @@ handling, resulting S3 state, and exit codes are tested against `aws s3`.
 This CLI is the strict compatibility layer over the more permissive Python
 library. It applies aws-compatible path validation, configuration resolution,
 transfer defaults, output behavior, and error handling. Human-readable wording
-is not guaranteed to be byte-for-byte identical, and the interactive UI and a
-few deliberately cleaned-up aws-cli edge-case failures are documented
-exceptions.
+is not guaranteed to be byte-for-byte identical. The interactive UI, and a few
+aws-cli edge-case failures that were deliberately cleaned up, are the other
+documented exceptions.
 
 ## Packaging & startup
 
 `boto3-s3-cli` is an ordinary Python package: it runs on the selected interpreter
 and reuses a compatible boto3 / botocore installation rather than bundling its
 own runtime. In contrast, the official aws-cli v2 installation is a
-self-contained distribution with its own runtime and dependencies; it is not a
-self-extracting executable that unpacks itself on every invocation.
+self-contained distribution that bundles its own runtime and dependencies
+(installed once — it does not unpack itself on every invocation).
 
 For a concrete comparison, the following measurement synced a directory
 containing one 11 KiB file to an empty prefix in the same local MinIO instance.

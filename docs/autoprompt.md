@@ -3,8 +3,8 @@
 `boto3-s3 --cli-auto-prompt` provides the **interactive prompt + completion**
 equivalent of `aws s3 --cli-auto-prompt`. It is enabled only in environments
 where `prompt_toolkit` is installed; where it is absent, it explains how to
-install it and refuses (the same **opt-in extra degradation** as awscrt =
-the `crt` extra).
+install it and refuses (the same **opt-in extra degradation** policy as the
+`crt` extra's awscrt).
 
 The implementation lives in `cli/src/boto3_s3_cli/autoprompt/`. The completion
 engine is a faithful port of aws-cli's `awscli/autocomplete/`, narrowed to the
@@ -98,7 +98,7 @@ section 1).
 - **Option value before a preceding path**: option-value completion at a stage
   where no path has been typed yet, as in `cp --storage-class <TAB>`. The source
   consumed the value into the positional, overwriting `current_param` and
-  killing value completion -> fixed so that **the positional is claimed only when
+  killing value completion. The fix: **the positional is claimed only when
   the fragment is non-empty AND no option value is awaited**. With this, (a) an
   option value stays with its option and is completed, (b) bare `file://` path
   completion is preserved (delegated to FilePathCompleter), and (c) an empty `cp
@@ -106,7 +106,7 @@ section 1).
   <TAB>`.
 - **Option after the second path**: cp/mv/sync take two paths, but the source
   set `current_args` to None at the second path and dropped subsequent options
-  into `unparsed_items`, stopping completion -> fixed to **keep the command's
+  into `unparsed_items`, stopping completion. The fix: **keep the command's
   options alive after the second positional, whatever it looks like**. So after
   *any* second positional - an `s3://` URI, a `./` / `/` / `file://` path, or a
   bare local name like `outdir` - option-name completion, value completion, and
@@ -176,9 +176,8 @@ non-contractual).
 
 `cli.main` resolves the mode from raw argv + env + profile config **before**
 argparse (to slip past the subcommand-required argparse and fire even on a bare
-`boto3-s3 --cli-auto-prompt`; equivalent to aws's `resolve_auto_prompt_mode` + config
-chain = aws-cli `clidriver.py`'s `resolve_auto_prompt_mode` +
-`_construct_cli_auto_prompt_chain`).
+`boto3-s3 --cli-auto-prompt`; equivalent to aws-cli `clidriver.py`'s
+`resolve_auto_prompt_mode` plus `_construct_cli_auto_prompt_chain`).
 
 First, `main` rejects `--cli-auto-prompt` and `--no-cli-auto-prompt` together
 with 252 (mutual exclusion, aws's wording) before mode resolution runs (in

@@ -1,8 +1,8 @@
 # Credential Masking Design for Debug Logs
 
 `boto3-s3` masks, by default, any credentials that flow into debug logs
-(`--debug` / `boto3_s3.set_stream_logger`). This is a **safety feature of our own
-that goes beyond aws-cli / boto3**, not a parity item (aws-cli / boto3 mask
+(`--debug` / `boto3_s3.set_stream_logger`). This is a **safety feature this
+project adds beyond aws-cli / boto3**, not a parity item (aws-cli / boto3 mask
 nothing other than the proxy URL via `mask_proxy_url`, and boto3 merely warns in
 its docstring "do not use in production"). This document is the source of truth
 for that design. The implementation lives in `src/boto3_s3/masking.py`, the CLI
@@ -94,10 +94,10 @@ to the ON/OFF of debug rather than to a per-operation scope).
 
 ## 4. Replacement notation (parity)
 
-Following the only masking mechanism present in aws-cli / boto3,
-`botocore.httpsession.mask_proxy_url` (`mask = '*' * 3`, replacing the userinfo
-with `***`), **secret values are replaced with `***`**. Non-secret structure
-(parameter names, the credential scope, the proxy host) is preserved.
+**Secret values are replaced with `***`**, following the one masking mechanism
+aws-cli / boto3 do have: `botocore.httpsession.mask_proxy_url` (`mask = '*' * 3`,
+replacing the userinfo with `***`). Non-secret structure (parameter names, the
+credential scope, the proxy host) is preserved.
 
 The only exception is the **AWS Access Key ID**: to allow distinguishing which
 account issued a request, **the last 4 characters are kept** (`***MPLE`).

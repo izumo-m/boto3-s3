@@ -86,20 +86,26 @@ dependencies through a `Context`.
   progress, etc.) in instance attributes, so calling `main()` multiple times in a
   single process does not carry state over (this corresponds to how aws-cli's
   `ListCommand._run_main` holds `self._total_objects` and the like).
-- `Context` is the container for the runtime dependencies that `main()` resolves.
-  Currently these are `client_factory` (`argparse.Namespace -> S3Client`, default
-  `clientfactory.build_client`), `service_client_factory`
-  (`(service, args, *, region=None) -> client`, default
-  `clientfactory.build_service_client` - the injection point where mv's
-  `--validate-same-s3-paths` creates the s3control / sts clients, section 5.8), and
-  `transfer_config` (`TransferConfig | None`. Overrides the transfer engine's
-  defaults - tests inject `use_threads=False` to make the multipart call order
-  deterministic. **Only when it is `None`** do cp / mv / sync build the config
-  from `[s3]` (section 8), so an injected value always takes precedence),
-  `auto_prompter` (`AutoPrompter | None`. The backend for `--cli-auto-prompt`.
-  Default `None` -> `main` lazily creates the prompt_toolkit implementation. Tests
-  inject a fake that returns canned argv to verify re-dispatch without a tty -
-  [`autoprompt.md`](./autoprompt.md) section 7). Tests inject a fake client via
+- `Context` is the container for the runtime dependencies that `main()`
+  resolves. Currently these are:
+  - `client_factory` (`argparse.Namespace -> S3Client`, default
+    `clientfactory.build_client`).
+  - `service_client_factory` (`(service, args, *, region=None) -> client`,
+    default `clientfactory.build_service_client`) - the injection point where
+    mv's `--validate-same-s3-paths` creates the s3control / sts clients
+    (section 5.8).
+  - `transfer_config` (`TransferConfig | None`) - overrides the transfer
+    engine's defaults; tests inject `use_threads=False` to make the multipart
+    call order deterministic. **Only when it is `None`** do cp / mv / sync
+    build the config from `[s3]` (section 8), so an injected value always
+    takes precedence.
+  - `auto_prompter` (`AutoPrompter | None`) - the backend for
+    `--cli-auto-prompt`. Default `None` -> `main` lazily creates the
+    prompt_toolkit implementation. Tests inject a fake that returns canned
+    argv to verify re-dispatch without a tty
+    ([`autoprompt.md`](./autoprompt.md) section 7).
+
+  Tests inject a fake client via
   `cli.main(argv, ctx=Context(client_factory=<fake>))` (no monkeypatching of
   module attributes).
 
@@ -611,9 +617,7 @@ first).
 
 Checksum path-type validation (`--checksum-algorithm` is locals3 / s3s3,
 `--checksum-mode` is s3local only. `Expected <param> parameter to be used with one
-of following path formats: ...` 252) is shared by cp / mv (transferargs.py. mv's
-probe revealed that it was unimplemented on the cp side, and it was added at the
-same time).
+of following path formats: ...` 252) is shared by cp / mv (`transferargs.py`).
 
 **The source deletion** is the engine's job, not the CLI's (transfer.md section 11): for
 each successful item, an upload deletes the source through its `Storage.delete`

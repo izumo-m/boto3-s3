@@ -46,8 +46,9 @@ SDK-free.
 - The `TransferConfig` in `s3.py` is an annotation-only import (`TYPE_CHECKING`).
   The re-export home for the public `TransferConfig` is `transferconfig.py`
   (boto3's subclass + the CRT fields, crt.md section 2), which imports
-  `boto3.s3.transfer` at module top - since it is reachable only through the lazy
-  re-export, the SDK-no-import contract of a bare `import boto3_s3` is preserved.
+  `boto3.s3.transfer` at module top. That home module is reachable only through
+  the lazy re-export, so the SDK-no-import contract of a bare `import boto3_s3`
+  is preserved.
   `crtsupport.py` makes all of awscrt / `s3transfer.crt` into in-function imports,
   so the classic path and a bare import pull in no CRT dependency.
 - `s3storage.py` currently defers its default-client boto3 import. This is an
@@ -69,12 +70,13 @@ SDK-free.
   versions are read from distribution metadata (`importlib.metadata.version`); the
   package itself is not imported.
 - The `--help` choices / help text are written as a **static mirror of aws-cli's
-  static tables** (the same approach as `globalargs.py`'s `_OUTPUT_CHOICES`,
-  which mirrors `cli.json`; the `aws s3` side likewise keeps all choices as static
-  literals in aws-cli's `awscli/customizations/s3/subcommands.py`). They are
-  not derived dynamically from botocore's service model - since aws-cli itself is
-  static, going dynamic would skew parity whenever botocore updates ahead, so this
-  is not a discipline for speed alone.
+  static tables**, not derived dynamically from botocore's service model. This
+  is the same approach as `globalargs.py`'s `_OUTPUT_CHOICES` (which mirrors
+  `cli.json`), and it is what aws-cli itself does: its
+  `awscli/customizations/s3/subcommands.py` keeps all choices as static
+  literals. Because aws-cli is static, deriving the choices dynamically would
+  skew parity whenever botocore updates ahead - so this is not a discipline for
+  speed alone.
 
 ## 5. Discipline for the transfer subcommands (cp / mv / sync)
 

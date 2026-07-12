@@ -1,6 +1,7 @@
 # sync (`S3.sync` / two-layer pipeline + pure-pairing comparator) design
 
-The established design for the `aws s3 sync` equivalent. For the CLI-side
+This document is the established design for boto3-s3's equivalent of
+`aws s3 sync`. For the CLI-side
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
@@ -9,10 +10,11 @@ against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline
 
-sync runs two layers in series: **visibility** and **pair decision**. Layers
-differ in series, within a layer they combine as booleans - this separation is
-the very structure that produces aws-cli's observable behavior (the exclusion
-protection of `--delete`), and it is the heart of the design.
+sync runs two layers in series: **visibility** and **pair decision**. The
+layers apply one after the other; within a layer, conditions combine as
+booleans. This separation is the very structure that produces aws-cli's
+observable behavior (the exclusion protection of `--delete`), and it is the
+heart of the design.
 
 ```
 src listing -- filter (visibility) --+
