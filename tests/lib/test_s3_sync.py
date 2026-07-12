@@ -920,3 +920,53 @@ class TestParallelFilter:
                 update_filter=ParallelFilter(boom, executor=pool),
                 transfer_config=_SERIAL,
             )
+
+    def test_inner_exception_awaits_other_accepted_decisions(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"aa")
+        _write(src, "b.txt", b"bb")
+        client, _calls = make_recording_client([_listing(("p/a.txt", 2), ("p/b.txt", 2))])
+        second_started = threading.Event()
+        release_second = threading.Event()
+        first_raised = threading.Event()
+        returned = threading.Event()
+        errors: list[BaseException] = []
+
+        def decide(pair: SyncPair) -> bool:
+            if pair.key == "a.txt":
+                assert second_started.wait(5.0)
+                first_raised.set()
+                raise ValueError("decide blew up")
+            second_started.set()
+            assert release_second.wait(5.0)
+            return False
+
+        pool = ThreadPoolExecutor(2)
+
+        def run_sync() -> None:
+            try:
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    update_filter=ParallelFilter(decide, executor=pool),
+                    transfer_config=_SERIAL,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                returned.set()
+
+        runner = threading.Thread(target=run_sync)
+        runner.start()
+        try:
+            assert first_raised.wait(5.0)
+            assert not returned.wait(1.0)
+        finally:
+            release_second.set()
+            runner.join(5.0)
+            pool.shutdown()
+
+        assert not runner.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], ValueError)
+        assert str(errors[0]) == "decide blew up"

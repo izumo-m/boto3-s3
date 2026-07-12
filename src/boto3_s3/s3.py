@@ -236,25 +236,31 @@ def _run_sync_pairs(
     compare-key order and the case-conflict "first key wins" becomes
     non-deterministic (a library-only knob, no ``aws s3`` parity at stake). A
     ``decide`` exception propagates here (aborting the sync) when its result is
-    consumed. `cancel_token` is polled before decisions and actions. Graceful
-    cancellation awaits outstanding decisions; immediate mode first calls
-    `cancel()` on their futures. The caller's executor is never shut down.
+    consumed. Before any exceptional return, decisions that have not started are
+    cancelled and running decisions are awaited, so none outlive the operation.
+    `cancel_token` is polled before decisions and actions. Graceful cancellation
+    awaits outstanding decisions; immediate mode first calls `cancel()` on their
+    futures. The caller's executor is never shut down.
     """
 
     pending: set[Future[bool]] = set()
 
-    def stop_if_cancelled() -> None:
-        """Apply the token mode to accepted decisions, then raise cancellation."""
-        if cancel_token is None or not cancel_token.cancelled:
-            return
+    def settle_pending(*, cancel: bool) -> None:
+        """Optionally cancel queued decisions, then await every accepted one."""
         remaining = pending
         while remaining:
-            if cancel_token.mode is CancelMode.IMMEDIATE:
+            if cancel:
                 for future in remaining:
                     future.cancel()
             remaining = {future for future in remaining if not future.done()}
             if remaining:
                 time.sleep(0.1)
+
+    def stop_if_cancelled() -> None:
+        """Apply the token mode to accepted decisions, then raise cancellation."""
+        if cancel_token is None or not cancel_token.cancelled:
+            return
+        settle_pending(cancel=cancel_token.mode is CancelMode.IMMEDIATE)
         raise CancelledError("sync was cancelled", operation="sync")
 
     def lane_for(pair: SyncPair) -> _Lane | None:
@@ -312,22 +318,33 @@ def _run_sync_pairs(
             return True
         return False
 
-    inflight = 0
-    while inflight < cap and dispatch():
-        inflight += 1
-    while inflight:
-        stop_if_cancelled()
-        try:
-            pair, future, lane = done.get(timeout=0.1)
-        except Empty:
-            continue
-        pending.discard(future)
-        inflight -= 1
-        stop_if_cancelled()
-        if future.result():
-            lane.submit(pair)
-        if dispatch():
+    try:
+        inflight = 0
+        while inflight < cap and dispatch():
             inflight += 1
+        while inflight:
+            stop_if_cancelled()
+            try:
+                pair, future, lane = done.get(timeout=0.1)
+            except Empty:
+                continue
+            pending.discard(future)
+            inflight -= 1
+            stop_if_cancelled()
+            if future.result():
+                lane.submit(pair)
+            if dispatch():
+                inflight += 1
+    finally:
+        # An exception from a decision, a lane action, or the pair producer must
+        # not leave accepted predicates running after sync has cleaned up its
+        # transfer manager and storages. Cancel work that has not started and
+        # await the rest without shutting down the caller-owned executor. Polling
+        # `done()` also handles a plain `Future` cancelled before a waiter was
+        # registered. Results are not read, preserving the error that triggered
+        # this cleanup.
+        if pending:
+            settle_pending(cancel=True)
 
 
 def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None:
