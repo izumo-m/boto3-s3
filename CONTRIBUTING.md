@@ -44,7 +44,9 @@ Run any tool through `uv run` so it uses that environment, e.g. `uv run pytest`.
 
 ## Quality gates
 
-Run these before every commit; all must pass:
+Run these before every commit that changes Python code or test data; all must
+pass. A docs-only commit can skip them: ruff and basedpyright act only on the
+Python sources, and the test suite does not read the documentation.
 
 ```bash
 uv run ruff format       # format
