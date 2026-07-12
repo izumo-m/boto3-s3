@@ -257,7 +257,9 @@ class StdioStorage(IOStorage):
     A source ``open("rb")`` reads ``sys.stdin.buffer`` (forced non-seekable); a
     destination ``open("wb")`` writes ``sys.stdout.buffer``. The stream is chosen
     by ``mode`` at ``open`` time, so a single instance serves either direction and
-    picks up a redirected ``sys.stdin`` / ``sys.stdout``.
+    picks up a redirected ``sys.stdin`` / ``sys.stdout``. If the selected process
+    stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
+    worker can receive an unusable file object.
     """
 
     def __init__(self) -> None:
@@ -276,7 +278,13 @@ class StdioStorage(IOStorage):
                     operation="cp",
                 )
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
-        return cast("BinaryIO", _Uncloseable(getattr(sys.stdout, "buffer", sys.stdout)))
+        stdout = sys.stdout
+        if stdout is None:
+            raise ValidationError(
+                "stdout is required for this operation, but is not available.",
+                operation="cp",
+            )
+        return cast("BinaryIO", _Uncloseable(getattr(stdout, "buffer", stdout)))
 
 
 __all__ = ["IOStorage", "StdioStorage"]

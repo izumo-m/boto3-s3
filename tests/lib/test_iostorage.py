@@ -149,3 +149,10 @@ class TestStdioStorage:
         # ValidationError: a runtime-state precondition (exceptions.md section 3).
         with pytest.raises(ValidationError, match="stdin is required"):
             StdioStorage().open("k", "rb")
+
+    def test_write_without_stdout_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("sys.stdout", None)
+        # Fail at the storage boundary instead of returning a wrapper that raises
+        # AttributeError later from a transfer worker.
+        with pytest.raises(ValidationError, match="stdout is required"):
+            StdioStorage().open("k", "wb")

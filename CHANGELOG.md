@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Unified listing and cancellation, added configurable annotation staging and local scan controls, and fixed bounded prefetching, dry-run validation, transfer, deletion, CRT, and aws-cli parity edge cases.
+- Unified listing and cancellation, added configurable annotation staging and local scan controls, and fixed parallel decision cleanup, stdio validation, bounded prefetching, transfer, deletion, CRT, and aws-cli parity edge cases.
 
 ## [0.5.0] - 2026-07-07
 
