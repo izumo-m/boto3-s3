@@ -43,6 +43,13 @@ def test_none_items_are_not_confused_with_end() -> None:
         assert list(it) == [None, 1, None]
 
 
+@pytest.mark.parametrize("queue_size", [0, -1])
+def test_non_positive_queue_size_is_rejected(queue_size: int) -> None:
+    with pytest.raises(ValueError, match="queue_size must be positive"):
+        with prefetch([[1]], queue_size=queue_size):
+            pass
+
+
 def test_worker_exception_surfaces_after_buffered_items() -> None:
     def boom() -> Iterator[list[int]]:
         yield [1, 2]

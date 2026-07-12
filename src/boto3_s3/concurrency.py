@@ -57,7 +57,12 @@ def prefetch(
     worker is signalled to stop and joined; unread chunks are dropped. A
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
+
+    `queue_size` must be positive. `queue.Queue` treats non-positive values as
+    unbounded, which would violate this helper's bounded-backpressure contract.
     """
+    if queue_size <= 0:
+        raise ValueError(f"queue_size must be positive (got {queue_size!r})")
     q: queue.Queue[Sequence[T] | object] = queue.Queue(maxsize=queue_size)
     stop = threading.Event()
     error: list[BaseException] = []
