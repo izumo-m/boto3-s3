@@ -236,8 +236,9 @@ def _run_sync_pairs(
     compare-key order and the case-conflict "first key wins" becomes
     non-deterministic (a library-only knob, no ``aws s3`` parity at stake). A
     ``decide`` exception propagates here (aborting the sync) when its result is
-    consumed. Before any exceptional return, decisions that have not started are
-    cancelled and running decisions are awaited, so none outlive the operation.
+    consumed. Before returning from a decision, action, or pair-producer
+    failure, decisions that have not started are cancelled and running decisions
+    are awaited, so none outlive the operation.
     `cancel_token` is polled before decisions and actions. Graceful cancellation
     awaits outstanding decisions; immediate mode first calls `cancel()` on their
     futures. The caller's executor is never shut down.
