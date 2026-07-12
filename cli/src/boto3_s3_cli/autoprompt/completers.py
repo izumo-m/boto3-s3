@@ -4,14 +4,14 @@ Ports ``CompletionResult`` / ``AutoCompleter`` (``completer.py``),
 ``fuzzy_filter`` (``filters.py``), and the completers from
 ``autocomplete/local/basic.py``, scoped to what ``aws s3`` actually exercises:
 
-- :class:`ModelIndexCompleter` - subcommand names and option names.
-- :class:`RegionCompleter` / :class:`ProfileCompleter` - ``--region`` /
+- ``ModelIndexCompleter`` - subcommand names and option names.
+- ``RegionCompleter`` / ``ProfileCompleter`` - ``--region`` /
   ``--profile`` values (local botocore/config data).
-- :class:`FilePathCompleter` - ``file://`` / ``fileb://`` paths.
-- :class:`ChoicesCompleter` - values for any option with fixed ``choices``.
+- ``FilePathCompleter`` - ``file://`` / ``fileb://`` paths.
+- ``ChoicesCompleter`` - values for any option with fixed ``choices``.
 
 The auto-prompt UI is charter-exempt (``docs/autoprompt.md`` section 1), so these
-completers favor *usability* over a byte-faithful port. :class:`ChoicesCompleter`
+completers favor *usability* over a byte-faithful port. ``ChoicesCompleter``
 completes every choice-bearing option uniformly from the argparse model, where
 aws only completes *global* choices (its command-level path reads
 ``argument_model.enum``, empty for the ``s3`` customization args whose values
@@ -57,7 +57,8 @@ class CompletionResult:
 
 
 # A response filter narrows + ranks candidates against the current fragment;
-# auto-prompt uses fuzzy_filter, the default elsewhere is startswith_filter.
+# auto-prompt uses fuzzy_filter (aws-cli's non-auto-prompt shell completion
+# defaults to a startswith filter, a path this port does not implement).
 ResponseFilter = Callable[[str, "list[CompletionResult]"], "list[CompletionResult]"]
 # A value provider sources region/profile candidates; injecting a fake keeps the
 # unit tests free of botocore and the network.
@@ -73,8 +74,8 @@ class _FuzzyMatch(NamedTuple):
 def fuzzy_filter(prefix: str, completions: list[CompletionResult]) -> list[CompletionResult]:
     """Subsequence match + rank, exactly as aws-cli's auto-prompt filter.
 
-    ``"rmt"`` becomes ``/r.*?m.*?t/``; each candidate keeps its shortest,
-    left-most match, and results sort by (match length, start, display, name).
+    ``"rmt"`` becomes ``/r.*?m.*?t/``; each candidate keeps its left-most, then
+    shortest match, and results sort by (match length, start, display, name).
     """
     if prefix and completions:
         fuzzy_matches: list[_FuzzyMatch] = []
@@ -102,11 +103,12 @@ def fuzzy_filter(prefix: str, completions: list[CompletionResult]) -> list[Compl
     return completions
 
 
-def startswith_filter(prefix: str, completions: list[CompletionResult]) -> list[CompletionResult]:
-    return [c for c in completions if (c.display_text or c.name).startswith(prefix)]
-
-
 def _clean_help(text: str | None) -> str | None:
+    """Strip HTML tags and flatten newlines - aws-cli's ``strip_html_tags_and_newlines``.
+
+    aws deletes newlines (``.replace("\\n", "")``); we replace them with a space
+    so adjacent words don't fuse in the single-line ``display_meta`` label.
+    """
     if not text:
         return None
     return re.sub("<.*?>", "", text).replace("\n", " ")
@@ -279,7 +281,7 @@ class FilePathCompleter(BaseCompleter):
 
     aws drives this with ``prompt_toolkit``'s ``PathCompleter``; we reimplement
     the directory listing in pure Python so the completion engine carries no
-    ``prompt_toolkit`` dependency (only :mod:`prompt` binds it).
+    ``prompt_toolkit`` dependency (only ``prompt`` binds it).
     """
 
     _PREFIXES = ("file://", "fileb://")

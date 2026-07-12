@@ -108,6 +108,12 @@ class _MemStorage(Storage):
     destination uses the key ``""`` (the location itself), a recursive one the
     relative keys. ``capabilities`` declares the full open-route contract; the
     narrower subclasses below drive the capability gate.
+
+    ``opens`` records every ``(key, mode)`` passed to ``open()`` - it lets a
+    dry-run test assert the backend is never opened (no read/write side
+    effect). ``deletes`` records every key passed to ``delete()`` - it lets an
+    mv test assert the source was removed through ``Storage.delete`` (not
+    ``os.remove`` of an empty path).
     """
 
     scheme = "mem"
@@ -121,11 +127,7 @@ class _MemStorage(Storage):
     def __init__(self, store: dict[str, bytes], *, location: str = "mem://data") -> None:
         self._store = store
         self._location = location
-        #: every (key, mode) passed to open() - lets a dry-run test assert the
-        #: backend is never opened (no read/write side effect).
         self.opens: list[tuple[str, str]] = []
-        #: every key passed to delete() - lets an mv test assert the source was
-        #: removed through Storage.delete (not os.remove of an empty path).
         self.deletes: list[str] = []
 
     def as_text(self) -> str:
@@ -409,8 +411,6 @@ class TestOpenDownloadRoute:
         # The open route mirrors the built-in one: aws filters the
         # single-object case as well - the excluded object is headed but
         # never fetched, and the backend is never opened.
-        from boto3_s3 import GlobFilter
-
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
         drop = GlobFilter().exclude("*").compile()

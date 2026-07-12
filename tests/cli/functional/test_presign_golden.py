@@ -22,6 +22,7 @@ from tests.utils.golden import assert_matches_golden, load_golden
 from tests.utils.harness import (
     assert_stderr_tokens,
     normalize_presign_stdout,
+    presign_scope_mask_region,
     run_cli_in_process,
 )
 from tests.utils.presign_scenarios import SCENARIOS, PresignScenario, resolve_argv
@@ -30,8 +31,11 @@ from tests.utils.presign_scenarios import SCENARIOS, PresignScenario, resolve_ar
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
 def test_presign_matches_golden(scenario: PresignScenario, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-    result = run_cli_in_process(resolve_argv(scenario, FUNCTIONAL_BUCKET))
-    lines = normalize_presign_stdout(result.stdout, bucket=FUNCTIONAL_BUCKET)
+    argv = resolve_argv(scenario, FUNCTIONAL_BUCKET)
+    result = run_cli_in_process(argv)
+    lines = normalize_presign_stdout(
+        result.stdout, bucket=FUNCTIONAL_BUCKET, mask_region=presign_scope_mask_region(argv)
+    )
     golden = load_golden("presign", scenario.name)
     assert_matches_golden(
         golden,

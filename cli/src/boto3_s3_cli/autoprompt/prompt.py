@@ -1,10 +1,10 @@
 """The ``prompt_toolkit``-backed auto-prompt - the only module that binds it.
 
 Imported only when ``--cli-auto-prompt`` fires on an install that has the
-``autoprompt`` extra. :class:`PromptToolkitCompleter` adapts our pure-Python
-:class:`~boto3_s3_cli.autoprompt.completers.AutoCompleter` to ``prompt_toolkit``
+``autoprompt`` extra. ``PromptToolkitCompleter`` adapts our pure-Python
+``AutoCompleter`` to ``prompt_toolkit``
 (a port of aws-cli's ``awscli/autoprompt/prompttoolkit.py``'s adapter), and
-:class:`PromptToolkitAutoPrompter` runs the editable prompt and returns the
+``PromptToolkitAutoPrompter`` runs the editable prompt and returns the
 edited argv. We use ``prompt_toolkit``'s standard completion menu rather than
 cloning aws's full-screen doc-panel app - the contract is candidate parity, not
 UI chrome (console output is non-contractual, option-handling section 6).
@@ -12,6 +12,7 @@ UI chrome (console output is non-contractual, option-handling section 6).
 
 from __future__ import annotations
 
+import logging
 import shlex
 import sys
 from typing import TYPE_CHECKING
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from prompt_toolkit.document import Document
 
     from boto3_s3_cli.autoprompt.completers import CompletionResult
+
+logger = logging.getLogger(__name__)
 
 _AUTO_PROMPT_OVERRIDES = ("--cli-auto-prompt", "--no-cli-auto-prompt")
 
@@ -54,7 +57,7 @@ def build_completion_source() -> AutoCompleter:
 
 
 class PromptToolkitCompleter(Completer):
-    """Converts our :class:`CompletionResult`s into ``prompt_toolkit`` completions."""
+    """Converts our ``CompletionResult``s into ``prompt_toolkit`` completions."""
 
     def __init__(self, completion_source: AutoCompleter) -> None:
         self._source = completion_source
@@ -71,6 +74,9 @@ class PromptToolkitCompleter(Completer):
             low_level = self._source.autocomplete(text, len(text))
             yield from self._convert(low_level, text_before_cursor)
         except Exception:
+            # Swallow so a completer bug never kills the interactive prompt, but
+            # leave a --debug trail (aws does the same in its adapter).
+            logger.debug("exception in PromptToolkitCompleter.get_completions", exc_info=True)
             return
 
     def _convert(

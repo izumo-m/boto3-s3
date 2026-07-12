@@ -1,11 +1,12 @@
 """Unit tests for ``Storage.as_text`` - the canonical aws-cli path-shape token.
 
-``as_text`` is the inverse of :meth:`S3.resolve` for locatable Storages
+``as_text`` is the inverse of ``S3.resolve`` for locatable Storages
 (``S3Storage`` / ``LocalStorage``) and a display-only token (``"-"``) for stream
 endpoints; ``str(storage)`` delegates to it. The goldens below pin the form the
-transfer engine's ``naming`` layer consumes - in particular that a keyless S3
-location is reconstructed slashless (``s3://bucket``), not echoed from the raw,
-possibly trailing-slashed constructor input.
+transfer planner (``transferplan``) and each backend's ``format`` grammar
+consume - in particular that a keyless S3 location is reconstructed slashless
+(``s3://bucket``), not echoed from the raw, possibly trailing-slashed
+constructor input.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class TestS3StorageAsText:
 
     def test_keyless_reconstructs_from_bucket_not_raw_url(self) -> None:
         # url echoes the raw input; as_text rebuilds from bucket/key, so the
-        # keyless trailing slash is normalized away (what naming expects).
+        # keyless trailing slash is normalized away (what the format grammar expects).
         storage = S3Storage("s3://bucket/")
         assert storage.url == "s3://bucket/"
         assert storage.as_text() == "s3://bucket"
@@ -84,7 +85,7 @@ class TestAsTextIsResolveInverse:
         assert isinstance(restored, S3Storage)
         assert (restored.bucket, restored.key) == (original.bucket, original.key)
 
-    @pytest.mark.parametrize("path", ["./x", "dir/", "/abs/p", "rel/p"])
+    @pytest.mark.parametrize("path", ["./x", "dir/", "/abs/p", "rel/p", "."])
     def test_local_round_trips_path(self, path: str) -> None:
         original = LocalStorage(path)
         restored = S3().resolve(original.as_text())

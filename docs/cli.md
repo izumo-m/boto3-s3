@@ -35,16 +35,18 @@ solidified design is added here.
   unset default. This lets a global option be placed **either before or after**
   the subcommand (both `boto3-s3 --profile foo ls s3://b` and
   `boto3-s3 ls s3://b --profile foo` work, matching `aws s3 --profile foo ls ...`).
-- To avoid touching `argparse._SubParsersAction` (private) in type annotations,
-  the subparsers are created by `cli.py`, and each subcommand class adds its own
-  arguments via `configure(parser)`.
+- The subparsers are created by `cli.py`: stage 1 registers stub entries whose
+  action (`_Stage1CommandAction`, an `argparse._SubParsersAction` subclass)
+  records the matched subcommand and captures the remaining argv uninterpreted
+  for stage 2, and each subcommand class adds its own arguments via
+  `configure(parser)` on the real stage-2 parser.
 
 ## 3. Module layout
 
 | module | role |
 |---|---|
-| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape, docs/imports.md section 2 item 4): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
-| `globalargs.py` | Common option definitions (the parent; SDK-free, the parse-path half - the aws-cli `globalargs.py` counterpart) |
+| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
+| `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
@@ -55,6 +57,7 @@ solidified design is added here.
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator; a non-string `fileb://` value is rejected at parse like aws's schema validation) |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
+| `usage.py` | The single home of the aws-parity usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
@@ -174,7 +177,7 @@ These implement the policy in
      present-wins - an empty value is fatal like aws, rc 255) nor the
      profile config supplies one; both client builders apply it.
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
-  / `--no-cli-pager` / `--color` / `--cli-error-format` / `--no-cli-auto-prompt`.
+  / `--no-cli-pager` / `--color` / `--cli-error-format`.
   They are accepted (the `choices` are validated) and have no effect on behavior.
 - **auto-prompt (section 3, design in [`autoprompt.md`](./autoprompt.md))**:
   `--cli-auto-prompt` is an **opt-in extra**. If `prompt_toolkit` is present, it
@@ -185,11 +188,16 @@ These implement the policy in
   **before** argparse, using the raw argv + the env `AWS_CLI_AUTO_PROMPT` + the
   profile's `cli_auto_prompt` (an SDK-free read, env > config > off) (so that it
   can launch even with no subcommand). `on-partial` means "run -> if a usage error
-  (252), prompt". `--no-cli-auto-prompt` is a no-op (section 2), but specifying it
-  together with `--cli-auto-prompt` is a usage error.
-- **`--debug`**: attaches a stderr handler to the `boto3_s3` / `botocore` /
-  `boto3` / `s3transfer` loggers (via the library's `boto3_s3.set_stream_logger`,
-  `mask_secrets=True`). Credentials (signatures, the access key id, the session
+  (252), prompt". `--no-cli-auto-prompt` forces the mode off - a no-op in the
+  default state, but it explicitly disables an env/config-driven prompt request
+  (matching aws-cli, section 2) - and specifying it together with
+  `--cli-auto-prompt` is a usage error.
+- **`--debug`**: attaches a stderr handler to the `boto3_s3` / `boto3_s3_cli` /
+  `botocore` / `boto3` / `s3transfer` loggers (via the library's
+  `boto3_s3.set_stream_logger`, `mask_secrets=True`). `boto3_s3_cli` is the
+  counterpart of aws-cli's own `awscli` logger, so the CLI's own debug lines
+  (runtimeconfig's alias resolution) surface too. Credentials (signatures, the
+  access key id, the session
   token, proxy credentials) are masked by `SecretMaskingFilter` (design in
   [`masking.md`](./masking.md)). `urllib3` is excluded (because it does not emit
   credentials). The library itself does not attach a handler at import time.
@@ -231,7 +239,7 @@ fills it in).
 
 | flag | handling |
 |---|---|
-| `--recursive` | `S3.ls(recursive=True)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
+| `--recursive` | `S3.ls(recursive=True, on_result=...)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
 | `--page-size N` | `S3Storage(url, page_size=N)` (the listing page size is the storage's own config now, not an `ls` argument). No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254. Charter compliance) |
 | `--request-payer [requester]` | `S3.ls(request_payer="requester")` (ineffective in bucket listing = same as aws) |
 | `--human-readable` | Formats the size in base-2 (CLI side, the library is not involved) |
@@ -265,11 +273,11 @@ is not guaranteed):
 
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
 non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
-head order of section 5.7 (`--endpoint-url` scheme 252 -> `--page-size`
-paramfile expansion 252 -> its conversion 255 -> session profile 255, so
-`rm badpath --profile <bad>` is the profile's 255, like aws; `ls` and
-`presign` share the endpoint/paramfile/conversion prefix for their integer
-options). The target has 3 forms
+head order of section 5.7 (the `--query` compile 252 -> `--endpoint-url`
+scheme 252 -> `--page-size` paramfile expansion 252 -> its conversion 255 ->
+session profile 255, so `rm badpath --profile <bad>` is the profile's 255,
+like aws; `ls` and `presign` share the query/endpoint/paramfile/conversion
+prefix for their integer options). The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
 
@@ -281,8 +289,9 @@ aws-cli's behavior):
   `FileFormat.s3_format`. Because `data` is listed as `data/`, a sibling such as
   `data-sibling.txt` with the same string prefix is **not swept in**). Folder
   markers are also deletion targets. The deletion is a batch `DeleteObjects` by
-  the library's `S3Deleter` (the wire deviation from aws's per-key `DeleteObject`
-  is accepted, [`deleter.md`](./deleter.md) section 4).
+  the library's `S3Deleter`; keys that cannot be represented in its XML 1.0 body
+  fall back to aws's per-key `DeleteObject` route
+  ([`deleter.md`](./deleter.md) section 4).
 - **No key (non-recursive) = folder-marker cleanup**: it lists everything but
   **deletes only the size-0, `/`-terminated markers** (at any depth). This is not
   a full wipe (a full wipe is `--recursive`).
@@ -336,17 +345,20 @@ client-side validation for `Bucket=""` (the same leading branch as rm).
 ### 5.4 `rb`
 
 Equivalent to `aws s3 rb <S3Uri>` (aws-cli `RbCommand`). A non-`s3://` path is
-rc 252. **A URI with a key is also rc 252** ("Please specify a valid bucket name
-only." A bare trailing slash in `s3://b/` is allowed, treating the key as empty =
-same as aws).
+rc 252. **A URI with a key is also rc 252** ("Please specify a valid bucket
+name only. E.g. s3://<bucket>" - the same wording for a key on a valid bucket
+and for `s3:///k` (an empty bucket name in that example). A bare trailing
+slash in `s3://b/` is allowed, treating the key as empty = same as aws).
 
 | flag | handling |
 |---|---|
-| `--force` | **Before** delete_bucket, it internally runs the entire `rm <S3Uri> --recursive` (delegating to `RmCommand` - `delete:` lines also appear the same as rm. aws likewise re-enters `RmCommand`). If rm's rc != 0, it emits the fixed text "remove_bucket failed: Unable to delete all objects in the bucket, bucket will not be deleted." to stderr and is **rc 255** (the path where aws's RuntimeError reaches the general handler; golden captured). It does not attempt to delete the bucket |
+| `--force` | **Before** delete_bucket, it internally runs the entire `rm <S3Uri> --recursive` (delegating to `RmCommand` - `delete:` lines also appear the same as rm. aws likewise re-enters `RmCommand`). If rm's rc != 0, the fixed text "remove_bucket failed: Unable to delete all objects in the bucket, bucket will not be deleted." is raised as an `InvalidValueError`, so it reaches stderr through `main`'s general handler with its `boto3-s3: [ERROR]: ` prefix rather than a direct write - **rc 255** (the path where aws's own `RuntimeError` reaches its general handler the same way, `aws: [ERROR]: `). It does not attempt to delete the bucket |
 
 Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
 <msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
-`Bucket=""` of `rb s3://`) is uniformly **rc 1**.
+`Bucket=""` of `rb s3://`) is uniformly **rc 1**, reusing the same
+`usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
+wrapper as `mb` / `rm`'s equivalent empty-bucket check.
 
 ### 5.5 `presign`
 
@@ -486,13 +498,21 @@ are subject to it only when awscrt is present (overview.md section 3, transfer.m
 Signing stays pure-Python via the pin of section 4.
 
 The validation order of `run()` (corresponding to aws's stages; the
-combined-error cases are measured against the pinned aws 2.35.5):
-**`--endpoint-url` scheme (252**, aws validates the value at parse time) ->
-**direct-option paramfile / blob loads (252**, aws's parse-time expansion -
-covering even the string-typed integer options, so `--page-size file:///no/x`
-is 252, and beating the conversions' 255) -> integer conversion (255) ->
-**`--metadata` resolution (252**, paramfile + shorthand + the string-only
-value check; the one value family the conversions beat) -> **session
+combined-error cases are measured against the pinned aws 2.35.18):
+**`--query` compile (252**, aws resolves it at `top-level-args-parsed`, ahead
+of everything else) -> **`--endpoint-url` scheme (252**, aws validates the
+value at parse time) -> **the direct-option paramfile loads and the two
+integer coercions, interleaved per aws's `TRANSFER_ARGS` registration order**
+(`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
+blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
+free-string text block, `--progress-frequency`, then `--page-size` - each
+option's `file://`/`fileb://` load and, for the two integer options, its
+`int()` coercion happen together at that option's registration position, so a
+combined failure resolves to whichever option comes first: a load is 252, a
+bad `int()` is 255) -> **`--metadata` resolution (252**, paramfile + shorthand
++ the string-only value check; resolved *after* both integer coercions,
+unlike the options above - the one value family the coercions beat) -> cp's
+**`--expected-size` paramfile (252)** -> **session
 profile resolution (255**, aws binds the profile at startup, so a bad
 `--profile` beats every post-parse usage error; an unresolvable *region*
 does NOT fail here - aws defers it to request time) -> route type / streaming
@@ -511,7 +531,9 @@ unconditionally) -> the SSE-C pair / `--case-conflict` Express branch (252)
 lines have already been emitted by on_result), any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
-`--expected-size`, an absent stdin, and case-conflict `error` are also here), a
+`--expected-size`, an absent stdin, and case-conflict `error` are also here;
+malformed `--grants` remains fatal under `--dryrun` because aws-cli maps each
+dry-run item's request parameters), a
 normal return is **2** if the warned count > 0, else 0.
 
 **Output** (`TransferPrinter`, aws-cli `ResultPrinter` shape): success
@@ -628,9 +650,10 @@ strategy-derived `--delete` / `--size-only` / `--exact-timestamps`): **`--recurs
 and `--expected-size` are not declared** (`Unknown options` 252 - sync is always
 recursive and has no streaming form). `add_transfer_arguments(include_recursive=False)`.
 
-**Validation order** (the shared section 5.7 head first - endpoint scheme,
-paramfile loads, the coercions, `--metadata`, the session profile - then,
-before the client factory):
+**Validation order** (the shared section 5.7 head first - the `--query`
+compile, the endpoint scheme check, the interleaved paramfile loads /
+coercions, `--metadata`, the session profile - then, before the client
+factory):
 
 1. Integer-option conversion (255; part of the shared head above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
@@ -698,10 +721,14 @@ the **refining subclasses are checked before their parents**: aws routes a
 post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
-([`exceptions.md`](./exceptions.md) section 2). The **message wording** of a
-usage error may stay as argparse's, except for an unknown option (`Unknown
-options: ...` = the same shape as aws-cli) - what the charter requires is the exit
-code, and a byte-for-byte match of the console output is not guaranteed.
+([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
+validation failures mapped to 252 use aws-cli 2.35.18's default enhanced-style
+envelope,
+`An error occurred (ParamValidation): <message>`. This includes argparse
+failures, unknown options, plain `ValidationError`, and the auto-prompt flag
+conflict. The program-name prefix remains outside the parity target, and
+alternate `--cli-error-format` renderings are not implemented
+([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start
@@ -729,8 +756,7 @@ the client in `super()._run_main()` ahead of the scheme / empty / `--x-s3` / key
 checks), so a client-construction failure takes precedence over a path usage
 error - e.g. `mb badpath --profile <bad>` is the construction error's 255, not
 the scheme 252, exactly like aws. (This means an `mb` / `rb` path usage error
-loads `boto3`; that is within the import contract, which keeps only the
-pre-dispatch paths SDK-free - docs/imports.md section 2.) Client creation is
+loads `boto3`; the import contract does not constrain usage-error paths.) Client creation is
 outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
 as a traceback - `NoCredentialsError` /
@@ -765,18 +791,12 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 
 ## 7. Import discipline (startup cost)
 
-Until the subcommand is determined (stage 1 of the two-stage dispatch), no
-AWS SDK module (boto3 / botocore / s3transfer), no command module, and no
-**`prompt_toolkit`** loads - so the top-level `--help` / `--version` and the
-stage-1 usage errors stay SDK-free. Once the subcommand is determined, a
-command module may top-import names that reach `botocore.exceptions`, and its
-`run()` may load botocore (the profile resolution, the error path); the
-boto3 / s3transfer **client stack** still loads only in `build_client` /
-`build_service_client`. The contract and the implementation as a whole are in
-[`imports.md`](./imports.md) (section 2 item 4 - the old "SDK imports go
-inside `run()`" rule is retired); enforcement is in
-`tests/cli/unit/test_import_contract.py` (the forbidden roots include
-`prompt_toolkit`). The key points on the CLI side:
+The top-level `--help` and `--version` exits load no AWS SDK module (boto3 /
+botocore / s3transfer) and no command module. This is the full CLI import
+contract: after normal dispatch begins, SDK imports are permitted, including on
+usage errors and subcommand help. [`imports.md`](./imports.md) defines the
+contract and `tests/cli/unit/test_import_contract.py` enforces the two exits.
+The key implementation points are:
 
 - The `--version` line is assembled when the action fires, and the boto3 /
   botocore versions are read from the distribution metadata (the package proper is
@@ -814,8 +834,8 @@ the library. The overall design and the library side (boto3-faithful) are in
   (rc 255 - aws-cli's class of the same name is also 255 at the general
   handler. It is placed **after**
   the usage 252 / src-absent 255 validation: an invalid `[s3]` value loses to
-  both). This also closes the existing gap where classic's
-  `multipart_threshold` etc. did not take effect from the config.
+  both). Classic transfers read `multipart_threshold` and the like from the
+  config through this same path.
 - **The engine decision tree** (`resolve_transfer_client`, a port of aws-cli
   `TransferManagerFactory`): `s3s3` -> unconditionally classic; `preferred` is
   `classic` -> classic; `crt` -> crt if awscrt is present *and* the installed
@@ -838,3 +858,8 @@ the library. The overall design and the library side (boto3-faithful) are in
   paths_type=...)`. A test-injected `ctx.transfer_config` always takes precedence.
   `preferred_transfer_client` has no CLI option (config key only. Same as
   aws-cli).
+- **Annotation staging**: `build_transfer_options` always sets the library-only
+  `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
+  multipart source annotation before creating the destination, matching
+  aws-cli, while no new CLI option is exposed. The tempfile/deferred modes are
+  library-only until the post-1.0 CLI surface is reconsidered.

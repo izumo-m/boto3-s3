@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import usage
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli import clientfactory, globalargs, usage
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_option_paramfile,
+    expand_positional_paramfile,
+)
 
 
 class WebsiteCommand(Command):
@@ -31,21 +36,35 @@ class WebsiteCommand(Command):
         ClientError-cause mapping; botocore's client-side parameter
         validation (empty bucket) is 252; client construction is 253.
         """
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, S3Storage
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # compile (252) leads, then the --endpoint-url scheme check (252), then
+        # the paramfile expansions (252) - the positional path and both document
+        # options are all expanded at parse time - before the request is built.
+        globalargs.validate_query(args)
+        clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "paths", name="paths", operation="website")
+        expand_option_paramfile(args, "index_document", operation="website")
+        expand_option_paramfile(args, "error_document", operation="website")
+        # Import the library entry point only when this execution path needs it.
+        from boto3_s3 import S3Storage
 
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
-        path = args.paths
+        if isinstance(args.paths, bytes):
+            # Intentional aws-cli bug parity: WebsiteCommand declares a
+            # one-element positional list, the URI handler unwraps it to bytes,
+            # and the command indexes those bytes as though the list remained.
+            # The resulting int has no startswith(), so aws exits 255.
+            raise AttributeError("'int' object has no attribute 'startswith'")
+        path: str = args.paths
         if path.startswith("s3://"):
             path = path[len("s3://") :]
         if path.endswith("/"):
             path = path[:-1]
 
-        storage = S3Storage(f"s3://{path}", client=ctx.client_factory(args))
+        s3 = ctx.s3(args)
+        storage = S3Storage(f"s3://{path}", client=s3.client())
         storage.validate()
         if path.endswith("/") or storage.key:
             # S3Storage splits "b/k" where aws would send the whole string as
@@ -58,7 +77,7 @@ class WebsiteCommand(Command):
                 usage.invalid_bucket_name_message(path),
                 operation="website",
             )
-        S3().website(
+        s3.website(
             storage,
             index_document=args.index_document,
             error_document=args.error_document,

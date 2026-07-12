@@ -3,29 +3,28 @@
 The aws-cli pipeline that decides a path pair's shape is ported here - this
 file plays aws-cli's ``fileformat.py``, holding the plan it produces:
 
-- ``FileFormat.format``                  -> :func:`plan_transfer`. The per-side
+- ``FileFormat.format``                  -> ``plan_transfer``. The per-side
   halves (``FileFormat.local_format`` / ``s3_format``, and aws-cli's
   ``CommandParameters._normalize_s3_trailing_slash``, which falls out of the
-  S3 join) live on the backends as :meth:`~boto3_s3.storage.Storage.format`
+  S3 join) live on the backends as ``format``
   overrides, each computed from the endpoint's own held state.
 - ``FileFormat.identify_type``           -> the CLI layer (string
   classification is its responsibility; the planner receives resolved
   ``Storage`` objects).
-- ``utils.find_dest_path_comp_key``      -> :func:`item_paths` / :func:`dest_for`
+- ``utils.find_dest_path_comp_key``      -> ``item_paths`` / ``dest_for``
   (kept here rather than mirroring aws's ``utils`` home because they operate
-  on the :class:`TransferPlan` this module owns)
+  on the ``TransferPlan`` this module owns)
 
 The planner sits *above* the storage backends: an endpoint arrives as a
-resolved :class:`~boto3_s3.storage.Storage`; its side is formatted by the
+resolved ``Storage``; its side is formatted by the
 polymorphic ``Storage.format``, while the *route* is classified by concrete
 type (``isinstance`` against ``S3Storage`` / ``LocalStorage``; any other
 ``Storage`` is a custom, ``open``-routed backend - the engine reaches into the
 built-in classes' own API, so only they can take the built-in routes).
-Importing this module therefore reaches ``botocore.exceptions`` through
-``s3storage`` (the dependency import contract item 3 permits for the
-``S3Storage`` surface).
+Importing this module therefore currently reaches ``botocore.exceptions``
+through ``s3storage``. That timing is not part of the import contract.
 
-S3 paths inside a :class:`TransferPlan` use aws-cli's internal
+S3 paths inside a ``TransferPlan`` use aws-cli's internal
 ``bucket/key`` form (scheme stripped); local paths are native (``os.sep``).
 Building display strings (``s3://...`` / relative rendering) is the caller's
 concern.
@@ -58,7 +57,7 @@ class TransferPlan:
     a native absolute path, and a custom ``open`` side as ``""`` (it addresses
     entries by the relative ``compare_key`` its own ``open`` takes); directory
     semantics are expressed by a trailing separator. ``--exclude`` / ``--include``
-    need no root here: :mod:`boto3_s3.globsieve` matches a relative pattern
+    need no root here: ``boto3_s3.globsieve`` matches a relative pattern
     against each item's ``compare_key`` and a root-anchored one against its full
     ``key`` at match time.
     """
@@ -118,11 +117,11 @@ def _paths_type(src: Storage, dest: Storage, *, operation: str) -> PathsType:
 def plan_transfer(
     src: Storage, dest: Storage, *, recursive: bool, operation: str = "cp"
 ) -> TransferPlan:
-    """Format a cp/mv endpoint pair into a :class:`TransferPlan` (aws-cli ``FileFormat.format``).
+    """Format a cp/mv endpoint pair into a ``TransferPlan`` (aws-cli ``FileFormat.format``).
 
-    The pairing is validated and its route named by :func:`_paths_type`; each
+    The pairing is validated and its route named by ``_paths_type``; each
     side then formats *itself* - the polymorphic
-    :meth:`~boto3_s3.storage.Storage.format` (aws-cli's per-type
+    ``format`` (aws-cli's per-type
     ``local_format`` / ``s3_format``, computed from the endpoint's held state).
     Each side's separator stays readable as ``plan.src.sep`` /
     ``plan.dest.sep``. ``recursive`` is aws-cli's ``dir_op``.
@@ -168,7 +167,7 @@ def item_paths(plan: TransferPlan, src_path: str) -> tuple[str, str]:
     The destination appends it (separator-translated) only when the
     destination takes the source's name. Used where no listing ``FileInfo`` is
     at hand (a stream's dest); the listing paths read ``FileInfo.compare_key``
-    and call :func:`dest_for` directly.
+    and call ``dest_for`` directly.
     """
     if plan.dir_op:
         rel_path = src_path[len(plan.src_root) :]

@@ -21,15 +21,16 @@ The suite is opt-in, gated on ``BOTO3_S3_E2E_BUCKET``:
 - env var unset, *only* e2e was requested -> the session aborts immediately
   with one message instead of N skips;
 - env var set -> the environment is probed once at collection time (the ``aws``
-  binary present; the bucket reachable and **empty**, checked via boto3) and the
-  session aborts on any failure. The non-empty check is the safety guard against
-  pointing the variable at a real, populated bucket.
+  binary present and on the vendored v2 pin; the bucket reachable and **empty**,
+  checked via boto3) and the session aborts on any failure. The non-empty check
+  is the safety guard against pointing the variable at a real, populated bucket.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -98,14 +99,15 @@ def _probe_e2e_environment_or_exit() -> None:
     ``pytest.exit`` (rather than per-test fixture errors) keeps the failure to
     a single clear message. The parity tests drive the high-level ``aws s3``
     commands themselves, so the probe only checks that the ``aws`` binary is
-    present; the bucket's reachability and the empty-bucket safety guard go
-    through boto3 (the same client the per-test ``_assert_bucket_empty`` uses),
-    not a low-level ``aws s3api`` call.
+    present and on the vendored v2 pin; the bucket's reachability and the
+    empty-bucket safety guard go through boto3 (the same client the per-test
+    ``_assert_bucket_empty`` uses), not a low-level ``aws s3api`` call.
     """
     bucket = os.environ.get(BUCKET_ENV_VAR)
     assert bucket  # checked by the caller
     if shutil.which("aws") is None:
         pytest.exit("aws v2 binary not on PATH", returncode=2)
+    _check_aws_version_or_exit()
     client = boto3.session.Session().client(
         "s3",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
@@ -123,6 +125,39 @@ def _probe_e2e_environment_or_exit() -> None:
             "bucket and try again.",
             returncode=2,
         )
+
+
+def _check_aws_version_or_exit() -> None:
+    """Gate the live ``aws`` on major 2 and the vendored pin.
+
+    The parity goldens are captured with the aws-cli the library is ported
+    against (the vendored submodule; ``scripts/install-awscli.sh`` installs it
+    into ``.venv/bin``). A v1 binary, or a v2 off the pin, silently skews the
+    comparison, so a wrong major aborts outright and a pinned-version drift
+    aborts under ``UPDATE_GOLDENS`` (the capture must match the pin) and warns
+    otherwise (a checked-out submodule is required for the pin check; without
+    one only the major is enforced).
+    """
+    from tests.utils.golden import (
+        detect_aws_version,
+        parse_aws_cli_version,
+        pinned_aws_version,
+        update_goldens_enabled,
+    )
+
+    reported = detect_aws_version()
+    version = parse_aws_cli_version(reported)
+    if version is None or version.split(".", 1)[0] != "2":
+        pytest.exit(f"e2e requires an aws-cli v2 binary; found {reported!r}", returncode=2)
+    pinned = pinned_aws_version()
+    if pinned is not None and version != pinned:
+        message = (
+            f"live aws-cli {version} != the vendored pin {pinned} "
+            "(scripts/install-awscli.sh); goldens are captured against the pin"
+        )
+        if update_goldens_enabled():
+            pytest.exit(message, returncode=2)
+        warnings.warn(message, stacklevel=2)
 
 
 @pytest.fixture(scope="session")

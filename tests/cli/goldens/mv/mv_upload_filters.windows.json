@@ -1,0 +1,33 @@
+{
+  "argv": [
+    "mv",
+    "src",
+    "s3://<BUCKET>/tree/",
+    "--recursive",
+    "--exclude",
+    "*",
+    "--include",
+    "*.txt"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "tree/a.txt",
+    "tree/sub/c.txt",
+    "tree/sub/deep/d.txt",
+    "tree/z.txt"
+  ],
+  "scenario": "mv_upload_filters",
+  "src_tree": [
+    "b.bin:3:ae4b3280"
+  ],
+  "stdout_lines": [
+    "move: src\\a.txt to s3://<BUCKET>/tree/a.txt",
+    "move: src\\sub\\c.txt to s3://<BUCKET>/tree/sub/c.txt",
+    "move: src\\sub\\deep\\d.txt to s3://<BUCKET>/tree/sub/deep/d.txt",
+    "move: src\\z.txt to s3://<BUCKET>/tree/z.txt"
+  ]
+}

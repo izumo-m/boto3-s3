@@ -1,18 +1,27 @@
 """Unit tests for the aws-cli exit-code mapping (docs/cli.md section 6).
 
-``exit_code_for`` is exercised directly for each branch, and ``main`` is
+`exit_code_for` is exercised directly for each branch, and `main` is
 exercised end-to-end for the paths that do not go through a library error
 (usage errors, unknown options) plus the ClientError path through a fake
-client, so the parse -> dispatch -> error -> exit-code wiring is covered.
+client, so the parse -> dispatch -> error -> exit-code wiring is covered. The
+catch-all backstop (`_exit_code_for_unexpected`: a non-Boto3S3Error escaping
+a command -> 252/253/254/255) and the `BrokenPipeError` -> 0 handler are
+covered end-to-end through `main` too.
 """
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    NoCredentialsError,
+    NoRegionError,
+    ParamValidationError,
+    PartialCredentialsError,
+)
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -93,13 +102,53 @@ class _RaisingClient:
         return _Paginator()
 
 
+class _BrokenPipeClient:
+    """Fake whose ListObjectsV2 paginator raises BrokenPipeError on iteration.
+
+    Models a downstream reader closing the pipe (``... | head``): the library
+    does not translate a BrokenPipeError (``s3_errors`` catches only
+    ClientError / BotoCoreError), so it escapes the command and reaches
+    ``_dispatch``'s dedicated ``except BrokenPipeError`` handler.
+    """
+
+    def get_paginator(self, name: str) -> Any:
+        class _Paginator:
+            def paginate(self, **kwargs: Any) -> Any:
+                raise BrokenPipeError
+
+        return _Paginator()
+
+
 class TestMainExitCodes:
+    @pytest.mark.parametrize(
+        ("argv", "required_name"),
+        [
+            (["cp"], "paths"),
+            (["mv"], "paths"),
+            (["rm"], "paths"),
+            (["mb"], "path"),
+            (["rb"], "path"),
+            (["presign"], "path"),
+            (["website"], "paths"),
+        ],
+    )
+    def test_missing_required_path_uses_aws_argument_name(
+        self,
+        argv: list[str],
+        required_name: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        assert cli.main(argv) == 252
+        first_line = capsys.readouterr().err.splitlines()[0]
+        assert first_line.endswith(f"the following arguments are required: {required_name}")
+
     def test_unknown_option_exits_252_with_aws_wording(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rc = cli.main(["ls", "--extra-argument-foo", "s3://bucket/p/"])
         err = capsys.readouterr().err
         assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
         assert "Unknown options" in err
         assert "--extra-argument-foo" in err
 
@@ -107,7 +156,7 @@ class TestMainExitCodes:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws s3 joins multiple unknown options with "," and NO space (the
-        # customizations command layer; verified against real aws 2.35.5), not
+        # customizations command layer; verified against real aws 2.35.18), not
         # ", ". Both option positions share this wording.
         assert cli.main(["cp", "a.txt", "s3://b/", "--foo", "--bar"]) == 252
         assert "Unknown options: --foo,--bar" in capsys.readouterr().err
@@ -120,6 +169,15 @@ class TestMainExitCodes:
         assert rc == 252
         assert "Unknown options" in err
         assert "stray" in err
+
+    def test_invalid_choice_exits_252_with_param_validation_wrapper(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["sync", ".", "s3://bucket/p/", "--checksum-algorithm", "INVALID"])
+        err = capsys.readouterr().err
+        assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
+        assert "argument --checksum-algorithm: Found invalid choice 'INVALID'" in err
 
     def test_missing_subcommand_exits_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert cli.main([]) == 252
@@ -144,6 +202,48 @@ class TestMainExitCodes:
 
         with pytest.raises(AssertionError, match="must not be called"):
             cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=boom))
+
+    @pytest.mark.parametrize(
+        ("error", "expected_rc"),
+        [
+            (NoCredentialsError(), 253),
+            (NoRegionError(), 253),
+            # PartialCredentialsError has no dedicated aws handler -> the general
+            # 255, NOT 253 (only NoCredentials / NoRegion are 253).
+            (PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"), 255),
+            (_client_error("AccessDenied", 403), 254),
+            (ParamValidationError(report="Invalid bucket name"), 252),
+            (RuntimeError("boom"), 255),
+        ],
+    )
+    def test_raw_error_escaping_a_command_maps_without_traceback(
+        self, error: BaseException, expected_rc: int, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Defense in depth (_exit_code_for_unexpected): a non-Boto3S3Error that
+        # escapes command.run untranslated must still map through aws-cli's
+        # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
+        # ClientError 254, else 255) without a traceback (the exit-code charter,
+        # docs/overview.md section 3).
+        # The client factory raising is the cleanest injection - ls.run calls
+        # ctx.client_factory(args) directly, so the raw error escapes run.
+        def factory(_args: Any) -> Any:
+            raise error
+
+        rc = cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory))
+        err = capsys.readouterr().err
+        assert rc == expected_rc
+        assert "boto3-s3:" in err
+        if expected_rc == 252:
+            assert "An error occurred (ParamValidation):" in err
+        assert "Traceback" not in err
+
+    def test_broken_pipe_from_a_command_exits_0(self) -> None:
+        # aws-cli exits 0 when a downstream reader closes the pipe
+        # (docs/cli.md section 6): a BrokenPipeError escaping the command maps to
+        # 0, not a fatal rc. The library does not translate it, so it reaches
+        # _dispatch's dedicated handler.
+        ctx = Context(client_factory=lambda _args: _BrokenPipeClient())  # pyright: ignore[reportArgumentType]
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
 
 
 class TestClientCreationExitCodes:
@@ -227,11 +327,14 @@ class TestValidationOrder:
 
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
-    against the pinned aws 2.35.5; docs/cli.md section 6): the
-    ``--endpoint-url`` scheme check (252) -> the integer coercions (255) ->
-    paramfile / shorthand / blob value resolution (252) -> the session
-    profile resolution (255) -> the path/usage checks. Each test pins one
-    combined-error pair whose exit code that order decides."""
+    against the pinned aws 2.35.18; docs/cli.md section 5.7, table in
+    section 6): the ``--query`` compile (252) -> the ``--endpoint-url`` scheme
+    check (252) -> the direct-option paramfiles and the two integer coercions,
+    interleaved per aws's option-by-option registration order (a bad paramfile
+    is 252, a bad ``int()`` 255, and the earlier option wins) -> the
+    ``--metadata`` resolution (252, the one value family the coercions beat) ->
+    the session profile resolution (255) -> the path/usage checks. Each test
+    pins one combined-error pair whose exit code that order decides."""
 
     _BOGUS = "boto3_s3_no_such_profile_for_order_tests"
     _MISSING = "/nonexistent_src_for_head_order_test.txt"
@@ -291,6 +394,49 @@ class TestParseToValidationOrder:
         )
         assert rc == 255
 
+    def test_integer_coercion_beats_a_later_paramfile(self) -> None:
+        # aws interleaves the paramfile expansion and the int() per its
+        # registration order: --progress-frequency (an integer, registered
+        # before --page-size) fails its int() 255 ahead of a bad --page-size
+        # file:// (252). CLI order is irrelevant - the registration order is.
+        # Measured.
+        assert (
+            cli.main(
+                [
+                    "cp",
+                    self._MISSING,
+                    "s3://b/k",
+                    "--progress-frequency",
+                    "abc",
+                    "--page-size",
+                    "file:///no/x",
+                ]
+            )
+            == 255
+        )
+        assert (
+            cli.main(
+                [
+                    "cp",
+                    self._MISSING,
+                    "s3://b/k",
+                    "--page-size",
+                    "file:///no/x",
+                    "--progress-frequency",
+                    "abc",
+                ]
+            )
+            == 255
+        )
+
+    def test_page_size_int_beats_a_later_expected_size_paramfile(self) -> None:
+        # --expected-size is registered AFTER --page-size, so --page-size abc's
+        # int() 255 wins over --expected-size file://missing (252). Measured.
+        rc = cli.main(
+            ["cp", "-", "s3://b/k", "--page-size", "abc", "--expected-size", "file:///no/x"]
+        )
+        assert rc == 255
+
     def test_ls_endpoint_beats_the_integer_coercion(self) -> None:
         rc = cli.main(["ls", "s3://b", "--page-size", "abc", "--endpoint-url", "badurl"])
         assert rc == 252
@@ -309,6 +455,39 @@ class TestParseToValidationOrder:
         # parse time (252) - it must not reach the transfer (rc 1).
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "a@=fileb:///no/x"])
         assert rc == 252  # the missing paramfile itself is also a 252
+
+    def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
+        # A whole-value --metadata fileb:// load failure is the paramfile 252.
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "fileb:///no/x"])
+        assert rc == 252
+
+    def test_whole_value_metadata_fileb_existing_is_255(self, tmp_path: Path) -> None:
+        # aws loads the bytes, then crashes indexing them in its map shorthand
+        # parser: a general 255, not the map's usage 252. Measured.
+        blob = tmp_path / "m.bin"
+        blob.write_bytes(b"k=v")
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"fileb://{blob}"])
+        assert rc == 255
+
+    def test_free_string_option_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
+        # A fileb:// on a string-typed option loads bytes, which botocore
+        # rejects for a string parameter (252), not a transfer. Measured.
+        blob = tmp_path / "ct.bin"
+        blob.write_bytes(b"hi")
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--content-type", f"fileb://{blob}", "--dryrun"]
+        )
+        assert rc == 252
+
+    def test_query_compile_beats_the_endpoint_and_paramfile(self) -> None:
+        # aws resolves --query at top-level-args-parsed, ahead of --endpoint-url
+        # and every paramfile: a bad expression is its 252 first. Measured for
+        # each transfer command (they share the classify_paths head).
+        for command in ("cp", "mv", "sync"):
+            rc = cli.main(
+                [command, self._MISSING, "s3://b/k", "--query", "][", "--endpoint-url", "badurl"]
+            )
+            assert rc == 252, command
 
     def test_local_local_stays_252_in_a_regionless_env(
         self, monkeypatch: pytest.MonkeyPatch
@@ -329,19 +508,18 @@ class TestRecursiveDestDirCreation:
     pipeline's rc 1. sync always did this; cp/mv --recursive share it now."""
 
     @pytest.fixture()
-    def readonly_dir(self, tmp_path: Any) -> Any:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root creates anything")
-        ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o555)
-        yield ro
-        ro.chmod(0o755)
+    def blocked_parent(self, tmp_path: Path) -> Path:
+        # A file where the destination's parent directory should be: makedirs
+        # fails on every platform (a chmod-denied directory would not hold on
+        # Windows or as root), and every OSError category maps to the same 255.
+        blocker = tmp_path / "ro"
+        blocker.write_bytes(b"")
+        return blocker
 
-    def test_cp_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
-        rc = cli.main(["cp", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+    def test_cp_uncreatable_recursive_dest_exits_255(self, blocked_parent: Any) -> None:
+        rc = cli.main(["cp", "s3://b/pre", str(blocked_parent / "new"), "--recursive"])
         assert rc == 255
 
-    def test_mv_uncreatable_recursive_dest_exits_255(self, readonly_dir: Any) -> None:
-        rc = cli.main(["mv", "s3://b/pre", str(readonly_dir / "new"), "--recursive"])
+    def test_mv_uncreatable_recursive_dest_exits_255(self, blocked_parent: Any) -> None:
+        rc = cli.main(["mv", "s3://b/pre", str(blocked_parent / "new"), "--recursive"])
         assert rc == 255

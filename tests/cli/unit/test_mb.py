@@ -16,8 +16,8 @@ from botocore.exceptions import ClientError
 from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import run_cli_in_process
-from tests.utils.recorder import make_recording_client
+from tests.utils.harness import CliResult, run_cli_in_process
+from tests.utils.recorder import ApiCall, make_recording_client
 
 
 def _client_error(code: str, status: int) -> ClientError:
@@ -38,7 +38,9 @@ def _unused_factory(_args: Any) -> Any:
     raise AssertionError("client factory must not be called on this path")
 
 
-def _run_recorded(parsed_responses: list[dict[str, Any]], argv: list[str]) -> Any:
+def _run_recorded(
+    parsed_responses: list[dict[str, Any]], argv: list[str]
+) -> tuple[CliResult, list[ApiCall]]:
     client, calls = make_recording_client(parsed_responses)
     return run_cli_in_process(argv, ctx=_ctx(client)), calls
 
@@ -94,7 +96,7 @@ class TestUsageErrors:
         err = capsys.readouterr().err
         assert "<S3Uri>\nError: Invalid argument type" in err
         # aws's MbCommand raises the bare form - only rm's CommandParameters
-        # path gets the "usage: aws s3 <cmd> ..." prefix (measured, 2.35.5).
+        # path gets the "usage: aws s3 <cmd> ..." prefix (measured, 2.35.18).
         assert "usage:" not in err
 
     def test_bare_bucket_key_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -125,6 +127,30 @@ class TestUsageErrors:
         rc = cli.main(["mb", f"s3://{arn}"], ctx=_ctx(None))
         assert rc == 252
         assert "make_bucket failed" not in capsys.readouterr().err
+
+    def test_slash_form_express_arn_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # A slash-form accesspoint ARN whose name ends --x-s3: aws's ARN-aware
+        # split makes the whole ARN the bucket, so is_s3express_bucket sees the
+        # suffix -> 252 (a naive partition on the first "/" would miss it).
+        arn = "arn:aws:s3:us-east-1:123456789012:accesspoint/foo--x-s3"
+        rc = cli.main(["mb", f"s3://{arn}"], ctx=_ctx(None))
+        assert rc == 252
+        assert "Cannot use mb command with a directory bucket." in capsys.readouterr().err
+
+    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws expands the positional file:// at parse time, before the client
+        # build (so a bad reference beats a bad --profile). Names it 'path'.
+        rc = cli.main(["mb", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
+
+    def test_invalid_query_beats_client_construction(self) -> None:
+        # --query is compiled before the client is built, so its 252 wins over
+        # a construction failure's 255 (guards the head order).
+        def boom(_args: Any) -> Any:
+            raise Boto3S3Error("Unable to locate credentials")
+
+        assert cli.main(["mb", "s3://b", "--query", "]["], ctx=Context(client_factory=boom)) == 252
 
     def test_tags_missing_value_is_252(self) -> None:
         result = run_cli_in_process(

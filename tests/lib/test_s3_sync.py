@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -30,14 +30,17 @@ from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import (
+    CancelMode,
     CancelToken,
     CaseConflictMode,
     FileInfo,
+    FileKind,
     OpOutcome,
     OpResult,
     TransferOptions,
     TransferType,
 )
+from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SERIAL = TransferConfig(use_threads=False)
@@ -122,6 +125,33 @@ class TestSyncUpload:
             r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
             for r in results
         )
+
+    def test_complete_source_enumeration_reaches_the_sync_filter(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"x")
+        _write(src, "sub/b.txt", b"x")
+        (src / "link.txt").symlink_to(src / "a.txt")  # a symlink leaf
+        client, calls = make_recording_client([_listing(), {}, {}, {}])
+        seen: list[str] = []
+
+        def exclude_directories(info: FileInfo) -> bool:
+            assert info.compare_key is not None
+            seen.append(info.compare_key)
+            return info.kind is FileKind.FILE
+
+        S3().sync(
+            LocalStorage(str(src), enumerate_all_entries=True),
+            S3Storage("s3://bucket/p", client=client),
+            filter=exclude_directories,
+            transfer_config=_SERIAL,
+        )
+        assert {"", "a.txt", "link.txt", "sub/", "sub/b.txt"} <= set(seen)
+        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
+        assert [call.params["Key"] for call in calls[1:]] == [
+            "p/a.txt",
+            "p/link.txt",
+            "p/sub/b.txt",
+        ]
 
     def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
@@ -298,7 +328,7 @@ class TestSyncUpload:
             (TransferType.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
         }
 
-    def test_compare_replaces_the_default_judgment(self, tmp_path: Path) -> None:
+    def test_update_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
         listing = _listing(("p/same.txt", 2))
@@ -389,46 +419,7 @@ class TestSyncUpload:
                 cancel_token=token,
             )
 
-
-class TestSyncDownload:
-    def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
-        # The aws-cli asymmetry: same-size pairs download only when the LOCAL
-        # side is newer than S3.
-        out = tmp_path / "out"
-        _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
-        _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
-        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
-        client, calls = make_recording_client([listing, _get_response(), _get_response()])
-        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
-        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
-        assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
-        assert (out / "new.txt").read_bytes() == b"payload"
-
-    def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
-        out = tmp_path / "out"
-        _write(out, "old.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
-        S3().sync(
-            S3Storage("s3://bucket/d", client=client),
-            str(out),
-            update_filter=AwsCliComparison(exact_timestamps=True),
-            transfer_config=_SERIAL,
-        )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
-
-    def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
-        out = tmp_path / "out"
-        _write(out, "touched.txt", b"xx", mtime=_NEWER)
-        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
-        S3().sync(
-            S3Storage("s3://bucket/d", client=client),
-            str(out),
-            update_filter=AwsCliComparison(size_only=True),
-            transfer_config=_SERIAL,
-        )
-        assert _ops(calls) == ["ListObjectsV2"]
-
-    def test_compare_true_recopies_every_update(self, tmp_path: Path) -> None:
+    def test_update_filter_true_recopies_every_update(self, tmp_path: Path) -> None:
         # update_filter=True forces every update (both-sides) pair through, even
         # an up-to-date one the default would skip.
         src = tmp_path / "src"
@@ -442,7 +433,7 @@ class TestSyncDownload:
         )
         assert _ops(calls) == ["ListObjectsV2", "PutObject"]
 
-    def test_compare_false_is_additive_only(self, tmp_path: Path) -> None:
+    def test_update_filter_false_is_additive_only(self, tmp_path: Path) -> None:
         # update_filter=False never re-copies an existing destination (additive
         # only), but a brand-new source file still copies (create_filter default).
         src = tmp_path / "src"
@@ -505,6 +496,45 @@ class TestSyncDownload:
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.txt"]
 
+
+class TestSyncDownload:
+    def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
+        # The aws-cli asymmetry: same-size pairs download only when the LOCAL
+        # side is newer than S3.
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
+        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
+        client, calls = make_recording_client([listing, _get_response(), _get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
+        assert (out / "new.txt").read_bytes() == b"payload"
+
+    def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "old.txt", b"xx", mtime=_OLDER)
+        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            update_filter=AwsCliComparison(exact_timestamps=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+
+    def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)
+        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            update_filter=AwsCliComparison(size_only=True),
+            transfer_config=_SERIAL,
+        )
+        assert _ops(calls) == ["ListObjectsV2"]
+
     def test_destination_directory_is_created_even_when_empty(self, tmp_path: Path) -> None:
         out = tmp_path / "fresh" / "nested"
         client, _calls = make_recording_client([_listing()])
@@ -547,9 +577,8 @@ class TestSyncDownload:
         assert stale.exists()
         assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
 
+    @skip_if_chmod_is_inert
     def test_local_delete_failure_aggregates_into_batcherror(self, tmp_path: Path) -> None:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root removes anything")
         out = tmp_path / "out"
         stale = _write(out, "locked/stale.txt", b"xx")
         stale.parent.chmod(0o555)
@@ -679,6 +708,77 @@ class TestParallelFilter:
                 transfer_config=_SERIAL,
                 cancel_token=token,
             )
+        assert not [call for call in calls if call.operation == "PutObject"]
+
+    def test_immediate_cancel_cancels_queued_filter_decisions(self, tmp_path: Path) -> None:
+        class _SingleWorkerWindow(Executor):
+            _max_workers = 2
+
+            def __init__(self) -> None:
+                self._pool = ThreadPoolExecutor(1)
+                self.queued: list[Future[Any]] = []
+                self.queued_ready = threading.Event()
+
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                if not self.queued:
+                    future = self._pool.submit(fn, *args, **kwargs)
+                    self.queued.append(future)
+                    return future
+                future = Future[Any]()
+                self.queued.append(future)
+                self.queued_ready.set()
+                return future
+
+            def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+                self._pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"a")
+        _write(src, "b.txt", b"b")
+        client, calls = make_recording_client([_listing(), {}, {}])
+        token = CancelToken()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        decided: list[str] = []
+
+        def decide(info: FileInfo) -> bool:
+            decided.append(info.compare_key or "")
+            if len(decided) == 1:
+                first_started.set()
+                assert release_first.wait(5.0)
+            return True
+
+        cancelled_before_release = threading.Event()
+        with _SingleWorkerWindow() as pool:
+
+            def cancel() -> None:
+                assert first_started.wait(5.0)
+                assert pool.queued_ready.wait(5.0)
+                token.cancel()
+                threading.Event().wait(0.05)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                for _ in range(100):
+                    if pool.queued[1].cancelled():
+                        cancelled_before_release.set()
+                        break
+                    threading.Event().wait(0.01)
+                release_first.set()
+
+            canceller = threading.Thread(target=cancel)
+            canceller.start()
+            with pytest.raises(CancelledError):
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    create_filter=ParallelFilter(decide, executor=pool),
+                    transfer_config=_SERIAL,
+                    cancel_token=token,
+                )
+            canceller.join()
+
+        assert decided == ["a.txt"]
+        assert cancelled_before_release.is_set()
+        assert len(pool.queued) == 2 and pool.queued[1].cancelled()
         assert not [call for call in calls if call.operation == "PutObject"]
 
     def test_update_lane_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
@@ -820,3 +920,53 @@ class TestParallelFilter:
                 update_filter=ParallelFilter(boom, executor=pool),
                 transfer_config=_SERIAL,
             )
+
+    def test_inner_exception_awaits_other_accepted_decisions(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"aa")
+        _write(src, "b.txt", b"bb")
+        client, _calls = make_recording_client([_listing(("p/a.txt", 2), ("p/b.txt", 2))])
+        second_started = threading.Event()
+        release_second = threading.Event()
+        first_raised = threading.Event()
+        returned = threading.Event()
+        errors: list[BaseException] = []
+
+        def decide(pair: SyncPair) -> bool:
+            if pair.key == "a.txt":
+                assert second_started.wait(5.0)
+                first_raised.set()
+                raise ValueError("decide blew up")
+            second_started.set()
+            assert release_second.wait(5.0)
+            return False
+
+        pool = ThreadPoolExecutor(2)
+
+        def run_sync() -> None:
+            try:
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    update_filter=ParallelFilter(decide, executor=pool),
+                    transfer_config=_SERIAL,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                returned.set()
+
+        runner = threading.Thread(target=run_sync)
+        runner.start()
+        try:
+            assert first_raised.wait(5.0)
+            assert not returned.wait(1.0)
+        finally:
+            release_second.set()
+            runner.join(5.0)
+            pool.shutdown()
+
+        assert not runner.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], ValueError)
+        assert str(errors[0]) == "decide blew up"

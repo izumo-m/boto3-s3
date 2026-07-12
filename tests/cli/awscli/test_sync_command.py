@@ -1,7 +1,7 @@
 """Port of aws-cli's functional sync tests to ``boto3-s3 sync``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_sync_command.py``
-(aws-cli 2.34.x). Test names, canned responses, and expected operations are
+(aws-cli 2.35.18). Test names, canned responses, and expected operations are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
@@ -53,6 +53,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -69,8 +70,9 @@ _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
 _SYNC_CONFIG = TransferConfig(use_threads=False)
 # See test_cp_command._CASE_CONFLICT_CONFIG: the "two S3 twins" gate detects a
 # conflict only while the first twin is still in flight, so it needs a threaded
-# (non-blocking) submit running ahead of completions - aws-cli's own tests use a
-# single worker (max_concurrent_requests = 1) here.
+# (non-blocking) submit running ahead of completions - aws-cli runs its whole
+# functional s3 harness with max_concurrent_requests = 1, and that single worker
+# keeps the gate deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 _LIST_BASE = {"MaxKeys": 1000}
@@ -384,6 +386,7 @@ class TestSyncCommand:
                     "Bucket": "mybucket",
                     "Key": "mykey",
                     "RequestPayer": "requester",
+                    "AnnotationDirective": "EXCLUDE",
                 },
             ),
         ]
@@ -408,6 +411,7 @@ class TestSyncCommand:
             "Key": "mykey",
             "SSECustomerAlgorithm": "AES256",
             "SSECustomerKey": "destination-key",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     def test_s3s3_sync_with_different_sse_c_keys(self) -> None:
@@ -436,6 +440,7 @@ class TestSyncCommand:
             "SSECustomerKey": "destination-key",
             "CopySourceSSECustomerAlgorithm": "AES256",
             "CopySourceSSECustomerKey": "source-key",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     def test_request_payer_with_deletes(self) -> None:
@@ -599,6 +604,7 @@ class TestSyncCommand:
             "Bucket": "dest-bucket",
             "Key": "mykey",
             "ChecksumAlgorithm": "SHA1",
+            "AnnotationDirective": "EXCLUDE",
         }
 
     # aws-cli: test_download_with_checksum_mode_* (one per algorithm)
@@ -757,6 +763,8 @@ class TestSyncCaseConflict:
         assert f"Failed to download bucket/{self.upper_key}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
+        # The first (admitted) key still downloads; only the conflicting
+        # second key trips the error gate - so one GetObject is scripted.
         result, _ = _run_cmd(
             [
                 list_objects_response([self.upper_key, self.lower_key]),
@@ -776,6 +784,7 @@ class TestSyncCaseConflict:
         )
         assert f"warning: Downloading bucket/{self.upper_key}" in result.stderr
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
     def test_warn_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         result, _ = _run_cmd(
             [
@@ -815,6 +824,7 @@ class TestSyncCaseConflict:
             ["sync", "s3://bucket", str(tmp_path), "--case-conflict", "ignore"],
         )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Can't rename to same file")
     def test_ignore_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
             [

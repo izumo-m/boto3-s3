@@ -21,6 +21,11 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." # repo root
 
+# Prefer the pinned aws in the project venv (scripts/install-awscli.sh) for the
+# script's own aws calls too, so they match the aws the suite runs (uv run puts
+# .venv/bin on PATH). Falls back to the host aws when the venv has none.
+PATH="$PWD/.venv/bin:$PATH"
+
 export AWS_REGION="$BOTO3_S3_E2E_REGION"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 # Resolve the profile's credentials into env vars and drop AWS_PROFILE: a test
@@ -28,7 +33,10 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 # selecting the CRT engine) must not be shadowed by a named profile's config.
 creds="$(aws configure export-credentials --profile "$BOTO3_S3_E2E_PROFILE" --format env)" \
     || { echo "could not resolve credentials for profile $BOTO3_S3_E2E_PROFILE" >&2; exit 1; }
-unset AWS_PROFILE AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL
+# Also drop any stale session credentials from the calling shell: a static-key
+# profile's export-credentials emits no AWS_SESSION_TOKEN line, so eval would
+# leave the outer shell's token alive and mismatched with the new access key.
+unset AWS_PROFILE AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION
 eval "$creds"
 
 suffix="$(openssl rand -hex 5 2>/dev/null \

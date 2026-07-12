@@ -40,7 +40,11 @@ _SEEDED: Mapping[str, int] = {"presign/basic.txt": 7}
 class PresignScenario(BaseScenario):
     """One ``presign`` invocation against a fixed bucket layout.
 
-    ``presign`` has no golden replay, so the base ``diff_only`` is inert here.
+    No presign scenario sets ``diff_only``: presign is pure client-side
+    computation, so no outcome is endpoint-relative. The presign suites
+    therefore do not filter on it (unlike the other command suites'
+    ``_REPLAYABLE`` tables) - every scenario is captured and replayed as a
+    golden.
     """
 
     seed: Mapping[str, int] = field(default_factory=dict)

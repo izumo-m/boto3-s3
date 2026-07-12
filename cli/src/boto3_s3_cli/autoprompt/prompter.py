@@ -1,9 +1,9 @@
 """The injectable auto-prompt interface.
 
-Kept in its own ``prompt_toolkit``-free module so :class:`Context
-<boto3_s3_cli.commands.base.Context>` can reference the type and tests can
+Kept in its own ``prompt_toolkit``-free module so ``Context``
+(``boto3_s3_cli.commands.base``) can reference the type and tests can
 supply a fake without the optional extra installed. The real, ``prompt_toolkit``
--backed implementation lives in :mod:`boto3_s3_cli.autoprompt.prompt` and is
+-backed implementation lives in ``boto3_s3_cli.autoprompt.prompt`` and is
 imported only when ``--cli-auto-prompt`` actually fires.
 """
 
@@ -20,5 +20,5 @@ class AutoPrompter(ABC):
         """Prompt the user (seeded with *argv*) and return the edited argv.
 
         *argv* is the raw token list with the auto-prompt flags removed.
-        The returned list is re-dispatched by :func:`boto3_s3_cli.cli.main`.
+        The returned list is re-dispatched by ``boto3_s3_cli.cli.main``.
         """

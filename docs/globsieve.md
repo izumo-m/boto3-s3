@@ -64,13 +64,19 @@ aws-cli joins every pattern onto the operation root with `os.path.join` and
 fnmatches the result against the entry's full path (`filters.py`). `os.path.join`
 *drops* the root for an absolute right-hand side, so an absolute pattern is
 effectively matched against the full path and a relative one against its
-root-relative tail. globsieve mirrors that split: a pattern is **anchored** iff
-`os.path.isabs` (POSIX `/foo`; Windows also `\foo` / `C:/foo` / UNC), and the
-`Anchored` matcher joins each anchored pattern onto the entry's `full_key`
+root-relative tail. globsieve mirrors that split: a pattern is **anchored** when
+`os.path.isabs` says so (POSIX `/foo`; Windows `C:/foo` / UNC), plus the Windows
+single-leading-separator forms `/foo` and `\foo`. The explicit Windows check is
+needed on Python 3.13+, where `ntpath.isabs` stopped recognizing those forms even
+though `ntpath.join` still replaces the root as aws-cli relies on. The `Anchored`
+matcher joins each anchored pattern onto the entry's `full_key`
 (`os.path.join(full_key, pattern)`, lending the entry's drive / UNC anchor to a
 driveless-absolute pattern exactly like aws-cli) before fnmatching `full_key`.
-With no `full_key` - an S3 listing has none - an anchored pattern can never match,
-matching aws-cli (its s3 paths carry no anchor). This is what lets the **single**
+An anchored pattern can never match an S3 entry, by either of two routes: a bare
+`included` call passes `full_key=None` and the anchored item is skipped, while
+`GlobFilter` passes the S3 key as `full_key` but that key carries no drive /
+anchor, so the joined absolute pattern fnmatches nothing. Both track aws-cli (its
+s3 paths carry no anchor). This is what lets the **single**
 `sync` filter prune the two sides per-side: a source-rooted absolute pattern
 matches the local source's full path but not the S3 destination's anchorless key.
 A relative pattern keeps matching `compare_key`, which is symmetric across sides.
@@ -83,6 +89,22 @@ in `/` space). On **Windows** a `\` in a pattern is therefore a separator
 (`--exclude "logs\*.txt"` matches `logs/x.txt`, a filename never contains a `\`
 there); on **POSIX** `os.sep` is already `/`, so folding is a no-op and `\` stays
 a literal - aws-cli-faithful on both.
+
+**Drive-relative patterns (Windows-only)**: a pattern like `C:foo` (a drive
+letter with no separator) is not anchored (`os.path.isabs` is false for it).
+aws-cli's `os.path.join` merges such a pattern onto a same-drive root as a
+plain root-relative tail (`ntpath.join('C:\\root', 'C:foo') ==
+'C:\\root\\foo'`), so `compile` mirrors that at compile time: it strips the
+drive (`_strip_drive_relative`) and matches what remains against
+`compare_key`, like any other relative pattern. `C:/foo` (drive-*absolute*)
+is untouched and still routes to `Anchored`. A known residual: `compile` has
+no root (and so no root drive) to compare against, so a drive-relative
+pattern naming a *different* drive than the source is folded to the same
+relative tail rather than kept drive-specific - aws-cli would keep it and it
+would never match. This is a rare Windows-only corner the compile-time engine
+cannot distinguish. POSIX is unaffected: `os.path.splitdrive` finds no drive
+there, so `C:foo` stays a literal filename (the colon is a valid character),
+aws-cli-faithful too.
 
 ## 2. Compile-time optimization
 
@@ -171,8 +193,8 @@ The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync (all
 implemented); ls does not apply it yet. **sync prunes each side's listing
 independently as its visibility layer** (before the comparator pairs the
 streams): the S3 side(s) do this through `ScanOptions.filter` (the same
-scan-level mechanism), while the local walk applies the predicate inline. The
-both sides are matched against the single `filter` (one symmetric predicate over
+scan-level mechanism), while the local walk applies the predicate inline. Both
+sides are matched against the single `filter` (one symmetric predicate over
 each side's compare key). A destination entry pruned here
 is invisible to `--delete`, reproducing aws's "files excluded by filters are
 excluded from deletion". The pair-level judgments (`compare` /

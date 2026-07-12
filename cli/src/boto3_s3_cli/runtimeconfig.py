@@ -5,30 +5,29 @@
 ``max_concurrent_requests`` ...), the CRT engine knobs (``target_bandwidth``,
 the file-I/O options) and the engine switch itself
 (``preferred_transfer_client`` - a config key only, aws-cli has no CLI
-option for it). :class:`RuntimeConfig` is the aws-cli parser verbatim -
+option for it). ``RuntimeConfig`` is the aws-cli parser verbatim -
 human-readable sizes (``8MB``), rates (``100MB/s`` / ``800Kb/s``), booleans,
 the ``default`` -> ``classic`` alias, and byte-exact error wording - raising
 the library's ``InvalidConfigError`` (aws-cli's class of the same name)
 where aws-cli's escapes to its general handler (both exit 255, after every
 path/usage validation).
 
-:func:`load_scoped_s3_config` reads the section the way aws-cli's
+``load_scoped_s3_config`` reads the section the way aws-cli's
 ``_get_runtime_config`` does - the profile's scoped config, so nested
 ``s3 =`` INI syntax, ``AWS_CONFIG_FILE`` and ``--profile`` all behave like
 aws. The engine decision tree over the parsed config is
-:func:`resolve_transfer_client` below (a port of aws-cli
+``resolve_transfer_client`` below (a port of aws-cli
 ``TransferManagerFactory._compute_transfer_client_type``; docs/crt.md
 section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from boto3_s3 import ConfigurationError, InvalidConfigError
-from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
+from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
 
 if TYPE_CHECKING:
     from boto3_s3 import TransferConfig
@@ -37,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # RuntimeConfig key -> boto3 TransferConfig constructor parameter. ``[s3]``
 # keys boto3's constructor does not expose (``max_queue_size``) are applied as
-# attributes after construction (:func:`build_transfer_config`).
+# attributes after construction (``build_transfer_config``).
 _TRANSFER_CONFIG_CTOR_KEYS = {
     "multipart_threshold": "multipart_threshold",
     "multipart_chunksize": "multipart_chunksize",
@@ -162,6 +161,7 @@ class RuntimeConfig:
                 runtime_config[attr] = human_readable_to_int(value)
 
     def _convert_human_readable_rates(self, runtime_config: dict[str, Any]) -> None:
+        """Normalize byte and bit rates, preserving aws-cli's accepted spellings."""
         for attr in self.HUMAN_READABLE_RATES:
             value = runtime_config.get(attr)
             if value is not None and not isinstance(value, int):
@@ -182,8 +182,7 @@ class RuntimeConfig:
                     )
 
     def _convert_booleans(self, runtime_config: dict[str, Any]) -> None:
-        # Deferred botocore import: parsing runs on the transfer path only,
-        # never on --help/usage (import contract, docs/imports.md).
+        # Import botocore only when converting an actual runtime config.
         from botocore.utils import ensure_boolean
 
         for attr in self.BOOLEANS:
@@ -206,6 +205,7 @@ class RuntimeConfig:
             return False
 
     def _resolve_choice_aliases(self, runtime_config: dict[str, Any]) -> None:
+        """Replace accepted config aliases with their canonical choice values."""
         for attr in self.CHOICE_ALIASES:
             current_value = runtime_config.get(attr)
             if current_value in self.CHOICE_ALIASES[attr]:
@@ -219,6 +219,7 @@ class RuntimeConfig:
                 runtime_config[attr] = resolved_value
 
     def _validate_config(self, runtime_config: dict[str, Any]) -> None:
+        """Validate normalized positive-integer and enumerated settings."""
         self._validate_positive_integers(runtime_config)
         self._validate_choices(runtime_config)
 
@@ -250,27 +251,21 @@ class RuntimeConfig:
         )
 
 
-def load_scoped_s3_config(args: argparse.Namespace) -> dict[str, Any]:
-    """Read the profile's ``[s3]`` section (aws-cli's ``_get_runtime_config`` read).
+def load_scoped_s3_config(config: AwsConfig) -> dict[str, Any]:
+    """Read aws-cli's known ``[s3]`` keys from an `S3`-bound config reader.
 
-    The scoped config honors ``--profile``, ``AWS_CONFIG_FILE`` and botocore's
-    nested ``s3 =`` INI syntax. The profile is resolved through aws-cli's
-    precedence (``--profile`` > ``AWS_PROFILE`` > ``AWS_DEFAULT_PROFILE`` -
-    :func:`boto3_s3_cli.clientfactory.resolve_profile`), the same as the client this
-    transfer uses (:func:`~boto3_s3_cli.clientfactory.build_client`): a bare
-    ``boto3.Session(profile_name=None)`` would inherit stock botocore's reversed
-    env order, so the ``[s3]`` section could be read from a *different* profile
-    than the client when both env vars are set (botocore #1725). Deferred boto3
-    import: only commands that reach the transfer pipeline pay it (they are about
-    to build a client through the same session machinery anyway).
+    The caller obtains *config* from `S3.aws_config`, so the active profile,
+    config file, and parsed config cache are those of the exact session the
+    command's clients use. Unknown ``[s3]`` keys are intentionally ignored,
+    matching `build_transfer_config`, which consumes only aws-cli's declared
+    runtime keys.
     """
-    import boto3
-
-    from boto3_s3_cli.clientfactory import resolve_profile
-
-    session = boto3.Session(profile_name=resolve_profile(args))
-    scoped: Any = session._session.get_scoped_config()  # pyright: ignore[reportPrivateUsage] # aws-cli reads the same botocore session surface
-    return dict(scoped.get("s3", {}))
+    scoped: dict[str, Any] = {}
+    for key in DEFAULTS:
+        value = config.get_str(f"s3.{key}")
+        if value is not None:
+            scoped[key] = value
+    return scoped
 
 
 def resolve_transfer_client(
@@ -336,7 +331,7 @@ def build_transfer_config(
 
     The config is engine-specific, exactly like aws-cli (aws-cli factory builds
     the classic ``TransferConfig`` and the CRT client from separate key sets).
-    Under CRT only the keys the CRT client consumes (:data:`_CRT_CONSUMED_KEYS`)
+    Under CRT only the keys the CRT client consumes (``_CRT_CONSUMED_KEYS``)
     are forwarded, and the classic-only tuning (the request queue size and the
     in-memory chunk caps) is omitted - both because the CRT manager ignores it
     and because forwarding ``io_chunksize`` / ``max_bandwidth`` would trip

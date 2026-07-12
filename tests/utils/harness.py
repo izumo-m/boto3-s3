@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from boto3_s3_cli.commands.base import Context
 
@@ -42,6 +42,7 @@ ACCESS_KEY_TOKEN = "<ACCESS_KEY>"
 DATE_TOKEN = "<DATE>"
 AMZ_DATE_TOKEN = "<AMZ_DATE>"
 SIGNATURE_TOKEN = "<SIGNATURE>"
+REGION_TOKEN = "<REGION>"
 
 
 class CliResult(NamedTuple):
@@ -127,7 +128,7 @@ def run_cli_subprocess_with_stdin(
     stdin_payload: bytes | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CliResult:
-    """Like :func:`run_cli_subprocess`, feeding *stdin_payload* to the process.
+    """Like ``run_cli_subprocess``, feeding *stdin_payload* to the process.
 
     *env* overlays the inherited environment (the CRT parity lane points
     ``AWS_CONFIG_FILE`` at a ``preferred_transfer_client=crt`` profile).
@@ -145,7 +146,7 @@ def run_aws_subprocess_with_stdin(
     stdin_payload: bytes | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CliResult:
-    """Like :func:`run_aws_subprocess`, feeding *stdin_payload* to the process."""
+    """Like ``run_aws_subprocess``, feeding *stdin_payload* to the process."""
     aws = shutil.which("aws")
     if aws is None:
         pytest.fail("aws v2 binary not on PATH (required for the e2e parity suite)")
@@ -258,7 +259,7 @@ def normalize_rm_stdout(stdout: str, *, bucket: str) -> list[str]:
     """Normalize ``rm`` stdout for golden storage / cross-run comparison.
 
     The bucket name is tokenized like ``ls``, but the lines are **sorted** -
-    the opposite of :func:`normalize_ls_stdout`, deliberately: aws-cli's
+    the opposite of ``normalize_ls_stdout``, deliberately: aws-cli's
     delete lines come out in parallel-completion order, which is
     nondeterministic run to run (observed on MinIO with 30 keys), so the line
     *set* is the contract, not the order. ``rm`` stdout is delete lines only,
@@ -328,7 +329,7 @@ def head_object_fields(
     return {field: response.get(field) for field in fields}
 
 
-def _normalize_presign_url(url: str, *, bucket: str) -> str:
+def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) -> str:
     parts = urllib.parse.urlsplit(url)
     path = parts.path
     if parts.netloc.startswith(f"{bucket}."):
@@ -347,14 +348,24 @@ def _normalize_presign_url(url: str, *, bucket: str) -> str:
             value = SIGNATURE_TOKEN
         elif key == "X-Amz-Credential":
             # "<access-key>/<yyyymmdd>/<region>/s3/aws4_request": mask the
-            # first two segments, keep the scope - the region is parity.
+            # first two segments, keep the scope - the region is parity. When
+            # the scope region matches the environment default (*mask_region*)
+            # it is folded to <REGION> too, so a golden captured in one region
+            # replays in any e2e region; an explicit --region stays raw (the
+            # e2e same-run check then keeps that region under test).
             scope = value.split("/", 2)[-1]
+            if mask_region is not None:
+                scope_region, sep, rest = scope.partition("/")
+                if scope_region == mask_region:
+                    scope = f"{REGION_TOKEN}{sep}{rest}"
             value = f"{ACCESS_KEY_TOKEN}/{DATE_TOKEN}/{scope}"
         params.append(f"{key}={value}")
     return normalized + "?" + "&".join(params)
 
 
-def normalize_presign_stdout(stdout: str, *, bucket: str) -> list[str]:
+def normalize_presign_stdout(
+    stdout: str, *, bucket: str, mask_region: str | None = None
+) -> list[str]:
     """Normalize ``presign`` stdout (a URL line) for goldens / comparison.
 
     The endpoint (``scheme://netloc``) is masked after canonicalizing a
@@ -363,8 +374,11 @@ def normalize_presign_stdout(stdout: str, *, bucket: str) -> list[str]:
     MinIO capture (IP endpoint -> path-style). Query values are
     percent-decoded for readable goldens, and the time/credential-dependent
     ones are masked: ``X-Amz-Date``, ``X-Amz-Signature``, and the access
-    key + date inside ``X-Amz-Credential`` (whose region/service scope
-    stays - it is parity-relevant). Everything else is the contract:
+    key + date inside ``X-Amz-Credential``. The credential scope keeps its
+    region except when it equals *mask_region* (the environment default,
+    from ``presign_scope_mask_region``), which is folded to <REGION> so a
+    golden does not drift across e2e regions; an explicit --region region
+    differs from the default and stays raw. Everything else is the contract:
     parameter *order* included (botocore emits a fixed order),
     ``X-Amz-Expires``, ``X-Amz-SignedHeaders``, and the key path. Non-URL
     lines just get the bucket tokenized.
@@ -372,10 +386,56 @@ def normalize_presign_stdout(stdout: str, *, bucket: str) -> list[str]:
     lines: list[str] = []
     for line in stdout.splitlines():
         if line.startswith(("http://", "https://")):
-            lines.append(_normalize_presign_url(line, bucket=bucket))
+            lines.append(_normalize_presign_url(line, bucket=bucket, mask_region=mask_region))
         else:
             lines.append(line.replace(bucket, BUCKET_TOKEN))
     return lines
+
+
+def presign_scope_mask_region(argv: Sequence[str]) -> str | None:
+    """The credential-scope region to fold to <REGION> for a presign golden.
+
+    The scope carries whatever region botocore signed with: the environment
+    default (``AWS_REGION`` / ``AWS_DEFAULT_REGION``) unless *argv* passes an
+    explicit ``--region``. Masking the environment default keeps a golden
+    stable across e2e runs in any region (docs/testing.md endpoint policy
+    step 1), while an explicit ``--region`` stays raw so its region is still
+    compared verbatim (that region is the point of the scenario). When the
+    two coincide the explicit one wins - nothing is masked - so the
+    ``--region`` golden never drifts either.
+    """
+    import os
+
+    explicit: str | None = None
+    if "--region" in argv:
+        index = list(argv).index("--region")
+        if index + 1 < len(argv):
+            explicit = argv[index + 1]
+    default = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not default or default == explicit:
+        return None
+    return default
+
+
+def presign_scope_region(stdout: str) -> str | None:
+    """The raw credential-scope region of a presign URL (or ``None``).
+
+    Reads the region segment out of ``X-Amz-Credential`` on the first URL
+    line, before any masking - the e2e same-run check compares aws's against
+    ours so the region the two CLIs sign with must be identical even though
+    the normalizer folds the environment default away.
+    """
+    for line in stdout.splitlines():
+        if not line.startswith(("http://", "https://")):
+            continue
+        query = urllib.parse.urlsplit(line).query
+        for key, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
+            if key == "X-Amz-Credential":
+                segments = value.split("/")
+                if len(segments) >= 3:
+                    return segments[2]
+        return None
+    return None
 
 
 def fetch_url(url: str) -> tuple[int, bytes]:
@@ -403,6 +463,26 @@ def bucket_exists(client: Any, bucket: str) -> bool:
     except ClientError:
         return False
     return True
+
+
+def create_bucket_in_region(client: Any, bucket: str) -> None:
+    """Create *bucket*, honoring the client's region.
+
+    Real S3 rejects a plain CreateBucket outside us-east-1 with
+    ``IllegalLocationConstraintException``, so any other region must be passed
+    as ``CreateBucketConfiguration.LocationConstraint``; us-east-1 (the region
+    MinIO reports) forbids the field and takes the plain form. The mb/rb parity
+    suites pre-create their sibling bucket through here so their run_e2e.sh
+    lane works in any region.
+    """
+    region = client.meta.region_name
+    if region and region != "us-east-1":
+        client.create_bucket(
+            Bucket=bucket,
+            CreateBucketConfiguration={"LocationConstraint": region},
+        )
+    else:
+        client.create_bucket(Bucket=bucket)
 
 
 def force_delete_bucket(client: Any, bucket: str) -> None:

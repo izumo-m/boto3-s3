@@ -12,14 +12,47 @@ import boto3_s3.types as t
 DT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 TYPE_NAMES = [
+    "CancelMode",
+    "CancelToken",
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
     "LocalScanOptions",
+    "ListingCallback",
     "S3FileInfo",
     "S3ScanOptions",
     "ScanOptions",
 ]
+
+
+class TestCancelToken:
+    def test_cancel_defaults_to_graceful(self) -> None:
+        token = t.CancelToken()
+
+        assert token.cancelled is False
+        assert token.mode is None
+
+        token.cancel()
+
+        assert token.cancelled is True
+        assert token.mode is t.CancelMode.GRACEFUL
+
+    def test_cancel_can_request_immediate_shutdown(self) -> None:
+        token = t.CancelToken()
+
+        token.cancel(mode=t.CancelMode.IMMEDIATE)
+
+        assert token.cancelled is True
+        assert token.mode is t.CancelMode.IMMEDIATE
+
+    def test_immediate_request_escalates_but_never_downgrades(self) -> None:
+        token = t.CancelToken()
+
+        token.cancel()
+        token.cancel(mode=t.CancelMode.IMMEDIATE)
+        token.cancel(mode=t.CancelMode.GRACEFUL)
+
+        assert token.mode is t.CancelMode.IMMEDIATE
 
 
 class TestFileInfo:

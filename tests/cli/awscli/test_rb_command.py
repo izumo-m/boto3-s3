@@ -1,7 +1,7 @@
 """Port of aws-cli's functional rb tests to ``boto3-s3 rb``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_rb_command.py``
-(aws-cli 2.34.x snapshot). Test names, canned responses, and expected
+(aws-cli 2.35.18). Test names, canned responses, and expected
 ops/rc are kept verbatim where possible so the file stays diffable against
 the aws-cli original when aws-cli is updated.
 

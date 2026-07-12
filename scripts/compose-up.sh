@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/compose-up.sh - bring up the project's MinIO compose stack if it is
 # not already running, then wait for the bucket-init helper to finish so
-# callers can rely on AWS_ENDPOINT_URL_S3=http://localhost:9000 being fully
+# callers can rely on AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000 being fully
 # provisioned (test-bucket + boto3-s3-e2e created). No-op when the stack is
 # already up.
 #

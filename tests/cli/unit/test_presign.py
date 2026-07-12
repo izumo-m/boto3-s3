@@ -111,3 +111,31 @@ class TestPresignExitCodeShape:
         rc = cli.main(["presign", f"s3://{arn}"], ctx=_ctx(object()))
         assert rc == 252
         assert "S3 Object Lambda" in capsys.readouterr().err
+
+
+def _unused_factory(_args: Any) -> Any:
+    raise AssertionError("client factory must not be called")
+
+
+class TestPresignParamfileAndQuery:
+    """aws expands the positional path file:// at parse time and compiles
+    --query there; a bad reference / expression is its 252 before any signing."""
+
+    def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
+        ref = tmp_path / "u.txt"
+        ref.write_text("s3://b/k")
+        client = _FakePresignClient()
+        assert cli.main(["presign", f"file://{ref}"], ctx=_ctx(client)) == 0
+        assert client.calls[0][1] == {"Bucket": "b", "Key": "k"}
+
+    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["presign", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
+
+    def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(
+            ["presign", "s3://b/k", "--query", "]["], ctx=Context(client_factory=_unused_factory)
+        )
+        assert rc == 252
+        assert "Bad value for --query ][" in capsys.readouterr().err

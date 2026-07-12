@@ -1,0 +1,33 @@
+{
+  "argv": [
+    "cp",
+    "s3://<BUCKET>/d/",
+    "dest",
+    "--recursive",
+    "--exclude",
+    "*",
+    "--include",
+    "*.txt"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "a.txt:13:48ec9dee",
+    "sub/c.txt:13:f8d67eb2"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d-sibling.txt",
+    "d/a.txt",
+    "d/b.bin",
+    "d/marker/",
+    "d/sub/c.txt"
+  ],
+  "scenario": "cp_download_recursive_filters",
+  "src_tree": null,
+  "stdout_lines": [
+    "download: s3://<BUCKET>/d/a.txt to dest\\a.txt",
+    "download: s3://<BUCKET>/d/sub/c.txt to dest\\sub\\c.txt"
+  ]
+}

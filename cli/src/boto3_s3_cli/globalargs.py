@@ -1,13 +1,12 @@
 """Common (global) option registration shared by every ``boto3-s3`` subcommand.
 
 These mirror ``aws s3``'s connection / auth and presentation globals (the file
-plays the role of aws-cli's ``globalargs.py``). :func:`add_common_arguments`
+plays the role of aws-cli's ``globalargs.py``). ``add_common_arguments``
 registers them on the top-level parser and on each subparser, so a global may
 sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
-connection / auth values into a boto3 client is :mod:`~boto3_s3_cli.clientfactory`'s
-job; this module stays SDK-free so the parse path never pays an SDK import
-(import contract, docs/imports.md). The presentation globals are accepted and
+connection / auth values into a boto3 client is ``clientfactory``'s
+job. The presentation globals are accepted and
 ignored (``docs/aws-cli-option-handling.md`` section 2); ``--cli-auto-prompt``
 launches the interactive prompt, resolved from raw argv by the dispatcher
 before parsing (section 3).
@@ -19,6 +18,9 @@ import argparse
 import sys
 from collections.abc import Sequence
 from typing import Any
+
+# Pure-Python name from the exceptions module.
+from boto3_s3 import ValidationError
 
 # Mirrored from aws-cli (awscli/data/cli.json) so an invalid value
 # still errors the same way before the flag is ignored (option-handling section 2).
@@ -35,6 +37,30 @@ _BINARY_FORMAT_CHOICES = ["base64", "raw-in-base64-out"]
 # the two CLIs would pick *different* profiles when both env vars are set.
 # The single home of that ordering; every profile read goes through it.
 PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
+
+
+def validate_query(args: argparse.Namespace) -> None:
+    """Reject an invalid ``--query`` JMESPath with aws's wording (rc 252).
+
+    aws-cli compiles ``--query`` at ``top-level-args-parsed`` (its globalargs
+    ``_resolve_query``) - before it resolves ``--endpoint-url`` and before any
+    paramfile expansion - so a bad expression is its ParamValidation 252 ahead
+    of every other head check (measured against aws 2.35.18: it beats a bad
+    ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
+    ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
+    a botocore dependency that is always importable, and it is loaded only when
+    ``--query`` is actually present.
+    """
+    value = getattr(args, "query", None)
+    if value is None:
+        return
+    import jmespath
+    from jmespath.exceptions import JMESPathError
+
+    try:
+        jmespath.compile(value)
+    except JMESPathError as exc:
+        raise ValidationError(f"Bad value for --query {value}: {exc}") from exc
 
 
 def _pkg_version_or_unknown(pkg: str) -> str:
@@ -61,9 +87,8 @@ def _version_string() -> str:
     and OS ``boto3-s3`` runs on. The two distributions are versioned
     independently, so each token is resolved on its own.
 
-    Only called when ``--version`` fires: the metadata lookups cost ~20ms to
-    import, which every other invocation must not pay (import contract,
-    docs/imports.md). The boto3/botocore tokens come from distribution
+    Only called when ``--version`` fires, avoiding the metadata lookup on
+    other invocations. The boto3/botocore tokens come from distribution
     metadata, not from importing the packages.
     """
     import platform
@@ -86,7 +111,7 @@ class _VersionAction(argparse.Action):
     awkward points. ``aws --version`` emits a single line; mirroring that keeps
     the output copy-pasteable into bug reports. The line is rendered here, at
     fire time, rather than taken as a parser-build kwarg - see
-    :func:`_version_string` for why it must not run on every invocation.
+    ``_version_string`` for why it must not run on every invocation.
     """
 
     def __init__(
@@ -163,7 +188,6 @@ def add_common_arguments(
     parser.add_argument("--version", action=_VersionAction)
 
     # Opt-in interactive UI (section 3, the "autoprompt" extra); the dispatcher
-    # resolves it from raw argv before parsing.
-    parser.add_argument(
-        "--cli-auto-prompt", action="store_true", default=flag, help=argparse.SUPPRESS
-    )
+    # resolves it from raw argv before parsing. Listed in --help like its
+    # --no-cli-auto-prompt counterpart (aws shows both).
+    parser.add_argument("--cli-auto-prompt", action="store_true", default=flag)

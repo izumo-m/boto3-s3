@@ -1,32 +1,37 @@
-"""``TransferConfig`` - boto3's transfer configuration plus CRT tuning fields.
+"""`TransferConfig` - boto3's transfer configuration plus library settings.
 
-The library re-exports this subclass of :class:`boto3.s3.transfer.TransferConfig`
+The library re-exports this subclass of ``boto3.s3.transfer.TransferConfig``
 as its public ``TransferConfig``. The transfer engine honors
 ``preferred_transfer_client`` (``'auto'`` / ``'classic'`` / ``'crt'``) with
 boto3's own semantics (``transfer.py`` / ``crtsupport.py``; design in
 ``docs/crt.md``); the constructor forwards it to the base class when that boto3
 accepts it and otherwise keeps it as a plain attribute (the floor boto3 lacks
-the field - see the signature probe below). The subclass only adds the
-CRT tuning knobs aws-cli keeps in its ``[s3]`` runtime config but boto3 has
-no field for:
+the field - see the signature probe below). The subclass adds the CRT tuning
+knobs aws-cli keeps in its `[s3]` runtime config plus annotation staging:
 
 - ``target_bandwidth`` - target throughput for the CRT engine in bytes per
   second (aws-cli ``target_bandwidth``; becomes the CRT client's
   ``target_throughput``). The classic engine's cap stays ``max_bandwidth``.
 - ``should_stream`` / ``disk_throughput`` / ``direct_io`` - aws-cli's CRT
   file-I/O options. The pip ``s3transfer`` CRT client cannot apply them yet
-  (no ``fio_options`` parameter as of 0.17); they are accepted now and passed
+  (no ``fio_options`` parameter as of 0.19); they are accepted now and passed
   through automatically once ``create_s3_crt_client`` grows support.
+- `annotation_temp_dir` - directory for
+  `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating
+  system's standard temporary-directory selection.
 
-The extras are plain attributes (not part of the base ``DEFAULTS`` sentinel
-machinery), default ``None`` = unset, and are ignored by the classic engine.
-A plain :class:`boto3.s3.transfer.TransferConfig` remains accepted everywhere
-a config is taken - readers fall back to ``None`` for the extra fields.
+The extras are plain attributes (not part of the base `DEFAULTS` sentinel
+machinery) and default to `None`. The CRT tuning fields are ignored by the
+classic engine; `annotation_temp_dir` is read by the classic multipart-copy
+path only under `PRELOAD_TEMPFILE`. A plain
+`boto3.s3.transfer.TransferConfig` remains accepted everywhere a config is
+taken - readers fall back to `None` for the extra fields.
 """
 
 from __future__ import annotations
 
 import inspect
+import os
 
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
@@ -38,18 +43,20 @@ __all__ = ["TransferConfig"]
 # unconditionally raises TypeError on the floor (breaking every cp/mv/sync,
 # even classic with no awscrt), so probe the base signature once and, when
 # absent, keep the value as a plain attribute instead - the engine reads it via
-# getattr (transfer.py), and the floor has no awscrt so it resolves to classic
-# regardless. Drop this shim once the boto3 floor is raised past 1.33.
+# getattr (transfer.py). On the floor the s3transfer (0.6.2) has no CRT surface,
+# so 'auto' falls to classic while an explicit 'crt' is rejected by crtsupport
+# (not silently downgraded). Drop this shim once the boto3 floor is raised
+# past 1.33.
 _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
     "preferred_transfer_client" in inspect.signature(Boto3TransferConfig.__init__).parameters
 )
 
 
 class TransferConfig(Boto3TransferConfig):
-    """boto3's ``TransferConfig`` with aws-cli's CRT tuning fields appended.
+    """boto3's `TransferConfig` with library-only settings appended.
 
     The base parameters keep boto3's exact names, order, and semantics; the
-    CRT extras are keyword-only and appended last, so existing boto3 code
+    Extra settings are keyword-only and appended last, so existing boto3 code
     works unchanged.
     """
 
@@ -69,7 +76,9 @@ class TransferConfig(Boto3TransferConfig):
         should_stream: bool | None = None,
         disk_throughput: int | None = None,
         direct_io: bool | None = None,
+        annotation_temp_dir: str | os.PathLike[str] | None = None,
     ) -> None:
+        """Forward classic values and retain library settings across SDK versions."""
         # Forward each base parameter only when set, letting the base ctor supply
         # its own default. On the floor boto3 (1.28 - ~1.40) the base signature
         # carries concrete defaults; forwarding None would overwrite them and
@@ -96,8 +105,11 @@ class TransferConfig(Boto3TransferConfig):
         super().__init__(**base_kwargs)  # pyright: ignore[reportArgumentType]
         if not _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
             # Floor boto3 has no such field; keep it readable via getattr.
-            self.preferred_transfer_client = preferred_transfer_client
+            self.preferred_transfer_client = (
+                "auto" if preferred_transfer_client is None else preferred_transfer_client
+            )
         self.target_bandwidth = target_bandwidth
         self.should_stream = should_stream
         self.disk_throughput = disk_throughput
         self.direct_io = direct_io
+        self.annotation_temp_dir = annotation_temp_dir

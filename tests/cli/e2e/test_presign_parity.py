@@ -28,6 +28,8 @@ from tests.utils.harness import (
     delete_keys,
     fetch_url,
     normalize_presign_stdout,
+    presign_scope_mask_region,
+    presign_scope_region,
     run_aws_subprocess,
     run_cli_subprocess,
     seed_bucket,
@@ -42,8 +44,13 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
         argv = resolve_argv(scenario, bucket)
         aws_result = run_aws_subprocess(argv)
         ours_result = run_cli_subprocess(argv)
-        aws_lines = normalize_presign_stdout(aws_result.stdout, bucket=bucket)
-        ours_lines = normalize_presign_stdout(ours_result.stdout, bucket=bucket)
+        mask_region = presign_scope_mask_region(argv)
+        aws_lines = normalize_presign_stdout(
+            aws_result.stdout, bucket=bucket, mask_region=mask_region
+        )
+        ours_lines = normalize_presign_stdout(
+            ours_result.stdout, bucket=bucket, mask_region=mask_region
+        )
 
         if update_goldens_enabled():
             write_golden(
@@ -77,6 +84,16 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
                 )
             )
             pytest.fail(f"[{scenario.name}] stdout parity broken:\n{diff}")
+        # The normalizer folds the environment-default scope region to <REGION>
+        # (endpoint policy step 1), so a same-run aws<->ours equality on the raw
+        # region keeps it under test - the two CLIs must sign with one scope.
+        assert presign_scope_region(ours_result.stdout) == presign_scope_region(
+            aws_result.stdout
+        ), (
+            f"[{scenario.name}] credential-scope region differs: "
+            f"ours={presign_scope_region(ours_result.stdout)!r} "
+            f"aws={presign_scope_region(aws_result.stdout)!r}"
+        )
         assert_stderr_tokens(
             scenario.expected_stderr_tokens_ours,
             ours_result.stderr,

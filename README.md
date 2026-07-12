@@ -1,10 +1,15 @@
 # boto3-s3
 
-A complete library version of the `aws s3` command, with a faithful `aws s3 sync`
-at its core. Every subcommand — `cp` / `ls` / `mb` / `mv` / `presign` / `rb` /
-`rm` / `sync` / `website` — runs in-process from Python, not by shelling out to
-the CLI. Byte transfers run on the same `s3transfer` engine as `aws s3`, so
-transfer performance keeps pace with the command.
+A Python library for running every `aws s3` operation in-process, with an
+`aws s3 sync`-compatible synchronization pipeline at its core. Applications
+that currently shell out to `aws s3 sync` can make the same default
+size/timestamp decisions, transfers, filters, and deletions through `S3.sync`
+without starting a CLI process. Every subcommand — `cp` / `ls` / `mb` / `mv` /
+`presign` / `rb` / `rm` / `sync` / `website` — has a corresponding Python API.
+
+The library provides the building blocks for `aws s3` compatibility and is
+occasionally more permissive for Python callers. The companion CLI is the layer
+that applies the command's strict argument validation and exit-code behavior.
 
 Each command is a method on a single `S3` object, taking ordinary keyword
 arguments; bring a boto3 client when you need a specific profile, region, or
@@ -25,31 +30,28 @@ Two packages:
 
 Much of `aws s3` is easy to do straight from boto3 — a one-off `cp` or `rm` is a
 few lines, and recursive copies or multipart via `s3transfer` take only a bit
-more effort. What's genuinely hard is matching `aws s3` faithfully: its path and
-naming rules, recursive and include/exclude semantics, and above all a `sync` that
-compares and transfers exactly like the command — fiddly to reproduce and easy to
-get subtly wrong. The usual fallbacks are shelling out to the `aws s3` command and
-parsing its output, or a partial reimplementation that drifts from it. boto3-s3 is
-neither: it reproduces `aws s3`'s behavior across the whole command set — sync
-included — as a library you call directly.
+more effort. What's genuinely hard is preserving the command's path and naming
+rules, recursive include/exclude semantics, and especially the decisions made
+by `aws s3 sync`. Reimplementing those rules in each application invites subtle
+drift; shelling out keeps the rules but leaves the application parsing process
+output. boto3-s3 brings those command semantics into a direct Python API.
 
-- **A faithful `aws s3 sync`.** Mirror local trees and buckets in any direction —
-  upload, download, or S3-to-S3 — with `--delete`, the same size/timestamp
-  comparison as aws-cli, include/exclude, and dry-run.
+- **An in-process replacement for `aws s3 sync`.** Mirror local trees and buckets
+  in any direction — upload, download, or S3-to-S3 — with the same default
+  size/timestamp comparison, include/exclude behavior, deletion, and dry-run.
 - **Every `aws s3` command.** `cp` / `ls` / `mb` / `mv` / `presign` / `rb` /
   `rm` / `website` complete the set.
 - **A library, not a CLI wrapper.** Runs in-process: no `subprocess`, no scraping
   stdout, no `aws` on `PATH`. You pass boto3 clients directly and get structured,
   per-item results back — not text to parse.
-- **Light enough for a Lambda.** The Python runtime already ships boto3 (and its
-  `botocore` / `s3transfer` deps), so adding boto3-s3 costs well under a megabyte
-  for the full `aws s3` feature set in-process — where bundling aws-cli (250 MB+)
-  overruns the deployment size limit and shelling out isn't practical.
-- **Transfer speed on par with aws-cli.** Byte transfers use the same engine as
-  `aws s3` (`s3transfer`, or the optional CRT engine), so large transfers run at
-  the same speed — no penalty for being a library.
-- **Familiar behavior.** Path rules, options, and (for the CLI) exit codes
-  follow `aws s3`, so what you know from the command carries over.
+- **Small, pure-Python packaging.** boto3-s3 can reuse a compatible existing
+  boto3 / botocore / s3transfer installation, including a Lambda runtime SDK
+  when it satisfies the supported version floor.
+- **The established AWS transfer engines.** Byte transfers use `s3transfer` or
+  the optional CRT engine, retaining their multipart and concurrency machinery
+  instead of introducing another byte-transfer implementation.
+- **Familiar behavior.** Path rules, options, and default sync decisions follow
+  `aws s3`; the CLI additionally owns strict validation and exit-code parity.
 
 ## Install
 
@@ -67,8 +69,9 @@ pip install "boto3-s3[crt]"
 
 ## Quick start
 
-Create the `S3` object once — it holds no connection of its own (nothing to
-close) and is safe to share across threads — then call what you need:
+Create the `S3` object once — it holds no connection of its own and needs no
+cleanup — then call what you need. Its own state is safe to share, but parallel
+operations require separate, prebuilt clients as described below.
 
 ```python
 from boto3_s3 import S3
@@ -82,9 +85,12 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
 s3.cp("./report.csv", "s3://my-bucket/report.csv")
 s3.cp("s3://my-bucket/report.csv", "./report.csv")
 
-# List objects lazily; each item is a FileInfo (key, size, …).
-for info in s3.ls("s3://my-bucket/site/", recursive=True):
-    print(info.key, info.size)
+# List objects; each result is a FileInfo (key, size, …).
+s3.ls(
+    "s3://my-bucket/site/",
+    recursive=True,
+    on_result=lambda info: print(info.key, info.size),
+)
 
 # Delete everything under a prefix.
 s3.rm("s3://my-bucket/tmp/", recursive=True)
@@ -99,8 +105,8 @@ local-to-local pair is rejected, like `aws s3`.
 
 ## Sync
 
-`sync` is the heart of the library — a faithful re-creation of `aws s3 sync`,
-callable from Python, in every direction:
+`sync` is the heart of the library: its default pipeline is designed as an
+in-process replacement for `aws s3 sync`, in every direction:
 
 ```python
 s3.sync("./site", "s3://my-bucket/site/")       # upload
@@ -148,11 +154,11 @@ The content strategies are opt-in submodule imports —
 `from boto3_s3.awsclicompare import AwsCliComparison` to tune the default).
 `ParallelFilter` imports from `boto3_s3` itself.
 
-Because it runs in-process, sync hands back **structured results that `aws s3`
-can't**: `on_result` fires once per item as the run proceeds, so you know exactly
-what changed without parsing any output. Each result carries a `transfer_type`
-(upload / download / copy / delete) and an `outcome`
-(succeeded / failed / warned / skipped):
+Because it runs in-process, sync provides **structured results without parsing
+console output**. `on_result` receives terminal item outcomes as the run
+proceeds, plus any additional warning or notice records. Each result carries a
+`transfer_type` (upload / download / copy / delete) and an `outcome` (succeeded /
+failed / warned / skipped / dryrun / notice):
 
 ```python
 from boto3_s3 import TransferType, OpOutcome
@@ -174,7 +180,7 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, recursive, request_payer, bucket_name_prefix, bucket_region)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Returns a lazy `Iterator[FileInfo]`. The listing page size is the `S3Storage`'s own `page_size` config. |
+| `ls(target="s3://", *, on_result, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_result`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
@@ -227,8 +233,10 @@ minio = boto3.client(
     aws_access_key_id="minioadmin",
     aws_secret_access_key="minioadmin",
 )
-for info in S3().ls(S3Storage("s3://bucket/", client=minio)):
-    print(info.key)
+S3().ls(
+    S3Storage("s3://bucket/", client=minio),
+    on_result=lambda info: print(info.key),
+)
 ```
 
 The bucket part of an S3 URI may also be an access-point ARN (plain or
@@ -236,18 +244,12 @@ Outposts), passed through as the `Bucket`, like `aws s3`.
 
 ## Running operations across threads
 
-An `S3` object carries only immutable defaults plus one benign, idempotent cache
-(the `aws_config()` reader — concurrent first reads just recompute the same
-value), so the object itself is safe to share across threads. The catch is
-**building** a boto3 client: boto3 documents that a session is not thread-safe,
-and creating clients concurrently from one session can resolve credentials more
-than once and can fail while copying the session's shared event hooks. A bare
-`"s3://..."` argument builds a fresh client on every call, so firing those
-operations from many threads at once is exactly that unsupported pattern.
-
-An already-built client is safe to *use* concurrently — which is why building one
-up front and sharing it works. Pass a prebuilt client through
-`S3Storage(url, client=client)`; the threaded calls then create nothing:
+An `S3` object's own state is safe to share across threads, but parallel
+operations need care on two fronts: boto3 sessions are not safe for concurrent
+client construction, and s3transfer's per-transfer setup is not safe on a
+client shared by concurrent operations. Build the clients sequentially before
+starting the workers, then give each concurrent operation its own client through
+`S3Storage`:
 
 ```python
 import concurrent.futures
@@ -255,21 +257,30 @@ import boto3
 from boto3_s3 import S3, S3Storage
 
 s3 = S3()
-client = boto3.Session(profile_name="prod", region_name="eu-west-1").client("s3")
+session = boto3.Session(profile_name="prod", region_name="eu-west-1")
+jobs = [
+    (
+        path,
+        S3Storage(
+            f"s3://prod-bucket/{path.name}",
+            client=session.client("s3"),
+        ),
+    )
+    for path in paths
+]
 
 with concurrent.futures.ThreadPoolExecutor() as pool:
-    for path in paths:  # paths: an iterable of pathlib.Path
-        dest = S3Storage(f"s3://prod-bucket/{path.name}", client=client)
+    for path, dest in jobs:
         pool.submit(s3.cp, str(path), dest)
 ```
 
-Alternatively, subclass `S3` and override `client()` to return a single
-memoized client — then bare `"s3://..."` strings are concurrency-safe too.
+Do not use bare `"s3://..."` arguments for this pattern: they call `client()`
+inside each operation and would build clients concurrently.
 
 ## Options
 
 `cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
-arguments, grouped here by what they control:
+arguments plus documented library extensions, grouped here by what they control:
 
 - **Metadata & headers:** `metadata`, `metadata_directive`, `copy_props`,
   `cache_control`, `content_type` / `content_disposition` / `content_encoding` /
@@ -280,6 +291,7 @@ arguments, grouped here by what they control:
 - **Integrity & write control:** `checksum_algorithm`, `checksum_mode`,
   `no_overwrite`, `case_conflict`
 - **Glacier:** `force_glacier_transfer` / `ignore_glacier_warnings`
+- **Annotation staging (library-only):** `annotation_copy_mode`
 
 ```python
 s3.cp(
@@ -294,7 +306,12 @@ s3.cp(
 
 Multipart tuning (thresholds, concurrency, bandwidth, the classic/CRT engine
 choice) is a `TransferConfig` passed as `transfer_config=`; its defaults match
-`aws s3`.
+`aws s3`. For multipart S3-to-S3 copies under `copy_props=ALL`, annotations are
+preloaded in memory by default to match aws-cli's failure timing. Library
+callers can select `AnnotationCopyMode.PRELOAD_TEMPFILE` (configured by
+`TransferConfig(annotation_temp_dir=...)`) or the lower-overhead
+`AnnotationCopyMode.DEFERRED`; the CLI deliberately exposes no corresponding
+flag.
 
 ## Filtering
 
@@ -319,16 +336,22 @@ overwrite, delete.
 
 ## Progress, results, cancellation, dry run
 
-Batch operations stream their per-item outcomes instead of returning a list:
+Batch operations stream item records instead of returning a list:
 
-- `on_result(OpResult)` — fires once per item as the run proceeds. Each
-  `OpResult` carries a `transfer_type` (upload / download / copy / move /
-  delete) and an `outcome` (succeeded / failed / warned / skipped / dryrun /
-  notice). It is called from worker threads, so keep it fast and non-raising.
+- `on_result(OpResult)` — receives each terminal item outcome as the run
+  proceeds. An item may also emit a `WARNED` or `NOTICE` record, so callers must
+  not assume exactly one callback per key. Callbacks may come from the calling
+  thread or worker threads, and may be concurrent; keep them thread-safe, fast,
+  and non-raising.
 - `on_progress(TransferProgress)` — byte-level transfer progress
   (`cp` / `mv` / `sync`; `rm` moves no bytes).
-- `cancel_token` — a `CancelToken` whose `cancel()` cooperatively stops the
-  run (`cp` / `mv` / `sync`).
+- `S3.ls(..., on_result=...)` — receives each listed `FileInfo`, in listing
+  order on the calling thread.
+- `cancel_token` — a `CancelToken` whose `cancel()` stops new work and drains
+  accepted work (`ls` / `cp` / `mv` / `rm` / `sync`). Pass
+  `mode=CancelMode.IMMEDIATE` to additionally request best-effort cancellation
+  of pending and in-flight work. A later immediate request upgrades an earlier
+  graceful request; cancellation never downgrades.
 - `dryrun=True` — reports every would-be action without any mutating call.
 
 ## Custom backends
@@ -344,7 +367,10 @@ for the `Storage` contract, capabilities, and a worked example.
 
 ## Errors
 
-Every failure is a `Boto3S3Error` subclass — catch the root to catch them all.
+Recognized operational failures use the `Boto3S3Error` hierarchy, so catching
+the root handles the library's translated S3, filesystem, validation, and
+configuration errors. Programming errors and a small number of documented
+dependency pass-throughs are not wrapped.
 
 | Exception | Raised when |
 | --- | --- |
@@ -355,7 +381,7 @@ Every failure is a `Boto3S3Error` subclass — catch the root to catch them all.
 | `AccessDeniedError` | Permission denied (S3 403, local `PermissionError`). |
 | `TransportError` | Network or local I/O failure (connection, timeout, `OSError`). |
 | `CancelledError` | Cancelled via `CancelToken`. |
-| `BatchError` | Raised once at the end of a batch op (`cp -r` / `mv -r` / `rm -r` / `sync`) when at least one item failed. |
+| `BatchError` | Raised once at the end of a `cp` / `mv` / `rm` / `sync` run when at least one item failed — single-item runs included; an error before the run starts (validation, resolution) raises its category error directly. |
 
 `BatchError` carries summary counts (`succeeded` / `failed` / `warned` /
 `skipped` / `total`); the per-item detail arrives live through `on_result`.
@@ -377,15 +403,14 @@ set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
 - **Python:** 3.10 and later.
 - **OS:** Linux, macOS, Windows (path-separator and case-sensitivity behavior is
   matched to `aws s3` on each).
-- **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2. A few
-  options need a newer SDK and are simply unavailable below it rather than
-  emulated — conditional writes (`no_overwrite`), the `CRC64NVME` checksum, the
-  `ls` bucket-name / bucket-region filters, `mb` with `tags=`, and the
-  copy/download source-ETag extras (`OpResult.extra_info`'s `{"ETag": ...}`
-  needs `capture_response=True` on an old s3transfer, and its
-  `CopySourceIfMatch` consistency pin on copies is absent). CRT features need
-  the `crt` extra. Everything else works at the minimum
-  (docs/overview.md section 2 is the authoritative list).
+- **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2.
+  Features introduced by newer S3 models degrade rather than being emulated.
+  Notable examples include conditional writes (`no_overwrite`), `CRC64NVME`,
+  paginated bucket filters, newer `mb` tags / account-regional namespace
+  fields, S3 object annotations, `copy_props="all"`, and source-ETag response
+  extras. CRT features need the `crt` extra. See
+  [`docs/overview.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/overview.md#2-supported-scope)
+  for the authoritative version requirements and degradation behavior.
 
 ## In short
 

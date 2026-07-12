@@ -133,7 +133,9 @@ events - the delete calls are issued directly - so it works on any engine.
 
 `error` is always a `Boto3S3Error` (the library exception taxonomy) or `None` -
 never a raw exception. A `FAILED` record carries the failure; a `WARNED` /
-`NOTICE` record carries the advisory text (the CLI prints `warning: {error}`).
+`NOTICE` record carries the advisory text - a `WARNED` body is bare (the CLI
+prints `warning: {error}`), while a `NOTICE` body already carries its own
+`warning: ` prefix (the CLI prints it verbatim).
 
 ## Example
 
@@ -153,7 +155,11 @@ def on_result(r: OpResult) -> None:
 Re-reaching the result object (e.g. to HEAD it):
 
 ```python
+from boto3_s3 import S3Storage
+
+# The backend is not always S3 (`sync --delete` onto a local or custom dest
+# deletes there), so narrow before using the S3-only surface.
 storage, info = r.src_storage, r.src_info  # a delete's removed object
-if storage is not None and info is not None:
+if isinstance(storage, S3Storage) and info is not None:
     head = storage.get_client().head_object(Bucket=storage.bucket, Key=info.key)
 ```

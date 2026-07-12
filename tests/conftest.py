@@ -23,25 +23,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.utils.host import is_case_insensitive
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-#: Test-only knob: point this at a case-insensitive directory to run the
-#: ``--case-conflict`` ``*_with_existing_file`` tests on an otherwise
-#: case-sensitive host (see :func:`case_insensitive_workdir`). The ``_PYTEST_``
-#: infix marks it as test infrastructure, not a CLI/library setting; it is not
-#: ``_E2E_`` because these tests need no live endpoint.
+# Test-only knob: point this at a case-insensitive directory to run the
+# ``--case-conflict`` ``*_with_existing_file`` tests on an otherwise
+# case-sensitive host (see `case_insensitive_workdir`). The ``_PYTEST_`` infix
+# marks it as test infrastructure, not a CLI/library setting; it is not
+# ``_E2E_`` because these tests need no live endpoint.
 CASE_INSENSITIVE_DIR_ENV = "BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR"
-
-
-def _is_case_insensitive(path: Path) -> bool:
-    """Whether *path*'s filesystem resolves names case-insensitively (probe)."""
-    probe = path / "CaseProbe.tmp"
-    probe.write_bytes(b"")
-    try:
-        return (path / "caseprobe.tmp").exists()
-    finally:
-        probe.unlink()
 
 
 @pytest.fixture
@@ -65,14 +57,14 @@ def case_insensitive_workdir(tmp_path: Path) -> Iterator[Path]:
     if base:
         root = Path(base)
         root.mkdir(parents=True, exist_ok=True)
-        if not _is_case_insensitive(root):
+        if not is_case_insensitive(root):
             pytest.skip(f"{CASE_INSENSITIVE_DIR_ENV}={base} is not a case-insensitive directory")
         work = Path(tempfile.mkdtemp(prefix="boto3s3-cc-", dir=root))
         try:
             yield work
         finally:
             shutil.rmtree(work, ignore_errors=True)
-    elif _is_case_insensitive(tmp_path):
+    elif is_case_insensitive(tmp_path):
         yield tmp_path
     else:
         pytest.skip(

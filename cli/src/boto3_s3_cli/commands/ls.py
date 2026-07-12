@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory, output
+from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
+    expand_integer_paramfile,
     expand_option_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -37,17 +39,26 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # aws's parse-time order (measured, docs/cli.md section 6): the
-        # --endpoint-url scheme check (252) and the --page-size paramfile
-        # expansion (252) both precede the bare int() coercion (255).
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # JMESPath compile (252) leads, then the --endpoint-url scheme check
+        # (252), then the paramfile expansions (252) - the positional and the
+        # bucket-listing filters as well as --page-size, all expanded at parse
+        # time - which precede the bare int() coercion (255).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
-        expand_option_paramfile(args, "page_size", operation="ls")
+        expand_positional_paramfile(args, "paths", name="paths", operation="ls")
+        expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
+        expand_option_paramfile(args, "bucket_region", operation="ls")
+        expand_integer_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, FileKind, S3Storage
+        # Import the library entry point only when this execution path needs it.
+        from boto3_s3 import FileInfo, FileKind, S3Storage
 
+        # Intentional aws-cli bug parity: a readable positional fileb:// is
+        # still bytes here. Calling bytes.startswith(str) raises TypeError,
+        # which the general handler maps to 255.
+        if isinstance(args.paths, bytes):
+            raise TypeError("startswith first arg must be bytes or a tuple of bytes, not str")
         target: str = args.paths
         # A target with no bucket lists all buckets. aws-cli even discards a key
         # left after an empty bucket ("s3:///k"), so normalize every such form to
@@ -56,20 +67,18 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
-        storage = S3Storage(target, client=ctx.client_factory(args), page_size=page_size)
+        s3 = ctx.s3(args)
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 
         matched = False
         total_objects = 0
         total_size = 0
-        for info in S3().ls(
-            storage,
-            recursive=args.recursive,
-            request_payer=args.request_payer,
-            bucket_name_prefix=args.bucket_name_prefix,
-            bucket_region=args.bucket_region,
-        ):
+
+        def print_result(info: FileInfo) -> None:
+            """Render one listing entry and update the optional summary totals."""
+            nonlocal matched, total_objects, total_size
             matched = True
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
@@ -78,6 +87,15 @@ class LsCommand(Command):
             if info.kind is FileKind.FILE:
                 total_objects += 1
                 total_size += info.size or 0
+
+        s3.ls(
+            storage,
+            on_result=print_result,
+            recursive=args.recursive,
+            request_payer=args.request_payer,
+            bucket_name_prefix=args.bucket_name_prefix,
+            bucket_region=args.bucket_region,
+        )
 
         if args.summarize:
             sys.stdout.write(

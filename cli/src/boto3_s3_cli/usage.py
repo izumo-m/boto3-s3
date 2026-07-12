@@ -1,8 +1,10 @@
 """aws-parity usage / error strings shared across subcommands.
 
-These strings are part of the stderr contract (the parity tests compare them
-token-for-token against aws), so each wording has exactly one home here and
-the commands interpolate only their own name or value.
+Most of these strings are part of the stderr contract (the parity tests
+compare them token-for-token against aws); ``invalid_bucket_name_message`` is
+the exception - only its rc is contractual and its text is a simplified form
+(its docstring). Each wording has exactly one home here and the commands
+interpolate only their own name or value.
 """
 
 from __future__ import annotations
@@ -14,9 +16,9 @@ def single_uri_usage(command: str) -> str:
     """aws's usage error for ``rm``'s single ``<S3Uri>`` - rc 252.
 
     Only the ``CommandParameters`` path (rm, and the transfer family via
-    :func:`two_path_usage`) prepends the ``usage:`` line; ``mb`` / ``rb``
-    raise the bare form (:func:`bare_single_uri_usage`) - measured against
-    aws 2.35.5.
+    ``two_path_usage``) prepends the ``usage:`` line; ``mb`` / ``rb``
+    raise the bare form (``bare_single_uri_usage``) - measured against
+    aws 2.35.18.
     """
     return f"usage: boto3-s3 {command} <S3Uri>\nError: Invalid argument type"
 

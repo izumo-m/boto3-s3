@@ -22,7 +22,7 @@ lines:
 
 Rendering is decoupled from the transfer workers, aws-cli's results-pipeline
 shape (its ``ResultProcessor`` thread): the worker-side callbacks only update
-the counters (the rc inputs - always exact, independent of rendering) and
+the counters (always exact, independent of rendering) and
 enqueue a slim record; one dedicated printer thread drains the queue and does
 every ``write``/``flush``, so console I/O never blocks a worker. Because a
 single thread renders in queue order, line ordering and the ``\\r`` padding
@@ -40,8 +40,10 @@ records behind (e.g. ``sync`` piped into a stopped pager) back-pressures the
 transfer instead (documented in docs/aws-cli-option-handling.md section 6).
 
 Suppression matrix (rm's ``_DeletePrinter`` precedent): ``--quiet``
-builds no output at all - failures included - while the warned/failed
-counters still feed the exit code; ``--only-show-errors`` drops successes
+builds no output at all - failures included - while the ``warned`` counter
+still feeds the exit code (rc 2; a failure's rc 1 comes from the library's
+``BatchError``, so ``failed`` is observational only, kept exact all the
+same); ``--only-show-errors`` drops successes
 and progress but keeps dryrun lines; ``--no-progress`` drops only progress.
 ``--progress-frequency N`` throttles progress repaints to one per N seconds;
 0 (the default) applies the ``_MIN_REPAINT_INTERVAL`` floor, which also
@@ -141,19 +143,23 @@ class TransferPrinter:
         self._frequency = max(float(frequency), _MIN_REPAINT_INTERVAL)
         self._multiline = multiline
         self._lock = threading.Lock()
-        # rc inputs - counted even when fully silenced (--quiet), on the
-        # worker side, so the exit code never depends on the printer thread.
+        # Counted even when fully silenced (--quiet), on the worker side, so
+        # the exit code never depends on the printer thread. Only warned feeds
+        # the rc (finish_transfer's rc 2); a failure's rc 1 comes through the
+        # library's BatchError, so failed is observational only.
         self.failed = 0
         self.warned = 0
         # progress bookkeeping (worker side, under the lock)
-        self._start = time.monotonic()
+        self._start: float | None = None
         self._last_progress_at = float("-inf")
         self._expected_files = 0
         self._finished_files = 0
         self._skipped_files = 0
         self._expected_bytes = 0
         self._done_bytes = 0
-        self._inflight: dict[str, int] = {}
+        # key -> (bytes_done, bytes_total); bytes_total lets a FAILED result
+        # backfill the untransferred remainder into the meter (aws parity).
+        self._inflight: dict[str, tuple[int, int | None]] = {}
         # rendering pipeline
         self._queue: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_MAX)
         self._thread: threading.Thread | None = None
@@ -190,15 +196,22 @@ class TransferPrinter:
     # -- callbacks (worker threads: count and enqueue, never write) -----------
 
     def on_progress(self, progress: TransferProgress) -> None:
+        """Update thread-safe byte/file totals and enqueue a throttled meter snapshot."""
         snapshot: _ProgressSnapshot | None = None
         with self._lock:
+            if self._start is None:
+                # aws anchors the transfer-speed denominator at the first queued
+                # result, not at construction (results.py _record_queued_result);
+                # do the same so a long enumeration phase before the first byte
+                # does not deflate the displayed rate.
+                self._start = time.monotonic()
             is_new = progress.key not in self._inflight
             if is_new:
                 self._expected_files += 1
                 if progress.bytes_total is not None:
                     self._expected_bytes += progress.bytes_total
-            previous = self._inflight.get(progress.key, 0)
-            self._inflight[progress.key] = progress.bytes_done
+            previous = self._inflight.get(progress.key, (0, None))[0]
+            self._inflight[progress.key] = (progress.bytes_done, progress.bytes_total)
             self._done_bytes += progress.bytes_done - previous
             if not self._show_progress:
                 return
@@ -223,6 +236,7 @@ class TransferPrinter:
         self._queue.put(snapshot)
 
     def on_result(self, result: OpResult) -> None:
+        """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
         record: _ResultRecord | None = None
         with self._lock:
             if result.outcome is OpOutcome.NOTICE:
@@ -233,7 +247,14 @@ class TransferPrinter:
             else:
                 if result.outcome in (OpOutcome.SUCCEEDED, OpOutcome.FAILED):
                     self._finished_files += 1
-                    self._inflight.pop(result.key, None)
+                    inflight = self._inflight.pop(result.key, None)
+                    if result.outcome is OpOutcome.FAILED and inflight is not None:
+                        # aws adds a failed file's untransferred remainder to the
+                        # meter (results.py bytes_failed_to_transfer) so the byte
+                        # progress still reaches the expected total.
+                        done_bytes, total_bytes = inflight
+                        if total_bytes is not None:
+                            self._done_bytes += total_bytes - done_bytes
                 elif (
                     result.outcome is OpOutcome.SKIPPED
                     and self._inflight.pop(result.key, None) is not None
@@ -270,9 +291,11 @@ class TransferPrinter:
     # -- rendering (the printer thread) ----------------------------------------
 
     def _drain(self) -> None:
+        """Render queued records until shutdown, disabling output after stream failure."""
         while True:
             record = self._queue.get()
             if record is _SHUTDOWN:
+                self._clear_residual_progress()
                 return
             if self._output_dead:
                 continue
@@ -288,9 +311,12 @@ class TransferPrinter:
                 # no worker ever blocks on the queue. The rc inputs live on
                 # the worker side and are unaffected; cli.main's own
                 # BrokenPipeError handling covers the process-level contract.
+                # An unencodable key is not a dead stream: _uni_write handles
+                # UnicodeEncodeError inline, so it never reaches here.
                 self._output_dead = True
 
     def _render_result(self, record: _ResultRecord) -> None:
+        """Render one terminal result with aws-cli's stream and wording rules."""
         if record.outcome is OpOutcome.NOTICE:
             self._write_line(sys.stderr, record.error)
             return
@@ -310,8 +336,10 @@ class TransferPrinter:
             self._write_line(sys.stderr, f"warning: {record.error}")
 
     def _write_progress(self, snapshot: _ProgressSnapshot) -> None:
+        """Render one byte-based or file-based progress snapshot."""
         if snapshot.expected_bytes > 0:
-            elapsed = max(snapshot.now - self._start, 1e-9)
+            start = self._start if self._start is not None else snapshot.now
+            elapsed = max(snapshot.now - start, 1e-9)
             speed = human_readable_size(snapshot.done_bytes / elapsed)
             statement = (
                 f"Completed {human_readable_size(snapshot.done_bytes)}/"
@@ -324,17 +352,41 @@ class TransferPrinter:
                 f"with {snapshot.remaining} file(s) remaining"
             )
         if self._multiline:
-            sys.stdout.write(statement + "\n")
+            self._uni_write(sys.stdout, statement + "\n")
         else:
             padded = statement.ljust(self._progress_length)
             self._progress_length = len(statement)
-            sys.stdout.write(padded + "\r")
-        sys.stdout.flush()
+            self._uni_write(sys.stdout, padded + "\r")
 
     def _write_line(self, stream: TextIO, text: str) -> None:
         padded = text.ljust(self._progress_length)
         self._progress_length = 0
-        stream.write(padded + "\n")
+        self._uni_write(stream, padded + "\n")
+
+    def _clear_residual_progress(self) -> None:
+        """Blot out a meter left on screen by a run whose tail records paint
+        nothing (cp/mv ``--no-overwrite`` 412 skips paint nothing and do not
+        reset the padding). aws clears it with a blank padded line ending in
+        ``\\r`` (``_clear_progress_if_no_more_expected_transfers``). A tail
+        result line already reset ``_progress_length`` to 0, so a normal run
+        clears nothing here."""
+        if self._output_dead or self._progress_length <= 0:
+            return
+        try:
+            self._uni_write(sys.stdout, " " * self._progress_length + "\r")
+        except Exception:
+            self._output_dead = True
+
+    def _uni_write(self, stream: TextIO, text: str) -> None:
+        """aws-cli's ``uni_print``: on a console/codepage that cannot encode the
+        text (a non-ASCII key on a cp932 or ascii stream), re-encode with the
+        stream's encoding and ``errors='replace'`` rather than dropping the
+        line, so one unencodable key never silences the rest of the run."""
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(stream, "encoding", None) or "ascii"
+            stream.write(text.encode(encoding, "replace").decode(encoding))
         stream.flush()
 
 

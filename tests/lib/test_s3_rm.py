@@ -25,6 +25,8 @@ from botocore.exceptions import ClientError
 from boto3_s3 import (
     S3,
     BatchError,
+    CancelledError,
+    CancelToken,
     FileInfo,
     GlobFilter,
     NotFoundError,
@@ -103,8 +105,8 @@ def _rm(
 ) -> list[OpResult]:
     """Run S3().rm with a result collector and return the OpResults.
 
-    ``page_size`` is now storage config, so it is routed to the ``S3Storage``
-    constructor rather than to ``rm``.
+    ``page_size`` is storage config, so it is passed to the ``S3Storage``
+    constructor.
     """
     results: list[OpResult] = []
     page_size = kwargs.pop("page_size", 1000)
@@ -196,6 +198,31 @@ class TestRmSingleKey:
         keep = GlobFilter().exclude("a.*").compile()
         assert _rm("s3://b/data/a.txt", client, filter=keep) == []
         assert client.delete_object_calls == []
+
+
+class TestRmCancellation:
+    def test_graceful_cancel_drains_inflight_batch_and_drops_buffer(self) -> None:
+        client = _FakeS3Client([{"Contents": [_obj(f"k/{i:04}") for i in range(1001)]}])
+        storage = S3Storage("s3://b/k/", client=client)
+        token = CancelToken()
+        results: list[OpResult] = []
+
+        def cancel_from_first(result: OpResult) -> None:
+            results.append(result)
+            if len(results) == 1:
+                token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().rm(
+                storage,
+                recursive=True,
+                cancel_token=token,
+                on_result=cancel_from_first,
+            )
+
+        assert len(client.delete_objects_calls) == 1
+        assert len(client.delete_objects_calls[0]["Delete"]["Objects"]) == 1000
+        assert len(results) == 1000
 
 
 class TestRmRecursive:

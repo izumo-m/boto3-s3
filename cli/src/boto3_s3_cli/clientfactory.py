@@ -1,12 +1,10 @@
 """Build boto3 clients from the parsed connection / auth globals.
 
-The execution half of the global-option surface :mod:`~boto3_s3_cli.globalargs`
-registers: :func:`build_client` turns the connection / auth values into the
+The execution half of the global-option surface ``globalargs``
+registers: ``build_client`` turns the connection / auth values into the
 boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
-section 5), and :func:`build_service_client` builds the non-S3 clients ``mv``'s
-path validation needs (section 5.8). Everything here reaches the AWS SDK, so
-the imports are deferred into the builders - a command pays them only once it
-actually needs a client (import contract, docs/imports.md).
+section 5), and ``build_service_client`` builds the non-S3 clients ``mv``'s
+path validation needs (section 5.8). Everything here reaches the AWS SDK.
 """
 
 from __future__ import annotations
@@ -16,14 +14,16 @@ import os
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-# Pure-Python names (exceptions module) - safe on the parse path (import
-# contract, docs/imports.md).
+# These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
+    from boto3.session import Session as Boto3Session
     from botocore.session import Session as BotocoreSession
     from mypy_boto3_s3 import S3Client
+
+    from boto3_s3 import S3
 
 
 def _pin_python_sigv4_signers() -> None:
@@ -37,7 +37,7 @@ def _pin_python_sigv4_signers() -> None:
     four, reserving CRT for the asymmetric SigV4a family (aws-cli's
     ``awscli/botocore/auth.py`` ``AUTH_TYPE_MAPS``). The difference is
     user-visible: the CRT presigner renders ``X-Amz-Expires`` after
-    ``X-Amz-SignedHeaders``, so ``presign``'s URLs would diverge. Restore the
+    ``X-Amz-SignedHeaders``, so ``presign``'s URLs would diverge. Restore
     aws-cli's entries (in-place table update - botocore resolves the signer
     from this table per request, however it was imported; without awscrt
     this just re-asserts the defaults).
@@ -57,15 +57,19 @@ def _pin_python_sigv4_signers() -> None:
 def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
-    ``--profile`` > the first env var of :data:`~boto3_s3_cli.globalargs.PROFILE_ENV_VARS`
-    that is *present* > ``None`` (boto3 then falls back to the ``default``
-    profile). Mirrors aws-cli's "first present env var wins" exactly, an empty
-    value included (``AWS_PROFILE=`` selects the empty profile ->
-    ProfileNotFound, like aws), so that `aws s3` parity holds even when both env
-    vars are set. Only the CLI layer corrects this; the library (boto3.client
+    ``--profile`` (truthy only) > the first env var of
+    ``PROFILE_ENV_VARS`` that is *present* > ``None``
+    (boto3 then falls back to the ``default`` profile). The ``--profile`` guard is
+    aws-cli's truthy test (its ``_handle_top_level_args`` binds the profile only
+    ``if getattr(args, 'profile', False)``), so an empty ``--profile ""`` is
+    ignored and the env chain wins - matching aws, which then reaches the server
+    (rc 254) rather than raising ProfileNotFound. The env chain is instead
+    present-wins, an empty value included (``AWS_PROFILE=`` selects the empty
+    profile -> ProfileNotFound, like aws), so `aws s3` parity holds even when both
+    env vars are set. Only the CLI layer corrects this; the library (boto3.client
     fallback) stays boto3/botocore-faithful and keeps stock order on purpose.
     """
-    if args.profile is not None:
+    if args.profile:
         return args.profile
     for name in PROFILE_ENV_VARS:
         if name in os.environ:
@@ -79,7 +83,7 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
     aws-cli validates the value at parse time - before the integer coercions,
     the session profile, and every path validation - so this runs first in
     the commands whose later checks could otherwise mask it (measured against
-    aws 2.35.5: ``--page-size abc --endpoint-url badurl`` is the endpoint's
+    aws 2.35.18: ``--page-size abc --endpoint-url badurl`` is the endpoint's
     252, not the conversion's 255). Also called inside the client builders,
     where botocore would otherwise raise a bare ``ValueError``.
     """
@@ -99,9 +103,7 @@ def validate_profile(args: argparse.Namespace) -> None:
     config reads (ProfileNotFound -> its general handler, rc 255) ahead of
     every post-parse usage error (252) - while an unresolvable *region* does
     NOT fail here (aws defers it to request time). Mirror the ordering by
-    forcing one scoped-config read on a session bound to the resolved
-    profile; the boto3 / s3transfer client stack stays unloaded (import
-    contract, docs/imports.md).
+    forcing one scoped-config read on a session bound to the resolved profile.
     """
     import botocore.session
     from botocore.exceptions import BotoCoreError
@@ -112,11 +114,38 @@ def validate_profile(args: argparse.Namespace) -> None:
         raise InvalidConfigError(str(exc)) from exc
 
 
+def build_session(args: argparse.Namespace) -> Boto3Session:
+    """Build and validate the one boto3 session owned by a CLI `S3` command."""
+    import boto3
+    import botocore.session
+    from botocore.exceptions import BotoCoreError
+
+    try:
+        botocore_session = botocore.session.Session(profile=resolve_profile(args))
+        botocore_session.get_scoped_config()
+        return boto3.Session(botocore_session=botocore_session)
+    except BotoCoreError as exc:
+        raise InvalidConfigError(str(exc)) from exc
+
+
+def build_s3(args: argparse.Namespace) -> S3:
+    """Build the command's `S3`, binding client and config reads to one session."""
+    from boto3_s3 import S3
+
+    session = build_session(args)
+
+    class CliS3(S3):
+        def client(self) -> S3Client:
+            return build_client(args, session=session)
+
+    return CliS3(session=session)
+
+
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
     """The region to build the client in, via aws-cli's region chain.
 
     Mirrors aws-cli's ``_construct_cli_region_chain``: the *explicit* value
-    (``--region``, or the caller's region for :func:`build_service_client`) >
+    (``--region``, or the caller's region for ``build_service_client``) >
     ``AWS_REGION`` env > ``AWS_DEFAULT_REGION`` env > the profile's config-file
     ``region`` > the EC2 IMDS region. Stock botocore never adopted ``AWS_REGION``
     (its region env is ``AWS_DEFAULT_REGION`` alone) and reserves its
@@ -130,8 +159,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     """
     if explicit is not None:
         return explicit
-    # Deferred like the SDK imports in the builders below (import contract,
-    # docs/imports.md): the providers are only reached once a client is built.
+    # Import the providers only when region resolution needs them.
     from botocore.configprovider import (
         ChainProvider,
         EnvironmentProvider,
@@ -153,7 +181,11 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
 
 
 def build_service_client(
-    service: str, args: argparse.Namespace, *, region: str | None = None
+    service: str,
+    args: argparse.Namespace,
+    *,
+    region: str | None = None,
+    session: Boto3Session | None = None,
 ) -> Any:
     """Build a non-S3 service client for path validation (``mv``'s resolver).
 
@@ -163,15 +195,19 @@ def build_service_client(
     ``None`` falls through to the session default, *not* to ``--region``,
     like aws-cli's dead-defaulted ``parameters.get('source_region', ...)``),
     and the ``--no-verify-ssl`` / ``--ca-bundle`` verify setting - no endpoint
-    override, no timeout config. A ``None`` region resolves through the same
-    :func:`_resolve_region` chain as :func:`build_client` (``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS), keeping the session default
-    aws v2-shaped.
+    override. aws resolves ``--cli-read-timeout`` / ``--cli-connect-timeout`` and
+    ``--no-sign-request`` into the *session* default client config at startup, so
+    ``from_session``'s ``create_client`` inherits them; mirror that here by folding
+    the same timeouts and the UNSIGNED signature into this client's ``Config``. A
+    ``None`` region resolves through the same ``_resolve_region`` chain as
+    ``build_client`` (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` > config > IMDS),
+    keeping the session default aws v2-shaped.
     """
     # Deferred like build_client: only a command that actually resolves
     # access-point paths pays the boto3 import.
     import boto3
     import botocore.session
+    from botocore import UNSIGNED
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
@@ -184,11 +220,22 @@ def build_service_client(
     # a bad --profile); translate them so they reach the exit-code mapping
     # instead of escaping as an uncaught traceback (see build_client).
     try:
-        botocore_session = botocore.session.Session(profile=resolve_profile(args))
-        session = boto3.Session(botocore_session=botocore_session)
+        if session is None:
+            botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            session = boto3.Session(botocore_session=botocore_session)
+        else:
+            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         # aws's bundled botocore applies its standard/3 retry defaults to
-        # these validator clients too.
+        # these validator clients too, and its startup handlers thread the
+        # timeouts / UNSIGNED signature through the session default config that
+        # from_session's create_client inherits (build_client mirrors the same).
         service_overrides: dict[str, Any] = {"retries": _retry_defaults(botocore_session)}
+        if args.no_sign_request:
+            service_overrides["signature_version"] = UNSIGNED
+        if args.cli_read_timeout is not None:
+            service_overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
+        if args.cli_connect_timeout is not None:
+            service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
         return session.client(
             service,
             region_name=_resolve_region(region, botocore_session),
@@ -218,21 +265,20 @@ def _coerce_cli_timeout(value: str) -> int | None:
         raise InvalidValueError(str(exc)) from exc
 
 
-def build_client(args: argparse.Namespace) -> S3Client:
+def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
-    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - :func:`resolve_profile`);
+    ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - ``resolve_profile``);
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS - :func:`_resolve_region`);
+    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
     kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` map to
     ``verify``. The client is handed to the library through ``S3Storage`` - the
     library never rebuilds connection settings itself.
     """
-    # Deferred: importing boto3 drags in botocore and s3transfer (~100ms), so
-    # it happens only once a command actually needs a client; --help/--version
-    # and usage errors never reach it (import contract, docs/imports.md).
+    # Importing boto3 drags in botocore and s3transfer. The top-level
+    # --help/--version exits return before this normal-dispatch path.
     import boto3
     import botocore.session
     from botocore import UNSIGNED
@@ -278,10 +324,13 @@ def build_client(args: argparse.Namespace) -> S3Client:
     # ConfigurationError [253], the rest -> InvalidConfigError [255]) instead of
     # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
     try:
-        botocore_session = botocore.session.Session(profile=resolve_profile(args))
+        if session is None:
+            botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            session = boto3.Session(botocore_session=botocore_session)
+        else:
+            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         overrides["retries"] = _retry_defaults(botocore_session)
         config = Config(**overrides)
-        session = boto3.Session(botocore_session=botocore_session)
         return session.client(
             "s3",
             region_name=_resolve_region(args.region, botocore_session),

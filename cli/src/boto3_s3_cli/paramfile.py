@@ -2,11 +2,13 @@
 
 The execution half of aws's ``paramfile.py`` (``get_paramfile`` over its
 ``LOCAL_PREFIX_MAP``), scoped to the local prefixes ``aws s3`` consumes -
-the http/https fetchers are not ported. Two callers share it: the
+the http/https fetchers are not ported. Three callers share it: the
 transfer-argument resolution (``commands/transferargs.py``: the free-string
-options, ``--metadata``'s pre-parse, the SSE-C blobs) and the shorthand
-parser's ``@=`` operator (``shorthand.py``). Every load failure is a
-:class:`~boto3_s3.exceptions.ValidationError` with aws's wording (rc 252).
+options, ``--metadata``'s pre-parse, the SSE-C blobs), the shorthand
+parser's ``@=`` operator (``shorthand.py``), and the plain-option expansion
+(``commands/base.py``'s ``expand_option_paramfile``: ls / rm ``--page-size``,
+presign ``--expires-in``). Every load failure is a
+``ValidationError`` with aws's wording (rc 252).
 """
 
 from __future__ import annotations

@@ -433,6 +433,14 @@ class TestMvSamePathGuards:
         # showing "s3://b/" as the destination.
         assert same_path("s3://b/k.txt", normalize_s3_uri("s3://b"))
 
+    def test_normalize_s3_uri_passes_a_scheme_less_path_through(self) -> None:
+        # aws-cli's startswith('s3://') guard: a path without the scheme is
+        # returned unchanged, never sliced blindly (which would corrupt
+        # "bucket/key" into "t/key").
+        assert normalize_s3_uri("bucket/key") == "bucket/key"
+        assert normalize_s3_uri("bucket") == "bucket"
+        assert normalize_s3_uri("") == ""
+
     def test_same_key_ignores_the_bucket(self) -> None:
         assert same_key("s3://b1/k.txt", "s3://b2/k.txt")
         assert not same_key("s3://b1/k.txt", "s3://b2/other.txt")

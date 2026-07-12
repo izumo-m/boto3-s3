@@ -20,10 +20,12 @@ if TYPE_CHECKING:
 class FileKind(enum.Enum):
     """What a listing entry is. Backends map their native kinds onto these.
 
-    ``FILE`` is a real object/file with content (``size`` / ``mtime`` populated).
-    ``DIRECTORY`` is a prefix / sub-directory grouping with no backing object (an
-    S3 common prefix or a local sub-directory; ``size`` / ``mtime`` may be
-    ``None``). ``BUCKET`` is a top-level S3 bucket.
+    ``FILE`` is an S3 object or a non-directory local entry. Under a local
+    complete-entry enumeration it can therefore be a symlink, FIFO, socket, or
+    device and does not by itself guarantee transferable content; inspect
+    ``LocalFileInfo.stat_result.st_mode`` for the precise native kind.
+    ``DIRECTORY`` is an S3 common-prefix grouping or a local directory;
+    ``size`` / ``mtime`` may be ``None``. ``BUCKET`` is a top-level S3 bucket.
     """
 
     FILE = "file"
@@ -33,10 +35,10 @@ class FileKind(enum.Enum):
 
 @dataclass(slots=True, kw_only=True)
 class FileInfo:
-    """Cross-backend listing entry returned by ``Storage.scan`` / ``S3.ls``.
+    """Cross-backend listing entry yielded by `Storage.scan` or delivered by `S3.ls`.
 
     One uniform type for every entry a backend can list: files, directories /
-    prefixes, and buckets are distinguished by :attr:`kind`, not by separate
+    prefixes, and buckets are distinguished by ``kind``, not by separate
     classes - so a backend never widens ``scan``'s return type as it gains kinds.
     Backend-specific detail lives on subclasses (``S3FileInfo`` / ``LocalFileInfo``);
     local-only notions such as symlinks are attributes of ``LocalFileInfo`` rather
@@ -59,12 +61,12 @@ class FileInfo:
     ``--exclude`` / ``--include`` matching space, and the axis ``sync`` merge-joins
     on (two ``scan`` sides relativized to their roots share one ``compare_key``
     space, while ``key`` stays the full identifier the transfer / delete uses and
-    differs per side). ``Storage.scan`` stamps it on every entry it yields, so a
-    custom ``ScanOptions.filter`` predicate - notably
-    :class:`~boto3_s3.globsieve.GlobFilter` - matches the root-relative key
-    directly, without re-deriving it from ``key``. The name mirrors aws-cli's
-    ``FileInfo.compare_key``. It is ``None`` only on a ``FileInfo`` built by hand
-    rather than produced by ``scan``.
+    differs per side). Each backend's ``scan_pages`` stamps it on every entry it
+    yields (a contract of the backend's listing, not of the base ``Storage.scan``),
+    so a custom ``ScanOptions.filter`` predicate - notably ``GlobFilter`` - matches
+    the root-relative key directly, without re-deriving it from ``key``. The name
+    mirrors aws-cli's ``FileInfo.compare_key``. It is ``None`` only on a
+    ``FileInfo`` built by hand rather than produced by ``scan``.
 
     ``storage`` is the backend the entry was listed from - the ``Storage`` whose
     ``scan`` (or single-key path) produced it - stamped by the producer during the
@@ -72,10 +74,10 @@ class FileInfo:
     ``source_client`` on its own ``FileInfo``). It lets a ``ScanOptions.filter``
     predicate reach the
     backend behind the entry (e.g. a ``HeadObject`` for a tag the listing omits),
-    and it is the handle ``sync`` reads through :attr:`SyncPair.src` /
-    :attr:`~boto3_s3.comparator.SyncPair.dest` to open a pair's non-S3 side for a
+    and it is the handle ``sync`` reads through ``SyncPair.src`` /
+    ``SyncPair.dest`` to open a pair's non-S3 side for a
     content compare (so ``pair.src.storage`` replaces a separately threaded
-    backend). ``None`` on a hand-built ``FileInfo``; :meth:`Storage.scan` sets it
+    backend). ``None`` on a hand-built ``FileInfo``; ``Storage.scan`` sets it
     as a safety net for a backend whose ``scan_pages`` did not.
     """
 
@@ -98,9 +100,11 @@ class LocalFileInfo(FileInfo):
     the target (``follow_symlinks=True`` only follows to descend / stat, matching
     aws-cli).
 
-    ``stat_result`` is the entry's **followed** ``os.stat`` (the same one the
-    walk's vetting battery computes - so carrying it costs no extra syscall), a
-    plain immutable snapshot a ``filter`` or ``on_result`` callback can read
+    ``stat_result`` is the exact stat snapshot the local producer used to classify
+    the entry: normally the followed ``os.stat``; the entry's own lstat when
+    ``follow_symlinks=False`` under complete enumeration; or an lstat fallback
+    when following a link failed. It is a plain immutable value a ``filter`` or
+    ``on_result`` callback can read
     (``st_mode`` / ``st_uid`` / ``st_size`` / ... - ``size`` and ``mtime`` are
     derived from it) without re-stat'ing. Because it is a value, not an
     ``os.DirEntry`` handle, the walk keeps its ``dir_fd`` fast path even while
@@ -108,9 +112,8 @@ class LocalFileInfo(FileInfo):
     link (from the walk's ``d_type`` / cached ``lstat`` - free); with
     ``follow_symlinks=True`` a link to a file still surfaces here as
     ``is_symlink=True`` while its ``stat_result`` describes the target.
-    ``LocalStorage`` populates both on every entry it lists (the walk and the
-    single-path ``get_fileinfo``); a ``FileInfo`` built by hand leaves them at
-    their defaults.
+    Every ``LocalFileInfo`` produced by ``LocalStorage`` carries both fields; a
+    value built by hand may leave ``stat_result`` at ``None``.
     """
 
     stat_result: os.stat_result | None = None
@@ -122,6 +125,10 @@ class S3FileInfo(FileInfo):
     """``FileInfo`` enriched with fields derived from an S3 object listing.
 
     ``etag`` is the dequoted ETag (surrounding ``"`` stripped) when populated.
+    ``storage_class`` is the object's storage class from the listing
+    (``ListObjectsV2``'s ``StorageClass``), consulted by the aws-cli glacier gate
+    to skip ``GLACIER`` / ``DEEP_ARCHIVE`` sources on ``cp`` / ``mv`` / ``sync``
+    unless forced or restored.
     ``owner`` is the S3 canonical user ID (``Owner["ID"]``), present only when
     the listing was made with ``fetch_owner=True`` - ``ListObjectsV2`` omits the
     owner otherwise, and ``FetchOwner`` adds per-page latency. ``DisplayName`` is
@@ -145,12 +152,12 @@ class ScanOptions:
     Carrying a single immutable object - rather than re-threading keyword
     arguments through ``scan`` -> ``scan_pages`` and every override - keeps the
     enumeration seam tidy. This base holds only the knobs **every** backend
-    honors; backend-specific knobs live on subclasses (:class:`S3ScanOptions` /
-    :class:`LocalScanOptions`) so one backend's options never leak into another's
+    honors; backend-specific knobs live on subclasses (``S3ScanOptions`` /
+    ``LocalScanOptions``) so one backend's options never leak into another's
     code. A backend builds its own subclass via
-    :meth:`~boto3_s3.storage.Storage.default_scan_options` and the built-ins
+    ``Storage.default_scan_options`` and the built-ins
     reject a foreign options type, so ``sync`` builds one subclass per side (an
-    S3 side gets :class:`S3ScanOptions`, a local side :class:`LocalScanOptions`).
+    S3 side gets ``S3ScanOptions``, a local side ``LocalScanOptions``).
     A custom backend uses this base plus its own instance state, or defines its
     own ``ScanOptions`` subclass. (Bucket *listing* - the S3 service root - is a
     separate operation with its own params, ``S3Storage.list_buckets`` / ``S3.ls``,
@@ -174,7 +181,7 @@ class ScanOptions:
     ``sync`` sets it (its merge-join needs both sides ascending), while ``cp`` /
     ``mv`` / ``ls`` / ``rm`` leave it ``False`` (order is immaterial - each entry
     transfers / lists / deletes independently). A backend declaring
-    :attr:`~boto3_s3.storage.StorageCapability.SORTABLE_SCAN` MUST honor
+    ``StorageCapability.SORTABLE_SCAN`` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
     byte-ordered, the local walk sorts for aws parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
@@ -197,7 +204,7 @@ class ScanOptions:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class S3ScanOptions(ScanOptions):
-    """S3 ``ListObjectsV2`` knobs - the S3 backend's :class:`ScanOptions`.
+    """S3 ``ListObjectsV2`` knobs - the S3 backend's ``ScanOptions``.
 
     ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
     like aws-cli, they pass through to the service, which decides (``page_size=0``
@@ -222,19 +229,39 @@ class S3ScanOptions(ScanOptions):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LocalScanOptions(ScanOptions):
-    """Local-walk knobs - the ``LocalStorage`` backend's :class:`ScanOptions`.
+    """Local-walk knobs - the ``LocalStorage`` backend's ``ScanOptions``.
 
-    ``follow_symlinks=False`` skips symlinks. ``detect_symlink_loops`` (default
-    ``False``, a library extension - ``aws s3`` has none, so off keeps parity)
-    guards the recursive walk against symlink cycles: with it (and
-    ``follow_symlinks``) a directory that resolves to one of its own ancestors is
-    skipped with a ``Symbolic link loop detected`` warning (via ``on_warning``)
-    instead of recursing until ``RecursionError``. Off is zero extra cost (no
-    per-directory ``stat``).
+    ``enumerate_all_entries`` selects the candidate enumeration policy before
+    ``ScanOptions.filter`` runs. ``False`` (default) is the aws-cli-compatible
+    transfer view: recursively list transferable files, apply the special-file /
+    readability battery, and skip no-follow symlinks. ``True`` is the complete
+    filesystem-entry view: include the root, directories, symlinks, special
+    files, and entries whose metadata is readable even when their content is not.
+    A filter can still remove any candidate; filtering a directory record is too
+    late to prune its children, while ``LocalFileGenerator.finalize_children`` can
+    prune before descent. High-level operations preserve this source setting, so
+    a caller that enables it is responsible for filtering out entries an intended
+    transfer cannot consume.
+
+    ``follow_symlinks`` selects the interpretation of a symlink. In the complete
+    view, ``False`` returns the link itself as an lstat-based leaf, including a
+    dangling link; ``True`` returns or descends its target as one entry at that
+    key. If the followed stat fails, the complete view warns and falls back to
+    the link's lstat. In the transfer view, ``False`` skips the link and ``True``
+    retains the aws-cli-compatible followed behavior.
+
+    ``detect_symlink_loops`` (default ``False``, a library extension -
+    ``aws s3`` has none, so off keeps parity) guards the recursive walk
+    against symlink cycles: with it (and ``follow_symlinks``) a directory that
+    resolves to one of its own ancestors is skipped with a ``Symbolic link
+    loop detected`` warning (via ``on_warning``) at the first re-entry, instead
+    of descending ~SYMLOOP_MAX levels until the kernel's ELOOP ends the walk with
+    a misleading ``File does not exist.`` warning (which is ``aws s3``'s
+    behavior). Off is zero extra cost (no per-directory ``stat``).
 
     ``storage`` is not a user knob: ``LocalStorage`` threads its own instance here
     (``scan_pages`` / ``walk_local``) so the *shared, stateless*
-    :class:`~boto3_s3.localstorage.LocalFileGenerator` can stamp each entry's
+    ``LocalFileGenerator`` can stamp each entry's
     ``FileInfo.storage`` before the visibility filter runs, without holding a
     back-reference to any one storage (which would misfire when one walker is
     shared across storages). ``None`` on a hand-built options object -
@@ -243,6 +270,7 @@ class LocalScanOptions(ScanOptions):
 
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
+    enumerate_all_entries: bool = False
     storage: Storage | None = None
 
 
@@ -293,11 +321,35 @@ class CaseConflictMode(enum.Enum):
 
 
 class CopyPropsMode(enum.Enum):
-    """Which source object properties to propagate on an S3-to-S3 copy."""
+    """Which source object properties to propagate on an S3-to-S3 copy.
+
+    `ALL` additionally carries S3 object annotations and needs an SDK with the
+    annotations model - botocore >= 1.43.31 and s3transfer >= 0.19; on an older
+    SDK the transfer engine refuses it up front with a `ConfigurationError`
+    (every other mode degrades silently there, docs/transfer.md section 4).
+    Multipart annotation staging is selected separately by
+    `AnnotationCopyMode`.
+    """
 
     NONE = "none"
     METADATA_DIRECTIVE = "metadata-directive"
     DEFAULT = "default"
+    ALL = "all"
+
+
+class AnnotationCopyMode(enum.Enum):
+    """How multipart `copy_props=all` stages source annotation payloads.
+
+    `PRELOAD_MEMORY` matches aws-cli by reading every payload into memory
+    before the multipart copy starts. `PRELOAD_TEMPFILE` preserves that
+    failure timing while storing payloads in a temporary file instead.
+    `DEFERRED` uses s3transfer's native post-copy reads, reducing pre-copy
+    resource use but potentially leaving the destination when a read fails.
+    """
+
+    PRELOAD_MEMORY = "preload-memory"
+    PRELOAD_TEMPFILE = "preload-tempfile"
+    DEFERRED = "deferred"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -320,6 +372,11 @@ class OpResult:
     acted on (a transfer's source, or a delete's removed object); the ``dest_*``
     trio the destination side. The fields, the ``src`` / ``dest`` convention, and
     which operation populates which field are documented in docs/opresult.md.
+
+    ``dest_info`` is ``None`` for ``cp`` / ``mv``, which never list the
+    destination; only ``sync`` populates it (the pre-existing object the copy
+    compared against), while ``dest_storage`` still carries the destination
+    backend in that case.
     """
 
     transfer_type: TransferType
@@ -330,31 +387,56 @@ class OpResult:
     src: str | None = None
     dest: str | None = None
     src_info: FileInfo | None = None
-    # None for cp / mv, which never list the destination; only sync populates it
-    # (the pre-existing object the copy compared against). dest_storage still
-    # carries the destination backend in that case.
     dest_info: FileInfo | None = None
     src_storage: Storage | None = None
     dest_storage: Storage | None = None
     extra_info: Mapping[str, Any] | None = None
 
 
-class CancelToken:
-    """Thread-safe cancellation flag handed to a blocking operation.
+class CancelMode(enum.Enum):
+    """How an operation shuts down after a `CancelToken` request.
 
-    ``cancel()`` may be called from any thread or a signal handler; the
-    operation observes it and raises ``CancelledError``.
+    `GRACEFUL` stops accepting new work and drains work already accepted by
+    the operation. `IMMEDIATE` additionally asks each engine to cancel pending
+    and in-flight work where its implementation supports cancellation; external
+    I/O already running may still have to finish.
+    """
+
+    GRACEFUL = "graceful"
+    IMMEDIATE = "immediate"
+
+
+class CancelToken:
+    """Thread-safe, monotonically escalating cancellation request.
+
+    `cancel()` may be called from any thread or a signal handler. The default
+    is graceful cancellation; a later `IMMEDIATE` request upgrades it, while a
+    later graceful request never downgrades it. The operation observes the
+    effective `mode`, performs that shutdown policy, and raises
+    `CancelledError` after reclaiming its resources.
     """
 
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._mode: CancelMode | None = None
 
-    def cancel(self) -> None:
-        self._event.set()
+    def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
+        with self._lock:
+            if self._mode is CancelMode.IMMEDIATE:
+                return
+            if self._mode is None or mode is CancelMode.IMMEDIATE:
+                self._mode = mode
+                self._event.set()
 
     @property
     def cancelled(self) -> bool:
         return self._event.is_set()
+
+    @property
+    def mode(self) -> CancelMode | None:
+        with self._lock:
+            return self._mode
 
 
 class TransferOptions(TypedDict, total=False):
@@ -363,6 +445,14 @@ class TransferOptions(TypedDict, total=False):
     Names are the snake_case form of the corresponding ``aws s3`` options; the
     library translates them to S3 API PascalCase internally. Options that do not
     apply to a given transfer direction are ignored (aws-cli parity).
+
+    ``sse_c_key`` is a ``str`` or raw ``bytes``, like botocore's
+    ``SSECustomerKey``: ``aws`` passes the CLI string through verbatim (only
+    ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
+    (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
+    ``PreconditionFailed`` becomes a silent skip), and an existence check before
+    downloads. `annotation_copy_mode` affects only multipart S3-to-S3 copies
+    under `copy_props=ALL`; it defaults to `PRELOAD_MEMORY` for aws-cli parity.
     """
 
     acl: str
@@ -371,14 +461,13 @@ class TransferOptions(TypedDict, total=False):
     sse: str
     sse_kms_key_id: str
     sse_c: str
-    # str or raw bytes, like botocore's SSECustomerKey: aws passes the CLI
-    # string through verbatim (only fileb:// loads bytes).
     sse_c_key: str | bytes
     sse_c_copy_source: str
     sse_c_copy_source_key: str | bytes
     metadata: Mapping[str, str]
     metadata_directive: str
     copy_props: CopyPropsMode
+    annotation_copy_mode: AnnotationCopyMode
     cache_control: str
     content_type: str
     content_disposition: str
@@ -393,14 +482,12 @@ class TransferOptions(TypedDict, total=False):
     force_glacier_transfer: bool
     ignore_glacier_warnings: bool
     case_conflict: CaseConflictMode
-    # Conditional write (--no-overwrite): IfNoneMatch="*" on uploads/copies
-    # (the server's PreconditionFailed becomes a silent skip), an existence
-    # check before downloads.
     no_overwrite: bool
 
 
 ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
+ListingCallback = Callable[[FileInfo], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
 # visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
@@ -410,7 +497,7 @@ ResultCallback = Callable[[OpResult], None]
 # ``compare_key`` while a richer predicate can decide on ``size`` / ``mtime`` /
 # ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``
 # (e.g. a HeadObject for a tag the listing omits).
-# :class:`~boto3_s3.globsieve.GlobFilter` is the ready-made glob implementation.
+# ``GlobFilter`` is the ready-made glob implementation.
 FileFilter = Callable[[FileInfo], bool]
 
 
@@ -429,12 +516,14 @@ def strip_response_metadata(
 
 
 __all__ = [
+    "CancelMode",
     "CancelToken",
     "CaseConflictMode",
     "CopyPropsMode",
     "FileFilter",
     "FileInfo",
     "FileKind",
+    "ListingCallback",
     "LocalFileInfo",
     "LocalScanOptions",
     "OpOutcome",

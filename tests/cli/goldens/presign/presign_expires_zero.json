@@ -11,6 +11,6 @@
   "remaining_keys": null,
   "scenario": "presign_expires_zero",
   "stdout_lines": [
-    "<ENDPOINT>/<BUCKET>/presign/basic.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<ACCESS_KEY>/<DATE>/us-east-1/s3/aws4_request&X-Amz-Date=<AMZ_DATE>&X-Amz-Expires=0&X-Amz-SignedHeaders=host&X-Amz-Signature=<SIGNATURE>"
+    "<ENDPOINT>/<BUCKET>/presign/basic.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<ACCESS_KEY>/<DATE>/<REGION>/s3/aws4_request&X-Amz-Date=<AMZ_DATE>&X-Amz-Expires=0&X-Amz-SignedHeaders=host&X-Amz-Signature=<SIGNATURE>"
   ]
 }

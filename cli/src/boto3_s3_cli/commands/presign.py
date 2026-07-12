@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory
+from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
-    expand_option_paramfile,
+    expand_integer_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -40,22 +41,24 @@ class PresignCommand(Command):
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the
-        # --endpoint-url scheme check (252) and the --expires-in paramfile
-        # expansion (252) both precede the bare int() coercion (255).
+        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # compile (252) leads, then the --endpoint-url scheme check (252), then
+        # the paramfile expansions (252, the positional path and --expires-in)
+        # precede the bare int() coercion (255).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
-        expand_option_paramfile(args, "expires_in", operation="presign")
+        expand_positional_paramfile(args, "path", name="path", operation="presign")
+        expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3, S3Storage
+        # Import the library entry point only when this execution path needs it.
+        from boto3_s3 import S3Storage
 
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; S3Storage takes both forms too.
-        storage = S3Storage(args.path, client=ctx.client_factory(args))
+        s3 = ctx.s3(args)
+        storage = S3Storage(args.path, client=s3.client())
         storage.validate()
-        url = S3().presign(storage, expires_in=expires_in)
+        url = s3.presign(storage, expires_in=expires_in)
         sys.stdout.write(url + "\n")
         return 0

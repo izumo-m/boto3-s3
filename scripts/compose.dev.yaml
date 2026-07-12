@@ -18,7 +18,10 @@ name: boto3-s3-dev
 
 services:
   minio:
-    image: minio/minio:latest
+    # pgsty/minio is the community-maintained continuation of minio/minio
+    # (upstream archived 2026-02; its :latest froze at RELEASE.2025-09-07).
+    # Drop-in compatible, CVE fixes only, no new features.
+    image: pgsty/minio:latest
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -33,7 +36,7 @@ services:
   # play, boto3-s3-e2e for the e2e suite (which probes that it exists and is
   # empty before running).
   mc-init:
-    image: minio/mc:latest
+    image: pgsty/mc:latest
     depends_on:
       - minio
     entrypoint: >

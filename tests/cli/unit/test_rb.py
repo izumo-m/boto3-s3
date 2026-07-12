@@ -18,8 +18,8 @@ from botocore.exceptions import ClientError
 from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import run_cli_in_process
-from tests.utils.recorder import make_recording_client
+from tests.utils.harness import CliResult, run_cli_in_process
+from tests.utils.recorder import ApiCall, make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -38,7 +38,13 @@ def _ctx(client: Any) -> Context:
     return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
 
 
-def _run_recorded(parsed_responses: list[dict[str, Any]], argv: list[str]) -> Any:
+def _unused_factory(_args: Any) -> Any:
+    raise AssertionError("client factory must not be called")
+
+
+def _run_recorded(
+    parsed_responses: list[dict[str, Any]], argv: list[str]
+) -> tuple[CliResult, list[ApiCall]]:
     client, calls = make_recording_client(parsed_responses)
     return run_cli_in_process(argv, ctx=_ctx(client)), calls
 
@@ -110,6 +116,26 @@ class TestUsageErrors:
         assert rc == 252
         assert "Please specify a valid bucket name only. E.g. s3://b" in capsys.readouterr().err
 
+    def test_empty_bucket_with_key_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws splits the path first: an empty bucket carrying a key is the key
+        # usage error (252), ending in a bare "s3://" - not the empty-bucket rc 1.
+        rc = cli.main(["rb", "s3:///k"], ctx=_ctx(None))
+        assert rc == 252
+        assert "Please specify a valid bucket name only. E.g. s3://\n" in capsys.readouterr().err
+
+    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws expands the positional file:// at parse time, before the client
+        # build (so a bad reference beats a bad --profile). Names it 'path'.
+        rc = cli.main(["rb", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
+
+    def test_invalid_query_beats_client_construction(self) -> None:
+        def boom(_args: Any) -> Any:
+            raise Boto3S3Error("Unable to locate credentials")
+
+        assert cli.main(["rb", "s3://b", "--query", "]["], ctx=Context(client_factory=boom)) == 252
+
     def test_object_lambda_arn_is_252_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-ap"
         rc = cli.main(["rb", f"s3://{arn}"], ctx=_ctx(None))
@@ -133,12 +159,15 @@ class TestPostStartErrors:
         assert "BucketNotEmpty" in result.stderr
 
     def test_empty_uri_is_rc_1(self) -> None:
-        # aws sends Bucket="" to DeleteBucket and fails client-side inside
-        # the local catch; our library's eager check lands in the same catch.
+        # aws sends Bucket="" to DeleteBucket and fails client-side inside the
+        # local catch -> rc 1 with the botocore-shaped line (same form as
+        # mb/rm), handled before construction so the client is never used.
         client, calls = make_recording_client([])
         result = run_cli_in_process(["rb", "s3://"], ctx=_ctx(client))
         assert result.rc == 1
-        assert result.stderr.startswith("remove_bucket failed: s3:// ")
+        assert result.stderr == (
+            'remove_bucket failed: s3:// Parameter validation failed:\nInvalid bucket name ""\n'
+        )
         assert calls == []
 
 
@@ -162,11 +191,13 @@ class TestForce:
         client = _ForceFailClient(_client_error("NoSuchBucket", 404))
         result = run_cli_in_process(["rb", "s3://b", "--force"], ctx=_ctx(client))
         assert result.rc == 255
-        # The inner rm printed its own fatal line, then rb the fixed sentence.
+        # The inner rm printed its own fatal line, then the fixed sentence goes
+        # through main's general handler with its 'boto3-s3: [ERROR]:' prefix
+        # (aws routes its RuntimeError the same way, 'aws: [ERROR]:').
         assert "fatal error:" in result.stderr
         assert (
-            "remove_bucket failed: Unable to delete all objects in the bucket, "
-            "bucket will not be deleted." in result.stderr
+            "boto3-s3: [ERROR]: remove_bucket failed: Unable to delete all objects in the "
+            "bucket, bucket will not be deleted." in result.stderr
         )
         assert client.delete_bucket_calls == []
 

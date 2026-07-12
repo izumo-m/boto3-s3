@@ -46,9 +46,11 @@ maintaining high functional compatibility (parity).
 - **Python**: 3.10 and later.
 - **OS**: Linux / macOS / **Windows**.
 - **AWS SDK floor**: `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2
-  (a roughly 3-year window). These are the oldest versions the library and CLI
-  are supported against; a future release may raise the floor (when it does,
-  the back-compat shims that carry a comment to that effect can be removed).
+  (a roughly 3-year window - the SDK generation of aws-cli 2.13.0, 2023-07,
+  the oldest aws-cli this floor corresponds to). These are the oldest versions
+  the library and CLI are supported against; a future release may raise the
+  floor (when it does, the back-compat shims that carry a comment to that
+  effect can be removed).
 - **Feature-level degradation on old SDKs**: rather than emulate newer AWS
   behavior, features that depend on a newer S3 model are simply unavailable
   below the SDK version that introduced them - on a par with the awscrt extra
@@ -56,17 +58,30 @@ maintaining high functional compatibility (parity).
   (conditional writes / `IfNoneMatch`, GA 2024-11) needs a late-2024 botocore,
   and `--checksum-algorithm CRC64NVME` needs a botocore that ships that
   algorithm. The bucket-listing filters `ls --bucket-name-prefix` /
-  `--bucket-region` (paginated `ListBuckets`, late 2024 / botocore 1.34.162)
-  are likewise silently inert below that botocore - `ls` itself still works,
-  falling back to an unpaginated `ListBuckets`. Two more degradations at the
-  floor: `mb --tags` / `mb --bucket-name-prefix`-era CreateBucket parameters
-  (`CreateBucketConfiguration.Tags` / `Location`) fail client-side with a clean
+  `--bucket-region` need the paginated `ListBuckets` (late 2024 / botocore
+  1.34.162); below it `ls` still works, falling back to an unpaginated
+  `ListBuckets` where the filters are silently inert. Their `Prefix` /
+  `BucketRegion` request parameters landed later still (botocore 1.35.42), so on
+  a paginating botocore that predates them (1.34.162 through 1.35.41) passing the
+  filters raises a client-side `ParamValidationError` rather than being inert.
+  Two more degradations at the
+  floor: the newer CreateBucket parameters `mb` can send - `--tags`'s
+  `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
+  account-regional namespace bucket selects - fail client-side with a clean
   ParamValidationError on a botocore that predates them; and without a modern
   s3transfer the engine cannot pre-provide the copy/download source ETag
   (`provide_object_etag`, guarded by hasattr), so `OpResult.extra_info`'s
   `{"ETag": ...}` is `None` there unless `capture_response=True` supplies it
   from the captured response, and s3transfer's own `CopySourceIfMatch`
-  consistency pin on copies is absent. Everything else works at the floor.
+  consistency pin on copies is absent. S3 object annotations (GA 2026-06)
+  follow the same rule: on a botocore without the annotations model, copies
+  silently stop sending `AnnotationDirective=EXCLUDE` (behaving like
+  pre-annotations aws-cli), and `copy_props=ALL` / `--copy-props all` - which
+  needs botocore >= 1.43.31 and s3transfer >= 0.19 - is refused up front with
+  a `ConfigurationError` (transfer.md section 4). On capable SDKs, multipart
+  `copy_props=ALL` preloads annotations in memory by default for aws-cli
+  failure-state parity; the library also offers temporary-file preload and
+  deferred post-copy reads. Everything else works at the floor.
 
 ## 3. Design policy
 
@@ -97,8 +112,9 @@ maintaining high functional compatibility (parity).
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
   are only two exceptions.
   1. Extension options that do not exist in `aws s3` (e.g., the CLI's own
-     `--help` / `-h` / `--version`, which aws-cli instead exposes as a `help`
-     subcommand)
+     `--help` / `-h`, which aws-cli instead exposes as a `help` subcommand,
+     and `--version`, which aws-cli offers only as the top-level
+     `aws --version`, not under `aws s3`)
   2. When it depends on a feature that is hard to realize (e.g., the CLI's
      interactive UI)
 
@@ -148,8 +164,8 @@ written here.
 - [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
   comparator, the per-lane `create_filter` / `update_filter` / `delete_filter`
   axis).
-- [`imports.md`](./imports.md) - import discipline (lazy re-export, lazy SDK
-  loading, the contract for the CLI startup path).
+- [`imports.md`](./imports.md) - import discipline (lazy root re-exports and the
+  SDK-free top-level CLI help/version exits).
 - [`masking.md`](./masking.md) - credential masking for debug logs
   (`set_stream_logger`, `SecretMaskingFilter`, parity of the replacement
   notation).

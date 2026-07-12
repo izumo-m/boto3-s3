@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import threading
 from typing import Any, cast
 
 import boto3
@@ -13,8 +14,10 @@ from botocore.exceptions import ProfileNotFound
 
 from boto3_s3 import (
     S3,
-    ConfigurationError,
+    CancelledError,
+    CancelToken,
     FileKind,
+    InvalidConfigError,
     LocalStorage,
     S3Storage,
     TransferConfig,
@@ -47,39 +50,120 @@ class _FakeS3Client:
 
 
 class TestLsRouting:
+    def test_pre_cancelled_listing_makes_no_request(self) -> None:
+        client = _FakeS3Client([])
+        token = CancelToken()
+        token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=client),
+                on_result=lambda _info: None,
+                cancel_token=token,
+            )
+
+        assert client.calls == []
+
+    def test_cancel_from_on_result_stops_delivery_and_reclaims_prefetch(self) -> None:
+        pages = [
+            {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
+        ]
+        storage = S3Storage("s3://b/p/", client=_FakeS3Client(pages))
+        token = CancelToken()
+        keys: list[str] = []
+
+        def stop_after_first(info: Any) -> None:
+            keys.append(info.key)
+            token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().ls(storage, on_result=stop_after_first, cancel_token=token)
+
+        assert keys == ["p/0"]
+        assert not any(
+            thread.name == "boto3-s3-prefetch" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    def test_cancel_stops_prefetch_before_callback_returns(self) -> None:
+        second_started = threading.Event()
+        release_second = threading.Event()
+        third_started = threading.Event()
+
+        class _ControlledPaginator:
+            def paginate(self, **_kwargs: Any) -> Any:
+                def pages() -> Any:
+                    yield {"Contents": [{"Key": "p/0", "Size": 1, "LastModified": _MTIME}]}
+                    second_started.set()
+                    assert release_second.wait(5.0)
+                    yield {"Contents": [{"Key": "p/1", "Size": 1, "LastModified": _MTIME}]}
+                    third_started.set()
+                    yield {"Contents": [{"Key": "p/2", "Size": 1, "LastModified": _MTIME}]}
+
+                return pages()
+
+        class _ControlledClient(_FakeS3Client):
+            def get_paginator(self, _name: str) -> Any:
+                return _ControlledPaginator()
+
+        token = CancelToken()
+
+        def cancel_while_page_is_inflight(_info: Any) -> None:
+            assert second_started.wait(5.0)
+            token.cancel()
+            release_second.set()
+            assert not third_started.wait(0.2)
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=_ControlledClient([])),
+                on_result=cancel_while_page_is_inflight,
+                cancel_token=token,
+            )
+
     def test_s3storage_target_delegates_to_scan(self) -> None:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("s3://b/p/", client=client)
-        assert [info.key for info in S3().ls(storage)] == ["p/a"]
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
+        assert [info.key for info in infos] == ["p/a"]
 
     def test_scheme_optional_storage_delegates_to_scan(self) -> None:
         # S3Storage accepts an s3://-less "bucket/key"; ls drives its scan the same.
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("b/p/", client=client)  # no s3:// scheme
-        assert [info.key for info in S3().ls(storage)] == ["p/a"]
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
+        assert [info.key for info in infos] == ["p/a"]
 
     def test_non_s3_location_raises_eagerly(self) -> None:
         # ls() is a regular method (not a generator): a non-S3 target raises on
         # the call itself, before any iteration.
         with pytest.raises(ValidationError):
-            S3().ls(LocalStorage("/tmp/x"))
+            S3().ls(LocalStorage("/tmp/x"), on_result=lambda _info: None)
 
     def test_service_root_storage_lists_buckets(self) -> None:
         client = _FakeS3Client([{"Buckets": [{"Name": "alpha", "CreationDate": _MTIME}]}])
         storage = S3Storage("s3://", client=client)
-        infos = list(S3().ls(storage))
+        infos: list[Any] = []
+        S3().ls(storage, on_result=infos.append)
         assert [(i.key, i.kind) for i in infos] == [("alpha", FileKind.BUCKET)]
 
     def test_bucket_filters_reach_the_scan(self) -> None:
         client = _FakeS3Client([])
         storage = S3Storage("s3://", client=client)
-        list(S3().ls(storage, bucket_name_prefix="al", bucket_region="us-east-1"))
+        S3().ls(
+            storage,
+            on_result=lambda _info: None,
+            bucket_name_prefix="al",
+            bucket_region="us-east-1",
+        )
         assert client.calls[0]["Prefix"] == "al"
         assert client.calls[0]["BucketRegion"] == "us-east-1"
 
     def test_key_without_bucket_raises_eagerly(self) -> None:
         with pytest.raises(ValidationError):
-            S3().ls("s3:///key")
+            S3().ls("s3:///key", on_result=lambda _info: None)
 
 
 class TestClientSeam:
@@ -97,35 +181,43 @@ class TestClientSeam:
         session = boto3.Session(region_name="ap-northeast-1")
         assert S3(session=session).client().meta.region_name == "ap-northeast-1"
 
+    def test_session_is_the_instance_default(self) -> None:
+        session = boto3.Session(region_name="ap-northeast-1")
+        assert S3(session=session).session is session
+
     def test_fresh_client_each_call(self) -> None:
         # Documented contract: a fresh client per call, owned by the caller.
         s3 = S3()
         assert s3.client() is not s3.client()
 
-    def test_build_failure_maps_to_configuration_error(
+    def test_build_failure_maps_to_invalid_config_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A build failure - e.g. AWS_PROFILE naming a missing profile - raises
-        # the translated ConfigurationError (docs/exceptions.md section 3), not
-        # the raw botocore error, like every other public-API failure.
+        # the translated error (docs/exceptions.md section 3), not the raw
+        # botocore one. ProfileNotFound refines to InvalidConfigError, not the
+        # plain ConfigurationError base; pin the exact type because the CLI
+        # maps this refinement to rc 255 (vs 253 for the base).
         def boom(*args: Any, **kwargs: Any) -> Any:
             raise ProfileNotFound(profile="missing-profile")
 
         monkeypatch.setattr(boto3, "client", boom)
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             S3().client()
+        assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
-    def test_session_build_failure_maps_to_configuration_error(self) -> None:
+    def test_session_build_failure_maps_to_invalid_config_error(self) -> None:
         # The session branch of client() is wrapped like the default-session
-        # branch: a session whose client build fails raises the translated
-        # ConfigurationError, not the raw botocore error.
+        # branch: a session whose client build fails raises the same translated
+        # InvalidConfigError refinement, not the raw botocore error.
         class _BrokenSession:
             def client(self, *args: Any, **kwargs: Any) -> Any:
                 raise ProfileNotFound(profile="missing-profile")
 
-        with pytest.raises(ConfigurationError) as exc_info:
+        with pytest.raises(InvalidConfigError) as exc_info:
             S3(session=cast("Any", _BrokenSession())).client()
+        assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
 

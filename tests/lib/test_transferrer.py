@@ -14,7 +14,7 @@ import io
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -23,8 +23,15 @@ from botocore.exceptions import ClientError
 from boto3_s3 import transfer
 from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
-from boto3_s3.transfer import TransferItem, Transferrer, conditional_write_unsupported_reason
+from boto3_s3.transfer import (
+    TransferItem,
+    Transferrer,
+    annotations_copy_unsupported_reason,
+    conditional_write_unsupported_reason,
+)
+from boto3_s3.transferconfig import TransferConfig as LibraryTransferConfig
 from boto3_s3.types import (
+    AnnotationCopyMode,
     CopyPropsMode,
     FileInfo,
     OpOutcome,
@@ -448,13 +455,20 @@ class TestCopy:
         assert create.params["ContentType"] == "text/html"
         assert create.params["Metadata"] == {"a": "b"}
 
-    def test_multipart_default_heads_source_and_inlines_small_tags(self) -> None:
+    def test_multipart_default_heads_source_and_copies_small_tags(self) -> None:
+        # Where s3transfer still forwards inline Tagging to the create call
+        # (< upstream 0.19) the small set rides the header; where it is
+        # blacklisted the engine routes it through the post-copy
+        # PutObjectTagging instead (transfer._mpu_inline_tagging_supported).
+        inline = transfer._mpu_inline_tagging_supported()
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
         ]
+        if not inline:
+            responses.append({})  # PutObjectTagging
         source_responses: list[dict[str, Any] | Exception] = [
             {"ContentType": "text/css", "Metadata": {}},
             {"TagSet": [{"Key": "team", "Value": "a&b"}]},
@@ -469,8 +483,276 @@ class TestCopy:
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         create = calls[0]
         assert create.params["ContentType"] == "text/css"
-        assert create.params["Tagging"] == "team=a%26b"
+        if inline:
+            assert create.params["Tagging"] == "team=a%26b"
+        else:
+            assert "Tagging" not in create.params
+            assert _ops(calls)[-1] == "PutObjectTagging"
+            assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "team", "Value": "a&b"}]}
         assert transferrer.succeeded == 1
+
+    def test_single_part_copy_excludes_annotations(self) -> None:
+        # Every copy-props mode short of ALL sends AnnotationDirective=EXCLUDE
+        # on the single-part CopyObject (the server default COPY would carry
+        # annotations over otherwise).
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=7, head={})],
+            [{}],
+            source_responses=[{"TagSet": []}],
+        )
+        assert calls[0].operation == "CopyObject"
+        assert calls[0].params["AnnotationDirective"] == "EXCLUDE"
+
+    def test_all_single_part_copy_sends_no_annotation_directive(self) -> None:
+        # copy_props=ALL rides the server-side COPY default: nothing on the wire.
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=7, head={})],
+            [{}],
+            source_responses=[{"TagSet": []}],
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+        assert calls[0].operation == "CopyObject"
+        assert "AnnotationDirective" not in calls[0].params
+
+    def test_all_multipart_default_preloads_then_uses_native_write_path(self) -> None:
+        # Reads are completed before submission. s3transfer >= 0.19 still owns
+        # the post-complete writes and pins ObjectIfMatch to the new ETag.
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {"Annotations": [{"AnnotationName": "ann1"}]},
+            {"AnnotationPayload": io.BytesIO(b"payload")},
+        ]
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+        assert "AnnotationDirective" not in calls[0].params
+        assert _ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[2].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert _ops(calls)[-1] == "PutObjectAnnotation"
+        assert calls[-1].params == {
+            "Bucket": "dest-b",
+            "Key": "cp/a.bin",
+            "AnnotationName": "ann1",
+            "AnnotationPayload": b"payload",
+            "ObjectIfMatch": '"dest-etag"',
+            "VersionId": "dest-v1",
+        }
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_deferred_read_failure_happens_after_destination(self) -> None:
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                {},  # native-path failure cleanup AbortMultipartUpload
+            ],
+            source_responses=[
+                {},
+                {"TagSet": []},
+                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+            ),
+        )
+
+        assert _ops(source_calls)[-1] == "ListObjectAnnotations"
+        assert _ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "UploadPartCopy",
+            "CompleteMultipartUpload",
+            "AbortMultipartUpload",
+        ]
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_default_read_failure_leaves_no_destination(self) -> None:
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"'},
+            {},  # native-path failure cleanup AbortMultipartUpload
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+        ]
+
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+
+        assert _ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+        ]
+        assert calls == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_preload_lists_all_pages_before_reading_payloads(self) -> None:
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"'},
+            {},
+            {},
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {"TagSet": []},
+            {
+                "Annotations": [{"AnnotationName": "ann1"}],
+                "NextContinuationToken": "next",
+            },
+            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"AnnotationPayload": io.BytesIO(b"one")},
+            {"AnnotationPayload": io.BytesIO(b"two")},
+        ]
+
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={"VersionId": "src-v1"})],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                request_payer="requester",
+            ),
+        )
+
+        assert _ops(source_calls) == [
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[1].params == {
+            "Bucket": "src-b",
+            "Key": "d/a.bin",
+            "RequestPayer": "requester",
+            "VersionId": "src-v1",
+        }
+        assert source_calls[2].params["ContinuationToken"] == "next"
+        assert source_calls[3].params["AnnotationName"] == "ann1"
+        assert source_calls[4].params["AnnotationName"] == "ann2"
+        assert [call.params["AnnotationPayload"] for call in calls[-2:]] == [b"one", b"two"]
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_tempfile_mode_cleans_its_configured_directory(
+        self, tmp_path: Path
+    ) -> None:
+        calls, _, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={})],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                {},
+                {},
+            ],
+            source_responses=[
+                {"TagSet": []},
+                {
+                    "Annotations": [
+                        {"AnnotationName": "ann1"},
+                        {"AnnotationName": "ann2"},
+                    ]
+                },
+                {"AnnotationPayload": io.BytesIO(b"first")},
+                {"AnnotationPayload": io.BytesIO(b"second-longer")},
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=tmp_path),
+        )
+
+        assert [call.params["AnnotationPayload"] for call in calls[-2:]] == [
+            b"first",
+            b"second-longer",
+        ]
+        assert list(tmp_path.iterdir()) == []
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_tempfile_creation_failure_leaves_no_destination(
+        self, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing"
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=[{}, {"TagSet": []}],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=missing),
+        )
+
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert calls == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_all_multipart_tempfile_read_failure_closes_the_file(self, tmp_path: Path) -> None:
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB, head={})],
+            [],
+            source_responses=[
+                {"TagSet": []},
+                {"Annotations": [{"AnnotationName": "ann1"}]},
+                _client_error("AccessDenied", 403, "GetObjectAnnotation"),
+            ],
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.PRELOAD_TEMPFILE,
+            ),
+            config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=tmp_path),
+        )
+
+        assert calls == []
+        assert list(tmp_path.iterdir()) == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
     def test_oversized_tags_apply_after_the_copy(self) -> None:
         big = "v" * 3000
@@ -791,8 +1073,10 @@ class TestMove:
         monkeypatch.setattr(os, "remove", _boom)
         _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
-        # aws prints the OS's own wording after "move failed: ...".
-        assert str(results[0].error) == f"[Errno 13] Permission denied: '{src}'"
+        # aws prints the OS's own wording after "move failed: ..." - compare via
+        # str(OSError(...)): that rendering quotes the filename with repr, so the
+        # expectation stays exact where the path itself contains backslashes.
+        assert str(results[0].error) == str(OSError(13, "Permission denied", str(src)))
 
     def test_transfer_failure_leaves_the_source(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
@@ -863,6 +1147,44 @@ class TestMove:
         assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_post_copy_tagging_and_rollback_both_fail_succeeds(self) -> None:
+        # aws parity: when the post-copy PutObjectTagging fails and the rollback
+        # DeleteObject also fails, aws-cli lets the delete error escape the done
+        # callback (swallowed) without flipping the future - the transfer is a
+        # success. We mirror that: the mv's source delete then proceeds.
+        big = "v" * 3000
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag="abc123",
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            _client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+            {},  # mv source-side DeleteObject
+        ]
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
+        )
+        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        # The source delete proceeds - the transfer is recorded as a success.
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
+        assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
+        assert (transferrer.succeeded, transferrer.failed) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
     def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
         client, calls = make_recording_client([])
@@ -1076,9 +1398,12 @@ class TestStreams:
             dest_bucket="bucket",
             dest_key="streaming.txt",
         )
-        calls, _, _, transferrer = _run(TransferType.UPLOAD, [item], [{}])
+        calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert _ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
+        # The provided size reaches the future (aws ProvideSizeSubscriber) and
+        # SUCCEEDED reports it, unlike the size-less streaming upload above.
+        assert results[0].bytes_transferred == 4
 
     def test_stream_download_probes_then_writes(self) -> None:
         sink = _OpenSink()
@@ -1126,8 +1451,8 @@ class TestEngineSelection:
         sentinel = object()
         seen: list[Any] = []
 
-        def fake_create(client: Any, config: Any) -> Any:
-            seen.append((client, config))
+        def fake_create(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
+            seen.append((client, config, endpoint))
             return sentinel
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
@@ -1135,14 +1460,36 @@ class TestEngineSelection:
         transferrer = self._transferrer(TransferType.UPLOAD, config)
         assert transferrer._get_manager() is sentinel
         assert seen and seen[0][1] is config
+        assert seen[0][2] is None  # no explicit endpoint threaded here
+
+    def test_crt_endpoint_is_threaded_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+
+        def fake_create(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
+            seen.append(endpoint)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            crt_endpoint=vpce,
+        )
+        transferrer._get_manager()
+        assert seen == [vpce]
 
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
         from boto3_s3 import crtsupport
 
-        def boom(client: Any, config: Any) -> Any:  # the CRT path must not run
-            raise AssertionError("copy reached the CRT path")
+        def boom(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
+            raise AssertionError("copy reached the CRT path")  # must not run
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", boom)
         config = TransferConfig(preferred_transfer_client="crt")
@@ -1156,7 +1503,9 @@ class TestEngineSelection:
 
         # boto3 semantics: a None from the CRT factory (lock held elsewhere,
         # incompatible singleton) silently selects classic.
-        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", lambda c, cfg: None)
+        monkeypatch.setattr(
+            crtsupport, "create_crt_transfer_manager", lambda c, cfg, *, endpoint=None: None
+        )
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
         assert isinstance(manager, TransferManager)
@@ -1184,13 +1533,13 @@ class TestCrtSubscriberCompat:
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (docs/transfer.md):
-        # the engine pair plus the --no-overwrite SDK-floor probe (section 7).
-        # A symbol added or dropped must be a deliberate __all__ / docs decision.
-        from boto3_s3 import transfer
-
+        # the engine pair plus the SDK-floor probes (--no-overwrite, section 7;
+        # copy_props=ALL, section 4). A symbol added or dropped must be a
+        # deliberate __all__ / docs decision.
         assert set(transfer.__all__) == {
             "TransferItem",
             "Transferrer",
+            "annotations_copy_unsupported_reason",
             "conditional_write_unsupported_reason",
         }
         for name in transfer.__all__:
@@ -1249,3 +1598,128 @@ class TestConditionalWriteSupport:
         Transferrer(
             TransferType.UPLOAD, model_only_client({"PutObject"}), options={"no_overwrite": True}
         )
+
+
+class TestAnnotationsCopySupport:
+    """The copy_props=ALL SDK gate (docs/transfer.md section 4).
+
+    Annotations need botocore's S3 model (CopyObject.AnnotationDirective,
+    1.43.31) and s3transfer's own multipart handling (the directive in
+    CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST, 0.19); below either,
+    ALL must be refused with a clear message. The installed dev SDK satisfies
+    both, so the s3transfer side is exercised by trimming the blacklist.
+    """
+
+    def _capable_client(self) -> Any:
+        return model_only_client({"CopyObject"}, member="AnnotationDirective")
+
+    def test_reason_none_on_current_sdk(self) -> None:
+        assert annotations_copy_unsupported_reason(self._capable_client()) is None
+
+    def test_reason_names_min_botocore(self) -> None:
+        reason = annotations_copy_unsupported_reason(
+            model_only_client(set(), member="AnnotationDirective")
+        )
+        assert reason is not None
+        assert "1.43.31" in reason and "botocore" in reason
+
+    def test_reason_names_min_s3transfer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from s3transfer.copies import CopySubmissionTask
+
+        trimmed = [
+            arg
+            for arg in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+            if arg != "AnnotationDirective"
+        ]
+        monkeypatch.setattr(CopySubmissionTask, "CREATE_MULTIPART_ARGS_BLACKLIST", trimmed)
+        reason = annotations_copy_unsupported_reason(self._capable_client())
+        assert reason is not None
+        assert "0.19" in reason and "s3transfer" in reason
+
+    def test_transferrer_rejects_all_on_old_botocore(self) -> None:
+        client = model_only_client(set(), member="AnnotationDirective")
+        with pytest.raises(ConfigurationError, match=r"1\.43\.31"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options={"copy_props": CopyPropsMode.ALL},
+            )
+
+    def test_transferrer_allows_all_on_current_sdk(self) -> None:
+        client = self._capable_client()
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL},
+        )
+
+    def test_metadata_directive_disables_the_all_gate_on_old_botocore(self) -> None:
+        # An explicit metadata_directive disables the copy-props chain entirely
+        # (aws-cli), so ALL never reaches the annotations path - the gate must
+        # not refuse the combination for a feature that won't run. aws-cli
+        # accepts `cp ... --metadata-directive REPLACE --copy-props all` here.
+        client = model_only_client(set(), member="AnnotationDirective")
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL, "metadata_directive": "REPLACE"},
+        )
+
+    def test_other_modes_stay_usable_on_old_botocore(self) -> None:
+        # EXCLUDE degrades silently below the annotations model; construction
+        # must not gate the default mode.
+        client = model_only_client(set(), member="AnnotationDirective")
+        Transferrer(TransferType.COPY, client, source_client=client)
+
+    def test_copy_props_none_value_means_default(self) -> None:
+        # The constructor interprets the mode once; a None copy_props reads
+        # as unspecified (the falsy convention the other options follow),
+        # not a ValueError - so a permissive caller's dryrun still constructs.
+        client = model_only_client(set(), member="AnnotationDirective")
+        transferrer = Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options=cast(TransferOptions, {"copy_props": None}),
+        )
+        assert transferrer._copy_props is CopyPropsMode.DEFAULT
+
+    def test_invalid_copy_props_value_raises_validation_error(self) -> None:
+        # A bad copy_props string fails the enum conversion; the constructor
+        # translates it to a Boto3S3Error-family ValidationError rather than
+        # leaking the enum's raw ValueError past the public API
+        # (docs/exceptions.md). The CLI never reaches here (choices-validated).
+        client = self._capable_client()
+        with pytest.raises(ValidationError, match="copy_props"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"copy_props": "al"}),
+            )
+
+    @pytest.mark.parametrize("mode", list(AnnotationCopyMode))
+    def test_annotation_copy_mode_accepts_every_public_mode(self, mode: AnnotationCopyMode) -> None:
+        client = self._capable_client()
+        Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=client,
+            options={"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": mode},
+        )
+
+    def test_invalid_annotation_copy_mode_raises_validation_error(self) -> None:
+        client = self._capable_client()
+        with pytest.raises(ValidationError, match="annotation_copy_mode"):
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(
+                    TransferOptions,
+                    {"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": "preload"},
+                ),
+            )

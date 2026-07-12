@@ -27,6 +27,7 @@ and the e2e diff feeds both subprocesses the same bytes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ from tests.utils.scenario import BaseScenario, resolve_argv
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 __all__ = [
     "SCENARIOS",
@@ -117,11 +119,19 @@ class CpScenario(BaseScenario):
     # Directories created with an explicit mode (workdir-relative -> mode),
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
+    # aws's own outcome is racy on a case-insensitive destination (its warn
+    # text: "may result in ... race conditions between concurrent downloads",
+    # observed as a remove->rename [WinError 183] collision between the twin
+    # downloads). On such a filesystem there is no stable aws behavior to
+    # diff or record: e2e pins only ours' deterministic side (rc 0 + stderr
+    # tokens) and the golden tiers stand down (no capture, no replay). This
+    # is the one carve-out from the unconditional-rc charter note above -
+    # where aws itself is nondeterministic, no defined rc exists to match.
+    undefined_on_case_insensitive_dest: bool = False
 
 
-def materialize_workdir(workdir: Any, scenario: CpScenario) -> None:
+def materialize_workdir(workdir: Path, scenario: CpScenario) -> None:
     """Create the scenario's local source tree (plus the standing ``dest/``)."""
-    import os
     import time
 
     (workdir / "dest").mkdir(parents=True, exist_ok=True)
@@ -351,8 +361,13 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
+        # ours synthesizes EISDIR on every host; aws hits EISDIR at open on
+        # POSIX but ENOENT on Windows (opening "src\" fails there).
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=("upload failed", "Is a directory"),
+        expected_stderr_tokens_aws=(
+            "upload failed",
+            "Is a directory" if os.name != "nt" else "[Errno 2]",
+        ),
     ),
     CpScenario(
         name="cp_upload_dest_bucket_missing",
@@ -560,6 +575,22 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed_kwargs=_SEED_META_KWARGS,
         head_key="cp/meta.txt",
         head_fields=("ContentType", "Metadata"),
+    ),
+    CpScenario(
+        # MinIO has no annotations API and rejects the pre-copy listing, while
+        # real S3 completes the copy. This live-only scenario compares both
+        # exit code and bucket end state on either endpoint; in particular,
+        # the MinIO failure must leave no cp/big.bin destination like aws-cli.
+        name="cp_copy_props_all_multipart",
+        argv=(
+            "cp",
+            f"s3://{BUCKET_TOKEN}/d/big.bin",
+            f"s3://{BUCKET_TOKEN}/cp/big.bin",
+            "--copy-props",
+            "all",
+        ),
+        seed_kwargs=_SEED_BIG_KWARGS,
+        diff_only=True,
     ),
     CpScenario(
         # Metadata is dropped under copy-props none; the resulting default
@@ -772,6 +803,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         ),
         seed=_SEED_CASE,
         capture_tree=True,
+        undefined_on_case_insensitive_dest=True,
         expected_stderr_tokens_ours=("warning: Downloading", "differs only by case"),
         expected_stderr_tokens_aws=("warning: Downloading", "differs only by case"),
     ),
@@ -791,12 +823,3 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("Failed to download", "differs only by case"),
     ),
 )
-
-
-__all__ = [
-    "SCENARIOS",
-    "CpScenario",
-    "materialize_workdir",
-    "resolve_argv",
-    "seed_remote",
-]

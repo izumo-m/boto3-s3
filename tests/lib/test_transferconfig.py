@@ -1,19 +1,22 @@
-"""``boto3_s3.TransferConfig`` - the boto3 subclass with CRT tuning fields.
+"""`boto3_s3.TransferConfig` - the boto3 subclass with library settings.
 
 Pins the contract docs/crt.md relies on: boto3's constructor surface is
 untouched (names, order, defaults, alias attributes, the UNSET sentinel that
-distinguishes "explicit" from "defaulted" values), the CRT extras are
-keyword-only with ``None`` defaults, and a plain boto3 ``TransferConfig``
-stays accepted by readers that fall back via ``getattr``.
+distinguishes "explicit" from "defaulted" values), the extras are keyword-only
+with `None` defaults, and a plain boto3 `TransferConfig` stays accepted by
+readers that fall back via `getattr`.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 import boto3_s3
 from boto3_s3.transferconfig import TransferConfig
+from boto3_s3.types import AnnotationCopyMode
 
 
 class TestSdkFloorCompat:
@@ -21,8 +24,8 @@ class TestSdkFloorCompat:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Regression: forwarding None for an omitted base param overwrites the
-        # base ctor's concrete default on the SDK floor (boto3 < ~1.43), so None
-        # reaches s3transfer (a TypeError on the first size comparison, and
+        # base ctor's concrete default on the SDK floor (boto3 1.28 - ~1.40), so
+        # None reaches s3transfer (a TypeError on the first size comparison, and
         # use_threads=None silently disables threading). Unset base params must
         # be omitted so the base ctor supplies its own default.
         captured: dict[str, object] = {}
@@ -55,6 +58,9 @@ class TestReExport:
     def test_subclasses_boto3(self) -> None:
         assert issubclass(TransferConfig, Boto3TransferConfig)
 
+    def test_annotation_copy_mode_is_public(self) -> None:
+        assert boto3_s3.AnnotationCopyMode is AnnotationCopyMode
+
 
 class TestBoto3Surface:
     def test_defaults_match_boto3(self) -> None:
@@ -83,6 +89,8 @@ class TestBoto3Surface:
         # that machinery intact.
         defaulted = TransferConfig()
         explicit = TransferConfig(multipart_chunksize=16 * 1024 * 1024)
+        if not hasattr(defaulted, "get_deep_attr"):
+            pytest.skip("installed boto3 predates the CRT explicit-value sentinel")
         assert defaulted.get_deep_attr("multipart_chunksize") is TransferConfig.UNSET_DEFAULT
         assert explicit.get_deep_attr("multipart_chunksize") == 16 * 1024 * 1024
         # Reads still resolve the default through __getattribute__.
@@ -124,6 +132,11 @@ class TestCrtExtras:
         assert config.should_stream is False
         assert config.disk_throughput == 1_000_000_000
         assert config.direct_io is True
+        # The extras sit past the `*` barrier: nine positional slots fill the
+        # base params through preferred_transfer_client, so a tenth positional
+        # (target_bandwidth) has no slot and raises rather than being accepted.
+        with pytest.raises(TypeError):
+            TransferConfig(1, 2, 3, 4, 5, 6, 7, 8, "auto", 100)  # pyright: ignore[reportCallIssue]
 
     def test_plain_boto3_config_reads_as_unset(self) -> None:
         # Engine code reads the extras with getattr(..., None) so a plain
@@ -131,3 +144,16 @@ class TestCrtExtras:
         plain = Boto3TransferConfig()
         assert getattr(plain, "target_bandwidth", None) is None
         assert getattr(plain, "direct_io", None) is None
+
+
+class TestAnnotationTempDir:
+    def test_defaults_to_os_temp_selection(self) -> None:
+        assert TransferConfig().annotation_temp_dir is None
+
+    def test_accepts_a_library_selected_directory(self, tmp_path: Path) -> None:
+        config = TransferConfig(annotation_temp_dir=tmp_path)
+        assert config.annotation_temp_dir == tmp_path
+
+    def test_plain_boto3_config_reads_as_unset(self) -> None:
+        plain = Boto3TransferConfig()
+        assert getattr(plain, "annotation_temp_dir", None) is None

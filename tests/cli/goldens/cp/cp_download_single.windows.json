@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "cp",
+    "s3://<BUCKET>/d/a.txt",
+    "dest/out.bin"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "out.bin:14:ebaee762"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d/a.txt"
+  ],
+  "scenario": "cp_download_single",
+  "src_tree": null,
+  "stdout_lines": [
+    "download: s3://<BUCKET>/d/a.txt to dest\\out.bin"
+  ]
+}

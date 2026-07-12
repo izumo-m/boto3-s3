@@ -18,8 +18,8 @@ from boto3_s3 import FileInfo
 from boto3_s3.globsieve import GlobPattern, PatternKind
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import run_cli_in_process
-from tests.utils.recorder import make_recording_client
+from tests.utils.harness import CliResult, run_cli_in_process
+from tests.utils.recorder import ApiCall, make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -42,7 +42,9 @@ def _ctx(client: Any) -> Context:
     return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
 
 
-def _run_recorded(parsed_responses: list[dict[str, Any]], argv: list[str]) -> Any:
+def _run_recorded(
+    parsed_responses: list[dict[str, Any]], argv: list[str]
+) -> tuple[CliResult, list[ApiCall]]:
     client, calls = make_recording_client(parsed_responses)
     return run_cli_in_process(argv, ctx=_ctx(client)), calls
 
@@ -205,6 +207,36 @@ class TestFilterWiring:
         result, calls = _run_recorded([], ["rm", "s3://b/data/a.txt", "--exclude", "*"])
         assert (result.rc, result.stdout, result.stderr) == (0, "", "")
         assert calls == []
+
+
+def _unused_factory(_args: Any) -> Any:
+    raise AssertionError("client factory must not be called")
+
+
+class TestParamfileAndQuery:
+    """aws expands the positional file:// at parse time and compiles --query
+    there too; a bad reference / expression is its 252 before any request."""
+
+    def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
+        ref = tmp_path / "u.txt"
+        ref.write_text("s3://b/k")
+        result, calls = _run_recorded([], ["rm", f"file://{ref}", "--dryrun"])
+        assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://b/k\n")
+        assert calls == []
+
+    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["rm", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 252
+        assert (
+            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
+        )
+
+    def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(
+            ["rm", "s3://b/k", "--query", "]["], ctx=Context(client_factory=_unused_factory)
+        )
+        assert rc == 252
+        assert "Bad value for --query ][" in capsys.readouterr().err
 
 
 class TestAppendFilterAction:

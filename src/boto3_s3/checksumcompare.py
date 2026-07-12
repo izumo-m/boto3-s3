@@ -1,8 +1,8 @@
 """``boto3_s3.checksumcompare``: a native-checksum content-comparison strategy for ``S3.sync``.
 
-``S3.sync``'s copy decision is a :data:`~boto3_s3.comparator.PairFilter` (``True``
+``S3.sync``'s copy decision is a ``PairFilter`` (``True``
 copies the source). The default ``update_filter=None`` decides by size + last-modified,
-aws-cli style; :class:`ChecksumComparison` decides by **content**,
+aws-cli style; ``ChecksumComparison`` decides by **content**,
 comparing S3's stored native checksum against the checksum the local file would
 carry:
 
@@ -11,7 +11,7 @@ carry:
   ``ObjectParts`` boundaries;
 - it recomputes that same algorithm over the local file and compares.
 
-Unlike :class:`~boto3_s3.etagcompare.EtagComparison` this needs **no write side** (the
+Unlike ``EtagComparison`` this needs **no write side** (the
 checksum is one S3 already stores), works against objects any tool uploaded with
 a checksum, is exact for multipart objects (the part sizes come back from
 GetObjectAttributes, so there is no part-size to guess), and works for SSE
@@ -46,7 +46,7 @@ computed locally (``crc32c`` / ``crc64nvme`` without ``awscrt``, or past
 on an indeterminate comparison. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
-under :class:`~boto3_s3.comparator.ParallelFilter`) - any backend, not just a
+under ``ParallelFilter``) - any backend, not just a
 local file - so a read failure surfaces as that backend's error (a
 ``Boto3S3Error`` for a local file). SSE-C objects need the customer key to
 ``GetObjectAttributes`` and are not supported (they read as indeterminate ->
@@ -92,7 +92,7 @@ _LITTLE = sys.byteorder == "little"
 
 
 class ChecksumComparison(ContentComparison):
-    """A native-checksum content :data:`~boto3_s3.comparator.PairFilter` (``True`` = copy).
+    """A native-checksum content ``PairFilter`` (``True`` = copy).
 
     Copies a pair when the destination's
     stored S3 checksum does not match the source's content. ``S3.sync`` hands it
@@ -128,8 +128,6 @@ class ChecksumComparison(ContentComparison):
     """
 
     __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
-
-    _strategy_name = "checksum comparison"
 
     check_size: bool
     pure_max_size: int | None

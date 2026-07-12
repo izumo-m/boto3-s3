@@ -2,7 +2,7 @@
 
 A focused subset of the transfer surface that the CRT manager actually serves
 - upload / download / mv / sync, single-part and multipart - reusing the
-:class:`~tests.utils.cp_scenarios.CpScenario` shape and helpers. The lane runs
+``CpScenario`` shape and helpers. The lane runs
 both CLIs with ``preferred_transfer_client = crt`` and asserts they agree, so
 these scenarios carry no goldens (the CRT manager's stdout is identical to the
 classic engine's - aws-cli ``s3handler`` has no CRT branch - and the value is

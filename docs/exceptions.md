@@ -5,8 +5,7 @@ exception design of `boto3-s3`. When a design decision changes, update this
 document first.
 
 Related: the entry point to the design as a whole is
-[`overview.md`](./overview.md). The documentation for the public API is being
-redesigned.
+[`overview.md`](./overview.md).
 
 ---
 
@@ -42,7 +41,7 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
-`-- CancelledError          # caller-initiated abort (CancelToken.cancel()).
+`-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
                             #   Unrelated to the CancelledError of asyncio / concurrent.futures
 ```
 
@@ -91,6 +90,16 @@ class Boto3S3Error(Exception):
 | an SDK floor missing a capability (`no_overwrite` on an old botocore) | `ConfigurationError` |
 | `CancelToken.cancel()` | `CancelledError` |
 
+`CancelToken.cancel()` defaults to `CancelMode.GRACEFUL`: operations stop
+accepting new work, discard work not yet accepted, drain accepted work, reclaim
+their workers, and then raise `CancelledError`. Passing
+`mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
+pending and in-flight futures. Synchronous external I/O already running cannot
+be killed safely and may still finish. Cancellation is monotonic and idempotent:
+an immediate request upgrades graceful cancellation, and later requests never
+downgrade it. `on_result` may call `cancel()`; it only changes token state and
+never shuts an engine down from the callback's worker thread.
+
 Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of
 `s3storage.translate_boto_error`): `FileNotFoundError` -> `NotFoundError`,
@@ -103,8 +112,10 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. That last
 fallback, `translate_boto_error`'s final clause for an exception nothing
 classifies, and the deleter's per-key `Errors[]` translation (whose entries
 carry a bare code with no HTTP status to widen on - an unknown code is the
-base category, deleter.md section 3) are the only places a direct base
-instance is created (section 1).
+base category, deleter.md section 3) are the only places the error
+*translation* creates a direct base instance; the remaining direct-base site
+is the message envelope on WARNED / NOTICE `OpResult` records
+(`Warner.warn` / `Transferrer.notice` in `transfer.py` - section 1).
 
 ## 4. The batch aggregation exception `BatchError`
 
@@ -130,17 +141,20 @@ class BatchError(Boto3S3Error):
   through the `on_result` hook (for the exit code, see section 5).
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
-- Single-item operations (`mb`/`rb`/`website`/`presign`/single `cp`) do not
-  aggregate; they raise the corresponding category exception on the spot.
-  **Exception: `rm` follows the batch model even for a single key**
-  (`OpResult` FAILED + `BatchError(1 of 1)`). Because in aws-cli a one-off rm is
-  also a "task" and yields `delete failed: ...` + rc 1, this shape keeps the CLI
-  mapping uniform with the recursive case. Note that an error before item
-  processing begins - such as a failure of the enumeration (scan) itself -
-  **propagates as the category exception** (CLI rm maps both to rc 1, cli.md section 6).
-- `OpOutcome.DRYRUN` is the report for an item that dryrun "would have deleted";
-  no API call occurs and it does not affect rc (an informational value, like
-  `SKIPPED`).
+- `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item
+  count: even a single-item failure is `OpResult` FAILED +
+  `BatchError(1 of 1)`. Because in aws-cli a one-off transfer or rm is also a
+  "task" and yields `... failed: ...` + rc 1, this shape keeps the CLI mapping
+  uniform with the recursive case. Only `mb` / `rb` / `website` / `presign`
+  are single-item operations that do not aggregate; they raise the
+  corresponding category exception on the spot. Note that an error before item
+  processing begins - such as a failure of the enumeration (scan) itself, or
+  `cp`'s missing-source check - **propagates as the category exception** (CLI
+  rm maps both to rc 1, cli.md section 6).
+- `OpOutcome.DRYRUN` is the report for an item a dry run *would* have acted on
+  (transferred or deleted); the item's mutating API call does not occur
+  (enumeration and HeadObject still run) and it does not affect rc (an
+  informational value, like `SKIPPED`).
 
 A note on `skipped`: it is an **informational value** whose collectability
 varies with "at which level the skip happened." Op-layer skips (sync unchanged,

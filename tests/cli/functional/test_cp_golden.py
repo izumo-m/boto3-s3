@@ -41,6 +41,7 @@ from tests.utils.harness import (
     run_cli_in_process,
     run_cli_in_process_streaming,
 )
+from tests.utils.host import is_case_insensitive
 
 _REPLAYABLE = [scenario for scenario in SCENARIOS if not scenario.diff_only]
 
@@ -60,6 +61,11 @@ def _assert_mtime_stamped(client: Any, bucket: str, scenario: CpScenario, workdi
 def test_cp_matches_golden(
     scenario: CpScenario, moto_s3: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if scenario.undefined_on_case_insensitive_dest and is_case_insensitive(tmp_path):
+        pytest.skip(
+            "aws's behavior is undefined on a case-insensitive destination "
+            "(racy twin rename); no stable golden exists"
+        )
     materialize_workdir(tmp_path, scenario)
     seed_remote(moto_s3, FUNCTIONAL_BUCKET, scenario)
     monkeypatch.chdir(tmp_path)

@@ -7,7 +7,7 @@ PascalCase API parameters built from the snake_case ``TransferOptions``.
 Falsy values are omitted exactly like aws-cli's truthiness gates.
 
 Only the operations the ``s3transfer``-driven path actually calls are ported
-(put/get/copy/head/list/tagging/delete); aws-cli's CreateMultipartUpload /
+(put/get/copy/head/tagging/delete); aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
@@ -111,13 +111,6 @@ def map_head_object_params_with_copy_source_sse(options: TransferOptions) -> dic
     return params
 
 
-def map_list_objects_v2_params(options: TransferOptions) -> dict[str, Any]:
-    """API params for the recursive-source listing."""
-    params: dict[str, Any] = {}
-    _set_request_payer_param(params, options)
-    return params
-
-
 def map_get_object_tagging_params(options: TransferOptions) -> dict[str, Any]:
     """API params for the copy-props tag read."""
     params: dict[str, Any] = {}
@@ -127,6 +120,20 @@ def map_get_object_tagging_params(options: TransferOptions) -> dict[str, Any]:
 
 def map_put_object_tagging_params(options: TransferOptions) -> dict[str, Any]:
     """API params for the post-copy tag write (oversized tag sets)."""
+    params: dict[str, Any] = {}
+    _set_request_payer_param(params, options)
+    return params
+
+
+def map_list_object_annotations_params(options: TransferOptions) -> dict[str, Any]:
+    """API params for the pre-copy annotation listing."""
+    params: dict[str, Any] = {}
+    _set_request_payer_param(params, options)
+    return params
+
+
+def map_get_object_annotation_params(options: TransferOptions) -> dict[str, Any]:
+    """API params for a pre-copy annotation payload read."""
     params: dict[str, Any] = {}
     _set_request_payer_param(params, options)
     return params
@@ -243,11 +250,12 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
 __all__ = [
     "map_copy_object_params",
     "map_delete_object_params",
+    "map_get_object_annotation_params",
     "map_get_object_params",
     "map_get_object_tagging_params",
     "map_head_object_params",
     "map_head_object_params_with_copy_source_sse",
-    "map_list_objects_v2_params",
+    "map_list_object_annotations_params",
     "map_put_object_params",
     "map_put_object_tagging_params",
 ]

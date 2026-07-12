@@ -14,11 +14,22 @@ The record shape::
 Destructive commands (``rm``) additionally record ``remaining_keys`` - the
 bucket's end state after the aws run, with the seeded layout as the start
 state - because their stdout is normalized *sorted* (delete-line order is
-nondeterministic in aws); the end state pins what the sort relaxes. ``ls``
-goldens predate the field and omit it (loaded as ``None``, not compared).
+nondeterministic in aws); the end state pins what the sort relaxes. The ``ls``
+capture passes no ``remaining_keys``, so it persists as ``null`` and is not
+compared.
 Bucket-lifecycle commands (``mb`` / ``rb``) further record ``bucket_exists``
 - whether the scenario bucket exists after the run; ``remaining_keys`` is
 ``None`` when it does not (a bucket that is gone has no key listing).
+
+Platform variants (docs/testing.md sections 3 and 8): the transfer kinds
+(`WINDOWS_VARIANT_KINDS`) have an OS-dependent local side, so next to the
+POSIX base ``<name>.json`` they may carry a ``<name>.windows.json`` captured
+from ``aws.exe``. Loading on Windows prefers the variant and falls back to
+the base (most captures are identical); capturing on Windows writes only
+variants - and only where the capture differs from the base on a compared
+field - never the base files, which stay POSIX captures. Every other kind's
+golden is platform-independent (the Windows e2e drift run verifies the same
+files against ``aws.exe`` unchanged).
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ import difflib
 import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -36,6 +48,10 @@ from typing import Any
 import pytest
 
 GOLDENS_DIR = Path(__file__).resolve().parents[1] / "cli" / "goldens"
+
+# Kinds whose goldens have a host-OS-dependent local side (result-line
+# separators, dir-vs-file outcomes) and may therefore carry a Windows variant.
+WINDOWS_VARIANT_KINDS = frozenset({"cp", "mv", "sync"})
 
 
 @dataclass(frozen=True)
@@ -65,8 +81,13 @@ class Golden:
 
 
 def golden_path(kind: str, name: str) -> Path:
-    """Path of the golden for scenario *name* of *kind* (e.g. ``"ls"``)."""
+    """Path of the base (POSIX-captured) golden for scenario *name* of *kind*."""
     return GOLDENS_DIR / kind / f"{name}.json"
+
+
+def _windows_variant_path(kind: str, name: str) -> Path:
+    """Path of the Windows-captured variant next to the base golden."""
+    return GOLDENS_DIR / kind / f"{name}.windows.json"
 
 
 def update_goldens_enabled() -> bool:
@@ -84,17 +105,85 @@ def detect_aws_version() -> str:
     return proc.stdout.decode(errors="replace").strip() or "unknown"
 
 
-def write_golden(kind: str, golden: Golden) -> Path:
-    """Persist *golden*; returns the path written."""
-    path = golden_path(kind, golden.scenario)
+# The version inside an ``aws --version`` line ("aws-cli/2.35.18 Python/... ...").
+_AWS_VERSION_RE = re.compile(r"aws-cli/(\d+(?:\.\d+)*)")
+
+_VENDORED_AWSCLI_INIT = (
+    Path(__file__).resolve().parents[2] / "vendor" / "aws-cli" / "awscli" / "__init__.py"
+)
+
+
+def parse_aws_cli_version(version_line: str) -> str | None:
+    """Extract the ``2.x.y`` version from an ``aws --version`` line, or None."""
+    match = _AWS_VERSION_RE.search(version_line)
+    return match.group(1) if match else None
+
+
+@functools.lru_cache(maxsize=1)
+def pinned_aws_version() -> str | None:
+    """The aws-cli version the goldens are pinned to (the vendored submodule).
+
+    Read from the vendored ``awscli/__init__.py`` ``__version__`` - the same
+    source ``scripts/install-awscli.sh`` derives its install target from, so
+    the live ``aws`` and the goldens track one reference. ``None`` when the
+    submodule is not checked out.
+    """
+    try:
+        text = _VENDORED_AWSCLI_INIT.read_text()
+    except OSError:
+        return None
+    match = re.search(r"__version__ = '([0-9][^']*)'", text)
+    return match.group(1) if match else None
+
+
+def _dump_golden(path: Path, golden: Golden) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(golden), indent=2, sort_keys=True) + "\n")
     return path
 
 
+def write_golden(kind: str, golden: Golden) -> Path | None:
+    """Persist *golden*; returns the path written (``None`` = nothing written).
+
+    On POSIX this writes the base file. On Windows only the
+    `WINDOWS_VARIANT_KINDS` are written, as ``<name>.windows.json`` variants,
+    and only when the capture differs from the base on a compared field
+    (``aws_version`` excluded - it always differs); a variant whose capture
+    stopped differing is pruned. Base files are never written from Windows:
+    they are POSIX captures (platform-independent kinds included, which is
+    why their Windows capture is skipped outright).
+    """
+    base_path = golden_path(kind, golden.scenario)
+    if os.name != "nt":
+        return _dump_golden(base_path, golden)
+    if kind not in WINDOWS_VARIANT_KINDS:
+        return None
+    if not base_path.exists():
+        pytest.fail(
+            f"golden {base_path} is missing; capture the POSIX baseline first "
+            "(docs/testing.md section 8)"
+        )
+    base = json.loads(base_path.read_text())
+    captured = asdict(golden)
+    variant = _windows_variant_path(kind, golden.scenario)
+    if all(value == base.get(key) for key, value in captured.items() if key != "aws_version"):
+        variant.unlink(missing_ok=True)
+        return None
+    return _dump_golden(variant, golden)
+
+
 def load_golden(kind: str, name: str) -> Golden:
-    """Load the committed golden, failing with regeneration instructions if absent."""
+    """Load the committed golden, failing with regeneration instructions if absent.
+
+    On Windows a ``<name>.windows.json`` variant wins over the base file for
+    the `WINDOWS_VARIANT_KINDS` (absent variant = the captures are identical,
+    fall back to the base).
+    """
     path = golden_path(kind, name)
+    if os.name == "nt" and kind in WINDOWS_VARIANT_KINDS:
+        variant = _windows_variant_path(kind, name)
+        if variant.exists():
+            path = variant
     if not path.exists():
         pytest.fail(
             f"golden {path} is missing. Generate it against MinIO:\n"
@@ -124,8 +213,9 @@ def assert_matches_golden(
     ``side="ours"`` is the functional replay (boto3-s3 vs recorded aws-cli);
     ``side="aws"`` is the e2e drift check (live aws-cli vs its own recording).
     rc is always compared (exit-code charter, docs/overview.md section 3);
-    *compare_stdout* only relaxes the stdout comparison. *remaining_keys* and
-    *bucket_exists* are compared only when the golden recorded them.
+    *compare_stdout* only relaxes the stdout comparison. Every end-state
+    argument (*remaining_keys*, *bucket_exists*, *local_tree*, *head_fields*,
+    *src_tree*) is compared only when the golden recorded it.
     """
     problems: list[str] = []
     if rc != golden.rc:

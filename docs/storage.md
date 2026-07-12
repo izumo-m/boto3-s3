@@ -70,7 +70,13 @@ declared capabilities promise:
   them to `scan_pages` but the caller does not pass them per operation
   (`S3ScanOptions` = the `ListObjectsV2` knobs `page_size` / `fetch_owner`, plus
   the operation-set `request_payer` / `prefix`; `LocalScanOptions` =
-  `follow_symlinks` / `detect_symlink_loops`). A subclass keeps one backend's knobs
+  `follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`). The
+  local complete-entry setting widens candidates before filtering: it includes
+  the root, directories, symlinks, special files, and metadata-readable entries
+  whose content is unreadable. High-level operations preserve it; a caller that
+  opts in must filter out entries its transfer cannot consume, or accept the
+  operation's normal failure, blocking, device-side-effect, and deletion behavior.
+  The default `False` keeps aws-cli transfer enumeration. A subclass keeps one backend's knobs
   from leaking into another's; the built-ins reject a foreign options type, and a
   custom backend reads its own knobs from its own subclass or from its instance
   state, taking the common base otherwise. `LocalStorage` also takes one
@@ -83,6 +89,8 @@ declared capabilities promise:
   check). `key=""` is the location itself; `None` means "no transferable entry
   here". Whether a symlink is followed is `LocalStorage`'s own `follow_symlinks`
   config, read from the storage like every scan (not a parameter here).
+  `enumerate_all_entries` does not apply: this point query retains the
+  transferable-entry contract.
 - **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
   `info.key`. Return the backend's delete response (surfaced under
   `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
@@ -101,7 +109,8 @@ Three more members come with working defaults a custom backend normally keeps:
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
   the single place a backend seeds the **source-config it holds on the instance**.
   The built-ins override it to inject their constructor knobs
-  (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…)`,
+  (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…,
+  enumerate_all_entries=…)`,
   `S3Storage(page_size=…, fetch_owner=…)`); a custom backend overrides it to seed
   its own instance state (or for any dynamic default). Every scan builds from it:
   the high-level `cp` / `sync` / `ls` / `rm` paths take
@@ -200,6 +209,7 @@ class DictStorage(Storage):
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
         | StorageCapability.SORTABLE_SCAN | StorageCapability.DELETE
     )
+    scan_pages_filters: ClassVar[bool] = True    # scan_pages applies options.filter itself
 
     def __init__(self, store: dict[str, bytes], *, root: str = "dict://store"):
         self._store, self._root = store, root

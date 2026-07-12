@@ -10,38 +10,82 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 
 **Status:** early development (pre-1.0). **Python:** 3.10+ · **License:** Apache-2.0
 
+## Why use it
+
+- **Fast startup.** In a representative Linux measurement, syncing a directory
+  that contained one small file was about 1.9x faster than aws-cli v2.
+- **Compact installation.** A default dependency-complete installation was
+  about 31.5 MiB, compared with about 268 MiB for the corresponding aws-cli v2
+  installation.
+  More importantly for Python and Lambda environments that already have boto3,
+  adding `boto3-s3-cli` increased the installed package set by only about
+  2.1 MiB in the measurement below.
+- **Easy to add to AWS Lambda.** A ZIP-based Python Lambda function can include
+  the package in its deployment ZIP or a Lambda layer. This avoids building or
+  rebuilding a container image solely to add an `aws s3`-compatible command.
+
 ## What it is
 
-`boto3-s3-cli` installs one command, **`boto3-s3`**, a drop-in for `aws s3` with
-every subcommand:
+`boto3-s3-cli` installs one command, **`boto3-s3`**, designed as a
+command-for-command replacement for `aws s3` with every subcommand:
 
 ```
 cp   ls   mb   mv   presign   rb   rm   sync   website
 ```
 
-It takes the same arguments and global options as `aws s3`, reads the same
-`~/.aws` configuration, and returns the same exit codes — so existing commands
-and scripts keep working: just swap `aws s3` for `boto3-s3`. Argument handling,
-configuration, and exit codes are tested for parity with `aws s3`.
+It takes the `aws s3` arguments and global options, reads the same `~/.aws`
+configuration, and treats an exit-code mismatch as a bug. Existing commands and
+scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
+handling, resulting S3 state, and exit codes are tested against `aws s3`.
 
-## Footprint & startup
+This CLI is the strict compatibility layer over the more permissive Python
+library. It applies aws-compatible path validation, configuration resolution,
+transfer defaults, output behavior, and error handling. Human-readable wording
+is not guaranteed to be byte-for-byte identical, and the interactive UI and a
+few deliberately cleaned-up aws-cli edge-case failures are documented
+exceptions.
 
-`boto3-s3-cli` is an ordinary Python package: it runs on the interpreter you
-already have and reuses your boto3 / botocore install rather than bundling its
-own. aws-cli v2 ships as a self-contained install — its own embedded Python plus a
-private copy of the SDK — and pays that bootstrap on every invocation.
+## Packaging & startup
 
-The startup gap is large. Against a local MinIO, listing a missing bucket (so the
-request itself is negligible) and printing `--version`, on one Linux machine:
+`boto3-s3-cli` is an ordinary Python package: it runs on the selected interpreter
+and reuses a compatible boto3 / botocore installation rather than bundling its
+own runtime. In contrast, the official aws-cli v2 installation is a
+self-contained distribution with its own runtime and dependencies; it is not a
+self-extracting executable that unpacks itself on every invocation.
 
-| Command                  | aws-cli v2 | boto3-s3-cli |
-| ------------------------ | ---------- | ------------ |
-| `ls` of a missing bucket | ~670 ms    | ~250 ms      |
-| `--version`              | ~580 ms    | ~65 ms       |
+For a concrete comparison, the following measurement synced a directory
+containing one 11 KiB file to an empty prefix in the same local MinIO instance.
+Each tool ran as a fresh process 20 times, with a different destination for
+every run and alternating execution order, on one x86-64 WSL2/Linux host with a
+warm filesystem cache:
 
-Same result, same exit code — boto3-s3-cli just skips the bundle's bootstrap and
-lazy-loads only what the subcommand needs. (Figures are from one environment and
-will vary; the ratio is what's representative.)
+| Operation | `boto3-s3-cli` 0.4.0 | aws-cli 2.35.18 |
+| --- | ---: | ---: |
+| One-file `sync` (median) | 244 ms | 463 ms |
+
+The measurement includes SDK setup, remote listing, and the actual upload.
+
+Installed package sizes on the same host were measured with `du` using Python
+3.10 and the same pinned dependency versions, with bytecode caches included:
+
+| Installed packages | Size |
+| --- | ---: |
+| boto3 and its dependencies | 29.4 MiB |
+| `boto3-s3-cli` and all default dependencies | 31.5 MiB |
+| **Increase when boto3 is already installed** | **2.1 MiB** |
+| aws-cli v2 self-contained installation | 268 MiB |
+
+The two `boto3-s3` project wheels total about 300 KiB compressed. These figures
+are illustrative rather than guarantees: startup time and size vary with the
+Python version, platform, filesystem, dependency versions, installation method,
+and S3 endpoint.
+
+For Python Lambda functions deployed as ZIP archives, install the package and
+its dependencies into the function archive or a
+[Lambda layer](https://docs.aws.amazon.com/lambda/latest/dg/python-layers.html).
+AWS recommends packaging all function dependencies, including boto3, to avoid
+runtime dependency version mismatches. Even in that dependency-complete case,
+the measured package set was about 31.5 MiB.
 
 ## Install
 
@@ -106,8 +150,9 @@ boto3-s3 ls s3://my-bucket --profile prod --region eu-west-1
 
 Transfer tuning is read from the profile's `[s3]` section in `~/.aws/config`
 (`max_concurrent_requests`, `multipart_threshold`, `multipart_chunksize`,
-`max_queue_size`, `max_bandwidth`, `io_chunksize`, `preferred_transfer_client`),
-exactly as `aws s3` reads it.
+`max_queue_size`, `max_bandwidth`, `io_chunksize`, `preferred_transfer_client`,
+plus the CRT-mode keys `target_bandwidth`, `should_stream`, `disk_throughput`,
+and `direct_io`), exactly as `aws s3` reads it.
 
 `--debug` turns on wire-level logging with credentials (signatures, access-key
 ids, session tokens) masked by default.

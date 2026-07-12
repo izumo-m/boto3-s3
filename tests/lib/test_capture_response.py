@@ -366,9 +366,7 @@ class TestMvDeleteSlot:
 
 
 class TestRmDeleteSlot:
-    def test_rm_recursive_batch_reconstructs_delete_slot(
-        self, s3_client: Any, tmp_path: Path
-    ) -> None:
+    def test_rm_recursive_batch_reconstructs_delete_slot(self, s3_client: Any) -> None:
         s3_client.put_bucket_versioning(
             Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
         )
@@ -383,7 +381,7 @@ class TestRmDeleteSlot:
             assert "delete" in info
             assert info["delete"].get("DeleteMarker") is True
 
-    def test_rm_single_key_blind_carries_delete_slot(self, s3_client: Any, tmp_path: Path) -> None:
+    def test_rm_single_key_blind_carries_delete_slot(self, s3_client: Any) -> None:
         s3_client.put_bucket_versioning(
             Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
         )
@@ -395,14 +393,31 @@ class TestRmDeleteSlot:
         assert "delete" in info
         assert info["delete"].get("DeleteMarker") is True
 
-    def test_rm_recursive_without_flag_has_no_extra_info(
-        self, s3_client: Any, tmp_path: Path
-    ) -> None:
+    def test_rm_recursive_without_flag_has_no_extra_info(self, s3_client: Any) -> None:
         for i in range(2):
             s3_client.put_object(Bucket=BUCKET, Key=f"d/f{i}.txt", Body=b"x")
         out, cb = _sink()
         S3().rm(f"s3://{BUCKET}/d", recursive=True, on_result=cb)
         assert all(r.extra_info is None for r in out)
+
+    def test_rm_recursive_deletes_xml_incompatible_key(self, s3_client: Any) -> None:
+        s3_client.put_bucket_versioning(
+            Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"}
+        )
+        keys = ["d/ordinary.txt", "d/control-\x01.txt"]
+        for key in keys:
+            s3_client.put_object(Bucket=BUCKET, Key=key, Body=b"x")
+        out, cb = _sink()
+
+        S3().rm(f"s3://{BUCKET}/d", recursive=True, capture_response=True, on_result=cb)
+
+        assert {result.key for result in out} == set(keys)
+        assert all(result.outcome is OpOutcome.SUCCEEDED for result in out)
+        assert all(
+            cast("dict[str, Any]", result.extra_info)["delete"].get("DeleteMarker") is True
+            for result in out
+        )
+        assert s3_client.list_objects_v2(Bucket=BUCKET).get("KeyCount") == 0
 
 
 class TestReadSlot:
@@ -441,6 +456,46 @@ class TestReadSlot:
         assert info is not None
         assert "read" not in info
         assert "ETag" in info
+
+    def test_filter_source_read_never_wins_the_read_slot(
+        self, s3_client: Any, tmp_path: Path
+    ) -> None:
+        # An s3->local sync whose content update_filter reads the SOURCE through
+        # the run's own client (pair.src.storage.open(..., "rb")) records a
+        # GetObject for the very key about to be downloaded. The read store is
+        # first-stored-wins, so without the submit-time clear that stale read
+        # would beat the transfer's own GetObject to the read slot. The filter
+        # overwrites the source after reading, so the two GetObjects carry
+        # different ETags - the read slot must reflect the bytes actually
+        # downloaded, not the filter's pre-change response.
+        s3_client.put_object(Bucket=BUCKET, Key="pre/k.txt", Body=b"AAAA")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        (dst / "k.txt").write_bytes(b"zzzz")  # pre-existing dest -> the update lane
+
+        def reads_then_bumps_source(pair: Any) -> bool:
+            src = pair.src
+            assert src is not None and src.storage is not None
+            with src.storage.open(src.key, "rb") as fh:
+                assert fh.read() == b"AAAA"  # the filter really reads the old source
+            # Mutate the source after its GetObject is captured; the transfer's
+            # own GetObject then reads (and must store) the new bytes.
+            s3_client.put_object(Bucket=BUCKET, Key="pre/k.txt", Body=b"BBBBBBB")
+            return True
+
+        out, cb = _sink()
+        S3().sync(
+            f"s3://{BUCKET}/pre/",
+            str(dst),
+            update_filter=reads_then_bumps_source,
+            capture_response=True,
+            on_result=cb,
+        )
+        copied = [r for r in out if r.outcome is OpOutcome.SUCCEEDED]
+        assert len(copied) == 1
+        info = cast("dict[str, Any]", copied[0].extra_info)
+        assert (dst / "k.txt").read_bytes() == b"BBBBBBB"  # the transfer wrote new bytes
+        assert info["read"]["ETag"] == info["ETag"] == _etag(b"BBBBBBB")
 
 
 class TestSyncDelete:

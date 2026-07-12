@@ -1,0 +1,30 @@
+{
+  "argv": [
+    "mv",
+    "src",
+    "s3://<BUCKET>/tree/",
+    "--recursive",
+    "--dryrun"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [],
+  "scenario": "mv_upload_dryrun_recursive",
+  "src_tree": [
+    "a.txt:6:b6a98d9c",
+    "b.bin:3:ae4b3280",
+    "sub/c.txt:6:ae9a6306",
+    "sub/deep/d.txt:6:673953e0",
+    "z.txt:5:2088d0c4"
+  ],
+  "stdout_lines": [
+    "(dryrun) move: src\\a.txt to s3://<BUCKET>/tree/a.txt",
+    "(dryrun) move: src\\b.bin to s3://<BUCKET>/tree/b.bin",
+    "(dryrun) move: src\\sub\\c.txt to s3://<BUCKET>/tree/sub/c.txt",
+    "(dryrun) move: src\\sub\\deep\\d.txt to s3://<BUCKET>/tree/sub/deep/d.txt",
+    "(dryrun) move: src\\z.txt to s3://<BUCKET>/tree/z.txt"
+  ]
+}

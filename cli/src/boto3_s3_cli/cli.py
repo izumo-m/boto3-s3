@@ -9,7 +9,7 @@ import io
 import logging
 import sys
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -24,10 +24,12 @@ from boto3_s3_cli.commands.base import Command, Context
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
-# docs/masking.md). The library attaches no handler on import (NullHandler
-# discipline). urllib3 is deliberately omitted: it logs no credentials, only
+# docs/masking.md). The library attaches no handler on import. "boto3_s3_cli"
+# is the counterpart of aws-cli's own "awscli" logger (clidriver._set_logging),
+# so the CLI's own debug lines (runtimeconfig's alias resolution) surface too.
+# urllib3 is deliberately omitted: it logs no credentials, only
 # connection-pool noise.
-_DEBUG_LOGGERS = ("boto3_s3", "botocore", "boto3", "s3transfer")
+_DEBUG_LOGGERS = ("boto3_s3", "boto3_s3_cli", "botocore", "boto3", "s3transfer")
 
 # aws-cli v2 exit-code conventions (awscli/constants.py). The
 # exit-code charter (docs/overview.md section 3) requires matching them; see
@@ -96,6 +98,43 @@ else:
     _SubParsersActionBase = argparse._SubParsersAction
 
 
+def _write_error(message: object, *, rc: int | None = None) -> None:
+    """Write one CLI error, adding the enhanced envelope required by `rc`."""
+    detail = str(message)
+    if rc == _PARAM_VALIDATION_ERROR_RC:
+        detail = f"An error occurred (ParamValidation): {detail}"
+    sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
+
+
+class _ParamValidationArgumentParser(argparse.ArgumentParser):
+    """Render argparse failures through aws-cli's ParamValidation envelope."""
+
+    def _aws_error_message(self, message: str) -> str:
+        """Translate the small argparse wording differences visible in aws-cli."""
+        required_prefix = "the following arguments are required: "
+        if message.startswith(required_prefix):
+            missing = message.removeprefix(required_prefix).split(", ")
+            positional_names = {
+                str(action.metavar): action.dest
+                for action in self._actions
+                if not action.option_strings and action.metavar is not None
+            }
+            return required_prefix + ", ".join(positional_names.get(name, name) for name in missing)
+
+        invalid_marker = ": invalid choice: "
+        argument, marker, remainder = message.partition(invalid_marker)
+        if marker:
+            choice, separator, _choices = remainder.rpartition(" (choose from ")
+            if separator and choice:
+                return f"{argument}: Found invalid choice {choice}"
+        return message
+
+    def error(self, message: str) -> NoReturn:
+        _write_error(self._aws_error_message(message), rc=_PARAM_VALIDATION_ERROR_RC)
+        self.print_usage(sys.stderr)
+        self.exit(2)
+
+
 class _Stage1CommandAction(_SubParsersActionBase):
     """Match the subcommand and capture its remainder verbatim (stage 1).
 
@@ -128,7 +167,7 @@ def _load_command(name: str) -> type[Command]:
     return cast("type[Command]", getattr(importlib.import_module(module_name), class_name))
 
 
-def _shared_globals_parent() -> argparse.ArgumentParser:
+def _shared_globals_parent() -> _ParamValidationArgumentParser:
     """The suppressed-defaults globals parent every subcommand parser takes.
 
     Suppressing the defaults stops an unspecified flag from clobbering a value
@@ -136,7 +175,7 @@ def _shared_globals_parent() -> argparse.ArgumentParser:
     ``boto3-s3 --profile foo ls s3://b`` and ``boto3-s3 ls s3://b --profile
     foo`` both work (matching aws-cli).
     """
-    shared = argparse.ArgumentParser(add_help=False)
+    shared = _ParamValidationArgumentParser(add_help=False)
     globalargs.add_common_arguments(shared, suppress_defaults=True)
     return shared
 
@@ -149,10 +188,10 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     usage errors (missing subcommand, invalid choice - argparse's wording,
     remapped to 252) render exactly as the full tree renders them while the
     path stays SDK- and command-module-free. The stubs are never parsed:
-    :class:`_Stage1CommandAction` records the matched name and the verbatim
+    ``_Stage1CommandAction`` records the matched name and the verbatim
     remainder for stage 2 instead.
     """
-    parser = argparse.ArgumentParser(
+    parser = _ParamValidationArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
     globalargs.add_common_arguments(parser)
@@ -171,7 +210,7 @@ def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParse
     full tree, so ``boto3-s3 <cmd> --help`` and the subcommand's usage errors
     render identically to the pre-split output.
     """
-    parser = argparse.ArgumentParser(
+    parser = _ParamValidationArgumentParser(
         prog=f"boto3-s3 {name}",
         description=type(command).help,
         parents=[_shared_globals_parent()],
@@ -189,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     once - so it imports all the command modules, a cost only the interactive
     prompt pays.
     """
-    parser = argparse.ArgumentParser(
+    parser = _ParamValidationArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
     globalargs.add_common_arguments(parser)
@@ -213,8 +252,18 @@ def _enable_debug_logging() -> None:
     # stream-logger setup. mask_secrets defaults to True, so credentials in the
     # botocore DEBUG output (signed headers, signatures, tokens) are redacted.
     from boto3_s3 import set_stream_logger
+    from boto3_s3.masking import SecretMaskingFilter
 
     for name in _DEBUG_LOGGERS:
+        # Idempotent, like aws's set_stream_logger (it removes its named
+        # handler before re-adding): the on-partial trial dispatch can reach
+        # here before the prompt re-dispatches, and the library's
+        # boto3-faithful set_stream_logger appends unconditionally - drop the
+        # previously attached masking handlers first or every line doubles.
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            if any(isinstance(f, SecretMaskingFilter) for f in handler.filters):
+                logger.removeHandler(handler)
         set_stream_logger(name, logging.DEBUG, stream=sys.stderr, mask_secrets=True)
 
 
@@ -230,9 +279,8 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     ``[s3]`` value, an unusable profile) through its general handler, not the
     dedicated 252 / 253 ones.
     """
-    # Deferred so the parse-only paths never load botocore (import contract,
-    # docs/imports.md): when a ClientError cause can exist botocore is already
-    # loaded, so this re-import is free on the paths that matter.
+    # Import locally because this mapping is the only code here that needs the
+    # concrete botocore exception type.
     from botocore.exceptions import ClientError
 
     if isinstance(exc.__cause__, ClientError):
@@ -250,27 +298,34 @@ def exit_code_for(exc: Boto3S3Error) -> int:
 
 
 def _exit_code_for_unexpected(exc: BaseException) -> int:
-    """Map a non-``Boto3S3Error`` exception escaping a command to aws-cli's rc.
+    """Map a non-`Boto3S3Error` exception escaping a command to aws-cli's rc.
 
     Mirrors aws-cli's error-handler chain for exceptions that reach the entry
-    point (errorhandler.py): a botocore credential / region resolution failure
-    is 253, a ``ClientError`` is 254, everything else is the general 255
-    (``GeneralExceptionHandler``). The common paths are already translated into
-    ``Boto3S3Error`` (the library's ``s3_errors`` and the CLI's ``build_client``);
-    this is the catch-all so no path can crash the CLI with a traceback (rc 1),
-    which the exit-code charter forbids (docs/overview.md section 3).
+    point (errorhandler.py): a raw botocore parameter-validation failure is
+    252, a credential / region resolution failure is 253, a `ClientError` is
+    254, and everything else is the general 255 (`GeneralExceptionHandler`).
+    The common paths are already translated into `Boto3S3Error` (the library's
+    `s3_errors` and the CLI's `build_client`); this is the catch-all so no
+    path can crash the CLI with a traceback (rc 1), which the exit-code charter
+    forbids (docs/overview.md section 3).
     """
-    # Deferred: botocore is already loaded once a command has run far enough to
-    # raise one of these (import contract, docs/imports.md).
-    from botocore.exceptions import ClientError, NoCredentialsError, NoRegionError
+    # Import locally because only unexpected command failures need these types.
+    from botocore.exceptions import (
+        ClientError,
+        NoCredentialsError,
+        NoRegionError,
+        ParamValidationError,
+    )
 
     # Only NoCredentials / NoRegion are 253 (aws errorhandler.py dedicated
-    # handlers). PartialCredentialsError has no aws handler -> GeneralException
-    # -> 255, so it must fall through here, not map to 253.
+    # handlers). PartialCredentialsError has no aws handler ->
+    # GeneralExceptionHandler -> 255, so it must fall through here, not map to 253.
     if isinstance(exc, (NoCredentialsError, NoRegionError)):
         return _CONFIGURATION_ERROR_RC
     if isinstance(exc, ClientError):
         return _CLIENT_ERROR_RC
+    if isinstance(exc, ParamValidationError):
+        return _PARAM_VALIDATION_ERROR_RC
     return _GENERAL_ERROR_RC
 
 
@@ -278,7 +333,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code.
 
     *ctx* carries the runtime dependencies the command resolves (the S3 client
-    factory, the auto-prompt backend); tests inject a :class:`Context` built
+    factory, the auto-prompt backend); tests inject a ``Context`` built
     around fakes. Always returns the exit code - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2.
 
@@ -292,9 +347,9 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
-        sys.stderr.write(
-            "boto3-s3: [ERROR]: Both --cli-auto-prompt and --no-cli-auto-prompt "
-            "cannot be specified at the same time.\n"
+        _write_error(
+            "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
+            rc=_PARAM_VALIDATION_ERROR_RC,
         )
         return _PARAM_VALIDATION_ERROR_RC
     mode = resolve.resolve_auto_prompt_mode(raw)
@@ -303,7 +358,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     if mode == "on-partial":
         # Run the command as-is; only a usage error (rc 252, which aws-cli and we
         # both raise before any S3 call) falls back to prompting (aws-cli's
-        # on-partial branch, clidriver.py:277). The usage message is silenced on
+        # on-partial branch in clidriver's _do_main). The usage message is silenced on
         # this trial so the prompt isn't buried under it (aws's
         # SilenceParamValidationMsgErrorHandler).
         rc = _dispatch(raw, ctx, suppress_usage_errors=True)
@@ -331,9 +386,9 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
         if importlib.util.find_spec("prompt_toolkit") is None:
             if not explicit:
                 return _dispatch(raw_argv, ctx)
-            sys.stderr.write(
-                "boto3-s3: [ERROR]: --cli-auto-prompt requires the optional 'prompt_toolkit' "
-                "dependency. Install it with: pip install 'boto3-s3-cli[autoprompt]'\n"
+            _write_error(
+                "--cli-auto-prompt requires the optional 'prompt_toolkit' dependency. "
+                "Install it with: pip install 'boto3-s3-cli[autoprompt]'"
             )
             return _PARAM_VALIDATION_ERROR_RC
         # Construct inside the try below: a broken/partial prompt_toolkit install
@@ -352,7 +407,7 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     except (KeyboardInterrupt, EOFError):
         return 130
     except Exception as exc:
-        sys.stderr.write(f"boto3-s3: [ERROR]: {exc}\n")
+        _write_error(exc)
         return _GENERAL_ERROR_RC
     # Re-dispatch without prompting again - strip the flags so a re-typed
     # --cli-auto-prompt can't loop.
@@ -362,12 +417,13 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     return _dispatch(completed, ctx)
 
 
-def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bool = False) -> int:
+def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = False) -> int:
     """Parse ``argv`` in two stages and run the matched subcommand.
 
-    Stage 1 reads the globals and the subcommand name off the stub tree - no
-    command module is imported, so ``--help`` / ``--version`` and the
-    stage-1 usage errors stay SDK-free (import contract, docs/imports.md).
+    Stage 1 reads the globals and the subcommand name off the stub tree. Its
+    static metadata lets top-level ``--help`` / ``--version`` exit without
+    importing a command module or the AWS SDK (import contract,
+    docs/imports.md).
     Stage 2 imports just the matched command's module, builds its real parser,
     and parses the stub-captured remainder into the stage-1 namespace (the
     suppressed-defaults parent keeps pre-subcommand globals intact). Once the
@@ -378,7 +434,7 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
     ``on-partial`` trial run so the fall-back prompt isn't preceded by the error
     the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
-    errorhandler.py:250, injected on the on-partial path at clidriver.py:281).
+    errorhandler.py:250, injected on the on-partial path in clidriver's ``_do_main``).
     argparse writes its own message inside ``parse_*``, so the
     parses (and only the parses - they are instant, no live output to lose) are
     wrapped to discard it; the command itself still runs with stderr live.
@@ -400,11 +456,11 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
         # like aws, never handed to a command parser that may define the same
         # flag. boto3-s3's top command is `aws s3`-equivalent, so this matches the
         # customizations command layer's wording (awscli customizations/commands.py
-        # joins with "," and NO space - verified against real aws 2.35.5, unlike the
+        # joins with "," and NO space - verified against real aws 2.35.18, unlike the
         # top-level clidriver.py which uses ", "), prefixed like aws's error handler
         # (errorformat.py "<prog>: [ERROR]: <msg>").
         if not suppress_usage_errors:
-            sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {','.join(extras)}\n")
+            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
 
     rest: list[str] = getattr(args, _REST_DEST, None) or []
@@ -422,7 +478,7 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
         # aws-cli wording again ("," with no space) - exercised by the ported
         # test_errors_out_with_extra_arguments.
         if not suppress_usage_errors:
-            sys.stderr.write(f"boto3-s3: [ERROR]: Unknown options: {','.join(extras)}\n")
+            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
 
     if getattr(args, "debug", False):
@@ -433,7 +489,7 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
-            sys.stderr.write(f"boto3-s3: [ERROR]: {exc}\n")
+            _write_error(exc, rc=rc)
         return rc
     except BrokenPipeError:
         return 0
@@ -452,5 +508,6 @@ def _dispatch(argv: list[str] | None, ctx: Context, *, suppress_usage_errors: bo
         # (the binding exit-code charter, docs/overview.md section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
         # they still propagate (Ctrl-C keeps its default rc 130).
-        sys.stderr.write(f"boto3-s3: [ERROR]: {exc}\n")
-        return _exit_code_for_unexpected(exc)
+        rc = _exit_code_for_unexpected(exc)
+        _write_error(exc, rc=rc)
+        return rc

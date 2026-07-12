@@ -16,8 +16,13 @@ is enforced. The exit-code charter this enforces lives in
 
 Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
-except e2e (skipped with a reason): any CI would need no Docker, since e2e
-self-skips without `BOTO3_S3_E2E_BUCKET`.
+except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
+quality gates and package builds on Linux, then runs this default suite on
+Linux and macOS at the Python 3.10 floor, plus Python 3.14 on Linux and Windows.
+It also downgrades to the declared boto3 / botocore / s3transfer floors and
+runs the library and CLI compatibility seams whose expected request models are
+stable at that SDK generation. It needs no Docker because e2e self-skips without
+`BOTO3_S3_E2E_BUCKET`.
 
 One small group needs a **case-insensitive filesystem**: the `--case-conflict`
 `*_with_existing_file` tests (aws-cli's `skip_if_case_sensitive`), where the
@@ -54,6 +59,14 @@ warnings-only path).
 Charter exceptions map naturally: extension options (e.g. `--help`) cannot
 run on the aws side, so they are unit-tested instead of diffed.
 
+`test_positional_fileb_bug_parity.py` is a dedicated drift tripwire rather
+than a golden scenario. It feeds a readable binary positional to all six
+single-path commands and asserts the explicit aws-cli bug-shaped exit codes
+before comparing the two CLIs. If aws-cli repairs one of those inconsistent
+paths, the aws-side assertion fails even if both implementations could
+otherwise be changed together; review and remove the matching compatibility
+branch instead of updating the expected code mechanically.
+
 ## 3. Golden contract
 
 A golden (`tests/cli/goldens/<cmd>/<scenario>.json`) records what the real
@@ -69,6 +82,27 @@ commands. Committed to git.
   changes behavior fails visibly.
 - **Replay** - the functional suite seeds moto with the scenario's exact
   layout, runs the CLI in-process, and compares against the golden.
+
+### Platform variants (Windows)
+
+A transfer golden's local side is OS-dependent (result-line separators; the
+file-vs-directory outcome of a trailing-`/` destination), so the cp/mv/sync
+goldens (`WINDOWS_VARIANT_KINDS` in `tests/utils/golden.py`) may carry a
+Windows twin next to the POSIX base: `<name>.windows.json`, captured from
+the real `aws.exe`. Loading on Windows prefers the variant and falls back to
+the base when absent - absence means the two captures are identical, which
+holds for most scenarios. Capture on Windows writes only variants, and only
+where the capture differs from the base on a compared field (a variant that
+stops differing is pruned); base files are POSIX captures and are never
+written from Windows - the platform-independent kinds (ls/rm/mb/rb/presign/
+website, verified against `aws.exe` unchanged) skip Windows capture
+entirely. One scenario has no Windows golden by design:
+`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - aws's own
+twin-download rename race makes its outcome undefined on a case-insensitive
+destination (its warn text says as much), so the golden tiers stand down
+there and e2e pins only ours' deterministic rc 0. Where aws itself is
+nondeterministic no defined rc exists to match, so this does not breach the
+exit-code charter.
 
 ### Endpoint policy (MinIO goldens, occasional real-AWS verification)
 
@@ -208,9 +242,26 @@ For **presign** the golden is one normalized URL line
 path-style and the endpoint is masked (`<ENDPOINT>` - the functional replay
 runs with no endpoint override while the capture used MinIO's IP endpoint),
 and the time/credential-dependent query values are masked (`X-Amz-Date`,
-`X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`,
-whose region/service scope stays - `--region` must reach the credential
-scope). Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
+`X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`). The
+credential scope's region/service segment is compared, not blanket-masked -
+the **endpoint policy**, in two steps:
+
+- **step 1** (golden stability, `presign_scope_mask_region` +
+  `normalize_presign_stdout(mask_region=...)`): the scope region folds to
+  `<REGION>` only when it equals the environment default (`AWS_REGION` /
+  `AWS_DEFAULT_REGION`), so a golden captured against one e2e region replays
+  against any other. An explicit `--region` that differs from the default is
+  left raw - that region is the scenario's whole point, and when it happens to
+  coincide with the default nothing is masked either, so the golden still
+  reflects it.
+- **step 2** (e2e-only, `presign_scope_region`): masking a golden's region is
+  a golden-stability concession, not license to stop checking it - the e2e
+  suite pulls the raw, unmasked scope region straight out of both sides'
+  stdout from the *same run* and asserts aws's and ours are equal, so the
+  region the two CLIs actually signed with stays under test even where step
+  1's golden comparison would hide a divergence.
+
+Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
 key path are compared verbatim. The functional replay needs no moto backend
 (presign never contacts a server) and deletes `AWS_SESSION_TOKEN` for the
 run - the root conftest exports one, which would add an
@@ -224,7 +275,7 @@ string alone cannot prove.
 
 ```
 scripts/compose-up.sh          # idempotent; waits for bucket init
-scripts/install-awscli.sh      # idempotent; aws-cli matching vendor/aws-cli -> .venv/bin
+scripts/install-awscli.sh      # idempotent; pinned aws-cli -> .venv/bin
 source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
 uv run pytest                  # full suite including e2e
 scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
@@ -240,8 +291,8 @@ The e2e diff is only meaningful when the live `aws` matches the version the
 goldens were captured with: the differential compares both CLIs against that
 capture, so an `aws` that adds or drops a flag (e.g. `--no-overwrite`, added
 mid-2.3x) diverges spuriously. `scripts/install-awscli.sh` pins it to the
-vendored `aws-cli` submodule's version - the source the library is ported
-against - by keeping the release zip's self-contained `dist/` and symlinking
+aws-cli source revision the library is ported against by keeping the release
+zip's self-contained `dist/` and symlinking
 `.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
 matching install is reused rather than re-downloaded).
 
@@ -336,11 +387,13 @@ rename, a parametrized merge of several aws-cli tests, a method from a different
 aws-cli class or file, or `none` for a boto3-s3 addition), or above a class when
 a whole block was carved out of one aws-cli class under the same method names.
 The comment references the aws-cli test by logical `Class.method` name - or just
-the method name when the origin is in the same class - never a vendored path. The presign port freezes botocore's signing clock
-through the `get_current_datetime` seam - patched in both modules that
-bind it, `botocore.auth` and (when awscrt is importable - the dev
-environment always is, section 4) `botocore.crt.auth` - and keeps
-aws-cli's expected URLs - frozen-time signatures included - bit-for-bit.
+the method name when the origin is in the same class - never a checkout path.
+
+The presign port freezes botocore's signing clock through the
+`get_current_datetime` seam - patched in both modules that bind it,
+`botocore.auth` and (when awscrt is importable - the dev environment always
+is, section 4) `botocore.crt.auth` - and keeps aws-cli's expected URLs -
+frozen-time signatures included - bit-for-bit.
 The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
 against the positional canned list, and rewrites aws-cli's expected
@@ -355,18 +408,15 @@ and skip on default Linux ones.
 
 ## 6. Import contract
 
-`tests/lib/test_import_contract.py` and `tests/cli/unit/test_import_contract.py`
-pin the lazy-import policy ([`imports.md`](./imports.md)): `import boto3_s3`
-- and the CLI's stage-1 paths (the top-level `--help` / `--version` and the
-pre-dispatch usage errors) - load no boto3 / botocore / s3transfer module;
-reaching the `S3` entry point, a determined subcommand's `--help`, or its
-post-parse usage errors may load botocore, never the boto3 / s3transfer
-client stack. Module-loading cases run in fresh
-interpreters (`python -c` subprocesses) so imports already made by the test
-runner can't mask a regression; a resolve-every-symbol case guards the
-three-way `__all__` / `TYPE_CHECKING` / `_EXPORT_HOMES` mirror in the lazy
-`__init__`. When a subcommand is added, extend the CLI cases (its `--help`
-must stay client-stack-free).
+`tests/lib/test_import_contract.py` pins the lazy package root and explicitly
+pure modules. `tests/cli/unit/test_import_contract.py` pins the CLI's two narrow
+guarantees: top-level `--help` and `--version` load no boto3 / botocore /
+s3transfer module or command module. Normal dispatch, usage errors,
+subcommand help, and `S3()` construction have no SDK-free contract.
+Module-loading cases run in fresh interpreters (`python -c` subprocesses) so
+imports already made by the test runner cannot mask a regression; a
+resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
+`_EXPORT_HOMES` mirror in the lazy `__init__`.
 
 ## 7. Known limitations
 
@@ -391,5 +441,88 @@ must stay client-stack-free).
   verified on moto (which supports the operation fully). Against real S3
   the same scenarios exit 0 on both sides - rc parity is endpoint-relative
   by design.
-- **Windows**: `scripts/minio-env.sh` is POSIX; set the variables manually
-  (or add a `.ps1` twin when Windows-native development starts).
+- **MinIO: no S3 object annotations** (probed 2026-07 on both minio/minio
+  and pgsty/minio): the `x-amz-object-annotation-directive` header is
+  ignored (harmless - the EXCLUDE both CLIs now send on every copy rides
+  through the copy lanes unchanged, goldens unaffected) and
+  ListObjectAnnotations answers 500, so `--copy-props all` cannot be
+  exercised end-to-end. Measured against aws 2.35.18: single-part `all`
+  exits 0 on both sides (nothing annotation-related on the wire); the
+  multipart carryover fails with rc 1 and **identical stderr** on both. The
+  live-only `cp_copy_props_all_multipart` scenario pins the defining end state:
+  both read annotations before CreateMultipartUpload and leave no destination.
+  Successful annotation writes, pagination, the three library staging modes,
+  and temporary-file cleanup are covered by `TestCopyPropsAllCpCommand` and
+  the library transfer tests because MinIO cannot serve those operations.
+
+## 8. Running the suite on Windows (WSL2 host)
+
+Windows is a supported OS (overview.md section 2); the suite runs there on a
+real Windows CPython using a host-installed `uv`, driven either from a native
+Windows shell or from WSL2 through its interop. Two things make the run
+representative:
+
+- **Work from an NTFS copy, not the WSL tree.** A Windows process can read
+  the repo through `\\wsl.localhost\...`, but that path serves the ext4
+  filesystem over 9P - case-sensitive and slow, a hybrid no real Windows
+  deployment has. Copy the working tree to an NTFS directory instead,
+  excluding the platform-bound and derived trees:
+
+      rsync -a --delete --exclude .git --exclude .venv --exclude '<aws-cli-source-dir>' \
+        --exclude __pycache__ --exclude out --exclude .pytest_cache \
+        --exclude .ruff_cache  <repo>/  /mnt/c/tmp/boto3-s3-wintest/
+
+  Replace `<aws-cli-source-dir>` with that checkout's repository-relative path.
+  The aws-cli source is reference-only for the tests - nothing imports from it -
+  so excluding it keeps the copy to a few MiB.
+
+- **Sync with `--all-packages`.** A bare `uv sync` installs only the root
+  project; without the `cli` workspace member every `boto3_s3_cli` import
+  fails at collection:
+
+      cd /mnt/c/tmp/boto3-s3-wintest
+      uv sync --all-packages
+      uv run pytest -q
+
+  `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
+  the support floor) - the host Python installation is not used.
+
+Prerequisites: a Windows `uv` on `PATH`, and Windows **Developer Mode** (or
+an elevated shell) because several `tests/lib` scenarios create symlinks.
+Tests staged on chmod-revoked access skip themselves on Windows (the
+`skip_if_chmod_is_inert` mark in `tests/utils/host.py`).
+
+**Goldens on Windows.** The cp/mv/sync goldens resolve to their
+`<name>.windows.json` variants (section 3, "Platform variants"); regenerating
+them needs this Windows setup plus the e2e stack below - `UPDATE_GOLDENS=1`
+from Windows writes only those variants and never touches the POSIX base
+files, so it is safe to run. `cp_case_conflict_warn` deliberately has no
+Windows golden and its functional replay self-skips on a case-insensitive
+filesystem.
+
+**e2e on Windows.** The differential machinery works unchanged against the
+WSL2 MinIO stack: pin `aws.exe` at the version `scripts/install-awscli.sh`
+pins (the reference aws-cli source version - the section 4 drift rationale
+applies to this binary too), start the stack inside WSL2 (`scripts/compose-up.sh`), and
+Windows reaches it on `127.0.0.1:9000` through WSL2's localhost forwarding.
+`scripts\install-awscli.cmd` is `install-awscli.sh`'s Windows twin and needs
+no admin rights: it extracts the version-pinned MSI's self-contained payload
+with `msiexec /a` (an administrative extraction - no registry entries, no
+system PATH edits, any installed AWS CLI stays untouched) into
+`%LOCALAPPDATA%\boto3-s3\aws-cli\<version>` behind a stable `current`
+junction. The NTFS test copy carries no aws-cli source checkout, so pass the
+version explicitly there (on a full checkout the argument is optional):
+
+    cmd.exe /c "scripts\install-awscli.cmd 2.35.18"
+
+The MinIO variables must be set in the **Windows** process - WSLENV
+propagation cannot be relied on - which is what `scripts/minio-env.cmd` (the
+`minio-env.sh` twin; a runner, because cmd cannot `source`) is for. It also
+prepends the pinned `aws.exe` to `PATH` when present, mirroring how
+`.venv/bin/aws` shadows any system `aws` on Linux:
+
+    cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+
+The Linux-capture caveat above applies to the e2e golden drift checks of
+cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
+never run the Windows and Linux e2e suites concurrently.

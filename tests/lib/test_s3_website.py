@@ -1,7 +1,7 @@
 """Unit tests for ``S3.website`` request shaping and error model.
 
 aws-cli parity facts asserted here (aws-cli WebsiteCommand,
-``awscli/customizations/s3/subcommands.py:971-1019``):
+``awscli/customizations/s3/subcommands.py:977-1025``):
 
 - ``--index-document`` -> ``IndexDocument.Suffix``, ``--error-document`` ->
   ``ErrorDocument.Key``; unset ones are omitted, and with neither set an
@@ -125,8 +125,9 @@ class TestWebsiteErrors:
         assert excinfo.value.__cause__ is cause
 
     def test_empty_bucket_fails_real_botocore_validation(self) -> None:
-        # Real botocore rejects Bucket="" client-side before any HTTP, the
-        # path `website s3://` exits 252 through.
+        # Real botocore rejects Bucket="" client-side before any HTTP, so this
+        # runs offline. The CLI's rc-252 parity for `website s3://` rests on
+        # exactly this error.
         import boto3
 
         client = boto3.session.Session().client("s3", region_name="us-east-1")

@@ -16,8 +16,10 @@ from typing import Any
 
 import pytest
 
-# The floor s3transfer (0.6.2) has no crt module at all (needs >= 0.8.0 +
-# awscrt); the library defers this import, so only the tests skip there.
+# s3transfer.crt imports awscrt at module top, so importorskip skips this whole
+# module when awscrt is absent. The floor s3transfer (0.6.2) ships crt.py but
+# predates the 0.8.0 CRT surface (the process lock etc.) that CrtStubs patches;
+# the library defers this import so it stays SDK-free.
 s3transfer_crt = pytest.importorskip("s3transfer.crt")
 from botocore import UNSIGNED  # noqa: E402
 from botocore.exceptions import MissingDependencyException  # noqa: E402
@@ -222,6 +224,69 @@ class TestCreateCrtTransferManager:
         assert client_kwargs["endpoint_url"] is None
         [kwargs] = stubs.create_kwargs
         assert kwargs["use_ssl"] is True
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://s3.cn-north-1.amazonaws.com.cn",
+            "https://s3.eusc-de-east-1.amazonaws.eu",
+            "https://s3.us-iso-east-1.c2s.ic.gov",
+            "https://s3.dualstack.us-east-1.api.aws",
+        ],
+        ids=["china", "eusc", "iso", "dualstack"],
+    )
+    def test_non_commercial_partition_endpoints_stay_none(
+        self, stubs: CrtStubs, endpoint: str
+    ) -> None:
+        # A standard endpoint in any botocore partition - not just the two
+        # commercial suffixes - is the AWS default form and must not be pinned.
+        client = FakeClient(endpoint=endpoint)
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None  # pyright: ignore[reportArgumentType]
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] is None
+
+    def test_custom_host_is_pinned(self, stubs: CrtStubs) -> None:
+        # A host outside every partition suffix (a lookalike domain, a gateway)
+        # is custom and must ride into the CRT wiring, not be dropped to None.
+        client = FakeClient(endpoint="https://s3.example.com")
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None  # pyright: ignore[reportArgumentType]
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] == "https://s3.example.com"
+
+    def test_aws_domain_custom_endpoint_dropped_without_the_explicit_signal(
+        self, stubs: CrtStubs
+    ) -> None:
+        # A VPC interface endpoint sits under an AWS suffix, so the host heuristic
+        # alone cannot tell it from a resolved standard endpoint and drops it to
+        # None (the gap the explicit signal below closes).
+        vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
+        client = FakeClient(endpoint=vpce)
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None  # pyright: ignore[reportArgumentType]
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] is None
+
+    def test_explicit_endpoint_is_pinned_even_under_an_aws_domain(self, stubs: CrtStubs) -> None:
+        # The caller's --endpoint-url is honored verbatim, matching aws-cli - so
+        # the VPC endpoint reaches the CRT serializer instead of re-resolving to
+        # public S3.
+        vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
+        client = FakeClient(endpoint=vpce)
+        manager = crtsupport.create_crt_transfer_manager(client, None, endpoint=vpce)  # pyright: ignore[reportArgumentType]
+        assert manager is not None
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] == vpce
+
+    def test_explicit_none_keeps_the_heuristic(self, stubs: CrtStubs) -> None:
+        # No --endpoint-url (endpoint=None) means "use the heuristic": a resolved
+        # AWS endpoint still maps to None, unchanged from the no-signal call.
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(endpoint=AWS_ENDPOINT), None, endpoint=None
+            )  # pyright: ignore[reportArgumentType]
+            is not None
+        )
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] is None
 
     def test_lock_held_elsewhere_falls_back_to_classic(
         self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch

@@ -9,7 +9,7 @@ share the same command machinery (see section 2.1).
 
 Reference points:
 
-- Reference CLI: **AWS CLI v2.35.5** (the pinned aws-cli). `aws s3` semantics
+- Reference CLI: **AWS CLI v2.35.18** (the pinned aws-cli). `aws s3` semantics
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's
@@ -44,12 +44,12 @@ changes nothing about the operation.
 | Option | Handling |
 |---|---|
 | `--output <fmt>` | Accept & ignore. Validates `choices`. |
-| `--query <jmespath>` | Accept & ignore. |
+| `--query <jmespath>` | Accept, but validate: aws compiles the value as JMESPath at parse time and rejects a bad expression (rc 252) before dispatch. The *result* is still ignored - there is no response payload to apply it to (section 2.1). |
 | `--no-paginate` | Accept & ignore. |
 | `--no-cli-pager` | Accept & ignore. |
 | `--color {on,off,auto}` | Accept & ignore. Validates `choices`. |
 | `--cli-error-format {legacy,json,yaml,text,table,enhanced}` | Accept & ignore. Validates `choices`. |
-| `--no-cli-auto-prompt` | Accept & ignore (already the default; see section 3). |
+| `--no-cli-auto-prompt` | Accept. A no-op in the default state, but it explicitly disables an env/config-driven prompt request, matching aws-cli (see section 3). |
 | `--cli-binary-format {base64,raw-in-base64-out}` | Accept & ignore. Validates `choices`. |
 
 ### 2.1 Why these are no-ops
@@ -66,6 +66,14 @@ driver's response-formatter pipeline therefore never runs, so
 `--output`, `--query`, `--no-paginate`, and `--no-cli-pager` have
 nothing to act on.
 
+`--query` is a partial exception: aws-cli's `globalargs` resolves (compiles)
+the JMESPath expression at `top-level-args-parsed`, independent of the
+response-formatter pipeline, so a malformed expression is still a usage error
+(rc 252) even though the compiled value is never applied to anything.
+`boto3-s3-cli`'s `globalargs.validate_query` matches this - every
+subcommand's `run()` calls it first, ahead of the `--endpoint-url` check
+(cli.md sections 5.7 and 6).
+
 `--color` is a no-op for a related reason: the parsed `color` global is
 consulted only by other parts of aws-cli (the table formatter, the error
 handler, the ECS monitor commands), never by `aws s3`; the `aws s3`
@@ -75,9 +83,11 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 `aws s3 ... --color on` therefore produces no color, and `boto3-s3-cli`
 matches that.
 
-`--cli-error-format` controls the top-level CLI exception rendering;
-`boto3-s3-cli` does not guarantee byte-for-byte console identity with
-aws-cli (see section 6), so it accepts the flag and ignores it.
+`--cli-error-format` controls the top-level CLI exception rendering in
+aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli 2.35.18's
+default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
+table renderings remain outside the parity target. In particular, parameter
+validation failures use `An error occurred (ParamValidation): <message>`.
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -96,22 +106,61 @@ help/validation, not the model-shape-driven decode above.) `boto3-s3-cli`
 therefore hands the library the raw string (or the bytes read from a `fileb://`
 path); the library accepts a raw `bytes` key and does no base64 step of its own.
 
-aws-cli registers a global URI paramfile handler on every `aws s3` argument, so
-`file://` (text) and `fileb://` (binary) load from disk for *any* arg, not just
-the SSE-C keys. `boto3-s3-cli` matches this: `fileb://` (bytes) is accepted on
-the two SSE-C key args, and `file://` (text) on those plus the free-string
-transfer options (`--content-type`, `--website-redirect`, `--cache-control`,
-`--content-disposition`, `--content-encoding`, `--content-language`, `--expires`,
+aws-cli registers a global URI paramfile handler on every `aws s3` argument -
+positional and optional alike - so `file://` (text) and `fileb://` (binary)
+load from disk for *any* arg, not just the SSE-C keys, all resolved at parse
+time before the command runs. `boto3-s3-cli` matches this on the positional
+too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
+`cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
+`file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
+`commands/base.py`), and so are the free-value options `--bucket-name-prefix`
+/ `--bucket-region` (`ls`) and `--index-document` / `--error-document`
+(`website`). On the transfer family (`cp` / `mv` / `sync`) the same expansion
+covers the free-string transfer options (`--content-type`,
+`--website-redirect`, `--cache-control`, `--content-disposition`,
+`--content-encoding`, `--content-language`, `--expires`, `--source-region`,
 `--sse-kms-key-id`), the string-typed integer options (`--page-size` /
 `--progress-frequency` / `--expected-size` / `--expires-in`, expanded before
 their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
-before its shorthand parse; the shorthand also accepts aws's `key@=file://...`
-operator, and rejects a `fileb://` bytes value at parse like aws's schema
-validation). The
-choices-validated options (`--acl`, `--storage-class`, `--sse`, ...) cannot carry
-a `file://` value - argparse rejects it as an invalid choice first - matching the
-practical aws result. A load failure (missing file, or a binary file via the
-text `file://` prefix) is a usage error (rc 252) with aws's wording.
+after both integer coercions, before its shorthand parse; the shorthand also
+accepts aws's `key@=file://...` operator). The choices-validated options
+(`--acl`, `--storage-class`, `--sse`, ...) cannot carry a `file://` value -
+argparse rejects it as an invalid choice first - matching the practical aws
+result. A load failure on any of these - a missing file, or a binary file via
+the text `file://` prefix - is a usage error (rc 252) with aws's wording
+(`Error parsing parameter '<name>': Unable to load paramfile ...`; `<name>` is
+the positional's `paths`/`path` or the option's `--flag` form).
+
+`fileb://` is not a free pass-through wherever it is accepted, though: only
+the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
+loaded *bytes* verbatim (they reach S3 as a `string`-shaped request parameter
+untouched, as above). Every free-string option in the list above still runs a
+`fileb://` value through the same string-typed parameter check aws applies:
+`--content-type fileb://x` loads the bytes and then fails botocore's
+client-side check for a `string`-typed parameter (`Invalid type for
+parameter ...`, rc 252) rather than passing them through unchanged.
+`--metadata` is the one further exception: a *whole-value* `--metadata
+fileb://...` loads the bytes and then crashes indexing them inside aws's own
+shorthand parser (`'in <string>' requires string as left operand, not int`) -
+`boto3-s3-cli` reproduces that crash verbatim, so a missing file is still the
+paramfile's rc 252 but an *existing* one is aws's rc 255, not a clean usage
+error (a `fileb://` value inside the `key@=...` shorthand form, by contrast,
+is rejected at parse like aws's schema validation - rc 252).
+
+A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
+expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally
+reproduces. aws loads the bytes into the positional and lets each command
+mishandle them differently: `mb` / `rb` / `presign` reject the bytes through
+string-parameter validation (rc 252); the transfer-command base decodes `rm`'s
+bytes back through the filesystem encoding, so it continues to the ordinary
+delete path (the invalid `s3://` regression case exits 1); and `ls` / `website`
+raise a `TypeError` / `AttributeError` inside path handling (rc 255, e.g.
+`'int' object has no attribute 'startswith'`). The implementation comments mark
+these branches as intentional bug compatibility. A dedicated subprocess e2e
+test asserts both the pinned aws-cli result and equality with `boto3-s3-cli`, so
+an aws-cli fix fails visibly and prompts a compatibility review. The
+missing-file case is unaffected: a `fileb:///nonexistent` positional is the
+parse-time load 252 on every subcommand.
 
 ## 3. Auto-prompt / completion UI
 
@@ -127,7 +176,7 @@ handling.
 |---|---|
 | `--cli-auto-prompt` (with `prompt_toolkit`) | Launches an interactive prompt with `aws s3`-style completion (usability-tuned, see below), then re-dispatches the completed command. |
 | `--cli-auto-prompt` (without `prompt_toolkit`) | Rejected with an install hint and a non-zero exit code. |
-| `--no-cli-auto-prompt` | Accept & ignore (already the default; section 2). Specifying it together with `--cli-auto-prompt` is a usage error, matching aws-cli. |
+| `--no-cli-auto-prompt` | Forces the mode **off**: a no-op in the default state, but it explicitly disables an env/config-driven prompt request (matching aws-cli's precedence, `autoprompt.md` section 5). Specifying it together with `--cli-auto-prompt` is a usage error, matching aws-cli. |
 | `AWS_CLI_AUTO_PROMPT=on`, profile `cli_auto_prompt=on` | **Consulted** (env > profile config > off), matching aws-cli's chain. Read SDK-free (env + `configparser`). With `prompt_toolkit` it prompts; without it, config/env-driven prompting silently falls through to normal dispatch (only the explicit flag gives the install hint). |
 | `on-partial` mode | **Supported**: run the command, and only on a usage error (rc 252) fall back to prompting (`autoprompt.md` section 5). |
 | Shell completion (the `aws_completer` equivalent) | **Not provided.** |
@@ -214,6 +263,19 @@ and warning messages, progress lines, `--help` - may differ in
 wording, ordering, or exact content between the two tools and between
 `boto3-s3-cli` releases. Parity is defined on S3 object state, return
 values, and error conditions, not on console formatting.
+
+The program name is explicitly outside the parity target. The root command
+tokens `aws` and `boto3-s3`, and output derived from them - for example usage
+lines and the `aws: [ERROR]:` / `boto3-s3: [ERROR]:` prefixes - are expected to
+differ. Comparisons may ignore or substitute the root command name while still
+checking the surrounding message on a best-effort basis.
+
+The default enhanced-style parameter-validation envelope is reproduced where
+practical: parser failures, unknown options, path/option validation failures,
+and auto-prompt flag conflicts use
+`An error occurred (ParamValidation): <message>`. This target is the default
+output of aws-cli 2.35.18; selecting another `--cli-error-format` does not alter
+`boto3-s3-cli` output, as described in section 2.1.
 
 Two deliberate output-pipeline deviations sit under this umbrella
 (`progress.py`; the rendering thread itself mirrors aws-cli's

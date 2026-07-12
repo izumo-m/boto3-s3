@@ -6,10 +6,7 @@ contract that motivates it:
 
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
   SDK module - ``boto3`` alone drags in ``s3transfer`` via its ``compat``
-  module, so an eager re-export taxes every importer ~100ms.
-- Reaching the ``S3`` entry point may load ``botocore.exceptions`` (error
-  translation) but still neither ``boto3``, ``s3transfer``, nor botocore's
-  client machinery; those wait until a default client is actually built.
+  module, so an eager re-export taxes every importer ~120ms (docs/imports.md).
 
 Module-loading cases run in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -65,6 +62,28 @@ class TestLibraryImportContract:
             """
         )
 
+    def test_types_alone_stays_pure(self) -> None:
+        # docs/imports.md item 2-2 names types among the pure modules: the
+        # record/enum definitions must not drag in the SDK on import.
+        _run_fresh(
+            """
+            import boto3_s3.types
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
+    def test_exceptions_alone_stays_pure(self) -> None:
+        # docs/imports.md item 2-2 names exceptions among the pure modules: the
+        # taxonomy is plain Python and must stay SDK-free on import.
+        _run_fresh(
+            """
+            import boto3_s3.exceptions
+
+            assert not sdk_modules(), sdk_modules()
+            """
+        )
+
     def test_awsconfig_alone_stays_pure(self) -> None:
         # The AWS-config-file reader is an opt-in building block; its botocore
         # touch (and the default boto3 session) are deferred into the read path,
@@ -113,39 +132,6 @@ class TestLibraryImportContract:
             """
         )
 
-    def test_transfer_planner_stops_at_exception_translation(self) -> None:
-        # The planner (transferplan) sits above the backends and routes by
-        # isinstance against S3Storage, so importing it reaches
-        # botocore.exceptions (the S3Storage allowance, contract item 3) -
-        # and nothing beyond it.
-        _run_fresh(
-            """
-            import boto3_s3.transferplan
-
-            def allowed(m):
-                return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))
-
-            leaked = [m for m in sdk_modules() if not allowed(m)]
-            assert not leaked, leaked
-            """
-        )
-
-    def test_s3_entry_point_defers_the_sdk(self) -> None:
-        # botocore.exceptions is the allowed exception-translation dependency
-        # (with the botocore.vendored.requests exception shims it imports);
-        # the SDK proper (boto3, s3transfer, botocore's client stack) is not.
-        _run_fresh(
-            """
-            from boto3_s3 import S3, S3Storage  # noqa: F401
-
-            def allowed(m):
-                return m == "botocore" or m.startswith(("botocore.exceptions", "botocore.vendored"))
-
-            leaked = [m for m in sdk_modules() if not allowed(m)]
-            assert not leaked, leaked
-            """
-        )
-
     def test_version_resolves_without_the_sdk(self) -> None:
         _run_fresh(
             """
@@ -159,12 +145,15 @@ class TestLibraryImportContract:
 
 class TestLazyExports:
     def test_every_public_symbol_resolves(self) -> None:
-        # Guards __all__ / _EXPORT_HOMES / TYPE_CHECKING-import drift: a name
-        # added to one but not the others fails here.
+        # Guards __all__ / _EXPORT_HOMES / TYPE_CHECKING-import drift in both
+        # directions: every __all__ name must resolve, and the resolution map
+        # (_EXPORT_HOMES, plus the two special-cased names) must carry exactly
+        # __all__ - a stale entry on either side fails here.
         import boto3_s3
 
         for name in boto3_s3.__all__:
             assert getattr(boto3_s3, name) is not None, name
+        assert set(boto3_s3._EXPORT_HOMES) | {"globsieve", "__version__"} == set(boto3_s3.__all__)
 
     def test_resolved_symbols_are_the_real_ones(self) -> None:
         import boto3_s3

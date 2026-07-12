@@ -4,7 +4,7 @@ The established design for the `aws s3 sync` equivalent. For the CLI-side
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
-[`testing.md`](./testing.md). Behavior matches aws 2.35.5, cross-checked
+[`testing.md`](./testing.md). Behavior matches aws 2.35.18, cross-checked
 against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline
@@ -39,8 +39,9 @@ dest listing -- filter (visibility) --+        |
   symmetric, the other per-side automatically); see globsieve.md. Folder markers
   (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
   produces them - either way sync neither transfers nor deletes markers. The
-  implementation is `ScanOptions.filter` (S3 side, pruned at the listing-page
-  stage) and the filter immediately after the local walk.
+  implementation is `ScanOptions.filter` on both sides (the S3 listing prunes
+  at the listing-page stage; the local walk applies the predicate inline
+  during the walk).
 - **Pair-decision layer** (after merge, per `SyncPair`): every decision that
   looks at both sides - size / timestamp / ETag, etc. - lives here. The default
   is aws-compatible, and this is the only layer an application swaps.
@@ -377,8 +378,14 @@ botocore client is safe to share for concurrent calls).
   read from each pool (`ThreadPoolExecutor._max_workers`, else a constant); it is
   throughput-only, never correctness.
 - **Errors / cancel.** A decision that raises aborts the sync (as the serial path
-  does), surfacing when its result is consumed; `cancel_token` is polled between
-  pairs. In-flight decisions on the caller's pool are abandoned to it.
+  does), surfacing when its result is consumed; decisions that have not started
+  are cancelled and running decisions are awaited before the exception returns.
+  `cancel_token` is polled between pairs. Graceful cancellation stops new pair
+  actions and drains transfers and delete batches already accepted; immediate
+  cancellation additionally asks their futures to cancel where possible.
+  Outstanding decisions on the caller's pool are always awaited before sync
+  returns; immediate mode first calls `cancel()` on each future, without shutting
+  down the caller-owned executor.
 
 `ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
 parallel filter, so the CLI never sets it and parity is not at stake.

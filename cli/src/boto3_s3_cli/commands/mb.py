@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Pure-Python names only on the parse path (import contract, docs/imports.md);
-# S3 / S3Storage reach botocore and are imported in run() instead.
+# Keep the module-level imports limited to the names used while configuring the
+# command; execution-only storage types are imported in `run()`.
 from boto3_s3 import Boto3S3Error, ValidationError
-from boto3_s3_cli import output, usage
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli import clientfactory, globalargs, output, usage
+from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
 
 class MbCommand(Command):
@@ -20,7 +20,7 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
         parser.add_argument("--tags", action="append", nargs=2, metavar=("KEY", "VALUE"))
@@ -39,17 +39,23 @@ class MbCommand(Command):
         region) takes precedence over a path usage error - we build it first to
         match (253/255 wins over the 252).
         """
-        # Deferred: the library's S3 entry reaches botocore; --help / --version /
-        # pre-subcommand usage errors stay SDK-free (import contract,
-        # docs/imports.md). A subcommand's run() may load the SDK.
-        from boto3_s3 import S3, S3Storage
+        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # (252), the --endpoint-url scheme check (252), and the positional
+        # paramfile expansion (252) all precede the client build - they beat a
+        # bad --profile (255) the way aws's parse-time load-cli-arg does.
+        globalargs.validate_query(args)
+        clientfactory.validate_endpoint_url(args)
+        expand_positional_paramfile(args, "path", name="path", operation="mb")
+        # Import the library entry point only when this execution path needs it.
+        from boto3_s3 import S3Storage
 
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks below (it reaches main's
         # exit-code mapping: config -> 253, other botocore -> 255).
-        client = ctx.client_factory(args)
+        s3 = ctx.s3(args)
+        client = s3.client()
 
-        target: str = args.paths
+        target: str = args.path
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
@@ -63,18 +69,21 @@ class MbCommand(Command):
             message = usage.invalid_bucket_name_message()
             sys.stderr.write(output.format_make_bucket_failed(target, message) + "\n")
             return 1
-        if bucket_part.endswith("--x-s3"):
-            # botocore is_s3express_bucket; aws rejects before any API work.
-            raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
 
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
         # ValidationError from S3Storage.validate -> rc 252, matching aws (the
         # check is deferred from the now non-raising construction).
         storage = S3Storage(target, client=client)
         storage.validate()
+        if storage.bucket.endswith("--x-s3"):
+            # botocore is_s3express_bucket on the ARN-aware bucket, ordered like
+            # aws (split_s3_bucket_key's ARN rejection runs first, inside
+            # validate); a slash-form accesspoint ARN whose name ends --x-s3 is
+            # caught here where a naive partition on the first "/" would miss it.
+            raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
         try:
-            S3().mb(storage, tags=tags)
+            s3.mb(storage, tags=tags)
         except Boto3S3Error as exc:
             sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
             return 1

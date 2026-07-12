@@ -1,11 +1,11 @@
 """Unit tests for ``--cli-auto-prompt``: the completion engine and the wiring.
 
 The completion engine (model + parser + completers) is pure Python, so it is
-exercised directly through an :class:`AutoCompleter` with fake region/profile
+exercised directly through an ``AutoCompleter`` with fake region/profile
 providers - no ``prompt_toolkit``, no botocore, no network. The ``cli.main``
 wiring (mutual exclusion, the missing-dependency degradation, and the
-prompt -> re-dispatch loop) is exercised with a fake :class:`AutoPrompter`
-injected through :class:`Context`, the same dependency-injection seam the other
+prompt -> re-dispatch loop) is exercised with a fake ``AutoPrompter``
+injected through ``Context``, the same dependency-injection seam the other
 subcommand tests use for the S3 client.
 """
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -135,7 +137,7 @@ class TestCompletionEngine:
             completer.autocomplete(line, len(line))
         assert calls == 1  # resolved once, then served from cache
 
-    def test_file_url_path_completion(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_file_url_path_completion(self, tmp_path: Path) -> None:
         import os
 
         base = str(tmp_path)
@@ -236,7 +238,7 @@ class TestCompletionReachability:
         # no spurious option menu (S3 server-side completion is out of scope).
         assert _names("cp s3://sou") == []
 
-    def test_bare_file_url_still_defers_to_path_completer(self, tmp_path: Any) -> None:
+    def test_bare_file_url_still_defers_to_path_completer(self, tmp_path: Path) -> None:
         # The first positional is a bare file:// path (no preceding option): the
         # engine must still defer to FilePathCompleter, not swallow it as an
         # option-name completion.
@@ -304,7 +306,9 @@ class TestAutoPromptWiring:
     def test_mutual_exclusion_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"])
         assert rc == 252
-        assert "cannot be specified at the same time" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "An error occurred (ParamValidation):" in err
+        assert "cannot be specified at the same time" in err
 
     def test_missing_prompt_toolkit_rejects_with_install_hint(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -391,7 +395,7 @@ class TestAutoPromptModeResolution:
         assert rc == 252
 
     def test_config_file_default_profile_on(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         config = tmp_path / "config"
@@ -403,7 +407,7 @@ class TestAutoPromptModeResolution:
         assert rc == 0
 
     def test_non_utf8_config_does_not_crash(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # The auto-prompt mode resolution runs on every command and reads
         # ~/.aws/config; a non-UTF-8 file must be read as "off", not crash with an
@@ -420,7 +424,7 @@ class TestAutoPromptModeResolution:
         assert cli.main(["no-such-command"]) == 252
 
     def test_config_file_named_profile_section(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         config = tmp_path / "config"
@@ -436,7 +440,7 @@ class TestAutoPromptModeResolution:
         assert off.seen is None
 
     def test_env_takes_precedence_over_config(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         config = tmp_path / "config"
         config.write_text("[default]\ncli_auto_prompt = on\n")
@@ -533,3 +537,33 @@ class TestPromptToolkitAdapter:
     def test_display_meta_carries_type(self) -> None:
         recursive = next(comp for comp in self._menu("cp --recursiv") if comp.text == "--recursive")
         assert "[boolean]" in recursive.display_meta_text
+
+    def test_completer_exception_is_swallowed_but_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A completer bug must never crash the interactive prompt, but it must
+        # leave a --debug trail (aws logs the same in its adapter).
+        pytest.importorskip("prompt_toolkit")
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        from boto3_s3_cli.autoprompt.prompt import PromptToolkitCompleter
+
+        class _Boom(c.AutoCompleter):
+            def __init__(self) -> None:
+                pass
+
+            def autocomplete(
+                self, command_line: str, index: int | None = None
+            ) -> list[c.CompletionResult]:
+                raise RuntimeError("boom")
+
+        completer = PromptToolkitCompleter(_Boom())
+        document = Document(text="cp ", cursor_position=3)
+        with caplog.at_level(logging.DEBUG, logger="boto3_s3_cli.autoprompt.prompt"):
+            results = list(completer.get_completions(document, CompleteEvent()))
+        assert results == []  # swallowed, no crash
+        assert any(
+            record.levelno == logging.DEBUG and "get_completions" in record.getMessage()
+            for record in caplog.records
+        )

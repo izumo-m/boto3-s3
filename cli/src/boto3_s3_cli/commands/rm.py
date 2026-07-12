@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Pure-Python names only (exceptions / types modules) - safe on the parse
-# path; S3 / S3Storage reach botocore and are imported in run() instead
-# (import contract, docs/imports.md).
+# Keep the module-level imports limited to the names used while configuring the
+# command; execution-only storage types are imported in `run()`.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,
@@ -15,13 +14,14 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, output, usage
+from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
-    expand_option_paramfile,
+    expand_integer_paramfile,
+    expand_positional_paramfile,
     parse_integer_option,
 )
 
@@ -87,17 +87,25 @@ class RmCommand(Command):
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
         # The aws parse-to-validation order (measured, docs/cli.md section 6):
-        # the --endpoint-url scheme check (252) and the --page-size paramfile
-        # expansion (252) beat the integer coercion (255), which beats the
-        # session profile resolution (255), which beats the path usage check
-        # below (252).
+        # the --query compile (252) leads, then the --endpoint-url scheme check
+        # (252), then the paramfile expansions (252, positional path and
+        # --page-size) beat the integer coercion (255), which beats the session
+        # profile resolution (255), which beats the path usage check below (252).
+        globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
-        expand_option_paramfile(args, "page_size", operation="rm")
+        expand_positional_paramfile(args, "paths", name="paths", operation="rm")
+        if isinstance(args.paths, bytes):
+            # Intentional aws-cli bug parity: S3TransferCommand decodes a
+            # positional fileb:// back through the filesystem encoding before
+            # validating and executing it. This is why rm reaches its normal
+            # rc-1 operation-error path while ls / website crash at rc 255.
+            args.paths = args.paths.decode(sys.getfilesystemencoding())
+        expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
-        clientfactory.validate_profile(args)
+        s3 = ctx.s3(args)
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore).
-        from boto3_s3 import S3, S3Storage
+        from boto3_s3 import S3Storage
 
         target: str = args.paths
         if not target.startswith("s3://"):
@@ -123,7 +131,7 @@ class RmCommand(Command):
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
         # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
         # from the now non-raising construction) through main -> rc 252, matching aws.
-        storage = S3Storage(target, client=ctx.client_factory(args), page_size=page_size)
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
 
         item_filter = filters.compile_filter(args.filters)
@@ -131,7 +139,7 @@ class RmCommand(Command):
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )
         try:
-            S3().rm(
+            s3.rm(
                 storage,
                 recursive=args.recursive,
                 filter=item_filter,

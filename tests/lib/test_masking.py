@@ -234,6 +234,55 @@ class TestMaskTextNotation:
         assert "<CanonicalRequestBytes>***</CanonicalRequestBytes>" in out
         assert "<StringToSignBytes>***</StringToSignBytes>" in out
 
+    def test_signature_mismatch_signature_provided_masked(self) -> None:
+        # A SignatureDoesNotMatch (403) body echoes the client's signature back in
+        # <SignatureProvided>; the header/query-form signature mask never sees this
+        # XML element, so it is masked here. The access key id in the same body is
+        # still tail-revealed by the standalone id regex.
+        body = (
+            "<Error><Code>SignatureDoesNotMatch</Code>"
+            f"<AWSAccessKeyId>{ACCESS_KEY_ID}</AWSAccessKeyId>"
+            f"<SignatureProvided>{SIGNATURE}</SignatureProvided></Error>"
+        )
+        out = m.mask_text(body)
+        assert SIGNATURE not in out
+        assert "<SignatureProvided>***</SignatureProvided>" in out
+        assert "<AWSAccessKeyId>***MPLE</AWSAccessKeyId>" in out
+
+    def test_web_identity_token_request_dict_repr_masked(self) -> None:
+        # The web-identity flow (role_arn + web_identity_token_file, EKS IRSA)
+        # sends a raw JWT to the unsigned AssumeRoleWithWebIdentity API; botocore
+        # logs the request_dict at DEBUG. The token, with the RoleArn on the same
+        # line, mints role credentials - a bearer-grade request secret.
+        jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJldmFsdWU"
+        line = (
+            "Making request for AssumeRoleWithWebIdentity with params: "
+            "{'Action': 'AssumeRoleWithWebIdentity', "
+            "'RoleArn': 'arn:aws:iam::123456789012:role/demo', "
+            f"'WebIdentityToken': '{jwt}'}}"
+        )
+        out = m.mask_text(line)
+        assert jwt not in out
+        assert "'WebIdentityToken': '***'" in out
+        assert "'RoleArn': 'arn:aws:iam::123456789012:role/demo'" in out
+
+    def test_web_identity_token_query_body_masked(self) -> None:
+        # The urlencoded query-protocol body form (defensive coverage).
+        jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJldmFsdWU"
+        body = f"Action=AssumeRoleWithWebIdentity&WebIdentityToken={jwt}&Version=2011-06-15"
+        out = m.mask_text(body)
+        assert jwt not in out
+        assert "WebIdentityToken=***" in out
+        assert "Version=2011-06-15" in out
+
+    def test_saml_assertion_request_masked(self) -> None:
+        # AssumeRoleWithSAML's SAMLAssertion is the same-shape unsigned-API request
+        # secret as the web-identity token and is masked alongside it.
+        assertion = "PHNhbWxwOlJlc3BvbnNlPmFzc2VydGlvbmJhc2U2NGJsb2J2YWx1ZQ=="
+        out = m.mask_text(f"{{'SAMLAssertion': '{assertion}'}}")
+        assert assertion not in out
+        assert "'SAMLAssertion': '***'" in out
+
     def test_long_non_url_run_does_not_hang(self) -> None:
         # Guards against ReDoS in the proxy-URL regex: a long contiguous
         # scheme-class run that never reaches "://" must mask in linear time.

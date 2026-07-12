@@ -5,10 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once sync is determined (stage 2 of the lazy dispatch), so these
-# may reach botocore.exceptions - transferargs does, through S3Storage (import
-# contract, docs/imports.md); the boto3 / s3transfer client stack still waits
-# for build_client.
+# Loaded only once sync is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
@@ -42,10 +39,10 @@ class SyncCommand(Command):
         SSE-C pairings 252, and an S3 Express directory bucket on either
         side 252 ("Cannot use sync command with a directory bucket.") - all
         before any S3 client exists. A missing local source exits 255; the
-        ``--exclude`` / ``--include`` patterns compile once against the source
-        root and apply to both sides (sync.md section 1).
+        ``--exclude`` / ``--include`` patterns compile once and apply to both
+        sides (rootless anchoring; sync.md section 1).
         """
-        head = transferargs.classify_paths(args, operation="sync")
+        head = transferargs.classify_paths(args, ctx, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
@@ -83,15 +80,12 @@ class SyncCommand(Command):
         )
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
 
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore); --help and usage errors stay
-        # SDK-free (import contract, docs/imports.md).
-        from boto3_s3 import S3
-
-        client = ctx.client_factory(args)
+        s3 = head.s3
+        client = s3.client()
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
+            s3,
             client,
             src,
             dest,
@@ -105,11 +99,11 @@ class SyncCommand(Command):
         # compare_key, an absolute one its full key, so the same filter prunes
         # the source and destination per-side (globsieve.Anchored).
         item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(args, ctx, paths_type=paths_type)
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:
-            S3().sync(
+            s3.sync(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]
                 delete_filter=args.delete,

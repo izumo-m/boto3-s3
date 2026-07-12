@@ -1,7 +1,7 @@
 """Unit tests for ``S3.presign`` request shaping and error model.
 
 aws-cli parity facts asserted here (aws-cli PresignCommand,
-``awscli/customizations/s3/subcommands.py:1022-1057``):
+``awscli/customizations/s3/subcommands.py:1028-1063``):
 
 - pure client-side computation: ``generate_presigned_url`` is the only call;
 - the ``s3://`` scheme is optional, and ``expires_in`` passes through with no

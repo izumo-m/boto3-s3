@@ -22,7 +22,7 @@ ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"  # last 4 == "MPLE"
 SIGNATURE = "0123456789abcdef" * 4
 SESSION_TOKEN = "FQoGZXIvYXdzEMPLELONGSESSIONTOKENvalue1234567890abcdef+/=="
 
-_DEBUG_LOGGERS = ("boto3_s3", "botocore", "boto3", "s3transfer")
+_DEBUG_LOGGERS = ("boto3_s3", "boto3_s3_cli", "botocore", "boto3", "s3transfer")
 
 
 @pytest.fixture
@@ -76,6 +76,38 @@ class TestDebugWiring:
         cli.main(["ls", "s3://bucket/"], ctx=_fake_ctx())
         for name in _DEBUG_LOGGERS:
             assert not _has_masking_handler(name)
+
+    def test_enabling_twice_does_not_duplicate_handlers(
+        self, restore_debug_loggers: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The on-partial trial dispatch can enable debug logging before the
+        # prompt re-dispatches the completed argv; the second enable must not
+        # stack a second handler (every --debug line would print twice).
+        cli._enable_debug_logging()
+        cli._enable_debug_logging()
+        for name in _DEBUG_LOGGERS:
+            masking = [
+                handler
+                for handler in logging.getLogger(name).handlers
+                if any(isinstance(f, SecretMaskingFilter) for f in handler.filters)
+            ]
+            assert len(masking) == 1, f"{name} has {len(masking)} masking handlers"
+        logging.getLogger("botocore").debug("emitted-once")
+        assert capsys.readouterr().err.count("emitted-once") == 1
+
+    def test_cli_package_records_reach_stderr(
+        self, restore_debug_loggers: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The CLI's own logger is wired too (aws-cli's 'awscli' counterpart),
+        # so runtimeconfig's alias-resolution DEBUG line surfaces under --debug.
+        cli._enable_debug_logging()
+        logging.getLogger("boto3_s3_cli.runtimeconfig").debug(
+            'Resolved %s configuration alias value "%s" to "%s"',
+            "preferred_transfer_client",
+            "default",
+            "classic",
+        )
+        assert "Resolved preferred_transfer_client" in capsys.readouterr().err
 
 
 class TestDebugOutputMasked:

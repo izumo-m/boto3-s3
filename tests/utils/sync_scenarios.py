@@ -1,6 +1,6 @@
 """Shared ``sync`` scenarios: golden replay and e2e parity.
 
-sync reuses :class:`tests.utils.cp_scenarios.CpScenario` and its helpers -
+sync reuses ``tests.utils.cp_scenarios.CpScenario`` and its helpers -
 same workdir materialization, same remote seeding, same stdout
 normalization - plus the ``local_mtimes`` field: sync's whole point is the
 size+time judgment, so the at-both scenarios pin each side of the aws-cli
@@ -21,6 +21,7 @@ warning (rc 2), and a destination that exists as a file fails per item
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from tests.utils.cp_scenarios import (
@@ -173,6 +174,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed=_DEL_SEED,
     ),
     CpScenario(
+        name="sync_upload_invalid_grants_dryrun",
+        argv=(
+            "sync",
+            "src",
+            f"s3://{BUCKET_TOKEN}/up",
+            "--grants",
+            "invalid",
+            "--dryrun",
+        ),
+        local_src={"src/a.txt": b"alpha\n"},
+        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
+        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
+    ),
+    CpScenario(
         name="sync_upload_no_overwrite",
         argv=("sync", "src", f"s3://{BUCKET_TOKEN}/no", "--no-overwrite"),
         # exists.txt differs in size and is locally newer - everything says
@@ -245,6 +260,25 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
+        name="sync_download_exact_timestamps_size_only",
+        argv=(
+            "sync",
+            f"s3://{BUCKET_TOKEN}/d",
+            "dest",
+            "--exact-timestamps",
+            "--size-only",
+        ),
+        # Both flags given, same size, local older: --size-only alone would skip
+        # (equal size), but --exact-timestamps wins over --size-only, so the skew
+        # triggers a download. The tree shows the remote body, distinguishing the
+        # two strategies' order (aws registers SizeOnly before ExactTimestamps, so
+        # the latter is applied last and wins).
+        local_src={"dest/same.txt": b"zz\n"},
+        local_mtimes={"dest/same.txt": -_DAY},
+        seed={"d/same.txt": b"xx\n"},
+        capture_tree=True,
+    ),
+    CpScenario(
         name="sync_download_delete",
         argv=("sync", f"s3://{BUCKET_TOKEN}/d", "dest", "--delete"),
         local_src={"dest/stale.txt": b"old\n", "dest/sub/stale2.txt": b"old2\n"},
@@ -277,9 +311,15 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed={"d/a.txt": b"remote alpha\n"},
         capture_tree=True,
         # The dest walk warns (file-as-directory), then each download fails
-        # with ENOTDIR; failures win the rc (1).
-        expected_stderr_tokens_ours=("File does not exist.", "Not a directory"),
-        expected_stderr_tokens_aws=("File does not exist.", "Not a directory"),
+        # with ENOTDIR; failures win the rc (1). On Windows the failure is
+        # ENOENT instead (file-as-directory opens answer [Errno 2] there),
+        # and aws's warning line is not pinned - only its failure is.
+        expected_stderr_tokens_ours=("File does not exist.", "Not a directory")
+        if os.name != "nt"
+        else ("File does not exist.", "[Errno 2]"),
+        expected_stderr_tokens_aws=("File does not exist.", "Not a directory")
+        if os.name != "nt"
+        else ("[Errno 2]",),
     ),
     # -- copies ---------------------------------------------------------------
     CpScenario(
@@ -309,6 +349,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "*.txt",
         ),
         seed={"cs/a.txt": b"alpha\n", "cs/b.bin": b"\x00\x01"},
+    ),
+    CpScenario(
+        name="sync_copy_invalid_grants_dryrun",
+        argv=(
+            "sync",
+            f"s3://{BUCKET_TOKEN}/cs",
+            f"s3://{BUCKET_TOKEN}/cd",
+            "--grants",
+            "invalid",
+            "--dryrun",
+        ),
+        seed={"cs/a.txt": b"alpha\n"},
+        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
+        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
     ),
     CpScenario(
         name="sync_copy_content_type",

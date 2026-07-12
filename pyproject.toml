@@ -1,7 +1,7 @@
 [project]
 name = "boto3-s3"
-version = "0.5.0"
-description = "A Python library providing `aws s3` operations with a boto3-like API."
+version = "0.6.0"
+description = "A Python library providing `aws s3`-equivalent operations through its own Python API."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -19,6 +19,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    # The SDK floor (docs/overview.md section 2): the boto3/botocore/s3transfer
+    # generation of aws-cli 2.13.0 (2023-07) - the oldest aws-cli this floor
+    # corresponds to. Features that need a newer S3 model degrade per the
+    # overview's list.
     "boto3>=1.28",
     # Imported directly (exceptions, config types); floor per docs/overview.md
     # section 2 (boto3 1.28 already requires it, so this is declarative).
@@ -57,9 +61,6 @@ dev = [
 
 [tool.uv.workspace]
 members = ["cli"]
-
-[tool.uv.sources]
-boto3-s3 = { workspace = true }
 
 [tool.ruff]
 line-length = 100

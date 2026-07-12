@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "cp",
+    "src/a.txt",
+    "s3://<BUCKET>/up/key.txt",
+    "--no-progress"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "up/key.txt"
+  ],
+  "scenario": "cp_upload_no_progress",
+  "src_tree": null,
+  "stdout_lines": [
+    "upload: src\\a.txt to s3://<BUCKET>/up/key.txt"
+  ]
+}

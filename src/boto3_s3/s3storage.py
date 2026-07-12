@@ -14,7 +14,7 @@ convenience (chiefly for a content-based ``sync`` filter reading an object's
 bytes), addressed by the object's full key. Its ``"wb"`` stays unimplemented:
 every S3 *write* rides ``s3transfer`` (built-in pairs and the S3 side of an
 open-route custom-backend transfer alike), so a writable stream has no caller
-(see :meth:`S3Storage.open`).
+(see ``S3Storage.open``).
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ _S3_SCHEME = "s3://"
 # may itself contain "/", so these run before the plain first-"/" split; the
 # whole ARN (group "bucket") is what the S3 API takes as ``Bucket``. The
 # *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above) are
-# :meth:`S3Storage.validate`'s concern - the split accepts them whole.
+# ``S3Storage.validate``'s concern - the split accepts them whole.
 _S3_ACCESSPOINT_TO_BUCKET_KEY_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3:[a-z\-0-9]*:[0-9]{12}:accesspoint[:/][^/]+)/?(?P<key>.*)$"
 )
@@ -141,9 +141,9 @@ def _parse_s3_url(url: str) -> tuple[str, str]:
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    :meth:`S3Storage.split_bucket_key`). The strict aws-cli checks - the
+    ``S3Storage.split_bucket_key``). The strict aws-cli checks - the
     unsupported S3 Object Lambda / Outposts *bucket* ARN forms, and a key with
-    no bucket - are deferred to :meth:`S3Storage.validate`, so construction
+    no bucket - are deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
     rest = url.partition("://")[2]
@@ -155,7 +155,7 @@ def _translate_client_error(
 ) -> Boto3S3Error:
     """Map a botocore ``ClientError`` to the matching ``Boto3S3Error`` category.
 
-    The error code is consulted first (:data:`S3_CODE_CATEGORIES`); the HTTP
+    The error code is consulted first (``S3_CODE_CATEGORIES``); the HTTP
     status widens codes not in the table. The message is the ClientError's
     full str - the "An error occurred (...)" line aws-cli prints - so these
     read the same as the per-key delete failures synthesized in deleter.py.
@@ -277,7 +277,7 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
     Runs on the consumer's iteration thread - ``S3.ls`` iterates
-    :meth:`list_buckets` directly, not through ``scan``'s prefetch worker. Each
+    ``list_buckets`` directly, not through ``scan``'s prefetch worker. Each
     bucket becomes an ``S3FileInfo`` whose ``key`` is the bucket name and whose
     ``mtime`` is the bucket's
     ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
@@ -308,24 +308,24 @@ class S3Storage(Storage):
     Wraps an ``s3://bucket/prefix`` location together with the boto3 S3 client
     used to reach it. The ``s3://`` scheme is optional in the constructor:
     ``S3Storage("bucket/key")`` is read the same as ``S3Storage("s3://bucket/key")``
-    (intentional library leniency; :meth:`S3.resolve` stays strict and routes a
+    (intentional library leniency; ``S3.resolve`` stays strict and routes a
     bare ``"bucket/key"`` to local instead). An empty bucket part (bare ``"s3://"``) is the
-    *service root*: :meth:`list_buckets` lists the account's buckets there (what
+    *service root*: ``list_buckets`` lists the account's buckets there (what
     ``S3.ls`` uses), while object listing / a transfer needs a bucket; a key
-    without a bucket (``"s3:///k"``) is rejected by :meth:`validate`. The bucket
+    without a bucket (``"s3:///k"``) is rejected by ``validate``. The bucket
     part may be an access-point ARN (plain or
     Outposts), which is passed whole as the ``Bucket`` parameter; S3 Object Lambda
     and Outposts bucket ARNs are rejected like ``aws s3`` rejects them (by
-    :meth:`validate`, deferred from construction). When
+    ``validate``, deferred from construction). When
     ``client`` is omitted, a default ``boto3.client("s3")``
     is built lazily on first use and owned by this instance (released by
-    :meth:`close`). The region is not derived from the URL; for a specific
+    ``close``). The region is not derived from the URL; for a specific
     region / endpoint / profile, pass a pre-built ``client``.
 
     How this source is *listed* is configured on the constructor too: ``page_size``
     (the ``ListObjectsV2`` page size) and ``fetch_owner`` (populate each entry's
     owner) are held on the instance and seeded into every scan via
-    :meth:`default_scan_options`, so a listing is tuned once here rather than per
+    ``default_scan_options``, so a listing is tuned once here rather than per
     operation.
 
     Thread safety: a built or supplied client is safe to share across threads for
@@ -337,9 +337,9 @@ class S3Storage(Storage):
     Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
     enumerates in native UTF-8 byte order (``ListObjectsV2``), reads an object
     (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
-    because every S3 write rides ``s3transfer`` (see :meth:`open`).
-    ``scan_options_type`` is :class:`S3ScanOptions` (arg-less
-    ``scan()`` builds it, and :meth:`scan_pages` requires it). ``scan_pages_filters``
+    because every S3 write rides ``s3transfer`` (see ``open``).
+    ``scan_options_type`` is ``S3ScanOptions`` (arg-less
+    ``scan()`` builds it, and ``scan_pages`` requires it). ``scan_pages_filters``
     is ``True`` - ``scan_pages`` sieves each page, so ``scan`` does not re-apply
     ``options.filter``.
     """
@@ -374,7 +374,13 @@ class S3Storage(Storage):
 
     @staticmethod
     def strip_scheme(path: str) -> str:
-        """Drop a leading ``s3://`` if present (aws-cli's ``split_s3_bucket_key``)."""
+        """Drop a leading ``s3://`` if present.
+
+        The scheme-strip half of aws-cli's ``split_s3_bucket_key``, which also
+        divides the rest into ``(bucket, key)``; that split half is
+        ``split_bucket_key`` here, and the two composed reproduce aws-cli's whole
+        function (as ``same_key`` does).
+        """
         if path.startswith(_S3_SCHEME):
             return path[len(_S3_SCHEME) :]
         return path
@@ -386,11 +392,15 @@ class S3Storage(Storage):
         aws-cli's ``_normalize_s3_trailing_slash``: a bucket-only URI with no
         trailing slash (``s3://bucket``, including a keyless access-point ARN)
         reads as the bucket root ``s3://bucket/`` - the form aws validates and
-        prints. A bare ``s3://`` (service root) stays as is. For raw strings
-        only (the CLI's pre-resolve inputs and ``S3PathResolver`` outputs);
-        with an ``S3Storage`` at hand, :meth:`normalized_uri` derives the same
-        form from the held state, and :meth:`format` the scheme-less root.
+        prints. A bare ``s3://`` (service root) stays as is, and - like aws-cli's
+        ``startswith('s3://')`` guard - a path that does not start with the scheme
+        is returned unchanged (never sliced blindly). For raw strings only (the
+        CLI's pre-resolve inputs and ``S3PathResolver`` outputs); with an
+        ``S3Storage`` at hand, ``normalized_uri`` derives the same form from
+        the held state, and ``format`` the scheme-less root.
         """
+        if not path.startswith(_S3_SCHEME):
+            return path
         rest = path[len(_S3_SCHEME) :]
         _bucket, key = S3Storage.split_bucket_key(rest)
         if not key and rest and not rest.endswith("/"):
@@ -420,7 +430,7 @@ class S3Storage(Storage):
         """Whether the two s3 URIs name the same *key* (buckets ignored).
 
         aws-cli's ``CommandParameters._same_key``: the key parts are compared with
-        the :meth:`same_path` rule anchored at ``/`` - so a keyless destination
+        the ``same_path`` rule anchored at ``/`` - so a keyless destination
         matches any source whose key is its own basename. Gates ``mv``'s
         resolve-and-validate work and its access-point warning.
         """
@@ -431,7 +441,7 @@ class S3Storage(Storage):
     def normalized_uri(self) -> str:
         """The keyless-normalized ``s3://`` URI, from the held state.
 
-        The instance form of :meth:`normalize_s3_uri` (aws-cli's
+        The instance form of ``normalize_s3_uri`` (aws-cli's
         ``_normalize_s3_trailing_slash``), derived from ``bucket`` / ``key``
         with no string round-trip: a keyless bucket reads as the bucket root
         ``s3://bucket/`` (the join supplies the slash), a bare service root
@@ -449,7 +459,7 @@ class S3Storage(Storage):
         keyless-normalized URIs, computed from the held ``bucket`` / ``key``
         instead of rebuilt strings: the buckets must match (with equal
         buckets the URI prefix is inert), and the keys are compared with the
-        :meth:`same_path` rule anchored at ``/`` - the :meth:`same_key`
+        ``same_path`` rule anchored at ``/`` - the ``same_key``
         anchoring, which preserves ``os.path.join`` / ``basename``'s host
         semantics exactly (a keyless side reads as the ``/``-terminated
         bucket root, and any prefix ending in ``/`` reproduces the full
@@ -475,8 +485,8 @@ class S3Storage(Storage):
         # "s3://bucket/key" (mirrors aws-cli ls/presign/website). S3.resolve stays
         # strict on purpose (a bare "bucket/key" routes to local), so cp/mv/sync can
         # still tell bare local paths from S3.
-        if not text.startswith("s3://"):
-            text = f"s3://{text}"
+        if not text.startswith(_S3_SCHEME):
+            text = f"{_S3_SCHEME}{text}"
         self._url = text
         self._bucket, self._key = _parse_s3_url(text)
         self._client = client
@@ -503,24 +513,24 @@ class S3Storage(Storage):
 
     @override
     def as_text(self) -> str:
-        """Reconstruct the ``s3://bucket/key`` token (:meth:`Storage.as_text`).
+        """Reconstruct the ``s3://bucket/key`` token (``Storage.as_text``).
 
-        Rebuilt from :attr:`bucket` / :attr:`key`, not from the raw constructor
+        Rebuilt from ``bucket`` / ``key``, not from the raw constructor
         input, so a keyless location normalizes to a slashless ``s3://bucket``
         (and the bare service root to ``s3://``) - exactly the token a raw
         ``s3://bucket`` argument carries into the transfer planner
-        (:mod:`boto3_s3.transferplan`).
+        (``boto3_s3.transferplan``).
         """
         if self._key:
-            return f"s3://{self._bucket}/{self._key}"
-        return f"s3://{self._bucket}"
+            return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+        return f"{_S3_SCHEME}{self._bucket}"
 
     @override
     def format(self, *, dir_op: bool) -> tuple[str, bool]:
-        """Format this S3 side; return ``(root, use_src_name)`` (:meth:`Storage.format`).
+        """Format this S3 side; return ``(root, use_src_name)`` (``Storage.format``).
 
         aws-cli's ``FileFormat.s3_format``, computed from the held
-        :attr:`bucket` / :attr:`key` instead of a re-parsed URI string: the
+        ``bucket`` / ``key`` instead of a re-parsed URI string: the
         scheme-less ``bucket/key`` root falls straight out of the join, and so
         does the keyless-bucket normalization (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
@@ -542,7 +552,7 @@ class S3Storage(Storage):
     def validate(self) -> None:
         """Reject the resource forms ``aws s3`` rejects at parse time (rc 252).
 
-        Deferred from construction (:meth:`Storage.validate`): S3 Object Lambda
+        Deferred from construction (``Storage.validate``): S3 Object Lambda
         and Outposts *bucket* ARNs (s3api / s3control territory), and a key with
         no bucket (``"s3:///k"``). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
@@ -573,9 +583,8 @@ class S3Storage(Storage):
         section 1).
         """
         if self._client is None:
-            # Deferred: only the default-client fallback needs boto3, and
-            # importing it pulls in s3transfer too (import contract,
-            # docs/imports.md). Callers passing a client never load it here.
+            # Only the default-client fallback needs boto3. Callers passing a
+            # client never load it here.
             import boto3
 
             # operation=None: no subcommand is in scope at build time.
@@ -592,7 +601,7 @@ class S3Storage(Storage):
     @override
     def default_scan_options(self) -> S3ScanOptions:
         """The listing options seeded with this storage's held config
-        (:meth:`Storage.default_scan_options`).
+        (``Storage.default_scan_options``).
 
         ``page_size`` / ``fetch_owner`` come from the constructor, so every scan
         reflects the listing tuned once on this ``S3Storage``; an operation
@@ -601,6 +610,7 @@ class S3Storage(Storage):
         """
         return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
 
+    @override
     def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
         """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
@@ -614,20 +624,20 @@ class S3Storage(Storage):
         recursive stream is directly merge-joinable (the basis of ``sync``).
         ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
         ``S3FileInfo.owner``. The bare service root (empty bucket) is *not* an
-        object container: it is listed with :meth:`list_buckets` (``S3.ls``
+        object container: it is listed with ``list_buckets`` (``S3.ls``
         dispatches there), and reaching object listing with an empty bucket fails
         with botocore's ``Invalid bucket name`` ParamValidation - matching
         ``aws s3 cp/rm/sync s3://``.
 
-        ``options.filter`` is applied here (:meth:`Storage.scan_pages`'s contract):
+        ``options.filter`` is applied here (``Storage.scan_pages``'s contract):
         the raw ``ListObjectsV2`` pages are sieved client-side with
-        :func:`~boto3_s3.storage.sieve_pages` before they are yielded. This is the
+        ``sieve_pages`` before they are yielded. This is the
         override seam: subclass and filter / enrich each page, then
-        ``super().scan_pages(options)``; the work runs on :meth:`Storage.scan`'s
+        ``super().scan_pages(options)``; the work runs on ``Storage.scan``'s
         prefetch worker so it overlaps consumption. Fetch-time botocore errors are
         translated to ``Boto3S3Error`` here and surface on the consumer's pull.
 
-        Requires an :class:`S3ScanOptions` (this backend's option type); a foreign
+        Requires an ``S3ScanOptions`` (this backend's option type); a foreign
         ``ScanOptions`` is rejected rather than silently listing with defaults.
         """
         if not isinstance(options, S3ScanOptions):
@@ -659,7 +669,11 @@ class S3Storage(Storage):
             paging["FetchOwner"] = True
         # get_client inside the translation scope like delete / get_fileinfo, so
         # a lazy-build failure also surfaces as a Boto3S3Error on the first pull.
-        with s3_errors(operation="ls", bucket=self._bucket):
+        # operation=None: this object listing backs every recursive scan - not
+        # only ls, but also rm / cp / mv / sync source enumeration - so the calling
+        # subcommand is not known here, and stamping a fixed "ls" would mislabel
+        # the others (the service-root list_buckets below is ls-only, so it can).
+        with s3_errors(operation=None, bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
                 yield _page_to_infos(page, recursive=options.recursive, prefix=prefix, storage=self)
@@ -672,7 +686,7 @@ class S3Storage(Storage):
     ) -> Iterator[FileInfo]:
         """List the account's buckets as ``BUCKET``-kind ``FileInfo`` (the service root).
 
-        The S3-only counterpart to :meth:`scan_pages`, kept separate because a
+        The S3-only counterpart to ``scan_pages``, kept separate because a
         bucket is a container, not an openable entity (aws-cli's
         ``_list_all_buckets``, which its ``ls`` dispatches to for a bare
         ``s3://``): ``S3.ls`` calls this at the service root, and no transfer scan
@@ -681,15 +695,20 @@ class S3Storage(Storage):
         ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
         when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
         floor (botocore 1.34.162) it falls back to one unpaginated
-        ``list_buckets()`` with the filters inert (docs/overview.md section 2).
-        Errors surface on the consumer's pull.
+        ``list_buckets()``, where these filters are simply never sent (inert). The
+        ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
+        1.35.42), so on a paginating botocore that predates them (1.34.162 through
+        1.35.41) passing ``name_prefix`` / ``region`` raises a
+        ``ParamValidationError`` (docs/overview.md section 2). Errors surface on the
+        consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
             if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31): the ListBuckets paginator and
-                # its Prefix / BucketRegion parameters are a late-2024 addition
-                # (botocore 1.34.162). Drop this branch once the floor reaches it.
+                # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
+                # late-2024 addition (botocore 1.34.162); its Prefix / BucketRegion
+                # input parameters came later still (botocore 1.35.42). Drop this
+                # branch once the floor reaches the paginator.
                 yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
             paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
@@ -762,10 +781,10 @@ class S3Storage(Storage):
         *,
         on_warning: Callable[[str], None] | None = None,
     ) -> S3FileInfo | None:
-        """HeadObject a single key (:meth:`Storage.get_fileinfo`).
+        """HeadObject a single key (``Storage.get_fileinfo``).
 
         ``key`` is relative to this storage's location: ``""`` heads
-        :attr:`key`, a non-empty ``key`` an entry beneath it - joined under the
+        ``key``, a non-empty ``key`` an entry beneath it - joined under the
         prefix with a ``/`` boundary (mirroring ``LocalStorage``'s
         ``os.path.join``), so a keyless or trailing-``/`` prefix needs none and a
         bare ``prefix`` still yields ``prefix/key``. A ``404`` returns ``None``

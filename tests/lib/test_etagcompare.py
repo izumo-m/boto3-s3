@@ -488,6 +488,9 @@ class TestGoldenCrossCheck:
             (_TEN, 10, _TEN_MP10),
             (_CONTENT_6MIB, 5 * _MIB, _CONTENT_6MIB_MP5),
         ],
+        # Explicit ids: the bytes params would otherwise become megabyte-long
+        # test ids, overflowing Windows' 32767-char cap on PYTEST_CURRENT_TEST.
+        ids=["ten-part4", "ten-part5", "ten-part10", "6mib-part5mib"],
     )
     def test_multipart_goldens(self, data: bytes, part: int, golden: str) -> None:
         assert golden == _independent_multipart(data, part)

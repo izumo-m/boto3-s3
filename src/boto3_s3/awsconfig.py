@@ -1,6 +1,6 @@
 """``boto3_s3.awsconfig``: a general reader for the AWS config file (``~/.aws/config``).
 
-This is the building block behind :meth:`boto3_s3.S3.aws_config`. It reads the
+This is the building block behind ``S3.aws_config``. It reads the
 AWS **config file** - ``AWS_CONFIG_FILE`` (default ``~/.aws/config``) - and lets
 an application pull any value out of it: not just the ``[s3]`` transfer tuning,
 but ``region`` / ``output`` / a ``[services ...]`` block / an ``[sso-session
@@ -18,7 +18,7 @@ The shape mirrors ``aws configure get``'s feel - the **profile is the default
 context** and ``services`` / ``sso-session`` are explicit selectors - with two
 deliberate additions ``aws``'s loader does not have:
 
-- **typed getters** (:meth:`~ConfigSection.get_str` / ``get_int`` / ``get_size``
+- **typed getters** (``get_str`` / ``get_int`` / ``get_size``
   / ``get_bool`` / ``get_rate``); ``aws configure get`` returns only strings;
 - **caller-supplied defaults**; this reader holds no central defaults table.
 
@@ -33,14 +33,16 @@ Resolution rules:
   caller's default (tolerant);
 - a **present** value that does not convert (``get_size("abc")``), or a key that
   points at a whole subsection instead of a value, raises
-  :class:`~boto3_s3.exceptions.InvalidConfigError` (a config typo is surfaced,
-  not silently defaulted);
+  ``InvalidConfigError`` (a config typo is surfaced, not silently defaulted) -
+  except ``get_bool``, which follows botocore's ``ensure_boolean``: any value
+  other than ``"true"`` (case-insensitively) reads as ``False`` and never raises,
+  matching how ``aws`` reads config booleans;
 - the **active profile** is resolved through botocore's ``get_scoped_config``: a
   ``--profile`` / ``AWS_PROFILE`` that is set but missing surfaces as an
   ``InvalidConfigError`` (botocore's ``ProfileNotFound``, converted at the
   boundary), matching ``aws``.
 
-Like :mod:`~boto3_s3.etagcompare` this is a standalone, opt-in building block:
+Like ``boto3_s3.etagcompare`` this is a standalone, opt-in building block:
 imported by submodule path (``from boto3_s3.awsconfig import AwsConfig``), **not**
 part of the package's lazy root re-export, and SDK-free at import time - boto3 /
 botocore are loaded lazily on the read path, so ``import boto3_s3.awsconfig``
@@ -92,7 +94,7 @@ def split_size_suffix(value: str) -> tuple[str, str]:
     Returns ``(lowered, suffix)``: the suffix is the trailing three characters
     for an ``ib`` spelling (``"mib"``), else the trailing two (``"mb"``). No
     validation happens here - each caller checks the suffix against
-    :data:`SIZE_SUFFIX` under its own boundary guard.
+    ``SIZE_SUFFIX`` under its own boundary guard.
     """
     lowered = value.lower()
     suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
@@ -113,8 +115,8 @@ class ConfigSection:
     nested subsection - ``"s3.multipart_chunksize"`` reads ``multipart_chunksize``
     from the section's ``s3`` block. A missing key returns the caller's default;
     a present value that does not convert, or a key naming a whole subsection,
-    raises :class:`~boto3_s3.exceptions.InvalidConfigError`. Obtain one from
-    :class:`AwsConfig` (``cfg.profile(...)`` / ``cfg.services(...)`` / ...).
+    raises ``InvalidConfigError``. Obtain one from
+    ``AwsConfig`` (``cfg.profile(...)`` / ``cfg.services(...)`` / ...).
     """
 
     __slots__ = ("_data",)
@@ -198,15 +200,15 @@ class ConfigSection:
 class AwsConfig:
     """Reader for the AWS config file (``~/.aws/config``), bound to a session.
 
-    Built from a boto3 session (or a default one) via :meth:`from_session`; the
+    Built from a boto3 session (or a default one) via ``from_session``; the
     file is parsed by botocore and cached on first access. ``profile`` is the
-    default context - the bare getters (:meth:`get_size` ...) read the session's
+    default context - the bare getters (``get_size`` ...) read the session's
     **active** profile, mirroring ``aws configure get varname`` - while
-    :meth:`services` / :meth:`sso_session` / :meth:`plugins` select other
+    ``services`` / ``sso_session`` / ``plugins`` select other
     sections, like ``aws``'s ``--services`` / ``--sso-session``. Each selector
-    returns a :class:`ConfigSection`.
+    returns a ``ConfigSection``.
 
-    Reachable from :meth:`boto3_s3.S3.aws_config`, which memoizes one per ``S3``
+    Reachable from ``S3.aws_config``, which memoizes one per ``S3``
     instance.
     """
 
@@ -254,7 +256,7 @@ class AwsConfig:
         ``name=None`` resolves the active profile through botocore's
         ``get_scoped_config`` (``--profile`` / ``AWS_PROFILE``, else
         ``[default]``); a set-but-missing profile raises
-        :class:`~boto3_s3.exceptions.InvalidConfigError`. A given ``name`` reads
+        ``InvalidConfigError``. A given ``name`` reads
         ``[profile name]`` (or ``[default]`` for ``"default"``) from the full
         config and is tolerant - an absent profile yields an empty section whose
         getters fall to their defaults.
@@ -282,7 +284,7 @@ class AwsConfig:
     @overload
     def get_str(self, key: str, default: None = None) -> str | None: ...
     def get_str(self, key: str, default: str | None = None) -> str | None:
-        """:meth:`ConfigSection.get_str` on the active profile."""
+        """``ConfigSection.get_str`` on the active profile."""
         return self._active_profile().get_str(key, default)
 
     @overload
@@ -290,7 +292,7 @@ class AwsConfig:
     @overload
     def get_int(self, key: str, default: None = None) -> int | None: ...
     def get_int(self, key: str, default: int | None = None) -> int | None:
-        """:meth:`ConfigSection.get_int` on the active profile."""
+        """``ConfigSection.get_int`` on the active profile."""
         return self._active_profile().get_int(key, default)
 
     @overload
@@ -298,7 +300,7 @@ class AwsConfig:
     @overload
     def get_size(self, key: str, default: None = None) -> int | None: ...
     def get_size(self, key: str, default: int | None = None) -> int | None:
-        """:meth:`ConfigSection.get_size` on the active profile."""
+        """``ConfigSection.get_size`` on the active profile."""
         return self._active_profile().get_size(key, default)
 
     @overload
@@ -306,7 +308,7 @@ class AwsConfig:
     @overload
     def get_rate(self, key: str, default: None = None) -> int | None: ...
     def get_rate(self, key: str, default: int | None = None) -> int | None:
-        """:meth:`ConfigSection.get_rate` on the active profile."""
+        """``ConfigSection.get_rate`` on the active profile."""
         return self._active_profile().get_rate(key, default)
 
     @overload
@@ -314,7 +316,7 @@ class AwsConfig:
     @overload
     def get_bool(self, key: str, default: None = None) -> bool | None: ...
     def get_bool(self, key: str, default: bool | None = None) -> bool | None:
-        """:meth:`ConfigSection.get_bool` on the active profile."""
+        """``ConfigSection.get_bool`` on the active profile."""
         return self._active_profile().get_bool(key, default)
 
     # -- internals --------------------------------------------------------
@@ -397,7 +399,7 @@ def _parse_rate(value: str, key: str) -> int:
 
     Ports aws-cli's rate parsing: a ``B/s`` value is bytes/s, a ``b/s`` value is
     bits/s (divided by 8), a bare integer is bytes/s. Magnitudes use the same
-    1024-based suffixes as :func:`_parse_size`.
+    1024-based suffixes as ``_parse_size``.
     """
     if value.endswith("B/s"):
         return _rate_magnitude(value, key)
