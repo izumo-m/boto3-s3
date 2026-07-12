@@ -8,7 +8,7 @@ pip install boto3-s3-cli
 boto3-s3 sync ./build s3://my-bucket/build/ --delete
 ```
 
-**Status:** early development (pre-1.0). **Python:** 3.10+ · **License:** Apache-2.0
+**Status:** beta (pre-1.0), preparing for 1.0. **Python:** 3.10+ · **License:** Apache-2.0
 
 ## Why use it
 

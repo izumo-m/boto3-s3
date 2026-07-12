@@ -40,10 +40,10 @@ that fallback is slow, the ``pure_max_size`` arg can cap it: above the cap, with
 ``awscrt``, a ``crc32c`` / ``crc64nvme`` object is treated as indeterminate
 (copied) rather than hashed.
 
-Caveats. An object with **no** native checksum, or one whose algorithm cannot be
-computed locally (``crc32c`` / ``crc64nvme`` without ``awscrt``, or past
-``pure_max_size``), is treated as differing (copied) - the strategy never skips
-on an indeterminate comparison. An upload / download comparison reads the
+Caveats. An object with **no** native checksum, an unknown algorithm, or a
+``crc32c`` / ``crc64nvme`` checksum beyond ``pure_max_size`` when ``awscrt`` is
+unavailable is treated as differing (copied) - the strategy never skips on an
+indeterminate comparison. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
 under ``ParallelFilter``) - any backend, not just a
@@ -104,10 +104,11 @@ class ChecksumComparison(ContentComparison):
     backend), whole-file for a ``FULL_OBJECT`` checksum or part-by-part at the
     returned ``ObjectParts`` sizes for a ``COMPOSITE`` one. An s3-to-s3 (COPY)
     pair compares the two objects' stored checksums directly (both via
-    ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched
-    algorithm, or an algorithm that cannot be computed locally is treated as
-    differing (copy), so it never skips on an indeterminate comparison. It is a
-    replacement ``update_filter=`` strategy, selected instead of the size+time default.
+    ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched or
+    unknown algorithm, or a ``crc32c`` / ``crc64nvme`` checksum beyond
+    ``pure_max_size`` when ``awscrt`` is unavailable is treated as differing
+    (copy), so it never skips on an indeterminate comparison. It is a replacement
+    ``update_filter=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side are taken by resolving ``src`` /
     ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to

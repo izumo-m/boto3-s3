@@ -15,8 +15,8 @@ Each command is a method on a single `S3` object, taking ordinary keyword
 arguments; bring a boto3 client when you need a specific profile, region, or
 endpoint.
 
-**Status:** early development (pre-1.0) — all subcommands are implemented; the
-public API may still change.
+**Status:** beta (pre-1.0), preparing for 1.0 — all subcommands are implemented;
+the public API may still change.
 **Python:** 3.10+ · **License:** Apache-2.0
 
 Two packages:

@@ -4,8 +4,8 @@ Thanks for your interest in boto3-s3. This document covers local setup, the test
 suite, and the coding and commit conventions. For the project's purpose, scope,
 and design policy, start with [`docs/overview.md`](docs/overview.md).
 
-The project is in early development (pre-1.0). Breaking changes are expected and
-backward compatibility is not yet a goal.
+The project is in beta and preparing for 1.0. Changes that might break the
+public API or aws-cli compatibility must be discussed before implementation.
 
 ## Project layout
 
@@ -24,10 +24,11 @@ Prerequisites:
 
 - Python 3.10+ (the floor is 3.10; see `.python-version`).
 - [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- For the end-to-end suite only: Docker (with Compose), plus the `aws` CLI v2
-  matching the pinned aws-cli source revision — installed into `.venv/bin` by
-  `scripts/install-awscli.sh` (below), not an arbitrary `PATH` aws, which can
-  drift the goldens.
+- For any end-to-end run: the `aws` CLI v2 matching the pinned aws-cli source
+  revision — installed into `.venv/bin` by `scripts/install-awscli.sh` (below),
+  not an arbitrary `PATH` aws, which can drift the goldens.
+- For the local MinIO end-to-end environment: Docker with Compose. A run against
+  real S3 does not need Docker.
 
 Install the workspace and its dev tools into a local virtualenv:
 

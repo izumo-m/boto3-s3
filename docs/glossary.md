@@ -2,8 +2,7 @@
 
 This document is the **established current state (source of truth)** for the
 terminology used in the `boto3-s3` project. It is authoritative so that the
-meaning of each term stays consistent across the project. Terminology such as
-component names will be added as the design solidifies.
+meaning of each term stays consistent across the project.
 
 Related: for the project overview, see [`overview.md`](./overview.md).
 
