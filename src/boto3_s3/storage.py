@@ -271,10 +271,13 @@ class Storage(abc.ABC):
         that can (e.g. a REST listing) translates ``options.filter`` into a
         server-side query instead.
 
-        ``options.recursive`` walks every entry beneath the prefix (all ``FILE``
-        kind, no directory grouping); non-recursive yields the immediate entries
-        plus one ``DIRECTORY``-kind ``FileInfo`` per sub-"directory" (S3
-        ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
+        ``options.recursive`` normally walks every transferable entry beneath the
+        prefix (all ``FILE`` kind, no directory grouping); a backend-specific
+        source setting may widen that view - local
+        ``enumerate_all_entries=True`` includes the root, directories, symlinks,
+        and special entries before filtering. Non-recursive normally yields the
+        immediate entries plus one ``DIRECTORY``-kind ``FileInfo`` per
+        sub-"directory" (S3 ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
         ``compare_key``): a backend declaring ``SORTABLE_SCAN`` MUST honor it, so
         two recursive streams can be merge-joined (what ``sync`` relies on) after
         each is relativized to its scan root; when ``sort`` is ``False`` (``cp`` /

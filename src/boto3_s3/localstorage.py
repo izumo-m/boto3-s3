@@ -13,19 +13,16 @@ files, broken symlinks, the invalid-timestamp epoch fallback). aws-cli's Python-
 byte-filename decoding warning has no Python-3 equivalent (a ``str`` directory
 scan always yields ``str``) and is not ported.
 
-Two library-extension scan knobs widen what the stream *contains* (both default
-off = exact ``aws s3`` parity, which lists files only): ``return_directories``
-returns every directory as its own ``DIRECTORY``-kind entry at its byte-order
-position - the walk root included, leading the stream at ``compare_key == ""`` -
-and ``return_symlinks`` returns each symlink as an unfollowed, vetting-free leaf
-(the link's own lstat, ``is_symlink=True``; a broken link is an entry too).
-They are orthogonal to ``follow_symlinks``, which keeps meaning *traversal*
-only: following while returning still descends a link's directory target, as a
-separate descent at its own byte-order position (``name`` + separator - after
-the link's own leaf, and after any sibling such as ``name.txt`` that sorts
-between), at the cost of one extra followed stat. All three ride
-``LocalScanOptions`` (seeded from the ``LocalStorage`` constructor), so
-``scan()``'s output shape is readable off its options.
+The library-extension ``enumerate_all_entries`` source setting selects a complete
+filesystem-entry view before filtering. It returns the root, directories,
+symlinks, special files, and metadata-readable entries whose content is
+unreadable; the default ``False`` retains exact ``aws s3`` transfer enumeration.
+``follow_symlinks`` independently selects one interpretation per symlink: follow
+and return/descend the target, or return the link itself as an lstat-based leaf in
+the complete view (the normal no-follow view skips it). A failed followed stat in
+the complete view warns and falls back to lstat. These settings ride
+``LocalScanOptions`` (seeded from the ``LocalStorage`` constructor), so every scan
+and high-level operation preserves the configured candidate enumeration policy.
 
 An app customizes the walk by subclassing ``LocalFileGenerator``, overriding
 its **public** methods, and passing an instance to
@@ -53,8 +50,8 @@ on Windows those APIs are absent, and the same code path falls back to a
 path-based scan whose ``FindNextFile`` data already supplies the attributes for
 free. The net effect is one ``stat`` per surviving entry (zero for a plain
 directory) plus aws-cli's one readability ``open`` per entry, versus the ~5
-restats per entry a naive port makes. Every surviving ``LocalFileInfo``
-carries that followed ``stat`` as ``stat_result``
+restats per entry a naive port makes. Every surviving ``LocalFileInfo`` carries
+the stat or lstat used to classify it as ``stat_result``
 and its ``d_type`` symlink flag as
 ``is_symlink`` - both already in hand from the
 vetting battery, so a ``filter`` / ``on_result`` callback reads them free, and
@@ -100,7 +97,6 @@ single-path point op) reuses them too.
 
 from __future__ import annotations
 
-import itertools
 import os
 import stat as stat_module
 from dataclasses import replace
@@ -388,9 +384,9 @@ class LocalFileGenerator:
         """Yield the files under ``root`` (recursively) as byte-order pages.
 
         The paged form driving ``Storage.scan_pages``: one page per directory
-        file-run - the sorted files between two sub-directory descents, plus,
-        under ``options.return_directories``, the descended directory's own
-        record (and, first, a one-record page for the walk root's). A
+        file-run - the sorted entries between two sub-directory descents. Under
+        ``options.enumerate_all_entries`` the root leads in a one-record page and
+        each descended directory rides the page before its children. A
         directory's files can only surface once its ``os.scandir`` has been read in
         full and sorted (the byte-order sort appends ``os.sep`` to directory names,
         so ``foo.txt`` precedes ``foo/bar``), and they are handed off just before
@@ -408,18 +404,15 @@ class LocalFileGenerator:
         this backend's option type, so a custom walker sees the full scan
         context):
         ``on_warning`` (warnings carry the aws-cli message bodies, dropped when
-        ``None``); ``follow_symlinks`` (``False`` skips symlinks silently);
-        ``return_directories`` (every directory's own record in-stream, the walk
-        root's first at ``compare_key == ""`` - see ``root_info``);
-        ``return_symlinks`` (symlinks as unfollowed, vetting-free leaves - see
-        ``symlink_child``; combined with ``follow_symlinks`` a link's directory
-        target is still descended, right after the link's own leaf);
+        ``None``); ``enumerate_all_entries`` (complete candidates before filtering,
+        bypassing transferability vetting); ``follow_symlinks`` (target view when
+        true, or an lstat leaf in the complete view / a silent skip otherwise);
         ``detect_symlink_loops`` (with ``follow_symlinks``, skips a directory that
         resolves to one of its own ancestors with a ``Symbolic link loop
         detected`` warning - a library extension, off = ``aws s3`` behaviour, no
         extra ``stat``); and ``filter`` (drops entries it rejects - applied
         *after* the aws-cli vetting so an excluded file still emits the warnings
-        aws-cli would, and yielding only survivors saves paging them downstream;
+        aws-cli would in the normal view, and yielding only survivors saves paging them downstream;
         the predicate can read each ``LocalFileInfo``'s ``stat_result`` /
         ``is_symlink``, stamped for free from the walk). The root is vetted with
         ``should_ignore_file``; its children per entry in
@@ -429,7 +422,16 @@ class LocalFileGenerator:
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
         follow_symlinks = options.follow_symlinks
-        if self.should_ignore_file(root, follow_symlinks=follow_symlinks, notify=notify):
+        if options.enumerate_all_entries:
+            root_record = self.root_info(root, options=options, notify=notify)
+            if root_record is None:
+                return
+            root_record.storage = options.storage
+            if options.filter is None or options.filter(root_record):
+                yield [root_record]
+            if root_record.kind is not FileKind.DIRECTORY:
+                return
+        elif self.should_ignore_file(root, follow_symlinks=follow_symlinks, notify=notify):
             return
         # No detector unless asked and reachable (a cycle needs a followed
         # symlink); None then costs no per-directory stat.
@@ -441,14 +443,6 @@ class LocalFileGenerator:
         item_filter = options.filter
         storage = options.storage
         pages = self.walk_dir(root, options, strip=strip, notify=notify, detector=detector)
-        if options.return_directories:
-            # "Return directories", strictly interpreted, includes the tree's
-            # own root: its record leads the stream (compare_key "", which
-            # sorts before every child key). Built after the root vetting; a
-            # race that removed the root since returns None and drops it.
-            root_record = self.root_info(root)
-            if root_record is not None:
-                pages = itertools.chain([[root_record]], pages)
         for page in pages:
             # compare_key is already stamped (scan_children, before finalize_children);
             # here we stamp each entry's producing backend (options.storage, walk-
@@ -494,8 +488,8 @@ class LocalFileGenerator:
         directory to prune its subtree (before ``super().walk_dir`` for the rest),
         or re-implement the loop to cap depth or change traversal - preserving the
         depth-first byte order that sync's merge-join relies on.
-        ``options.return_directories`` makes this loop also emit each descended
-        directory's own record, on the page flushed just before its descent.
+        ``options.enumerate_all_entries`` makes this loop also emit each descended
+        directory's own record on the page flushed just before its descent.
         ``compare_key`` is stamped in ``scan_children``; ``ScanOptions.filter``
         is ``list_file_pages``'s job on the yielded pages, not this method's.
 
@@ -514,13 +508,13 @@ class LocalFileGenerator:
             # A sub-directory: sort_name carries the trailing os.sep (the sort
             # suffix), so the child path and the loop warning read correctly.
             sub = os.path.join(dir_path, sort_name)
-            # The directory's own record (options.return_directories; off =
-            # aws parity) rides the page flushed before its descent: it sorts
+            # The directory's own record in the complete view rides the page
+            # flushed before its descent: it sorts
             # after the collected files and before anything under sub. Appended
             # before the flush and the detector, so the record is emitted even
             # when the descent is then skipped as a cycle - like an unreadable
             # directory, the record survives and only the children are lost.
-            if options.return_directories:
+            if options.enumerate_all_entries:
                 run.append(info)
             # Descending runs sub's own scandir; hand off the files collected so
             # far first (they all sort before anything under sub) as this
@@ -561,29 +555,63 @@ class LocalFileGenerator:
         if run:
             yield run
 
-    def root_info(self, root: str) -> LocalFileInfo | None:
-        """The walk root's own ``DIRECTORY`` record (``options.return_directories``).
+    def root_info(
+        self,
+        root: str,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None:
+        """The complete view's root entry, classified with the walk's symlink policy.
 
         ``root`` is the absolutized walk root with a trailing separator (the
         ``list_file_pages`` anchor, or ``_scan_one_level``'s for a non-recursive
         scan). Its ``compare_key`` is the empty string -
         the root relativized to itself - which sorts before every child key,
         so the record leads the stream; note glob filters see that ``""`` (a
-        lone ``*`` matches it, a non-empty literal does not). The stat is
-        taken after the root vetting passed; ``None`` (a race removed the root
-        since) drops the record, as its children are about to be. The stat is
-        the followed one - the walk is descending this directory - with
-        ``is_symlink`` reflecting the root path itself.
+        lone ``*`` matches it, a non-empty literal does not). A directory key
+        carries the trailing separator and is descended; any other root is the
+        scan's sole leaf. ``stat_result`` is the followed stat or no-follow /
+        failed-follow lstat selected by ``options``, with ``is_symlink``
+        reflecting the root path itself.
         """
+        drive, _tail = os.path.splitdrive(root)
+        path = root.rstrip(os.sep)
+        if not path or path == drive:
+            path = drive + os.sep
+        follow_symlinks = options.follow_symlinks
+        is_symlink = os.path.islink(path)
         try:
-            st = os.stat(root)
+            st = os.stat(path, follow_symlinks=follow_symlinks)
         except OSError:
-            return None
+            if not (options.enumerate_all_entries and is_symlink and follow_symlinks):
+                if self.triggers_warning(path, notify):
+                    return None
+                raise
+            notify(f"Skipping file {path}. File does not exist.")
+            try:
+                st = os.lstat(path)
+            except OSError:
+                return None
+        is_directory = stat_module.S_ISDIR(st.st_mode)
+        entry_path = path
+        if is_directory and not entry_path.endswith(os.sep):
+            entry_path += os.sep
+        key = entry_path.replace(os.sep, "/")
+        size: int | None = None
+        mtime: datetime | None = None
+        if not is_directory:
+            size, mtime = _size_mtime(st)
+            if mtime is None:
+                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+                mtime = self.EPOCH_TIME
         return LocalFileInfo(
-            key=root.replace(os.sep, "/"),
-            kind=FileKind.DIRECTORY,
+            key=key,
+            kind=FileKind.DIRECTORY if is_directory else FileKind.FILE,
+            size=size,
+            mtime=mtime,
             stat_result=st,
-            is_symlink=os.path.islink(root.rstrip(os.sep)),
+            is_symlink=is_symlink,
             compare_key="",
         )
 
@@ -605,13 +633,10 @@ class LocalFileGenerator:
         prefix removed, aws-cli's ``src_path[len(root):]``), then hands the list to
         ``finalize_children`` (which sorts, and is the override point for
         pruning / registration). ``options`` carries the per-walk context the
-        classification reads (``follow_symlinks`` / ``return_symlinks``). Under
-        ``return_symlinks`` *and* ``follow_symlinks``, a symlink to a directory
-        contributes two children: the link's own leaf (sort key ``name``) and
-        the target directory's descent (``name`` + separator, at its own
-        byte-order position - after the leaf and after any sibling such as
-        ``name.txt`` that sorts between) - the extra followed stat is what decides that descent, and
-        a broken link simply has nothing to descend. A directory that cannot be opened or scanned
+        classification reads (``follow_symlinks`` / ``enumerate_all_entries``).
+        A path contributes one child: a followed symlink describes its target;
+        a no-follow symlink in the complete view describes the link itself. A
+        directory that cannot be opened or scanned
         (a symlink cycle stopped by the kernel, an over-long path, or a race
         after its parent vetted it readable) is skipped through the
         ``triggers_warning`` battery - the aws-cli warning its full-path
@@ -673,27 +698,11 @@ class LocalFileGenerator:
                     child = self.classify_child(entry, full, dir_fd, options=options, notify=notify)
                     if child is None:
                         continue
-                    if self.crosses_full_path_boundary(
+                    if not options.enumerate_all_entries and self.crosses_full_path_boundary(
                         child.info, full, sym_depth=sym_depth, notify=notify
                     ):
                         continue
                     children.append(child)
-                    if (
-                        options.return_symlinks
-                        and options.follow_symlinks
-                        and child.info.is_symlink
-                        and child.info.kind is not FileKind.DIRECTORY
-                    ):
-                        # Returning AND following: the link's own leaf is
-                        # above; when its target is a directory, descend it
-                        # too - the extra followed stat is the cost this
-                        # combination pays. A broken link: nothing to descend.
-                        try:
-                            followed = entry.stat()
-                        except OSError:
-                            continue
-                        if stat_module.S_ISDIR(followed.st_mode):
-                            children.append(self.dir_child(entry, full, followed))
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
@@ -775,15 +784,13 @@ class LocalFileGenerator:
         The per-entry decision, and the walk's single stat: it takes the entry's
         ``entry_stat_result`` **once** and threads that one value through the
         rest (so nothing below re-stats or re-checks for ``None``). Symlinks are
-        decided first, on a free ``d_type`` test before any stat: under
-        ``options.return_symlinks`` the link is its own leaf (``symlink_child``,
-        lstat-based, vetting-free; the follow-and-descend companion child is
-        ``scan_children``'s); otherwise no-follow skips it silently. A stat
-        that comes back ``None`` (a broken symlink followed, or the entry raced
-        away between the scan and here) is the "does not exist" skip. A stat that
+        decided first on a free ``d_type`` test: no-follow returns an lstat leaf
+        only in the complete view and otherwise skips it. A followed stat that
+        comes back ``None`` warns; the complete view then falls back to the link's
+        lstat, while the normal view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
         vetting-free leaf, like ``symlink_child``; then
-        ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
+        the normal view's ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
         its ``st_mode`` (``S_IFDIR`` = descend via ``dir_child``, else a file
         via ``stat_info``). Keying on that same stat - rather than a fresh
         ``entry.is_dir`` - keeps the whole entry on one stat and lets an lstat
@@ -792,13 +799,15 @@ class LocalFileGenerator:
         off POSIX).
         """
         if entry.is_symlink():
-            if options.return_symlinks:
+            if options.enumerate_all_entries and not options.follow_symlinks:
                 return self.symlink_child(entry, full, notify=notify)
             if not options.follow_symlinks:
                 return None
         st = self.entry_stat_result(entry)
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
+            if options.enumerate_all_entries and entry.is_symlink():
+                return self.symlink_child(entry, full, notify=lambda _body: None)
             return None
         if stat_module.S_ISLNK(st.st_mode):
             # Only an lstat-style entry_stat_result override produces this mode:
@@ -806,7 +815,9 @@ class LocalFileGenerator:
             # plus a target, no content to probe - the file probe would open the
             # target, which Windows refuses for a directory).
             return WalkChild(entry.name, self.stat_info(entry, full, st, notify), None)
-        if self.should_ignore_entry(entry, full, dir_fd, st, notify=notify):
+        if not options.enumerate_all_entries and self.should_ignore_entry(
+            entry, full, dir_fd, st, notify=notify
+        ):
             return None
         if stat_module.S_ISDIR(st.st_mode):
             return self.dir_child(entry, full, st)
@@ -834,18 +845,15 @@ class LocalFileGenerator:
     def symlink_child(
         self, entry: os.DirEntry[str], full: str, *, notify: Callable[[str], None]
     ) -> WalkChild | None:
-        """A symlink's own ``WalkChild`` (``options.return_symlinks``): the
-        link as a leaf.
+        """A symlink's own lstat-based leaf in the complete no-follow/fallback view.
 
         lstat-based - the info carries the link's own stat with
         ``is_symlink=True``, so ``size`` / ``mtime`` describe the link, not the
         target - and vetting-free: a symlink is a name plus a target with no
         content to probe, so the special/readability battery does not apply
         and a broken link is a returned entry like any other. The child itself
-        is never descended (``loop_key=None``); when the walk also follows
-        (``follow_symlinks``), ``scan_children`` appends the target directory's
-        descent as a separate child. ``None`` = the entry raced away (even
-        lstat failed).
+        is never descended (``loop_key=None``). ``None`` means the entry raced
+        away and even lstat failed.
         """
         try:
             st = entry.stat(follow_symlinks=False)
@@ -861,8 +869,7 @@ class LocalFileGenerator:
         The last step of ``scan_children``, the seam for shaping a directory's
         children as a whole before the walk consumes them - each child's
         ``compare_key`` is already stamped, so an override can prune by it, harvest
-        (register directories / symlinks a plain transfer would not surface),
-        strip entries it does not want transferred, or re-order. It receives the
+        register entries, strip entries it does not want, or re-order. It receives the
         children *unsorted*, so pruning here happens before the sort; call
         ``super().finalize_children`` (or ``normalize_sort``) for aws-cli byte
         order. ``FileInfo.storage`` (the producing backend) is *not* set yet - the
@@ -872,9 +879,9 @@ class LocalFileGenerator:
         its whole subtree (the walk
         never descends what this does not return) - a speedup ``aws s3`` cannot do
         (it vets every file), so it is the right place for a non-parity backup
-        walk, not the default. To surface directories (or symlinks) as stream
-        entries of their own, use the ``return_directories`` /
-        ``return_symlinks`` scan options instead of harvesting here. The
+        walk, not the default. ``enumerate_all_entries`` surfaces directories,
+        symlinks, and other native entries without an override; a backup walker
+        normally customizes only this method to prune excluded subtrees. The
         default returns the sorted list unchanged.
         """
         return self.normalize_sort(children)
@@ -1068,8 +1075,7 @@ class LocalStorage(Storage):
         walker: LocalFileGenerator | None = None,
         follow_symlinks: bool = True,
         detect_symlink_loops: bool = False,
-        return_directories: bool = False,
-        return_symlinks: bool = False,
+        enumerate_all_entries: bool = False,
         fsync: bool = False,
     ) -> None:
         self._path = os.fspath(path)
@@ -1079,18 +1085,15 @@ class LocalStorage(Storage):
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
         self._abspath = os.path.abspath(self._path)
-        # How this local source is read (the scan's source-config): whether
-        # symlinks are followed, whether directories / symlinks appear in the
-        # scan output themselves (return_*; defaults off = aws parity), and
-        # whether the recursive walk guards against symlink cycles. Seeded into
-        # every scan via default_scan_options; the single-path get_fileinfo reads
-        # only follow_symlinks (the return_* / loop knobs shape a scan's output and
-        # do not apply to resolving one entry), so an app configures the walk once
-        # here rather than passing it through each operation.
+        # How this local source is read: symlink interpretation, whether every
+        # metadata-readable native entry is enumerated before filtering, and
+        # whether recursive descent guards against symlink cycles. Seeded into
+        # every scan and high-level operation via default_scan_options. The
+        # single-path get_fileinfo reads only follow_symlinks; enumeration / loop
+        # settings shape a scan and do not apply to resolving one entry.
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
-        self._return_directories = return_directories
-        self._return_symlinks = return_symlinks
+        self._enumerate_all_entries = enumerate_all_entries
         # A library-only durability knob for this local backend as a *destination*
         # (default off = aws parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,
@@ -1156,18 +1159,17 @@ class LocalStorage(Storage):
         """The walk options seeded with this storage's held config
         (``Storage.default_scan_options``).
 
-        ``follow_symlinks`` / ``detect_symlink_loops`` / ``return_directories`` /
-        ``return_symlinks`` come from the constructor, so every scan reads the walk
+        ``follow_symlinks`` / ``detect_symlink_loops`` /
+        ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
         own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto this.
         The single-path ``get_fileinfo`` does not build these options - it reads
-        ``follow_symlinks`` directly and ignores the ``return_*`` / loop knobs.
+        ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """
         return LocalScanOptions(
             follow_symlinks=self._follow_symlinks,
             detect_symlink_loops=self._detect_symlink_loops,
-            return_directories=self._return_directories,
-            return_symlinks=self._return_symlinks,
+            enumerate_all_entries=self._enumerate_all_entries,
         )
 
     @override
@@ -1180,19 +1182,19 @@ class LocalStorage(Storage):
         just before the walk descends into its next sub-directory) so a page maps
         to one scandir - the unit a prefetch consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
+        ``options.enumerate_all_entries`` /
         ``options.on_warning`` / ``options.filter`` are threaded into it - a
         symlink skip, the cycle guard, the aws-cli-worded warning channel a
         transfer needs, and the per-entry filter (applied in the walk, after
         vetting - ``Storage.scan_pages``'s "return filtered pages" contract).
-        Every listed ``LocalFileInfo`` carries its followed ``stat_result`` and
+        Every listed ``LocalFileInfo`` carries its classification ``stat_result`` and
         ``is_symlink`` flag for a filter / ``on_result`` to read.
         Non-recursive yields one level like the S3 backend (immediate entries in
         the same sort order, sub-directories as ``DIRECTORY``-kind infos whose key
         ends with ``/``) as a single page, anchored at the absolutized path
-        (``self._abspath``) so ``FileInfo.key`` is absolute. Under
-        ``return_directories`` that page also leads with the scanned root's own
-        record (``compare_key == ""`` - see ``root_info``), as the recursive walk
-        does; the S3 backend has no such knob, so this is a local-only extension.
+        (``self._abspath``) so ``FileInfo.key`` is absolute. Complete enumeration
+        leads with the scanned root (``compare_key == ""``) and includes every
+        immediate metadata-readable entry without descending.
 
         Requires a ``LocalScanOptions`` (this backend's option type); a
         foreign ``ScanOptions`` is rejected rather than silently walking with
@@ -1227,7 +1229,7 @@ class LocalStorage(Storage):
         ``path``, and a non-directory root degrades to a "does not exist"
         warning rather than a scan error). The walk reads this storage's held
         source-config (``follow_symlinks`` / ``detect_symlink_loops`` /
-        ``return_directories`` / ``return_symlinks`` from the constructor, via
+        ``enumerate_all_entries`` from the constructor, via
         ``default_scan_options`` - the same walk ``scan``
         runs); ``on_warning`` is the per-call overlay, like an operation's. This
         is the raw walk (no ``ScanOptions.filter``); ``scan`` applies the filter
@@ -1255,12 +1257,9 @@ class LocalStorage(Storage):
         root (``should_ignore_file``): a no-follow symlink root is silently skipped
         and an unreadable / special root warns-and-skips, so the two forms agree
         instead of the one-level scan descending a link or emitting a record the
-        recursive walk would drop. Under ``return_directories`` the root's own
-        record then leads (``compare_key == ""``, key ending in ``/`` - see
-        ``root_info``), as the recursive walk prepends it. Under ``return_symlinks``
-        + ``follow_symlinks`` the follow-and-descend companion ``scan_children``
-        appends for the recursive walk is dropped here (one level does not descend,
-        so it would just duplicate the link's path in followed form). Every entry
+        recursive walk would drop. Complete enumeration instead classifies and
+        emits the root first, then its immediate children when it is a directory.
+        Every entry
         has its ``compare_key`` stamped, its producing backend set
         (``options.storage``), and ``options.filter`` applied.
         """
@@ -1268,6 +1267,24 @@ class LocalStorage(Storage):
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
         item_filter = options.filter
+        if options.enumerate_all_entries:
+            root_anchor = os.path.join(root, "")
+            root_record = self._walker.root_info(root_anchor, options=options, notify=notify)
+            if root_record is None:
+                return
+            root_record.storage = options.storage
+            if item_filter is None or item_filter(root_record):
+                yield root_record
+            if root_record.kind is not FileKind.DIRECTORY:
+                return
+            strip = len(root_anchor.replace(os.sep, "/"))
+            for _sort_name, info, _loop_key in self._walker.scan_children(
+                root, strip=strip, options=options, notify=notify
+            ):
+                info.storage = options.storage
+                if item_filter is None or item_filter(info):
+                    yield info
+            return
         if not os.path.isdir(root):
             # A single-file non-recursive scan honors the passed options'
             # follow_symlinks (like the directory branch below), so it stats
@@ -1291,18 +1308,6 @@ class LocalStorage(Storage):
             root_anchor, follow_symlinks=options.follow_symlinks, notify=notify
         ):
             return
-        if options.return_directories:
-            # A one-level scan lists the immediate entries; strictly, "return
-            # directories" also includes the scanned directory itself, so lead
-            # with its record - the same root_info the recursive walk prepends
-            # (compare_key "", key ending in "/"), anchored with the trailing
-            # separator. None (a race removed the root) simply drops it, as its
-            # children are about to be. Stamped and filtered like every entry.
-            root_record = self._walker.root_info(root_anchor)
-            if root_record is not None:
-                root_record.storage = options.storage
-                if item_filter is None or item_filter(root_record):
-                    yield root_record
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized root-prefix length (root_anchor = root + a sep, the common
         # prefix of every child key). One level down this equals the name.
@@ -1310,16 +1315,6 @@ class LocalStorage(Storage):
         for _sort_name, info, _loop_key in self._walker.scan_children(
             root, strip=strip, options=options, notify=notify
         ):
-            # Under return_symlinks + follow_symlinks, scan_children appends a
-            # symlinked directory's target as a second, DIRECTORY-kind child so
-            # the recursive walk descends it (the link is already out as its own
-            # leaf). A one-level scan does not descend, so that companion is not
-            # an entry here - it would just duplicate the link's path in followed
-            # form. Drop it; follow_symlinks is a traversal knob and must not add
-            # an entry at one level. A plain followed dir-symlink (no
-            # return_symlinks) still surfaces as its DIRECTORY entry, S3-style.
-            if options.return_symlinks and info.kind is FileKind.DIRECTORY and info.is_symlink:
-                continue
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
             info.storage = options.storage

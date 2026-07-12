@@ -34,6 +34,7 @@ from boto3_s3.types import (
     CancelToken,
     CaseConflictMode,
     FileInfo,
+    FileKind,
     OpOutcome,
     OpResult,
     TransferOptions,
@@ -125,22 +126,26 @@ class TestSyncUpload:
             for r in results
         )
 
-    def test_source_return_knobs_do_not_leak_into_the_sync(self, tmp_path: Path) -> None:
-        # sync's local-side walk is file-only too: a LocalStorage source built with
-        # the library-extension scan knobs (return_directories / return_symlinks)
-        # still feeds the merge-join files only - no DIRECTORY record (which would
-        # manufacture a phantom pair and try to upload a directory) or unfollowed
-        # symlink leaf. Only the three files sync against the empty destination.
+    def test_complete_source_enumeration_reaches_the_sync_filter(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "a.txt", b"x")
         _write(src, "sub/b.txt", b"x")
         (src / "link.txt").symlink_to(src / "a.txt")  # a symlink leaf
         client, calls = make_recording_client([_listing(), {}, {}, {}])
+        seen: list[str] = []
+
+        def exclude_directories(info: FileInfo) -> bool:
+            assert info.compare_key is not None
+            seen.append(info.compare_key)
+            return info.kind is FileKind.FILE
+
         S3().sync(
-            LocalStorage(str(src), return_directories=True, return_symlinks=True),
+            LocalStorage(str(src), enumerate_all_entries=True),
             S3Storage("s3://bucket/p", client=client),
+            filter=exclude_directories,
             transfer_config=_SERIAL,
         )
+        assert {"", "a.txt", "link.txt", "sub/", "sub/b.txt"} <= set(seen)
         assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
         assert [call.params["Key"] for call in calls[1:]] == [
             "p/a.txt",

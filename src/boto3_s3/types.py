@@ -20,10 +20,12 @@ if TYPE_CHECKING:
 class FileKind(enum.Enum):
     """What a listing entry is. Backends map their native kinds onto these.
 
-    ``FILE`` is a real object/file with content (``size`` / ``mtime`` populated).
-    ``DIRECTORY`` is a prefix / sub-directory grouping with no backing object (an
-    S3 common prefix or a local sub-directory; ``size`` / ``mtime`` may be
-    ``None``). ``BUCKET`` is a top-level S3 bucket.
+    ``FILE`` is an S3 object or a non-directory local entry. Under a local
+    complete-entry enumeration it can therefore be a symlink, FIFO, socket, or
+    device and does not by itself guarantee transferable content; inspect
+    ``LocalFileInfo.stat_result.st_mode`` for the precise native kind.
+    ``DIRECTORY`` is an S3 common-prefix grouping or a local directory;
+    ``size`` / ``mtime`` may be ``None``. ``BUCKET`` is a top-level S3 bucket.
     """
 
     FILE = "file"
@@ -98,9 +100,11 @@ class LocalFileInfo(FileInfo):
     the target (``follow_symlinks=True`` only follows to descend / stat, matching
     aws-cli).
 
-    ``stat_result`` is the entry's **followed** ``os.stat`` (the same one the
-    walk's vetting battery computes - so carrying it costs no extra syscall), a
-    plain immutable snapshot a ``filter`` or ``on_result`` callback can read
+    ``stat_result`` is the exact stat snapshot the local producer used to classify
+    the entry: normally the followed ``os.stat``; the entry's own lstat when
+    ``follow_symlinks=False`` under complete enumeration; or an lstat fallback
+    when following a link failed. It is a plain immutable value a ``filter`` or
+    ``on_result`` callback can read
     (``st_mode`` / ``st_uid`` / ``st_size`` / ... - ``size`` and ``mtime`` are
     derived from it) without re-stat'ing. Because it is a value, not an
     ``os.DirEntry`` handle, the walk keeps its ``dir_fd`` fast path even while
@@ -108,9 +112,8 @@ class LocalFileInfo(FileInfo):
     link (from the walk's ``d_type`` / cached ``lstat`` - free); with
     ``follow_symlinks=True`` a link to a file still surfaces here as
     ``is_symlink=True`` while its ``stat_result`` describes the target.
-    ``LocalStorage`` populates both on every entry it lists (the walk and the
-    single-path ``get_fileinfo``); a ``FileInfo`` built by hand leaves them at
-    their defaults.
+    Every ``LocalFileInfo`` produced by ``LocalStorage`` carries both fields; a
+    value built by hand may leave ``stat_result`` at ``None``.
     """
 
     stat_result: os.stat_result | None = None
@@ -228,20 +231,24 @@ class S3ScanOptions(ScanOptions):
 class LocalScanOptions(ScanOptions):
     """Local-walk knobs - the ``LocalStorage`` backend's ``ScanOptions``.
 
-    ``follow_symlinks`` says whether the walk *traverses* symlinks (``False``
-    skips what they point at); ``return_symlinks`` says whether the links
-    themselves *appear in the output*, as unfollowed leaves carrying their own
-    lstat (``is_symlink=True``; a broken link is an entry too, vetting-free).
-    Independent axes - all four combinations are meaningful: following while
-    returning descends a link's directory target right after the link's own
-    leaf, at the cost of one extra followed stat. ``return_directories``
-    returns every directory as its own ``DIRECTORY``-kind entry at its
-    byte-order position; strictly interpreted that includes the walk root
-    itself, leading the stream with ``compare_key == ""`` (note a glob
-    ``*`` matches that empty key, a non-empty literal does not). Both
-    ``return_*`` default ``False`` = ``aws s3`` parity (a transfer lists files
-    only), and transfer / sync lanes expect exactly that file-only stream -
-    the knobs are for scans an application consumes itself.
+    ``enumerate_all_entries`` selects the candidate enumeration policy before
+    ``ScanOptions.filter`` runs. ``False`` (default) is the aws-cli-compatible
+    transfer view: recursively list transferable files, apply the special-file /
+    readability battery, and skip no-follow symlinks. ``True`` is the complete
+    filesystem-entry view: include the root, directories, symlinks, special
+    files, and entries whose metadata is readable even when their content is not.
+    A filter can still remove any candidate; filtering a directory record is too
+    late to prune its children, while ``LocalFileGenerator.finalize_children`` can
+    prune before descent. High-level operations preserve this source setting, so
+    a caller that enables it is responsible for filtering out entries an intended
+    transfer cannot consume.
+
+    ``follow_symlinks`` selects the interpretation of a symlink. In the complete
+    view, ``False`` returns the link itself as an lstat-based leaf, including a
+    dangling link; ``True`` returns or descends its target as one entry at that
+    key. If the followed stat fails, the complete view warns and falls back to
+    the link's lstat. In the transfer view, ``False`` skips the link and ``True``
+    retains the aws-cli-compatible followed behavior.
 
     ``detect_symlink_loops`` (default ``False``, a library extension -
     ``aws s3`` has none, so off keeps parity) guards the recursive walk
@@ -263,8 +270,7 @@ class LocalScanOptions(ScanOptions):
 
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
-    return_directories: bool = False
-    return_symlinks: bool = False
+    enumerate_all_entries: bool = False
     storage: Storage | None = None
 
 

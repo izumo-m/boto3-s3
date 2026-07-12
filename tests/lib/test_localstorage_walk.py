@@ -431,58 +431,54 @@ class TestWalkIsCustomizable:
         # every 'skip/' subtree is pruned at any depth (top-level and nested)
         assert keys == ["a.txt", "keep/b.txt"]
 
-    def test_finalize_children_prunes_registers_and_strips(self, tmp_path: Path) -> None:
-        # The finalize_children seam, backup-style: prune an excluded dir by
-        # compare_key (pre-sort, so its subtree is never walked), then - on the
-        # sorted survivors - register directories / symlinks and strip the raw
-        # symlinks from the transfer stream. Registration is post-sort, so the
-        # catalog comes out in byte order (sequential re-compare next run).
+    def test_finalize_children_is_the_only_customization_needed_for_backup_pruning(
+        self, tmp_path: Path
+    ) -> None:
+        # Complete enumeration owns directories, lstat symlinks, and vetting.
+        # A backup walker only prunes excluded directory children before descent.
         _make_tree(tmp_path, "keep.txt", "skip/inner.txt", "sub/nested.txt")
         (tmp_path / "link.txt").symlink_to(tmp_path / "keep.txt")
-        registered: list[str] = []
 
-        class _Backup(LocalFileGenerator):
-            def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
-                return entry.stat(follow_symlinks=False)  # lstat -> symlinks are FILE-kind
-
+        class _ManifestWalker(LocalFileGenerator):
             def finalize_children(self, children: list[WalkChild]) -> list[WalkChild]:
-                assert all(c.info.compare_key is not None for c in children)  # stamped already
-                # 1. prune the excluded 'skip' dir (pre-sort -> subtree not walked)
-                kept = [c for c in children if c.info.compare_key.rstrip("/") != "skip"]  # pyright: ignore[reportOptionalMemberAccess]
-                kept = self.normalize_sort(kept)  # 2. sort
-                out: list[WalkChild] = []
-                for c in kept:  # 3. register (post-sort) + 4. strip symlinks
-                    if c.info.kind is FileKind.DIRECTORY or c.info.is_symlink:
-                        registered.append(c.info.compare_key)  # pyright: ignore[reportArgumentType]
-                    if not c.info.is_symlink:
-                        out.append(c)
-                return out
+                kept = [
+                    child
+                    for child in children
+                    if child.info.compare_key is not None
+                    and child.info.compare_key.rstrip("/") != "skip"
+                ]
+                return self.normalize_sort(kept)
 
-        infos = list(LocalStorage(str(tmp_path), walker=_Backup()).walk_local())
-        keys = [i.compare_key for i in infos]
-        # 'skip/' subtree pruned; link.txt stripped; real files (dirs recursed) remain
-        assert keys == ["keep.txt", "sub/nested.txt"]
-        # dir + symlink registered in byte order; the excluded dir is not registered
-        assert registered == ["link.txt", "sub/"]
+        infos = list(
+            LocalStorage(
+                tmp_path,
+                walker=_ManifestWalker(),
+                follow_symlinks=False,
+                enumerate_all_entries=True,
+            ).walk_local()
+        )
+        assert [info.compare_key for info in infos] == [
+            "",
+            "keep.txt",
+            "link.txt",
+            "sub/",
+            "sub/nested.txt",
+        ]
+        assert infos[2].is_symlink
 
 
-class TestReturnEntries:
-    """``return_directories`` / ``return_symlinks``: what the stream *contains*.
+class TestEnumerateAllEntries:
+    """The complete filesystem-entry view selected before filtering."""
 
-    Both default off = aws parity (a transfer lists files only);
-    ``follow_symlinks`` keeps meaning traversal, so returning and following are
-    independent axes.
-    """
-
-    def test_return_directories_surfaces_every_directory_and_the_root(self, tmp_path: Path) -> None:
-        # Strictly interpreted, "return directories" includes the walk root:
+    def test_complete_view_surfaces_every_directory_and_the_root(self, tmp_path: Path) -> None:
+        # Complete enumeration includes the walk root:
         # its record leads the stream at compare_key "" (sorts before every
         # child key). foo/ lands between foo.txt and foo/bar ('.' < '/'), and
         # an empty directory surfaces despite owning no files.
         _make_tree(tmp_path, "a.txt", "foo.txt", "foo/bar")
         (tmp_path / "empty").mkdir()
 
-        infos = list(LocalStorage(str(tmp_path), return_directories=True).walk_local())
+        infos = list(LocalStorage(str(tmp_path), enumerate_all_entries=True).walk_local())
         keys = [i.compare_key for i in infos]
         assert keys == ["", "a.txt", "empty/", "foo.txt", "foo/", "foo/bar"]
         kinds = {i.compare_key: i.kind for i in infos}
@@ -493,8 +489,8 @@ class TestReturnEntries:
         assert root.stat_result is not None
         assert root.key.endswith("/")  # the walk anchor, separator-folded
 
-    def test_return_symlinks_keeps_links_as_unfollowed_leaves(self, tmp_path: Path) -> None:
-        # No-follow + return: every link is its own lstat-based leaf. The dir
+    def test_complete_no_follow_view_keeps_links_as_lstat_leaves(self, tmp_path: Path) -> None:
+        # Complete no-follow enumeration returns every link as an lstat-based leaf. The dir
         # link is not descended, the broken link is an entry rather than a
         # warning, and the walk warns about nothing.
         _make_tree(tmp_path, "real/inner.txt")
@@ -503,13 +499,15 @@ class TestReturnEntries:
         warnings: list[str] = []
 
         infos = list(
-            LocalStorage(str(tmp_path), follow_symlinks=False, return_symlinks=True).walk_local(
-                on_warning=warnings.append
-            )
+            LocalStorage(
+                str(tmp_path), follow_symlinks=False, enumerate_all_entries=True
+            ).walk_local(on_warning=warnings.append)
         )
         assert [(i.compare_key, i.is_symlink) for i in infos] == [
+            ("", False),
             ("link_broken", True),
             ("link_dir", True),
+            ("real/", False),
             ("real/inner.txt", False),
         ]
         assert warnings == []
@@ -517,43 +515,19 @@ class TestReturnEntries:
         assert link.stat_result is not None
         assert stat.S_ISLNK(link.stat_result.st_mode)  # the link's own lstat
 
-    def test_return_symlinks_while_following_descends_dir_targets(self, tmp_path: Path) -> None:
-        # Follow + return: the link's own leaf comes out at "name" and a
-        # directory target is additionally descended at "name/" (the one extra
-        # followed stat this combination costs); a file target is not
-        # duplicated - the link leaf is the entry at that name.
-        _make_tree(tmp_path, "real/inner.txt", "target.txt")
-        (tmp_path / "dlink").symlink_to(tmp_path / "real")
-        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
-
-        infos = list(LocalStorage(str(tmp_path), return_symlinks=True).walk_local())
-        assert [(i.compare_key, i.is_symlink) for i in infos] == [
-            ("dlink", True),
-            ("dlink/inner.txt", False),
-            ("flink", True),
-            ("real/inner.txt", False),
-            ("target.txt", False),
-        ]
-
-    def test_return_directories_and_symlinks_together_pair_leaf_and_companion(
+    def test_complete_followed_view_returns_one_target_entry_per_symlink(
         self, tmp_path: Path
     ) -> None:
-        # Both return_* axes on at once (recursive, following): a directory link
-        # yields BOTH its own unfollowed leaf ("dlink", FILE, is_symlink=True) and
-        # the followed-descent companion ("dlink/", DIRECTORY) sorting right after
-        # it - the companion carries is_symlink=True even though its stat_result
-        # describes the followed target directory, not the link. A file link stays
-        # a single leaf; the root leads and every real directory still surfaces.
+        # Following selects the target view. A directory link is one DIRECTORY
+        # entry and is descended; a file link is one FILE entry with the target
+        # stat. Neither path also produces an lstat leaf.
         _make_tree(tmp_path, "real/inner.txt", "target.txt")
         (tmp_path / "dlink").symlink_to(tmp_path / "real")
         (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
 
-        infos = list(
-            LocalStorage(str(tmp_path), return_directories=True, return_symlinks=True).walk_local()
-        )
+        infos = list(LocalStorage(str(tmp_path), enumerate_all_entries=True).walk_local())
         assert [(i.compare_key, i.kind, i.is_symlink) for i in infos] == [
             ("", FileKind.DIRECTORY, False),
-            ("dlink", FileKind.FILE, True),
             ("dlink/", FileKind.DIRECTORY, True),
             ("dlink/inner.txt", FileKind.FILE, False),
             ("flink", FileKind.FILE, True),
@@ -561,59 +535,126 @@ class TestReturnEntries:
             ("real/inner.txt", FileKind.FILE, False),
             ("target.txt", FileKind.FILE, False),
         ]
-        companion = next(i for i in infos if i.compare_key == "dlink/")
-        assert companion.stat_result is not None
-        assert stat.S_ISDIR(companion.stat_result.st_mode)  # the followed target dir
-        assert not stat.S_ISLNK(companion.stat_result.st_mode)
+        file_link = next(info for info in infos if info.compare_key == "flink")
+        assert file_link.stat_result is not None
+        assert stat.S_ISREG(file_link.stat_result.st_mode)
 
-    def test_return_directories_with_no_follow_drops_symlinks(self, tmp_path: Path) -> None:
-        # follow_symlinks=False under return_directories (return_symlinks off): a
-        # symlink is neither followed (no descent) nor returned as a leaf, so both
-        # the directory link and the file link vanish from the stream entirely -
-        # only the root, real directories, and real files remain, and the skip is
-        # silent (no warning).
-        _make_tree(tmp_path, "real/inner.txt", "target.txt")
-        (tmp_path / "dlink").symlink_to(tmp_path / "real")
-        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
+    def test_complete_followed_view_falls_back_to_lstat_with_warning(self, tmp_path: Path) -> None:
+        broken = tmp_path / "broken"
+        broken.symlink_to(tmp_path / "gone")
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
         warnings: list[str] = []
 
         infos = list(
-            LocalStorage(str(tmp_path), return_directories=True, follow_symlinks=False).walk_local(
+            LocalStorage(tmp_path, enumerate_all_entries=True).walk_local(
                 on_warning=warnings.append
             )
         )
-        assert [(i.compare_key, i.kind) for i in infos] == [
-            ("", FileKind.DIRECTORY),
-            ("real/", FileKind.DIRECTORY),
-            ("real/inner.txt", FileKind.FILE),
-            ("target.txt", FileKind.FILE),
+
+        assert [(info.compare_key, info.is_symlink) for info in infos] == [
+            ("", False),
+            ("broken", True),
+            ("loop", True),
         ]
+        assert all(
+            info.stat_result is not None and stat.S_ISLNK(info.stat_result.st_mode)
+            for info in infos[1:]
+        )
+        assert set(warnings) == {
+            f"Skipping file {broken}. File does not exist.",
+            f"Skipping file {loop}. File does not exist.",
+        }
+
+    def test_complete_followed_view_reports_once_when_link_disappears_before_lstat(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "target.txt"
+        target.write_bytes(b"x")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        warnings: list[str] = []
+
+        class _DisappearingLink(LocalFileGenerator):
+            def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
+                if entry.name == "link":
+                    link.unlink()
+                    return None
+                return super().entry_stat_result(entry)
+
+        infos = list(
+            LocalStorage(
+                tmp_path, walker=_DisappearingLink(), enumerate_all_entries=True
+            ).walk_local(on_warning=warnings.append)
+        )
+
+        assert [info.compare_key for info in infos] == ["", "target.txt"]
+        assert warnings == [f"Skipping file {link}. File does not exist."]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+    def test_complete_view_includes_special_files_without_transfer_warnings(
+        self, tmp_path: Path
+    ) -> None:
+        pipe = tmp_path / "pipe"
+        os.mkfifo(pipe)  # pyright: ignore[reportAttributeAccessIssue]
+        warnings: list[str] = []
+
+        infos = list(
+            LocalStorage(tmp_path, enumerate_all_entries=True).walk_local(
+                on_warning=warnings.append
+            )
+        )
+
+        assert [info.compare_key for info in infos] == ["", "pipe"]
+        pipe_info = infos[1]
+        assert pipe_info.kind is FileKind.FILE
+        assert pipe_info.stat_result is not None
+        assert stat.S_ISFIFO(pipe_info.stat_result.st_mode)
         assert warnings == []
 
-    def test_return_directories_alone_surfaces_a_followed_dir_symlink(self, tmp_path: Path) -> None:
-        # return_directories without return_symlinks, following (default): a
-        # followed directory link has no unfollowed leaf, but its descent still
-        # surfaces as a DIRECTORY entry at "dlink/" carrying is_symlink=True (the
-        # stat is the followed target directory). A followed file link is a normal
-        # FILE leaf under its link name (is_symlink=True) - that is following, not
-        # return_symlinks.
-        _make_tree(tmp_path, "real/inner.txt", "target.txt")
-        (tmp_path / "dlink").symlink_to(tmp_path / "real")
-        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
+    @skip_if_chmod_is_inert
+    def test_complete_view_includes_unreadable_file_without_warning(self, tmp_path: Path) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"secret")
+        secret.chmod(0)
+        warnings: list[str] = []
+        try:
+            infos = list(
+                LocalStorage(tmp_path, enumerate_all_entries=True).walk_local(
+                    on_warning=warnings.append
+                )
+            )
+        finally:
+            secret.chmod(0o644)
 
-        infos = list(LocalStorage(str(tmp_path), return_directories=True).walk_local())
-        assert [(i.compare_key, i.kind, i.is_symlink) for i in infos] == [
-            ("", FileKind.DIRECTORY, False),
-            ("dlink/", FileKind.DIRECTORY, True),
-            ("dlink/inner.txt", FileKind.FILE, False),
-            ("flink", FileKind.FILE, True),
-            ("real/", FileKind.DIRECTORY, False),
-            ("real/inner.txt", FileKind.FILE, False),
-            ("target.txt", FileKind.FILE, False),
+        assert [info.compare_key for info in infos] == ["", "secret.txt"]
+        assert infos[1].stat_result is not None
+        assert warnings == []
+
+    @skip_if_chmod_is_inert
+    def test_complete_view_keeps_unreadable_directory_record_when_descent_fails(
+        self, tmp_path: Path
+    ) -> None:
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        (locked / "hidden.txt").write_bytes(b"x")
+        locked.chmod(0)
+        warnings: list[str] = []
+        try:
+            infos = list(
+                LocalStorage(tmp_path, enumerate_all_entries=True).walk_local(
+                    on_warning=warnings.append
+                )
+            )
+        finally:
+            locked.chmod(0o755)
+
+        assert [(info.compare_key, info.kind) for info in infos] == [
+            ("", FileKind.DIRECTORY),
+            ("locked/", FileKind.DIRECTORY),
         ]
-        dlink = next(i for i in infos if i.compare_key == "dlink/")
-        assert dlink.stat_result is not None
-        assert stat.S_ISDIR(dlink.stat_result.st_mode)  # the followed target dir
+        assert infos[1].stat_result is not None
+        assert len(warnings) == 1 and "is not readable" in warnings[0]
 
     def test_root_record_and_the_scan_filter_on_its_empty_key(self, tmp_path: Path) -> None:
         # The root's compare_key is "": a glob '*' matches it (fnmatch), a
@@ -623,61 +664,36 @@ class TestReturnEntries:
         storage = LocalStorage(str(tmp_path))
 
         drop_all = GlobFilter().exclude("*").compile()
-        opts = LocalScanOptions(recursive=True, return_directories=True, filter=drop_all)
+        opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
         drop_txt = GlobFilter().exclude("*.txt").compile()
-        opts = LocalScanOptions(recursive=True, return_directories=True, filter=drop_txt)
+        opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_non_recursive_scan_does_not_leak_the_follow_descent_companion(
+    def test_non_recursive_complete_view_returns_root_and_immediate_entries(
         self, tmp_path: Path
     ) -> None:
-        # A one-level scan does not descend, so return_symlinks + follow_symlinks
-        # must not surface a symlinked directory's target as an extra DIRECTORY
-        # entry (scan_children appends that companion only for the recursive walk
-        # to descend). The link is its own leaf, and follow_symlinks - a traversal
-        # knob - changes nothing at one level: the output equals the no-follow
-        # one. A real sub-directory still surfaces as a DIRECTORY entry, S3-style.
         _make_tree(tmp_path, "real/inner.txt", "target.txt")
         (tmp_path / "dlink").symlink_to(tmp_path / "real")
-        (tmp_path / "flink").symlink_to(tmp_path / "target.txt")
         storage = LocalStorage(str(tmp_path))
 
-        expected = [
-            ("dlink", FileKind.FILE, True),
-            ("flink", FileKind.FILE, True),
+        followed = LocalScanOptions(recursive=False, enumerate_all_entries=True)
+        assert [(i.compare_key, i.kind, i.is_symlink) for i in storage.scan(followed)] == [
+            ("", FileKind.DIRECTORY, False),
+            ("dlink/", FileKind.DIRECTORY, True),
             ("real/", FileKind.DIRECTORY, False),
             ("target.txt", FileKind.FILE, False),
         ]
-        for follow in (True, False):
-            opts = LocalScanOptions(recursive=False, return_symlinks=True, follow_symlinks=follow)
-            rows = [(i.compare_key, i.kind, i.is_symlink) for i in storage.scan(opts)]
-            assert rows == expected, follow
-
-    def test_non_recursive_scan_returns_the_root_under_return_directories(
-        self, tmp_path: Path
-    ) -> None:
-        # "Return directories" includes the scanned directory itself, so a
-        # one-level scan leads with the root's own record (compare_key "", key
-        # ending in "/") just like the recursive walk - and drops it again with
-        # return_directories off, where the level is only its immediate entries.
-        _make_tree(tmp_path, "a.txt")
-        (tmp_path / "sub").mkdir()
-        storage = LocalStorage(str(tmp_path))
-
-        opts = LocalScanOptions(recursive=False, return_directories=True)
-        infos = list(storage.scan(opts))
-        assert [(i.compare_key, i.kind) for i in infos] == [
-            ("", FileKind.DIRECTORY),
-            ("a.txt", FileKind.FILE),
-            ("sub/", FileKind.DIRECTORY),
+        nofollow = LocalScanOptions(
+            recursive=False, enumerate_all_entries=True, follow_symlinks=False
+        )
+        assert [(i.compare_key, i.kind, i.is_symlink) for i in storage.scan(nofollow)] == [
+            ("", FileKind.DIRECTORY, False),
+            ("dlink", FileKind.FILE, True),
+            ("real/", FileKind.DIRECTORY, False),
+            ("target.txt", FileKind.FILE, False),
         ]
-        root = infos[0]
-        assert root.key.endswith("/") and root.stat_result is not None and not root.is_symlink
-
-        off = LocalScanOptions(recursive=False, return_directories=False)
-        assert [i.compare_key for i in storage.scan(off)] == ["a.txt", "sub/"]
 
     def test_non_recursive_root_record_obeys_the_scan_filter_on_its_empty_key(
         self, tmp_path: Path
@@ -689,21 +705,30 @@ class TestReturnEntries:
         storage = LocalStorage(str(tmp_path))
 
         drop_all = GlobFilter().exclude("*").compile()
-        opts = LocalScanOptions(recursive=False, return_directories=True, filter=drop_all)
+        opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
         drop_txt = GlobFilter().exclude("*.txt").compile()
-        opts = LocalScanOptions(recursive=False, return_directories=True, filter=drop_txt)
+        opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_non_recursive_no_follow_symlink_root_is_skipped_like_recursive(
+    def test_complete_leaf_root_is_the_only_entry_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
-        # A root that is a symlink to a directory, scanned with follow_symlinks=
-        # False: the recursive walk vets the root (should_ignore_file) and skips the
-        # link silently, so a one-level scan must too - follow_symlinks is a
-        # traversal knob, so it must not follow the link and list the target's
-        # children at one level either.
+        root = tmp_path / "one.txt"
+        root.write_bytes(b"one")
+        storage = LocalStorage(root)
+
+        for recursive in (True, False):
+            infos = list(
+                storage.scan(LocalScanOptions(recursive=recursive, enumerate_all_entries=True))
+            )
+            assert [(i.compare_key, i.kind, i.size) for i in infos] == [("", FileKind.FILE, 3)]
+            assert infos[0].stat_result is not None
+
+    def test_complete_no_follow_symlink_root_is_an_lstat_leaf_for_both_scan_shapes(
+        self, tmp_path: Path
+    ) -> None:
         real = tmp_path / "real"
         real.mkdir()
         (real / "a.txt").write_bytes(b"x")
@@ -714,17 +739,23 @@ class TestReturnEntries:
         warnings: list[str] = []
         for recursive in (True, False):
             opts = LocalScanOptions(
-                recursive=recursive, follow_symlinks=False, on_warning=warnings.append
+                recursive=recursive,
+                follow_symlinks=False,
+                enumerate_all_entries=True,
+                on_warning=warnings.append,
             )
-            assert list(storage.scan(opts)) == [], recursive
-        assert warnings == []  # a no-follow symlink root is skipped silently
+            infos = list(storage.scan(opts))
+            assert [(i.compare_key, i.kind, i.is_symlink) for i in infos] == [
+                ("", FileKind.FILE, True)
+            ]
+            assert infos[0].stat_result is not None
+            assert stat.S_ISLNK(infos[0].stat_result.st_mode)
+        assert warnings == []
 
     @skip_if_chmod_is_inert
-    def test_non_recursive_unreadable_root_matches_recursive(self, tmp_path: Path) -> None:
-        # An unreadable directory root under return_directories: the one-level scan
-        # applies the same root vetting (should_ignore_file) as the recursive walk,
-        # so both drop the root record and warn - no record leaks past the vetting
-        # on the one-level path (which formerly emitted it straight from root_info).
+    def test_unreadable_root_record_survives_failed_descent_for_both_scan_shapes(
+        self, tmp_path: Path
+    ) -> None:
         root = tmp_path / "locked"
         root.mkdir()
         (root / "a.txt").write_bytes(b"x")
@@ -734,15 +765,17 @@ class TestReturnEntries:
             for recursive in (True, False):
                 warnings: list[str] = []
                 opts = LocalScanOptions(
-                    recursive=recursive, return_directories=True, on_warning=warnings.append
+                    recursive=recursive,
+                    enumerate_all_entries=True,
+                    on_warning=warnings.append,
                 )
                 keys = [i.compare_key for i in LocalStorage(str(root)).scan(opts)]
                 outcomes.append((keys, warnings))
         finally:
             root.chmod(0o755)
-        assert outcomes[0] == outcomes[1]  # recursive == one-level
-        assert outcomes[0][0] == []  # no root record survives the vetting
-        assert outcomes[0][1]  # and a warning was emitted
+        assert outcomes[0] == outcomes[1]
+        assert outcomes[0][0] == [""]
+        assert len(outcomes[0][1]) == 1 and "is not readable" in outcomes[0][1][0]
 
 
 class TestScanPagesAreScandirAligned:
@@ -866,10 +899,11 @@ class TestGetFileinfo:
         link = tmp_path / "link.txt"
         link.symlink_to(target)
         warnings: list[str] = []
-        # follow_symlinks is the storage's own config now, not a get_fileinfo arg.
-        info = LocalStorage(str(link), follow_symlinks=False).get_fileinfo(
-            on_warning=warnings.append
-        )
+        # get_fileinfo keeps its transferable-entry contract. Complete enumeration
+        # is scan-only and does not turn a no-follow point query into lstat.
+        info = LocalStorage(
+            str(link), follow_symlinks=False, enumerate_all_entries=True
+        ).get_fileinfo(on_warning=warnings.append)
         assert info is None
         assert warnings == []
 
@@ -924,10 +958,16 @@ class TestLocalStorageScan:
         assert keys == [str(tmp_path).replace(os.sep, "/") + "/a.txt"]
 
     def test_default_scan_options_seeds_constructor_config(self) -> None:
-        storage = LocalStorage(".", follow_symlinks=False, detect_symlink_loops=True)
+        storage = LocalStorage(
+            ".",
+            follow_symlinks=False,
+            detect_symlink_loops=True,
+            enumerate_all_entries=True,
+        )
         opts = storage.default_scan_options()
         assert opts.follow_symlinks is False
         assert opts.detect_symlink_loops is True
+        assert opts.enumerate_all_entries is True
 
     def test_follow_symlinks_config_reaches_an_arg_less_scan(self, tmp_path: Path) -> None:
         # The walk knob configured on the storage flows into an arg-less scan()

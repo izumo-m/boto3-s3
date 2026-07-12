@@ -34,7 +34,6 @@ from boto3_s3.types import (
     CaseConflictMode,
     FileFilter,
     FileInfo,
-    LocalScanOptions,
     S3FileInfo,
     ScanOptions,
     TransferOptions,
@@ -59,7 +58,7 @@ def walk_source_scan_options(
 
     Built from the storage's own ``default_scan_options`` - which seeds the
     source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
-    ``detect_symlink_loops`` / ``return_directories`` / ``return_symlinks``, a
+    ``detect_symlink_loops`` / ``enumerate_all_entries``, a
     custom backend's own knobs, all configured on the constructor) - with only the
     operation-inherent knobs overlaid (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
@@ -68,14 +67,13 @@ def walk_source_scan_options(
     would honor it. An S3 source never comes here (it lists through
     ``scan_s3_source``).
 
-    The transfer / sync / case-gate lanes move files only, so the local
-    library-extension scan knobs ``return_directories`` / ``return_symlinks`` are
-    pinned off here: a ``DIRECTORY`` record (the walk root leads at
-    ``compare_key == ""``) or an unfollowed symlink leaf must not enter the
-    transfer stream, where it would fail mid-flight (a directory opens with
-    ``IsADirectoryError``). Only the ``LocalStorage`` knobs are forced - the base
-    ``ScanOptions`` an S3 / custom backend returns carries no such fields. The
-    scan API an application drives directly still honors the ``return_*`` config.
+    Source settings are never narrowed here. In particular,
+    ``enumerate_all_entries=True`` lets the operation's item filter observe every
+    native entry. The caller is responsible for filtering out directories,
+    special files, or other entries the transfer route cannot consume; survivors
+    reach the operation and may fail, block, have device side effects, or be
+    deleted by ``mv`` / ``sync --delete`` according to that operation's normal
+    behavior. The default ``False`` preserves aws-cli transfer enumeration.
     """
     options = replace(
         storage.default_scan_options(),
@@ -84,8 +82,6 @@ def walk_source_scan_options(
         on_warning=on_warning,
         filter=item_filter,
     )
-    if isinstance(options, LocalScanOptions):
-        options = replace(options, return_directories=False, return_symlinks=False)
     return options
 
 

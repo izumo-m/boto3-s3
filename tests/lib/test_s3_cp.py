@@ -44,6 +44,7 @@ from boto3_s3.types import (
     CopyPropsMode,
     FileFilter,
     FileInfo,
+    FileKind,
     OpOutcome,
     OpResult,
     TransferOptions,
@@ -195,25 +196,29 @@ class TestUploadRoute:
             for r in results
         )
 
-    def test_source_return_knobs_do_not_leak_into_the_transfer(self, tmp_path: Path) -> None:
-        # A LocalStorage source configured with the library-extension scan knobs
-        # (return_directories / return_symlinks) still feeds the transfer a
-        # file-only stream: the walk_source_scan_options overlay pins them off, so
-        # no DIRECTORY record (the root leads a raw scan at compare_key "") or
-        # unfollowed symlink leaf enters the upload - only the three files do. Were
-        # the knobs to leak, the root/sub DIRECTORY records would open as
-        # directories and fail the transfer.
+    def test_complete_source_enumeration_reaches_the_transfer_filter(self, tmp_path: Path) -> None:
+        # The constructor's enumeration policy reaches the high-level operation.
+        # A caller can inspect every entry and keep only transferable files.
         (tmp_path / "a.txt").write_bytes(b"x")
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "b.txt").write_bytes(b"x")
         (tmp_path / "link.txt").symlink_to(tmp_path / "a.txt")  # a symlink leaf
         client, calls = make_recording_client([{}, {}, {}])  # exactly the three files
+        seen: list[str] = []
+
+        def exclude_directories(info: FileInfo) -> bool:
+            assert info.compare_key is not None
+            seen.append(info.compare_key)
+            return info.kind is FileKind.FILE
+
         S3().cp(
-            LocalStorage(str(tmp_path), return_directories=True, return_symlinks=True),
+            LocalStorage(str(tmp_path), enumerate_all_entries=True),
             S3Storage("s3://b/t", client=client),
             recursive=True,
+            filter=exclude_directories,
             transfer_config=_SYNC,
         )
+        assert seen == ["", "a.txt", "link.txt", "sub/", "sub/b.txt"]
         assert [call.params["Key"] for call in calls] == ["t/a.txt", "t/link.txt", "t/sub/b.txt"]
 
     def test_missing_source_raises_not_found_up_front(self, tmp_path: Path) -> None:

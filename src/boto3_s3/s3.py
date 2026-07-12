@@ -828,10 +828,13 @@ class S3:
         does not apply - aws-cli applies no filter to a stream either.
         How the local source is walked - whether symlinks are followed
         (``follow_symlinks``) and whether the recursive walk guards against symlink
-        cycles (``detect_symlink_loops``, a library extension ``aws s3`` lacks) - is
+        cycles (``detect_symlink_loops``, a library extension ``aws s3`` lacks),
+        and whether every native entry becomes a filter candidate
+        (``enumerate_all_entries``) - is
         configured on the ``LocalStorage`` itself (its constructor knobs), not on
         ``cp``: pass a configured ``LocalStorage`` as ``src`` to change it; a bare
-        path string uses the defaults (follow symlinks, no cycle guard).
+        path string uses the defaults (follow symlinks, no cycle guard, normal
+        transfer enumeration).
         The S3 listing page size is likewise the ``S3Storage``'s own ``page_size``.
         ``dryrun`` enumerates (listing and HeadObject still
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
