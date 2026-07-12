@@ -566,6 +566,10 @@ class TestEnumerateAllEntries:
             f"Skipping file {loop}. File does not exist.",
         }
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows caches DirEntry lstat metadata, so this unlink race is not reproducible",
+    )
     def test_complete_followed_view_reports_once_when_link_disappears_before_lstat(
         self, tmp_path: Path
     ) -> None:

@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "sync",
+    "s3://<BUCKET>/d",
+    "dest",
+    "--exact-timestamps",
+    "--size-only"
+  ],
+  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": [
+    "same.txt:3:348df4eb"
+  ],
+  "rc": 0,
+  "remaining_keys": [
+    "d/same.txt"
+  ],
+  "scenario": "sync_download_exact_timestamps_size_only",
+  "src_tree": null,
+  "stdout_lines": [
+    "download: s3://<BUCKET>/d/same.txt to dest\\same.txt"
+  ]
+}
