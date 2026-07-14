@@ -386,6 +386,26 @@ class TestParseToValidationOrder:
         )
         assert rc == 252
 
+    def test_ls_integer_coercion_beats_bucket_filter_paramfiles(self) -> None:
+        # ls's option order puts --page-size ahead of the bucket-listing
+        # filters, so its bare int() (255) fires before their bad paramfiles
+        # (252) - the reverse of cp's direct-option case above. Measured.
+        rc = cli.main(
+            ["ls", "s3://b", "--page-size", "abc", "--bucket-name-prefix", "file:///no/x"]
+        )
+        assert rc == 255
+
+    def test_ls_page_size_paramfile_beats_bucket_filter_paramfiles(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Same slot order with both as bad paramfiles: aws names --page-size,
+        # not the bucket filter. Measured.
+        rc = cli.main(
+            ["ls", "s3://b", "--page-size", "file:///no/x1", "--bucket-region", "file:///no/x2"]
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
+
     def test_metadata_resolution_loses_to_the_integer_coercion(self) -> None:
         # The map option is the exception: its value (paramfile and shorthand
         # alike) resolves AFTER the coercions - aws exits the int's 255 here.

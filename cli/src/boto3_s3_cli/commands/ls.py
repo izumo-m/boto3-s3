@@ -41,16 +41,18 @@ class LsCommand(Command):
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
         # aws's parse-time order (measured, docs/cli.md section 6): the --query
         # JMESPath compile (252) leads, then the --endpoint-url scheme check
-        # (252), then the paramfile expansions (252) - the positional and the
-        # bucket-listing filters as well as --page-size, all expanded at parse
-        # time - which precede the bare int() coercion (255).
+        # (252), then each option at its own slot in aws's option-table order -
+        # the positional, then --page-size (paramfile load 252, then the bare
+        # int() coercion 255), then the bucket-listing filters. So a bad
+        # --page-size value fires ahead of a bad --bucket-name-prefix /
+        # --bucket-region paramfile (measured on aws 2.35.18).
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")
-        expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
-        expand_option_paramfile(args, "bucket_region", operation="ls")
         expand_integer_paramfile(args, "page_size", operation="ls")
         page_size = parse_integer_option(args.page_size, operation="ls")
+        expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
+        expand_option_paramfile(args, "bucket_region", operation="ls")
         # Import the library entry point only when this execution path needs it.
         from boto3_s3 import FileInfo, FileKind, S3Storage
 
