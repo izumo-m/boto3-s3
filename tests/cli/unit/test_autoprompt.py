@@ -348,6 +348,32 @@ class TestAutoPromptWiring:
         assert prompter.seen is None  # never prompted
         assert "usage:" in capsys.readouterr().out.lower()
 
+    def test_debug_handlers_detach_during_prompt_and_restore(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The on-partial trial dispatch can enable --debug stream handlers
+        # before its usage error falls back to the prompt; they must not paint
+        # over the prompt screen (aws swaps handlers into its debug panel for
+        # the app run), and they must come back for the re-dispatch.
+        botocore_logger = logging.getLogger("botocore")
+        handler = logging.NullHandler()
+        botocore_logger.addHandler(handler)
+        during: list[int] = []
+
+        class _Recording(AutoPrompter):
+            def prompt_for_args(self, argv: list[str]) -> list[str]:
+                during.append(len(botocore_logger.handlers))
+                return ["--version"]
+
+        try:
+            rc = cli.main(["--cli-auto-prompt", "ls"], ctx=Context(auto_prompter=_Recording()))
+            assert rc == 0
+            assert during == [0]  # detached while the prompt ran
+            assert handler in botocore_logger.handlers  # restored after
+        finally:
+            botocore_logger.removeHandler(handler)
+        capsys.readouterr()  # swallow the re-dispatched --version output
+
     def test_no_cli_auto_prompt_does_not_trigger_prompt(self) -> None:
         prompter = _FakePrompter(["--version"])
         rc = cli.main(["--no-cli-auto-prompt", "--version"], ctx=Context(auto_prompter=prompter))

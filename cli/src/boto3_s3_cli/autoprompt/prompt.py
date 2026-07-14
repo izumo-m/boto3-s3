@@ -74,8 +74,11 @@ class PromptToolkitCompleter(Completer):
             low_level = self._source.autocomplete(text, len(text))
             yield from self._convert(low_level, text_before_cursor)
         except Exception:
-            # Swallow so a completer bug never kills the interactive prompt, but
-            # leave a --debug trail (aws does the same in its adapter).
+            # Swallow so a completer bug never kills the interactive prompt
+            # (aws's adapter does the same). The debug record is emitted for
+            # completeness but stays invisible while the prompt owns the
+            # terminal: the CLI detaches its --debug handlers around the prompt
+            # and has no aws-style debug panel to route records into.
             logger.debug("exception in PromptToolkitCompleter.get_completions", exc_info=True)
             return
 

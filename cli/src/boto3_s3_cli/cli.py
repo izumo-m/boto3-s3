@@ -8,7 +8,8 @@ import importlib
 import io
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from boto3_s3 import (
@@ -267,6 +268,32 @@ def _enable_debug_logging() -> None:
         set_stream_logger(name, logging.DEBUG, stream=sys.stderr, mask_secrets=True)
 
 
+@contextmanager
+def _debug_handlers_detached() -> Generator[None, None, None]:
+    """Detach the ``--debug`` stream handlers while the prompt owns the terminal.
+
+    The on-partial trial dispatch can enable debug logging before its usage
+    error falls back to the prompt; live stderr DEBUG handlers would then paint
+    over the prompt_toolkit screen (the first ``--region`` / ``--profile``
+    completion triggers a boto3 session load, dozens of botocore DEBUG lines).
+    aws swaps every logger's handlers into its debug-panel buffer for the
+    duration of the app run; there is no panel here, so records emitted during
+    the prompt are dropped instead, and the handlers come back for the
+    re-dispatch.
+    """
+    saved: list[tuple[logging.Logger, list[logging.Handler]]] = []
+    for name in _DEBUG_LOGGERS:
+        logger = logging.getLogger(name)
+        if logger.handlers:
+            saved.append((logger, logger.handlers[:]))
+            logger.handlers.clear()
+    try:
+        yield
+    finally:
+        for logger, handlers in saved:
+            logger.handlers[:] = handlers
+
+
 def exit_code_for(exc: Boto3S3Error) -> int:
     """Map a library error to the aws-cli v2 exit code (docs/cli.md section 6).
 
@@ -403,7 +430,8 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
             from boto3_s3_cli.autoprompt.prompt import build_default_prompter
 
             prompter = build_default_prompter()
-        completed = prompter.prompt_for_args(seed)
+        with _debug_handlers_detached():
+            completed = prompter.prompt_for_args(seed)
     except (KeyboardInterrupt, EOFError):
         return 130
     except Exception as exc:
