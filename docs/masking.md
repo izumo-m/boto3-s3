@@ -46,7 +46,13 @@ in the `http.client` wire dump (verified against live botocore).
   credential profile (assume-role / web-identity / session-token), credential
   resolution issues an STS call whose response body carries the temporary
   `SecretAccessKey` and `SessionToken` (the credentials themselves), in XML or
-  JSON. These are masked in both encodings.
+  JSON. These are masked in both encodings. The instance/container metadata
+  fetchers (`botocore/utils.py`) add two more DEBUG shapes of the same secrets:
+  the parsed-credentials *dict repr* (single quotes) when a response misses a
+  required field, and the raw IMDS/ECS JSON body on malformed JSON, where the
+  session token rides under the key `Token`. The key/value pattern is therefore
+  quote-agnostic and includes `Token` (the quote anchored to the key name keeps
+  `ContinuationToken` / `NextToken` visible).
 - The same `Response body:` DEBUG line fires for **error** responses. A
   `SignatureDoesNotMatch` (HTTP 403) body echoes the request's canonical form back
   as `<CanonicalRequestBytes>` / `<StringToSignBytes>` - a space-separated hex dump
@@ -117,7 +123,7 @@ that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
 | Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
 | SSO bearer token (`x-amz-sso_bearer_token` header, dict / colon form - the `sso GetRoleCredentials` request botocore logs at DEBUG; the token mints role credentials for every account/role the user can access) | `'x-amz-sso_bearer_token': 'aoal-...'` -> `'x-amz-sso_bearer_token': '***'` | `***` |
 | sso-oidc token-endpoint bodies (`"accessToken"` / `"refreshToken"` / `"idToken"` / `"clientSecret"` in a CreateToken / RegisterClient `Response body:` line) | `"accessToken": "aoat-..."` -> `"accessToken": "***"` | `***` |
-| STS response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML and `"SecretAccessKey"`/`"SessionToken"` JSON; an AssumeRole / GetSessionToken body logged at DEBUG) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>` | `***` |
+| STS / metadata-service response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML; quote-agnostic `SecretAccessKey`/`SessionToken`/`Token` key-value in JSON bodies and the metadata fetchers' dict reprs) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>`, `'Token': 'FQo...'` -> `'Token': '***'` | `***`. `ContinuationToken` / `NextToken` are kept (quote-anchored key) |
 | Signature-mismatch byte-dump (`<CanonicalRequestBytes>` / `<StringToSignBytes>` in a `SignatureDoesNotMatch` response body - a hex dump that reconstructs the signed headers) | `<CanonicalRequestBytes>78 2d 61 ...</CanonicalRequestBytes>` -> `<CanonicalRequestBytes>***</CanonicalRequestBytes>` | `***` (whole dump) |
 | SSE-C customer key (`x-amz-server-side-encryption-customer-key` and the `copy-source` variant, dict / colon form, case-insensitive) | `'x-amz-server-side-encryption-customer-key': '<b64>'` -> `'...customer-key': '***'` | `***`. The `-md5` companion header (a non-secret hash) is kept |
 | SSE-C customer key, boto3 parameter form (`'SSECustomerKey'` / `'CopySourceSSECustomerKey'` in a logged kwargs dict - s3transfer logs each task's `extra_args` at DEBUG *before* botocore base64-encodes the key) | `'SSECustomerKey': '<raw key>'` -> `'SSECustomerKey': '***'` (str or bytes repr) | `***`. The `...KeyMD5` companion is kept |
@@ -133,7 +139,8 @@ that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
   boto3.
 - **CLI**: on `--debug`, `cli._enable_debug_logging` calls
   `set_stream_logger(name, DEBUG, stream=sys.stderr, mask_secrets=True)` for each
-  logger in `_DEBUG_LOGGERS` (`boto3_s3` / `botocore` / `boto3` / `s3transfer`).
+  logger in `_DEBUG_LOGGERS` (`boto3_s3` / `boto3_s3_cli` / `botocore` / `boto3` /
+  `s3transfer`).
   The loggers are narrowed for noise control (attaching to root would flood the
   output with debug from unrelated libraries). **`urllib3` is excluded**: it only
   produces connection-pool logs and emits no credentials. Since the CLI exits

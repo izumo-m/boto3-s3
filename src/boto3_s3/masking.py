@@ -157,17 +157,23 @@ _SIGV2_AUTH_HEADER_RE = re.compile(
     rf"(?P<key>AWS (?:AKIA|ASIA)[0-9A-Z]{{16}}:)(?P<val>{_TOKEN_VALUE})"
 )
 
-# STS response-body temporary credentials. botocore logs the parsed response body
-# at DEBUG (``Response body:``), so an AssumeRole / GetSessionToken / web-identity
-# response leaks its ``SecretAccessKey`` and ``SessionToken`` (the temporary
-# secret key + token). Covered in both XML (``<SecretAccessKey>...``) and JSON
-# (``"SecretAccessKey": "..."``) forms; ``AccessKeyId`` is left for the standalone
-# id regex to tail-reveal.
+# STS / metadata-service response-body temporary credentials. botocore logs the
+# parsed response body at DEBUG (``Response body:``), so an AssumeRole /
+# GetSessionToken / web-identity response leaks its ``SecretAccessKey`` and
+# ``SessionToken`` (the temporary secret key + token) in XML or JSON form. The
+# instance/container metadata fetchers emit two more DEBUG shapes of the same
+# secrets: the parsed-credentials *dict repr* (single quotes) when a response
+# misses a required field, and the raw IMDS/ECS JSON body on malformed JSON,
+# where the session token rides under the key ``Token``. The key/value regex is
+# therefore quote-agnostic and includes ``Token``; the quote anchored directly
+# to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked, and
+# ``AccessKeyId`` is left for the standalone id regex to tail-reveal.
 _STS_BODY_XML_CRED_RE = re.compile(
     r"(?P<key><(?:SecretAccessKey|SessionToken)>)(?P<val>[^<]+)", re.IGNORECASE
 )
-_STS_BODY_JSON_CRED_RE = re.compile(
-    r'(?P<key>"(?:SecretAccessKey|SessionToken)"\s*:\s*")(?P<val>[^"]+)', re.IGNORECASE
+_CRED_BODY_KV_RE = re.compile(
+    r"(?P<key>['\"](?:SecretAccessKey|SessionToken|Token)['\"]\s*:\s*b?['\"])(?P<val>[^'\"]+)",
+    re.IGNORECASE,
 )
 
 # Hex byte-dumps in an error response body (full mask). A ``SignatureDoesNotMatch``
@@ -235,7 +241,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
-    text = _STS_BODY_JSON_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _CRED_BODY_KV_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_PROVIDED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
