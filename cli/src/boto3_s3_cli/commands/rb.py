@@ -77,6 +77,11 @@ class RbCommand(Command):
                     f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
                     operation="rb",
                 )
+            # aws has no empty-bucket short-circuit: --force still runs the
+            # inner rm --recursive first, and its (inevitable) failure aborts
+            # at rc 255 before delete_bucket is attempted.
+            if args.force and self._force_rm(target, args, ctx) != 0:
+                raise InvalidValueError(_FORCE_FAILED, operation="rb")
             message = usage.invalid_bucket_name_message()
             sys.stderr.write(output.format_remove_bucket_failed(target, message) + "\n")
             return 1
