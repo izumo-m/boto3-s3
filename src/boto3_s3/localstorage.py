@@ -130,7 +130,9 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # aws warn-skips it (rc 2). These floors gate a full-path re-vetting so the two
 # agree; they sit well below the common OS limits (SYMLOOP_MAX ~32-40, PATH_MAX
 # 1024-4096) so a normal walk never crosses them, and correctness rests on the
-# actual full-path probe, not the exact floor.
+# actual full-path probe, not the exact floor. The length floor counts bytes
+# (os.fsencode), because PATH_MAX is a byte limit and a multibyte path reaches
+# a 1024-byte PATH_MAX at a few hundred characters.
 _SYMLINK_DEPTH_PROBE = 20
 _PATH_LEN_PROBE = 1000
 
@@ -732,18 +734,23 @@ class LocalFileGenerator:
         ancestor chain plus the leaf's own link) or ``PATH_MAX`` fails there -
         ``os.path.exists`` is ``False``, its warn-skip counts toward rc 2 - while
         the fd-relative probe admits it and the transfer then fails to open it
-        (rc 1). Near either limit (``sym_depth`` for a symlink leaf, ``len(full)``
-        for any leaf - the floors sit well below the OS limits, so a normal walk
-        never reaches this probe) re-run the full-path warning battery
+        (rc 1). Near either limit (``sym_depth`` for a symlink leaf, the full
+        path's byte length for any leaf - the floors sit well below the OS
+        limits, so a normal walk never reaches this probe) re-run the full-path
+        warning battery
         (``triggers_warning``); a leaf it warns away is dropped here so the two
         agree. Directories are already covered - a boundary-crossing descent fails
         its own ``os.open`` in ``scan_children`` and warn-skips there.
         """
         if info.kind is FileKind.DIRECTORY:
             return False
-        near_boundary = len(full) >= _PATH_LEN_PROBE or (
-            info.is_symlink and sym_depth >= _SYMLINK_DEPTH_PROBE
-        )
+        # PATH_MAX is a byte limit, so the length floor is measured in bytes
+        # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
+        # characters); the character pre-check (UTF-8 spends at most 4 bytes
+        # per character) keeps fsencode off the per-entry hot path.
+        near_boundary = (
+            len(full) >= _PATH_LEN_PROBE // 4 and len(os.fsencode(full)) >= _PATH_LEN_PROBE
+        ) or (info.is_symlink and sym_depth >= _SYMLINK_DEPTH_PROBE)
         return near_boundary and self.triggers_warning(full, notify)
 
     def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:

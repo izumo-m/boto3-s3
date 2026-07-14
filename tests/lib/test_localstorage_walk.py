@@ -202,6 +202,50 @@ class TestWalkWarnings:
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
 
+class TestFullPathBoundaryProbe:
+    """The fd-relative fast walk re-vets a file leaf by full path near the OS
+    limits (`crosses_full_path_boundary`). PATH_MAX is a byte limit, so the
+    length floor counts bytes: a multibyte path must reach the probe at a few
+    hundred characters (a 1024-byte PATH_MAX host would otherwise admit a
+    leaf that aws-cli's full-path stat warn-skips)."""
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="targets the POSIX dir_fd fast path; Windows length limits "
+        "depend on the LongPathsEnabled policy",
+    )
+    def test_length_floor_counts_bytes_not_characters(self, tmp_path: Path) -> None:
+        recorded: list[str] = []
+
+        class _Recording(LocalFileGenerator):
+            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
+                recorded.append(path)
+                return super().triggers_warning(path, notify)
+
+        # A leaf whose full path is >= 1000 bytes but far below 1000
+        # characters (CJK components: 3 bytes per character in UTF-8).
+        component = "あ" * 80  # 80 characters, 240 bytes
+        parent = tmp_path
+        while len(os.fsencode(str(parent))) < 1000:
+            parent = parent / component
+        parent.mkdir(parents=True)
+        (parent / "f.txt").write_bytes(b"x")
+        (tmp_path / "short.txt").write_bytes(b"x")
+        full = str(parent / "f.txt")
+        assert len(full) < 1000 and len(os.fsencode(full)) >= 1000
+
+        storage = LocalStorage(str(tmp_path), walker=_Recording())
+        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
+        # This host's PATH_MAX sits above the floor, so the full-path battery
+        # finds nothing wrong and the leaf stays in the scan set; the point is
+        # that the byte-measured floor consulted it at all.
+        assert any(key.endswith("f.txt") for key in keys)
+        assert full in recorded
+        # An ordinary short leaf stays off the probe (fsencode never runs on
+        # the hot path, and the battery is never consulted for it).
+        assert str(tmp_path / "short.txt") not in recorded
+
+
 class TestSymlinks:
     def test_followed_by_default(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "real/inner.txt")
