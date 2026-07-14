@@ -87,6 +87,22 @@ class TestWalkWarnings:
         ]
 
     @skip_if_chmod_is_inert
+    def test_no_follow_unreadable_root_warning_drops_the_separator(self, tmp_path: Path) -> None:
+        # aws-cli's should_ignore_file rebinds the separator-stripped path
+        # before its warning battery in the no-follow mode, so the warning
+        # names the scanned root without the trailing separator (the default
+        # follow mode strips nothing on either side and keeps it).
+        _make_tree(tmp_path, "locked/inner.txt")
+        locked = tmp_path / "locked"
+        locked.chmod(0)
+        warnings: list[str] = []
+        try:
+            assert _keys(locked, follow_symlinks=False, on_warning=warnings.append) == []
+        finally:
+            locked.chmod(0o755)
+        assert warnings == [f"Skipping file {locked}. File/Directory is not readable."]
+
+    @skip_if_chmod_is_inert
     def test_unreadable_directory_warns_once_and_prunes(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt", "locked/inner.txt")
         (tmp_path / "locked").chmod(0)

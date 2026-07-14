@@ -911,11 +911,12 @@ class LocalFileGenerator:
         hot path uses the DirEntry form ``should_ignore_entry``.
         """
         if not follow_symlinks:
-            probe = path
-            if os.path.isdir(probe) and probe.endswith(os.sep):
+            if os.path.isdir(path) and path.endswith(os.sep):
                 # A trailing separator must be removed to test the link itself.
-                probe = probe[:-1]
-            if os.path.islink(probe):
+                # aws-cli rebinds the stripped path, so the warning wording
+                # below drops the separator too; mirror that.
+                path = path[:-1]
+            if os.path.islink(path):
                 return True
         return self.triggers_warning(path, notify)
 
