@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Improved cancellation robustness, local path-limit parity, and secret masking coverage; added a storage option to exit scans immediately on interrupts.
+- Sped up CRT transfer startup by reusing the caller's session for request serialization.
 
 ## [0.6.0] - 2026-07-12
 

@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from boto3.s3.transfer import TransferConfig
+    from boto3.session import Session
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3.storage import Storage
@@ -592,6 +593,7 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt_endpoint: str | None = None,
+        session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -671,6 +673,11 @@ class Transferrer:
         # the CRT engine so it pins a custom endpoint the host heuristic would
         # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
         self._crt_endpoint = crt_endpoint
+        # The caller's boto3 session (S3.session), threaded to the CRT engine
+        # so its request serializer reuses the warm session instead of paying
+        # a fresh one per process (crtsupport._botocore_session); None = the
+        # default-session/fresh fallback there.
+        self._session = session
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
@@ -1150,7 +1157,10 @@ class Transferrer:
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         return crtsupport.create_crt_transfer_manager(
-            self._client, self._transfer_config, endpoint=self._crt_endpoint
+            self._client,
+            self._transfer_config,
+            endpoint=self._crt_endpoint,
+            session=self._session,
         )
 
     def _create_classic_manager(self) -> Any:

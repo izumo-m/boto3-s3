@@ -125,6 +125,14 @@ also read as `'auto'`) with the same rules as boto3.
   - credentials = no provider if `signature_version is UNSIGNED`
     (`--no-sign-request`), otherwise
     `BotocoreCRTCredentialsWrapper(client._get_credentials())`
+  - serializer session = the caller's session (`S3(session=)` ->
+    `Transferrer(session=)` -> `create_crt_transfer_manager(session=)`), falling
+    back to boto3's default session when one exists, then to a fresh botocore
+    session. Matches aws-cli, which hands its live CLI session to
+    `BotocoreCRTRequestSerializer`; a fresh session re-parses the S3 service
+    model and endpoint data on every process (~40 ms measured), which was the
+    dominant fixed cost of the CRT lane versus aws in the E2E benchmark
+
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
     sentinel (a faithful version of the same rule as the aws-cli factory)

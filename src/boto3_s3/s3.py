@@ -992,6 +992,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
         # into the shared rollup (aws's reverse enumeration shares the result
@@ -1171,6 +1172,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         with transferrer:
             if dryrun:
@@ -1483,6 +1485,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         deletes = _SyncDeletes(
             dest_storage,

@@ -1451,8 +1451,10 @@ class TestEngineSelection:
         sentinel = object()
         seen: list[Any] = []
 
-        def fake_create(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
-            seen.append((client, config, endpoint))
+        def fake_create(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
+            seen.append((client, config, endpoint, session))
             return sentinel
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
@@ -1461,13 +1463,16 @@ class TestEngineSelection:
         assert transferrer._get_manager() is sentinel
         assert seen and seen[0][1] is config
         assert seen[0][2] is None  # no explicit endpoint threaded here
+        assert seen[0][3] is None  # no session threaded here
 
     def test_crt_endpoint_is_threaded_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
 
         seen: list[Any] = []
 
-        def fake_create(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
+        def fake_create(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
             seen.append(endpoint)
             return object()
 
@@ -1483,12 +1488,37 @@ class TestEngineSelection:
         transferrer._get_manager()
         assert seen == [vpce]
 
+    def test_session_is_threaded_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+
+        def fake_create(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
+            seen.append(session)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        caller_session = object()
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            session=caller_session,  # pyright: ignore[reportArgumentType]
+        )
+        transferrer._get_manager()
+        assert seen == [caller_session]
+
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
         from boto3_s3 import crtsupport
 
-        def boom(client: Any, config: Any, *, endpoint: str | None = None) -> Any:
+        def boom(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", boom)
@@ -1504,7 +1534,9 @@ class TestEngineSelection:
         # boto3 semantics: a None from the CRT factory (lock held elsewhere,
         # incompatible singleton) silently selects classic.
         monkeypatch.setattr(
-            crtsupport, "create_crt_transfer_manager", lambda c, cfg, *, endpoint=None: None
+            crtsupport,
+            "create_crt_transfer_manager",
+            lambda c, cfg, *, endpoint=None, session=None: None,
         )
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
