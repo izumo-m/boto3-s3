@@ -142,6 +142,10 @@ file path, or a git-revision prefix matched against stored filenames. Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
 a `--quick` run) are not compared.
 
+Officially recorded baselines - headline numbers with their revision and
+machine environment - are kept in [benchmarks/RESULTS.md](../benchmarks/RESULTS.md),
+which survives the git-ignored results directory.
+
 Flag rules (`--threshold`, default 1.10): an E2E work scenario flags when
 `(net ratio now) / (net ratio baseline)` exceeds the threshold - the aws side
 is the same-run control, so this survives cross-run host noise; without a
