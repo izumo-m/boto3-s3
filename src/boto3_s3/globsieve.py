@@ -344,8 +344,11 @@ class UnionRegex:
 
     def __init__(self, patterns: Iterable[str]) -> None:
         self.patterns: tuple[str, ...] = tuple(patterns)
+        # A union of zero patterns must never match, like the other empty-set
+        # matchers; joining zero alternatives would compile "" and match every
+        # key instead.
         self._regex: re.Pattern[str] = re.compile(
-            "|".join(f"(?:{fnmatch.translate(p)})" for p in self.patterns)
+            "|".join(f"(?:{fnmatch.translate(p)})" for p in self.patterns) or r"(?!)"
         )
 
     def matches(self, key: str) -> bool:

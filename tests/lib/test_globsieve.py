@@ -107,6 +107,13 @@ class TestUnionRegex:
         assert m.matches("save.bak") is True
         assert m.matches("save.txt") is False
 
+    def test_empty_union_never_matches(self) -> None:
+        # Like the other empty-set matchers (a zero-alternative join would
+        # otherwise compile "" and match everything).
+        m = UnionRegex([])
+        assert m.matches("anything") is False
+        assert m.matches("") is False
+
 
 class TestCompositeSet:
     # CompositeSet takes pre-stripped buckets: literals verbatim, suffixes
