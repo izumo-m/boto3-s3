@@ -135,7 +135,7 @@ class TestScanNonRecursive:
         assert client.calls[0]["Delimiter"] == "/"
         assert client.calls[0]["Bucket"] == "bucket"
         assert client.calls[0]["Prefix"] == "prefix/"
-        # compare_key is the prefix-relative key, and the listing backend is
+        # compare_key is the Prefix-relative key, and the listing backend is
         # stamped as storage - both by scan, before any filter.
         assert results[0] == S3FileInfo(
             key="prefix/sub/", kind=FileKind.DIRECTORY, compare_key="sub/", storage=storage
@@ -165,11 +165,11 @@ class TestScanRecursive:
         assert "Delimiter" not in client.calls[0]
         assert all(isinstance(r, S3FileInfo) for r in results)
         assert [r.key for r in results] == ["prefix/a.txt", "prefix/sub/b.txt", "prefix/c.txt"]
-        # scan stamps the prefix-relative compare_key on every entry.
+        # scan stamps the Prefix-relative compare_key on every entry.
         assert [r.compare_key for r in results] == ["a.txt", "sub/b.txt", "c.txt"]
 
     def test_filter_matches_scan_stamped_compare_key(self) -> None:
-        # A custom ScanOptions.filter can match the prefix-relative compare_key
+        # A custom ScanOptions.filter can match the Prefix-relative compare_key
         # directly: scan stamps it, so the predicate neither strips the prefix
         # nor trips over a None compare_key.
         pages = [{"Contents": [_obj("prefix/keep/a.txt"), _obj("prefix/drop/b.txt")]}]

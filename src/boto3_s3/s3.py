@@ -1692,7 +1692,7 @@ class S3:
     def _rm_scan_filter(item_filter: FileFilter | None, *, sweep: bool) -> FileFilter | None:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
-        The scan stamps each entry's prefix-relative ``compare_key``, so a
+        The scan stamps each entry's ``Prefix``-relative ``compare_key``, so a
         glob/user filter reads it directly. The
         keyless sweep additionally restricts to folder markers (marker test first,
         then the user filter - aws-cli order). ``None`` when there is nothing to

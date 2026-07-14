@@ -61,8 +61,9 @@ class SyncPair:
     """One compare key's pairing across the two sides of a sync.
 
     ``key`` is the compare key - the entry's path relative to its side's
-    sync root, ``/``-separated on every platform - so name-based filters
-    need not care where either root lives. ``transfer_type`` is the sync's
+    listing (directory-relative for a local side, ``Prefix``-relative for an
+    S3 side), ``/``-separated on every platform - so name-based filters
+    need not care where either side lives. ``transfer_type`` is the sync's
     transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
     pair filter can apply the direction-asymmetric rules without being told the
     route. ``src`` / ``dest`` are the sides' listing entries; exactly one may

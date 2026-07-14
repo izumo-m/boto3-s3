@@ -176,7 +176,7 @@ relativization, so it is not part of the prefix.
 
 `S3.rm` wraps the filter (for the folder-marker sweep) and passes it as
 `ScanOptions.filter` to the enumeration; the backend's `scan_pages` producer
-stamps each entry's prefix-relative `compare_key` (`info.key[len(prefix):]`) before
+stamps each entry's `Prefix`-relative `compare_key` (`info.key[len(prefix):]`) before
 the predicate runs.
 The evaluation is the **producer's** job: `scan_pages` returns already-filtered
 pages (`Storage.scan` flattens + prefetches them, re-applying the filter as a

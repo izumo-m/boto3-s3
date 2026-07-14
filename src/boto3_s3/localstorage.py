@@ -632,7 +632,7 @@ class LocalFileGenerator:
         it scans ``dir_path`` once with ``os.scandir``, turns each entry into
         a ``WalkChild`` via ``classify_child`` (skips return ``None``),
         stamps each child's ``compare_key`` (the key with the ``strip``-long
-        directory prefix removed, aws-cli's ``src_path[len(root):]``), then hands
+        directory prefix removed, aws-cli's ``src_path[len(src['path']):]``), then hands
         the list to
         ``finalize_children`` (which sorts, and is the override point for
         pruning / registration). ``options`` carries the per-walk context the
@@ -907,7 +907,7 @@ class LocalFileGenerator:
         ``should_ignore_file``).
 
         Path-based, used for the walk root (which has no ``os.DirEntry``);
-        ``path`` is the absolutized root with a trailing ``os.sep``. The per-entry
+        ``path`` is the absolutized walk ``root`` with a trailing ``os.sep``. The per-entry
         hot path uses the DirEntry form ``should_ignore_entry``.
         """
         if not follow_symlinks:

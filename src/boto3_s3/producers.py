@@ -523,7 +523,7 @@ def scan_s3_source(
 
     The shared transfer-side enumeration: cp/mv scan their source here,
     and sync scans whichever of its sides is S3 (the destination too).
-    Folder markers never surface; the scan stamps each entry's prefix-relative
+    Folder markers never surface; the scan stamps each entry's ``Prefix``-relative
     ``compare_key``, which ``item_filter`` matches against. Built from the passed
     ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
     config and a custom ``S3Storage`` subclass survive), with the operation-inherent

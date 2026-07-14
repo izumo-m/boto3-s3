@@ -98,7 +98,7 @@ class LocalFileInfo(FileInfo):
     """``FileInfo`` for a local filesystem entry.
 
     Its ``key`` is the **absolute** path with ``os.sep`` normalized to ``/``
-    (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
+    (``LocalStorage`` anchors every scan at its absolutized ``path``); ``to_native_path``
     turns it back into a host path for I/O. ``key`` keeps the path *as walked* -
     a symlinked directory or file stays under its link name, never resolved to
     the target (``follow_symlinks=True`` only follows to descend / stat, matching
@@ -175,7 +175,7 @@ class ScanOptions:
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
     prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
     / ``mv``, and sync's *visibility* layer: each side's listing is pruned
-    independently (its own ``--exclude`` / ``--include`` root) before the
+    independently (its own ``--exclude`` / ``--include`` matching space) before the
     comparator pairs the streams - which is exactly why filtered-out destination
     entries are protected from ``--delete`` (an entry a producer does not return
     is simply absent, so it is not a delete candidate). Keep the predicate
