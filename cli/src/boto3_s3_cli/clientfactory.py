@@ -251,6 +251,21 @@ def build_service_client(
         raise InvalidConfigError(str(exc)) from exc
 
 
+def resolve_cli_timeouts(args: argparse.Namespace) -> None:
+    """Coerce ``--cli-read-timeout`` then ``--cli-connect-timeout`` (255 on failure).
+
+    aws resolves both at ``top-level-args-parsed`` in registration order (read
+    first), before any command-layer parsing, so a bad value beats an invalid
+    choice, unknown options, and missing arguments; the dispatcher's pre-pass
+    calls this to keep that order. Validation-only: the client builders coerce
+    the same namespace strings again when they build.
+    """
+    if args.cli_read_timeout is not None:
+        _coerce_cli_timeout(args.cli_read_timeout)
+    if args.cli_connect_timeout is not None:
+        _coerce_cli_timeout(args.cli_connect_timeout)
+
+
 def _coerce_cli_timeout(value: str) -> int | None:
     """aws-cli's ``_resolve_timeout`` coercion: ``int(value)``, then ``0`` -> ``None``.
 

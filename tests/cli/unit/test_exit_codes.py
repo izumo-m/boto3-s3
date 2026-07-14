@@ -329,7 +329,10 @@ class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
     against the pinned aws 2.35.18; docs/cli.md section 5.7, table in
     section 6): the ``--query`` compile (252) -> the ``--endpoint-url`` scheme
-    check (252) -> the direct-option paramfiles and the two integer coercions,
+    check (252) -> the ``--cli-read-timeout`` / ``--cli-connect-timeout``
+    coercions (255, read first; resolved in the dispatch pre-pass, so they
+    also beat invalid choices, unknown options, and missing arguments) ->
+    the direct-option paramfiles and the two integer coercions,
     interleaved per aws's option-by-option registration order (a bad paramfile
     is 252, a bad ``int()`` 255, and the earlier option wins) -> the
     ``--metadata`` resolution (252, the one value family the coercions beat) ->
@@ -338,6 +341,50 @@ class TestParseToValidationOrder:
 
     _BOGUS = "boto3_s3_no_such_profile_for_order_tests"
     _MISSING = "/nonexistent_src_for_head_order_test.txt"
+
+    def test_bad_timeout_beats_unknown_options(self) -> None:
+        assert cli.main(["ls", "--funky", "--cli-read-timeout", "abc"]) == 255
+
+    def test_bad_timeout_beats_missing_arguments(self) -> None:
+        assert cli.main(["cp", "--cli-read-timeout", "abc"]) == 255
+
+    def test_bad_timeout_beats_invalid_choice(self) -> None:
+        assert cli.main(["nosuchcmd", "--cli-connect-timeout", "abc"]) == 255
+
+    def test_bad_timeout_beats_top_level_unknown_options(self) -> None:
+        assert cli.main(["--funky", "ls", "--cli-read-timeout", "abc"]) == 255
+
+    def test_bad_query_beats_a_bad_timeout(self) -> None:
+        rc = cli.main(["ls", "s3://b", "--query", "bad((", "--cli-read-timeout", "abc"])
+        assert rc == 252
+
+    def test_bad_endpoint_beats_a_bad_timeout(self) -> None:
+        rc = cli.main(["ls", "s3://b", "--endpoint-url", "badurl", "--cli-read-timeout", "abc"])
+        assert rc == 252
+
+    def test_read_timeout_beats_connect_timeout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(
+            ["ls", "s3://b", "--cli-read-timeout", "abc1", "--cli-connect-timeout", "abc2"]
+        )
+        assert rc == 255
+        assert "abc1" in capsys.readouterr().err
+
+    def test_bad_timeout_beats_the_page_size_coercion(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["ls", "s3://b", "--page-size", "xyz", "--cli-read-timeout", "abc"])
+        assert rc == 255
+        assert "abc" in capsys.readouterr().err
+
+    def test_version_wins_over_a_bad_timeout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws's --version exits during the top-level parse, before its
+        # top-level-args-parsed resolutions fire.
+        assert cli.main(["--version", "--cli-read-timeout", "abc"]) == 0
+        capsys.readouterr()
+
+    def test_help_wins_over_a_bad_timeout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["--help", "--cli-read-timeout", "abc"]) == 0
+        capsys.readouterr()
 
     def test_bad_profile_beats_the_local_local_usage_error(self) -> None:
         assert cli.main(["cp", "a", "b", "--profile", self._BOGUS]) == 255
@@ -543,3 +590,32 @@ class TestRecursiveDestDirCreation:
     def test_mv_uncreatable_recursive_dest_exits_255(self, blocked_parent: Any) -> None:
         rc = cli.main(["mv", "s3://b/pre", str(blocked_parent / "new"), "--recursive"])
         assert rc == 255
+
+
+class TestHelpToken:
+    """aws's parser turns an exactly-``['help']`` token list into the help
+    page (rc 0) at every level - its ``ArgTableArgParser`` special case.
+    Measured on aws 2.35.18: ``s3 help`` and ``s3 ls help`` are 0,
+    ``s3 help foo`` is 252, and a bad timeout still beats the token (255)."""
+
+    def test_top_level_help_token(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["help"]) == 0
+        assert "usage:" in capsys.readouterr().out.lower()
+
+    def test_help_token_after_globals(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["--debug", "help"]) == 0
+        capsys.readouterr()
+
+    def test_subcommand_help_token(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["ls", "help"]) == 0
+        assert "usage: boto3-s3 ls" in capsys.readouterr().out
+
+    def test_help_token_beats_missing_arguments(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["cp", "help"]) == 0
+        capsys.readouterr()
+
+    def test_help_token_with_extras_is_not_special(self) -> None:
+        assert cli.main(["help", "foo"]) == 252
+
+    def test_bad_timeout_beats_the_help_token(self) -> None:
+        assert cli.main(["help", "--cli-read-timeout", "abc"]) == 255

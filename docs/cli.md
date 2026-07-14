@@ -22,6 +22,19 @@ solidified design is added here.
   `SystemExit` is also absorbed inside `main` and converted into an exit code, so
   `main` always returns an int. The exit codes for exceptions and usage errors
   are covered in section 6 (the implementation of the exit code parity charter).
+- Before the two parse stages, `_dispatch` runs the aws-shaped **top-level
+  pre-pass**: a globals-only `parse_known_args` over the full argv (aws's
+  `MainArgParser`), then the `--query` compile, the `--endpoint-url` scheme
+  check, and the `--cli-read-timeout` / `--cli-connect-timeout` coercions in
+  aws's registration order - so those errors beat an invalid choice, unknown
+  options, and missing arguments (measured; section 5.7/6). A parse-time
+  `-h` / `--help` / `--version` wins over the resolutions (aws's parser
+  actions fire before its `top-level-args-parsed` event), and aws's
+  **help-token rule** applies: an exactly-`help` pre-pass remainder, or an
+  exactly-`help` stage-2 remainder after a subcommand, prints the
+  corresponding help page at rc 0 (`ls help` shows ls's help rather than
+  listing a bucket named `help`; `help foo` stays the invalid-choice 252,
+  like aws).
 - `ctx` (`Context`) is the injection point for runtime dependencies (section 3.1). When
   not supplied, the real one (the default `Context()`) is assembled. Tests pass a
   `Context` loaded with fakes.
@@ -280,9 +293,10 @@ is not guaranteed):
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
 non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
 head order of section 5.7 (the `--query` compile 252 -> `--endpoint-url`
-scheme 252 -> `--page-size` paramfile expansion 252 -> its conversion 255 ->
+scheme 252 -> the `--cli-read/connect-timeout` conversions 255 ->
+`--page-size` paramfile expansion 252 -> its conversion 255 ->
 session profile 255, so `rm badpath --profile <bad>` is the profile's 255,
-like aws; `ls` and `presign` share the query/endpoint/paramfile/conversion
+like aws; `ls` and `presign` share the query/endpoint/timeout/paramfile/conversion
 prefix for their integer options). The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
@@ -510,7 +524,11 @@ The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws 2.35.18):
 **`--query` compile (252**, aws resolves it at `top-level-args-parsed`, ahead
 of everything else) -> **`--endpoint-url` scheme (252**, aws validates the
-value at parse time) -> **the direct-option paramfile loads and the two
+value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
+coercions (255**, read before connect - aws's registration order at the same
+event; all three resolutions run in `_dispatch`'s top-level pre-pass, so they
+also beat stage 1's invalid-choice / unknown-options / missing-argument
+rejections, section 1) -> **the direct-option paramfile loads and the two
 integer coercions, interleaved per aws's `TRANSFER_ARGS` registration order**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
 blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
@@ -789,8 +807,11 @@ Because argparse's `type=int` would turn the same error into
 a usage error (252), it is not used; instead, each `run()` converts at the top via
 `parse_integer_option` in `commands/base.py` (before the client factory = exits
 255 with the SDK still unloaded), raising `InvalidValueError` - the class
-`exit_code_for` sends to 255 (the CLI timeouts' `_coerce_cli_timeout` uses the
-same class). **The exception is cp's `--expected-size`**:
+`exit_code_for` sends to 255. The CLI timeouts' `_coerce_cli_timeout` uses the
+same class, but runs earlier: `_dispatch`'s top-level pre-pass coerces both
+timeouts (read, then connect) ahead of every command-layer parse, aws's
+`top-level-args-parsed` timing (section 1; the client builders coerce the same
+strings again when they build). **The exception is cp's `--expected-size`**:
 because aws does a bare `int()` at submit time (within the pipeline) and **only on
 the streaming-upload route**, a non-integer there is not 255 but a `fatal error:`
 of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0

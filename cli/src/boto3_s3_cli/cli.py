@@ -204,6 +204,21 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_globals_parser() -> argparse.ArgumentParser:
+    """Globals-only parser for the aws-shaped top-level pre-pass (``_dispatch``).
+
+    aws parses the top-level globals over the *full* argv first
+    (``MainArgParser.parse_known_args``) and resolves them ahead of any
+    command-layer parsing. ``add_help=False`` keeps ``-h`` / ``--help`` in the
+    remainder (they win over the resolutions, like ``--version``'s parse-time
+    exit); everything this parser does not know - the subcommand token and its
+    options - passes through untouched.
+    """
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
+    globalargs.add_common_arguments(parser)
+    return parser
+
+
 def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParser:
     """The determined subcommand's real parser (stage 2).
 
@@ -472,6 +487,42 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         if suppress_usage_errors
         else contextlib.nullcontext()
     )
+
+    # aws-shaped top-level pre-pass: aws parses the globals over the full argv
+    # (MainArgParser.parse_known_args) and resolves them - the --query compile
+    # (252), the --endpoint-url scheme check (252), then the timeout coercions
+    # (255, read before connect, aws's registration order) - before ANY
+    # command-layer parsing, so those errors beat an invalid choice, unknown
+    # options, and missing arguments (measured on aws 2.35.18). A parse-time
+    # -h/--help/--version wins instead (aws's parser actions fire before the
+    # resolutions), and an exactly-['help'] remainder is aws's help-token
+    # rule: the top-level help page, rc 0. The pre-pass output is discarded -
+    # on a pre-pass parse error, stage 1 below reproduces the canonical
+    # message itself.
+    try:
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            head, remainder = _build_globals_parser().parse_known_args(argv)
+    except SystemExit:
+        head, remainder = None, []
+    if head is not None and "-h" not in remainder and "--help" not in remainder:
+        from boto3_s3_cli import clientfactory
+
+        try:
+            globalargs.validate_query(head)
+            clientfactory.validate_endpoint_url(head)
+            clientfactory.resolve_cli_timeouts(head)
+        except Boto3S3Error as exc:
+            rc = exit_code_for(exc)
+            if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
+                _write_error(exc, rc=rc)
+            return rc
+        if remainder == ["help"]:
+            _build_stage1_parser().print_help()
+            return 0
+
     try:
         with silencer:
             args, extras = _build_stage1_parser().parse_known_args(argv)
@@ -495,6 +546,12 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     if hasattr(args, _REST_DEST):
         delattr(args, _REST_DEST)
     command = _load_command(args.command)()
+    if rest == ["help"]:
+        # aws's help-token rule at the subcommand level (its ArgTableArgParser
+        # special-cases an exactly-['help'] remainder): the command's help
+        # page, rc 0 - even where a normal parse would fail or run a listing.
+        _build_command_parser(args.command, command).print_help()
+        return 0
     try:
         with silencer:
             args, extras = _build_command_parser(args.command, command).parse_known_args(
