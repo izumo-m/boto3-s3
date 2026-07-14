@@ -85,15 +85,17 @@ The filter is auto-prompt's default **fuzzy** (subsequence match).
 | `file://` / `fileb://` | local path completion only when the prefix begins with them (option-independent) |
 | **values of every option that has choices** | global (`--output` `--color` `--cli-binary-format` `--cli-error-format`) + **command-level** (`--storage-class` `--acl` `--sse` `--metadata-directive` `--copy-props` `--checksum-algorithm` `--case-conflict`, etc.). As noted in section 2, aws does not complete the latter |
 
-The `help` subcommand is not offered (this CLI has no `help` subcommand;
-`--help` is also excluded because it is not in aws's candidate set).
+The `help` subcommand is not offered (this CLI has no `help` subcommand - the
+dispatcher honors aws's bare `help` *token* at rc 0, [`cli.md`](./cli.md)
+section 1, but it is not a completable command; `--help` is also excluded
+because it is not in aws's candidate set).
 
 ### Reachability (parser adjustments for usability)
 
 aws's `CLIParser` assumes a single positional argument, so as ported verbatim
 the following do not appear. This implementation corrects them by adjusting
-`_handle_positional` in `parser.py` at two points (the UI is non-contractual =
-section 1).
+`_handle_positional` in `parser.py` at two points and `_consume_value` at one
+(the UI is non-contractual = section 1).
 
 - **Option value before a preceding path**: option-value completion at a stage
   where no path has been typed yet, as in `cp --storage-class <TAB>`. The source
@@ -118,9 +120,19 @@ section 1).
   also fuzzy-matched the options against the command name, offering a useless
   subset even for the path-like forms.
 
+- **Integer `nargs` option values** (`mb --tags KEY VALUE`): aws's
+  `_consume_value` has no integer-nargs branch, so its fall-through binds the
+  first value to the path positional while the user still owes the second, and
+  pops the full option menu mid-pair. The fix consumes up to `nargs` tokens
+  like the `+`/`*` branch and keeps `current_param` until the count is met -
+  the owed value keeps its silent free-text context, and the token after a
+  complete pair binds to the positional correctly. A deliberate improvement
+  over the original aws behavior.
+
 These are **deliberate deviations** from aws's behavior (usability first), and
 they are guaranteed by
-`tests/cli/unit/test_autoprompt.py::TestCompletionReachability`.
+`tests/cli/unit/test_autoprompt.py::TestCompletionReachability` and
+`TestIntNargsParsing`.
 
 ## 4. Architecture
 

@@ -285,6 +285,26 @@ class TestModelReflectsParser:
             assert offered == _argparse_options(subparser), name
 
 
+class TestIntNargsParsing:
+    """`_consume_value`'s integer-nargs branch (`mb --tags KEY VALUE`) - a
+    deliberate improvement over aws's parser, whose fall-through binds KEY to
+    the path positional while VALUE is still owed (docs/autoprompt.md
+    section 2). Do not "re-align" these to the aws behavior."""
+
+    def test_owed_value_keeps_the_param_context(self) -> None:
+        result = CLIParser(build_model()).parse(f"{ROOT} mb --tags k ")
+        assert result.current_param == "tags"
+        assert result.parsed_params["tags"] == ["k"]
+        assert "path" not in result.parsed_params  # KEY did not leak into it
+
+    def test_complete_pair_frees_the_positional(self) -> None:
+        result = CLIParser(build_model()).parse(f"{ROOT} mb --tags k v s3://bucket ")
+        assert result.current_param is None
+        assert result.parsed_params["tags"] == ["k", "v"]
+        assert result.parsed_params["path"] == "s3://bucket"
+        assert result.unparsed_items == []
+
+
 # --------------------------------------------------------------------------- #
 # cli.main wiring                                                             #
 # --------------------------------------------------------------------------- #
