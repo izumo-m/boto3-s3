@@ -100,8 +100,8 @@ def _compare_key(info: FileInfo) -> str:
 
     Every ``Storage.scan`` (listing) and ``Storage.get_fileinfo`` (single) entry
     carries it (the single-object HEAD path stamps it too), so a transfer reads it
-    instead of re-deriving the root-relative key. ``None`` would mean a producer
-    skipped the stamp - a bug.
+    instead of re-deriving it. ``None`` would mean a producer skipped the stamp -
+    a bug.
     """
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
@@ -883,7 +883,7 @@ def cp_case_gate(
     here reads the destination storage's own source-config
     (``default_scan_options``), warns into the transfer rollup, and applies
     the run's ``item_filter``, exactly like a source walk. Each entry's
-    stamped ``compare_key`` is the root-relative membership key. Scoped to
+    stamped ``compare_key`` is the membership key. Scoped to
     ``s3local`` (a case-insensitive *filesystem* destination); a custom
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.

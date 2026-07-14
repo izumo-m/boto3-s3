@@ -104,10 +104,10 @@ class _MemStorage(Storage):
     """An in-memory ``dict[str, bytes]`` as a custom (non-built-in) ``Storage``.
 
     ``scheme = "mem"`` routes ``cp`` through the open route against an S3 side.
-    ``store`` is keyed by ``compare_key`` (root-relative): a single source /
-    destination uses the key ``""`` (the location itself), a recursive one the
-    relative keys. ``capabilities`` declares the full open-route contract; the
-    narrower subclasses below drive the capability gate.
+    ``store`` is keyed by ``compare_key`` relative to this storage's location: a
+    single source / destination uses the key ``""`` (the location itself), a
+    recursive one the relative keys. ``capabilities`` declares the full open-route
+    contract; the narrower subclasses below drive the capability gate.
 
     ``opens`` records every ``(key, mode)`` passed to ``open()`` - it lets a
     dry-run test assert the backend is never opened (no read/write side

@@ -46,7 +46,7 @@ def _keys(
     for info in LocalStorage(root, **config).walk_local(on_warning=on_warning):
         assert info.key.startswith(prefix)
         rel = info.key[len(prefix) :]
-        # walk_local stamps compare_key with this same root-relative key.
+        # walk_local stamps compare_key with this same directory-relative key.
         assert info.compare_key == rel
         out.append(rel)
     return out
@@ -470,9 +470,11 @@ class TestWalkIsCustomizable:
 class TestEnumerateAllEntries:
     """The complete filesystem-entry view selected before filtering."""
 
-    def test_complete_view_surfaces_every_directory_and_the_root(self, tmp_path: Path) -> None:
-        # Complete enumeration includes the walk root:
-        # its record leads the stream at compare_key "" (sorts before every
+    def test_complete_view_surfaces_every_directory_and_scanned_directory(
+        self, tmp_path: Path
+    ) -> None:
+        # Complete enumeration includes the scanned directory. Its record leads
+        # the stream at compare_key "" (sorts before every
         # child key). foo/ lands between foo.txt and foo/bar ('.' < '/'), and
         # an empty directory surfaces despite owning no files.
         _make_tree(tmp_path, "a.txt", "foo.txt", "foo/bar")
@@ -485,9 +487,9 @@ class TestEnumerateAllEntries:
         assert kinds[""] is FileKind.DIRECTORY
         assert kinds["foo/"] is FileKind.DIRECTORY
         assert kinds["foo/bar"] is FileKind.FILE
-        root = infos[0]
-        assert root.stat_result is not None
-        assert root.key.endswith("/")  # the walk anchor, separator-folded
+        scanned_directory = infos[0]
+        assert scanned_directory.stat_result is not None
+        assert scanned_directory.key.endswith("/")  # the walk anchor, separator-folded
 
     def test_complete_no_follow_view_keeps_links_as_lstat_leaves(self, tmp_path: Path) -> None:
         # Complete no-follow enumeration returns every link as an lstat-based leaf. The dir
@@ -660,10 +662,10 @@ class TestEnumerateAllEntries:
         assert infos[1].stat_result is not None
         assert len(warnings) == 1 and "is not readable" in warnings[0]
 
-    def test_root_record_and_the_scan_filter_on_its_empty_key(self, tmp_path: Path) -> None:
-        # The root's compare_key is "": a glob '*' matches it (fnmatch), a
-        # non-empty literal does not - so an exclude-everything filter drops
-        # the root record too, while a targeted exclude leaves it standing.
+    def test_scanned_directory_record_and_filter_on_its_empty_key(self, tmp_path: Path) -> None:
+        # The scanned directory's compare_key is "": a glob '*' matches it
+        # (fnmatch), while a non-empty literal does not. An exclude-everything
+        # filter drops that record too; a targeted exclude leaves it standing.
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
@@ -675,7 +677,7 @@ class TestEnumerateAllEntries:
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_non_recursive_complete_view_returns_root_and_immediate_entries(
+    def test_non_recursive_complete_view_returns_scanned_directory_and_immediate_entries(
         self, tmp_path: Path
     ) -> None:
         _make_tree(tmp_path, "real/inner.txt", "target.txt")
@@ -699,12 +701,12 @@ class TestEnumerateAllEntries:
             ("target.txt", FileKind.FILE, False),
         ]
 
-    def test_non_recursive_root_record_obeys_the_scan_filter_on_its_empty_key(
+    def test_non_recursive_scanned_directory_record_obeys_filter_on_empty_key(
         self, tmp_path: Path
     ) -> None:
-        # Same empty-key filter contract as the recursive root: a glob '*'
-        # matches "" so exclude-all drops the root too, a non-empty literal
-        # does not so a targeted exclude leaves it standing.
+        # Same empty-key filter contract as the recursive scanned-directory
+        # record: a glob '*' matches "" so exclude-all drops the record too; a
+        # non-empty literal does not, so a targeted exclude leaves it standing.
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
@@ -716,12 +718,12 @@ class TestEnumerateAllEntries:
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_complete_leaf_root_is_the_only_entry_for_both_scan_shapes(
+    def test_complete_scanned_file_is_the_only_entry_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
-        root = tmp_path / "one.txt"
-        root.write_bytes(b"one")
-        storage = LocalStorage(root)
+        scanned_file = tmp_path / "one.txt"
+        scanned_file.write_bytes(b"one")
+        storage = LocalStorage(scanned_file)
 
         for recursive in (True, False):
             infos = list(
@@ -730,7 +732,7 @@ class TestEnumerateAllEntries:
             assert [(i.compare_key, i.kind, i.size) for i in infos] == [("", FileKind.FILE, 3)]
             assert infos[0].stat_result is not None
 
-    def test_complete_no_follow_symlink_root_is_an_lstat_leaf_for_both_scan_shapes(
+    def test_complete_no_follow_scanned_symlink_is_lstat_leaf_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
         real = tmp_path / "real"
@@ -757,13 +759,13 @@ class TestEnumerateAllEntries:
         assert warnings == []
 
     @skip_if_chmod_is_inert
-    def test_unreadable_root_record_survives_failed_descent_for_both_scan_shapes(
+    def test_unreadable_scanned_directory_survives_failed_descent_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
-        root = tmp_path / "locked"
-        root.mkdir()
-        (root / "a.txt").write_bytes(b"x")
-        root.chmod(0)
+        scanned_directory = tmp_path / "locked"
+        scanned_directory.mkdir()
+        (scanned_directory / "a.txt").write_bytes(b"x")
+        scanned_directory.chmod(0)
         outcomes: list[tuple[list[str], list[str]]] = []
         try:
             for recursive in (True, False):
@@ -773,10 +775,10 @@ class TestEnumerateAllEntries:
                     enumerate_all_entries=True,
                     on_warning=warnings.append,
                 )
-                keys = [i.compare_key for i in LocalStorage(str(root)).scan(opts)]
+                keys = [i.compare_key for i in LocalStorage(str(scanned_directory)).scan(opts)]
                 outcomes.append((keys, warnings))
         finally:
-            root.chmod(0o755)
+            scanned_directory.chmod(0o755)
         assert outcomes[0] == outcomes[1]
         assert outcomes[0][0] == [""]
         assert len(outcomes[0][1]) == 1 and "is not readable" in outcomes[0][1][0]
@@ -786,9 +788,10 @@ class TestScanPagesAreScandirAligned:
     """``scan_pages`` hands off one page per directory file-run (one ``os.scandir``)."""
 
     def test_pages_fall_on_directory_boundaries(self, tmp_path: Path) -> None:
-        # root=[a.txt, sub/, z.txt], sub=[b.txt]. Byte order interleaves sub's
-        # page between root's two file-runs, so the pages are [a.txt], [sub/b.txt],
-        # [z.txt] - not one arbitrary fixed-size batch.
+        # scanned directory=[a.txt, sub/, z.txt], sub=[b.txt]. Byte order
+        # interleaves sub's page between the scanned directory's two file-runs,
+        # so the pages are [a.txt], [sub/b.txt], [z.txt] - not one arbitrary
+        # fixed-size batch.
         _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
         pages = [
             [info.compare_key for info in page]
@@ -943,7 +946,7 @@ class TestLocalStorageScan:
         infos = list(LocalStorage(tmp_path).scan(LocalScanOptions(recursive=True)))
         prefix = str(tmp_path).replace(os.sep, "/")
         assert [info.key for info in infos] == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
-        # scan stamps the root-relative compare_key on every entry.
+        # scan stamps the directory-relative compare_key on every entry.
         assert [info.compare_key for info in infos] == ["a.txt", "a/inner.txt"]
 
     def test_non_recursive_lists_one_level_with_directories(self, tmp_path: Path) -> None:

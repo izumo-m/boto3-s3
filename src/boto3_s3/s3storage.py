@@ -232,7 +232,8 @@ def _page_to_infos(
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
     ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
     ``Prefix``, so every object key and common-prefix starts with it, and the
-    slice is the root-relative key operations and custom filters match against.
+    slice is the ``Prefix``-relative key operations and custom filters match
+    against.
     ``storage`` (the listing backend) is stamped on every entry alongside
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
@@ -281,9 +282,9 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
     bucket becomes an ``S3FileInfo`` whose ``key`` is the bucket name and whose
     ``mtime`` is the bucket's
     ``CreationDate`` (what ``aws s3 ls`` prints next to the name). The service
-    root has no prefix, so ``compare_key`` is the bucket name itself; ``storage``
-    (the service-root ``S3Storage``) is stamped as the producing backend, like
-    every other producer's entries.
+    listing supplies no ``Prefix``, so ``compare_key`` is the bucket name itself;
+    ``storage`` (the service-level ``S3Storage``) is stamped as the producing
+    backend, like every other producer's entries.
     """
     infos: list[FileInfo] = []
     for bucket in page.get("Buckets", []):
@@ -731,7 +732,7 @@ class S3Storage(Storage):
         ``info.storage.open(info.key, "rb")`` reads a built-in backend's entry
         uniformly (``LocalStorage`` resolves an absolute ``info.key`` to its
         file), and a typical custom backend's too (its ``key`` equals
-        ``compare_key`` - the scan-root-relative address its ``open`` is
+        ``compare_key`` - the relative address its ``open`` is
         required to resolve; docs/storage.md section 2). The body is **read-only and forward-only**
         (no ``seek``); it supports the context-manager / ``read`` / ``close``
         protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a

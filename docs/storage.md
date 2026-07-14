@@ -133,8 +133,8 @@ Three more members come with working defaults a custom backend normally keeps:
   polymorphically; `S3Storage` / `LocalStorage` override it with aws's
   `s3_format` / `local_format` on their own held state). The default is the
   open-route rule. The root is `""`: a custom backend encapsulates its own
-  location, its `open` receives the scan-root-relative `compare_key`
-  unprefixed (`""` for the single location), and its `delete` receives the
+  location, its `open` receives `compare_key`, which addresses an entry relative
+  to that location (`""` for the single location), and its `delete` receives the
   entry's `FileInfo` (keyed by `info.key`; section "Keys" below).
   `use_src_name` follows the S3 convention
   (`dir_op` or a trailing `/` on `as_text()`).
@@ -149,18 +149,18 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
 - **`key`** is the entry's full, `/`-separated identifier **in the backend's own
   address space** — what `delete(info)` acts on (the built-ins key on
   `info.key`). A backend chooses its own space (`S3Storage`'s `key` is the full
-  bucket key, `LocalStorage`'s an absolute path). A typical custom backend
-  rooted at its location uses keys relative to that root, so a recursive
-  entry's `key` is its `compare_key` and the single location is `""`. `open`'s
+  bucket key, `LocalStorage`'s an absolute path). A typical custom backend uses
+  keys relative to its location, so a recursive entry's `key` is its
+  `compare_key` and the single location is `""`. `open`'s
   address argument is backend-specific: `S3Storage.open` takes the full bucket
   key, `LocalStorage.open` joins its key under the location (an absolute key
   resolves to itself), and a **custom** backend's `open` must resolve the
-  scan-root-relative key the engine passes (`compare_key`; `""` for the single
+  `compare_key` the engine passes relative to its location (`""` for the single
   location — the open route and the content strategies both pass that space).
   For the typical custom backend (`key == compare_key`) the two spaces
   coincide, so `info.storage.open(info.key, "rb")` reads built-in and typical
   custom entries alike.
-- **`compare_key`** is the same entry **relative to the scan root**: the
+- **`compare_key`** is the relative form of the same entry: the
   `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
   `scan` must stamp it on every entry.
 
@@ -191,8 +191,8 @@ at all. The exact per-route gates are in [`sync.md`](./sync.md) /
 
 ## 4. Example
 
-A minimal in-memory backend — a `dict[str, bytes]` keyed by `compare_key`
-(root-relative), so a single entry uses `""`:
+A minimal in-memory backend — a `dict[str, bytes]` keyed by `compare_key`, so a
+single entry uses `""`:
 
 ```python
 import io
@@ -228,7 +228,7 @@ class DictStorage(Storage):
         return io.BytesIO(self._store[key]) if mode == "rb" else _Committing(self._store, key)
 
     def scan_pages(self, options: ScanOptions):
-        infos = [FileInfo(key=k, size=len(v), compare_key=k)    # compare_key = root-relative
+        infos = [FileInfo(key=k, size=len(v), compare_key=k)    # relative key
                  for k, v in sorted(self._store.items())]       # sorted -> byte order (sync)
         if options.filter is not None:                          # the scan_pages contract: return
             infos = [i for i in infos if options.filter(i)]     # filtered pages (or push the

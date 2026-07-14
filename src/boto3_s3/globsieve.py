@@ -28,8 +28,8 @@ partitioned by shape (literal, suffix, prefix, general fnmatch): a
 uniform set uses that shape's dedicated ``SetMatcher``, and a mixed
 set is folded into a ``CompositeSet`` that ORs one matcher per shape.
 
-A relative pattern is matched against the entry's root-relative
-``compare_key`` (``fnmatch`` is greedy across ``/``, so it matches anywhere
+A relative pattern is matched against the entry's relative ``compare_key``
+(``fnmatch`` is greedy across ``/``, so it matches anywhere
 in the key the way aws-cli's root-joined form does). A root-anchored
 (absolute) pattern - ``--exclude /data/secret/*`` - is matched against the
 entry's ``full_key`` instead, anchored with ``os.path.join`` exactly like
@@ -119,12 +119,12 @@ class GlobPattern:
 
 
 def is_anchored(pattern: str) -> bool:
-    """Whether a pattern is root-anchored (absolute) rather than root-relative.
+    """Whether a pattern is root-anchored (absolute) rather than relative.
 
     aws-cli joins every pattern onto the operation root with ``os.path.join``,
     which *drops* the root for an absolute right-hand side - so an absolute
     pattern is matched against the entry's full path, a relative one effectively
-    against its root-relative tail. ``compile`` mirrors that split: anchored
+    against its relative tail. ``compile`` mirrors that split: anchored
     patterns go to ``Anchored`` (matched against ``full_key``), the rest
     keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
     POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
@@ -132,7 +132,7 @@ def is_anchored(pattern: str) -> bool:
     slash even though ``ntpath.join`` still replaces the root for that form, so
     the explicit Windows check preserves the join semantics aws-cli uses. A
     drive-relative ``C:foo`` is not anchored: ``compile`` instead strips its
-    drive and treats it as root-relative (see ``_strip_drive_relative``),
+    drive and treats it as relative (see ``_strip_drive_relative``),
     matching aws-cli's same-drive join.
     """
     return os.path.isabs(pattern) or (os.sep == "\\" and pattern.startswith(("/", "\\")))
@@ -143,10 +143,10 @@ def _strip_drive_relative(pattern: str) -> str:
 
     aws-cli joins each pattern onto the operation root with ``os.path.join``; on
     Windows a *drive-relative* right-hand side sharing the root's drive merges as
-    a plain root-relative tail (``ntpath.join('C:\\root', 'C:foo') ==
+    a plain relative tail (``ntpath.join('C:\\root', 'C:foo') ==
     'C:\\root\\foo'``). globsieve has no root at compile time, so it strips the
     drive and treats the pattern as relative, so it matches the entry's
-    root-relative ``compare_key`` the same way aws-cli's join does. An absolute
+    ``compare_key`` the same way aws-cli's join does. An absolute
     ``C:/foo`` keeps its drive and routes to ``Anchored`` (untouched here); a
     driveless pattern is returned unchanged. Windows-only: on POSIX
     ``os.path.splitdrive`` finds no drive, so ``C:foo`` stays a literal filename
@@ -186,7 +186,7 @@ class Matcher(Protocol):
     """Final include/exclude decision for an entry.
 
     ``included(compare_key, full_key=None) -> bool``. A relative pattern matches
-    the root-relative ``compare_key``; a root-anchored (absolute) pattern is
+    ``compare_key``; a root-anchored (absolute) pattern is
     anchored against ``full_key`` (the entry's full path - see ``Anchored``).
     Matchers built from relative-only pattern lists ignore ``full_key``.
     """
@@ -261,8 +261,8 @@ class Sequential:
 class Anchored:
     """Last-match-wins when the pattern list contains a root-anchored pattern.
 
-    A relative pattern matches the root-relative ``compare_key`` (like the other
-    matchers, via its precompiled ``SetMatcher``). A root-anchored
+    A relative pattern matches ``compare_key`` (like the other matchers, via its
+    precompiled ``SetMatcher``). A root-anchored
     (absolute) pattern is anchored against the entry's ``full_key`` exactly the
     way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
     the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
@@ -569,10 +569,10 @@ class GlobFilter:
     patterns are read-only and every compilation is equivalent).
 
     As a ``FileFilter`` it is invoked with a ``FileInfo``:
-    a relative pattern matches its ``compare_key`` (the root-relative key the
-    operation stamps), a root-anchored (absolute) pattern its ``key`` (the full
-    path), exactly like ``compile``. Byte-exact (the permissive building
-    block); host case-folding for ``aws s3`` parity is the CLI layer's job.
+    a relative pattern matches its relative ``compare_key``; a root-anchored
+    (absolute) pattern matches its ``key`` (the full path), exactly like
+    ``compile``. Byte-exact (the permissive building block); host case-folding
+    for ``aws s3`` parity is the CLI layer's job.
     """
 
     __slots__ = ("_compiled", "_patterns")

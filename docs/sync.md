@@ -28,7 +28,8 @@ dest listing -- filter (visibility) --+        |
 
 - **Visibility layer** (before pairing, decided on one side's `FileInfo`
   alone): the single `filter` is applied **to both streams**. A **relative**
-  `--exclude` / `--include` matches each side's root-relative compare key, so it
+  `--exclude` / `--include` matches each side's `compare_key` (directory-relative
+  for local entries, `Prefix`-relative for S3 entries), so it
   prunes the source and destination identically (symmetric); an entry excluded
   this way is "nonexistent" on **both** sides and is thus protected from
   `--delete` (aws's "files excluded by filters are excluded from deletion"). A

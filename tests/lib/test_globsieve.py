@@ -541,19 +541,19 @@ class TestSeparatorNormalization:
 class TestDriveRelative:
     """A Windows drive-relative pattern (``C:foo``) anchors to the root the way
     aws-cli's ``os.path.join`` merges it: ``ntpath.join('C:\\root', 'C:foo') ==
-    'C:\\root\\foo'``. globsieve strips the drive at compile and matches the
-    root-relative ``compare_key`` - not the never-match literal a raw ``C:foo``
+    'C:\\root\\foo'``. globsieve strips the drive at compile and matches
+    ``compare_key`` - not the never-match literal a raw ``C:foo``
     would be. Windows-only; on POSIX the colon is a valid filename character and
     the pattern stays literal.
     """
 
-    def test_windows_drive_relative_folds_to_root_relative(
+    def test_windows_drive_relative_folds_to_relative(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(globsieve.os, "path", ntpath)
         monkeypatch.setattr(globsieve.os, "sep", "\\")
         m = globsieve.compile([GlobPattern.exclude("C:secret")])
-        assert m.included("secret") is False  # drive dropped -> excluded root-relative
+        assert m.included("secret") is False  # drive dropped -> relative pattern excludes
         assert m.included("keep") is True
         # A drive-relative directory pattern folds its separator and anchors too.
         sub = globsieve.compile([GlobPattern.exclude("C:logs\\*")])

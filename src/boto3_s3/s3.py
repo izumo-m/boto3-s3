@@ -75,14 +75,14 @@ if TYPE_CHECKING:
 
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
-    """The prefix root an ``rm`` of ``key`` operates under (aws-cli parity).
+    """The filter prefix an ``rm`` of ``key`` operates under (aws-cli parity).
 
     A recursive target is normalized to end with ``/`` (aws-cli
     ``FileFormat.s3_format``): ``rm s3://b/data --recursive`` lists under
-    ``data/`` and does not touch ``data-sibling.txt``. A non-recursive key
-    roots at its parent "directory", and a bucket-root target at ``""``
+    ``data/`` and does not touch ``data-sibling.txt``. A non-recursive key uses
+    its parent directory, and a bucket-root target uses ``""``
     (aws-cli ``filters._get_s3_root``). ``--exclude`` / ``--include``
-    patterns resolve relative to this root, and the recursive listing uses
+    patterns resolve relative to this prefix, and the recursive listing uses
     it as the ``Prefix``. Always empty or ``/``-terminated.
     """
     if recursive:
@@ -838,9 +838,9 @@ class S3:
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
-        ``compare_key`` is stamped to the source path relative to the transfer
-        root - a `GlobFilter` matches that key (a
-        relative pattern) or the full ``key`` (an absolute one) while a richer
+        ``compare_key`` is stamped relative to the source directory or S3
+        ``Prefix`` - a `GlobFilter` matches that key (a relative pattern) or the
+        full ``key`` (an absolute one) while a richer
         predicate can read size / mtime / storage_class. On the stream route (an
         ``IOStorage`` on one side) there is no listing to prune, so ``filter``
         does not apply - aws-cli applies no filter to a stream either.
@@ -1324,9 +1324,9 @@ class S3:
 
         - **Visibility** - both listings are pruned independently *before*
           the sides meet by the single ``filter``, a
-          `FileFilter` applied to each side's
-          root-relative compare key - so it prunes the source and the
-          destination **symmetrically** (matching aws, which evaluates
+          `FileFilter` applied to each side's `compare_key` (directory-relative
+          for local entries, ``Prefix``-relative for S3 entries) - so it prunes
+          the source and destination **symmetrically** (matching aws, which evaluates
           ``--exclude`` / ``--include`` against both sides). Folder markers
           (zero-byte ``/``-terminated objects) never surface on either side -
           sync neither transfers nor deletes them. Because pruning is
@@ -1596,8 +1596,8 @@ class S3:
 
         ``filter`` keeps an item in the deletion when it is *included*: a
         ``Callable[[FileInfo], bool]`` over the entry's ``FileInfo``. Its
-        ``compare_key`` is stamped to the key relative to `rm_filter_root`
-        before the call, so a `GlobFilter` matches
+        ``compare_key`` is stamped to the key relative to the prefix returned by
+        `rm_filter_root` before the call, so a `GlobFilter` matches
         that key (the CLI maps ``--exclude`` / ``--include`` here) while a
         richer predicate can read ``size`` / ``mtime`` / ``storage_class`` (on
         the blind single-key path ``size`` / ``mtime`` / ``storage_class`` are
@@ -1692,8 +1692,8 @@ class S3:
     def _rm_scan_filter(item_filter: FileFilter | None, *, sweep: bool) -> FileFilter | None:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
-        The scan stamps each entry's root-relative ``compare_key`` (the listing is
-        anchored at the prefix), so a glob/user filter reads it directly. The
+        The scan stamps each entry's prefix-relative ``compare_key``, so a
+        glob/user filter reads it directly. The
         keyless sweep additionally restricts to folder markers (marker test first,
         then the user filter - aws-cli order). ``None`` when there is nothing to
         test, so unfiltered paths pay no per-object call. Evaluated page by page on
@@ -1720,8 +1720,8 @@ class S3:
         """The blind single-key path (no listing; aws ``_list_single_object``).
 
         No scan runs here, so the entry's ``compare_key`` (its key relative to
-        ``root`` = `rm_filter_root`, what a glob filter matches) is stamped
-        on the hand-built ``FileInfo``.
+        the prefix returned by `rm_filter_root`, what a glob filter matches) is
+        stamped on the hand-built ``FileInfo``.
         """
         key = storage.key
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)

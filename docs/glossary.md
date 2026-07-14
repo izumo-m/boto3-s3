@@ -79,8 +79,10 @@ group (`aws s3`).
   key / prefix / bucket name, or a local path with the host `os.sep` translated
   to `/`). It is `/`-form on **every OS**, never the host separator, so the two
   sides of a sync share one merge/sort key space. (`FileInfo.key`.)
-- **compare key** - the **key** relative to its scan root (the full key with the
-  root prefix stripped), `/`-separated. It is what sync's merge-join pairs on
+- **compare key** - the relative form of the **key**, `/`-separated: for a local
+  scan, the key relative to the directory being enumerated; for an S3 object
+  listing, the entry key with the `ListObjectsV2` `Prefix` removed. A bucket
+  listing uses the bucket name unchanged. It is what sync's merge-join pairs on
   and what a glob `FileFilter` (`GlobFilter`, `--exclude` / `--include`) is
   matched against. It is carried on `FileInfo.compare_key`: each backend's
   listing stamps it on every entry it yields (a `scan` contract of the backend,
