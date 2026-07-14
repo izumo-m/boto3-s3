@@ -343,3 +343,17 @@ class TestBuildServiceClient:
                 region="us-east-1",
             )
         assert exit_code_for(excinfo.value) == 255
+
+    def test_none_region_falls_back_to_the_region_global(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws binds --region into the session at startup, so from_session's
+        # region-less sts client (and the source s3control without
+        # --source-region) still lands in --region; the caller's None must fall
+        # back to args.region ahead of the env/config chain.
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        client = clientfactory.build_service_client(
+            "sts", _parse(["--region", "eu-central-1"]), region=None
+        )
+        assert client.meta.region_name == "eu-central-1"

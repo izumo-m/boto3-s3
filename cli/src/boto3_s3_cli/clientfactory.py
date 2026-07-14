@@ -191,17 +191,18 @@ def build_service_client(
 
     aws-cli's ``S3PathResolver.from_session``: a plain ``create_client`` carrying
     only the profile session, the caller's region choice (the source side
-    passes ``--source-region``, the destination ``--region``, sts none - a
-    ``None`` falls through to the session default, *not* to ``--region``,
-    like aws-cli's dead-defaulted ``parameters.get('source_region', ...)``),
+    passes ``--source-region``, the destination ``--region``, sts none),
     and the ``--no-verify-ssl`` / ``--ca-bundle`` verify setting - no endpoint
-    override. aws resolves ``--cli-read-timeout`` / ``--cli-connect-timeout`` and
-    ``--no-sign-request`` into the *session* default client config at startup, so
-    ``from_session``'s ``create_client`` inherits them; mirror that here by folding
-    the same timeouts and the UNSIGNED signature into this client's ``Config``. A
-    ``None`` region resolves through the same ``_resolve_region`` chain as
-    ``build_client`` (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` > config > IMDS),
-    keeping the session default aws v2-shaped.
+    override. aws binds ``--region`` into the session itself at startup
+    (clidriver's ``set_config_variable``), so a ``create_client`` with no
+    ``region_name`` still lands in ``--region``; mirror that by falling back
+    from the caller's ``None`` to ``args.region`` before the shared
+    ``_resolve_region`` chain (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` >
+    config > IMDS). aws likewise resolves ``--cli-read-timeout`` /
+    ``--cli-connect-timeout`` and ``--no-sign-request`` into the *session*
+    default client config at startup, so ``from_session``'s ``create_client``
+    inherits them; fold the same timeouts and the UNSIGNED signature into this
+    client's ``Config``.
     """
     # Deferred like build_client: only a command that actually resolves
     # access-point paths pays the boto3 import.
@@ -238,7 +239,9 @@ def build_service_client(
             service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
         return session.client(
             service,
-            region_name=_resolve_region(region, botocore_session),
+            region_name=_resolve_region(
+                region if region is not None else args.region, botocore_session
+            ),
             verify=verify,
             config=Config(**service_overrides),
         )
