@@ -245,6 +245,28 @@ class TestMainExitCodes:
         ctx = Context(client_factory=lambda _args: _BrokenPipeClient())  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
 
+    def test_keyboard_interrupt_exits_130_with_a_bare_newline(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
+        # and rc 130 (128+SIGINT), never a traceback (measured on aws 2.35.18).
+        # KeyboardInterrupt is a BaseException, so it passes _dispatch's
+        # handlers and reaches main's backstop.
+        class _InterruptClient:
+            def get_paginator(self, name: str) -> Any:
+                class _Paginator:
+                    def paginate(self, **kwargs: Any) -> Any:
+                        raise KeyboardInterrupt
+
+                return _Paginator()
+
+        ctx = Context(client_factory=lambda _args: _InterruptClient())  # pyright: ignore[reportArgumentType]
+        rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
+        out, err = capsys.readouterr()
+        assert rc == 130
+        assert out == "\n"
+        assert err == ""
+
 
 class TestClientCreationExitCodes:
     """Client construction (build_client) runs the real boto3 session, which

@@ -377,7 +377,9 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     *ctx* carries the runtime dependencies the command resolves (the S3 client
     factory, the auto-prompt backend); tests inject a ``Context`` built
     around fakes. Always returns the exit code - argparse's ``SystemExit`` is
-    absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2.
+    absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
+    and a Ctrl-C anywhere mirrors aws's ``InterruptExceptionHandler``: a bare
+    newline on stdout and rc 130 (128+SIGINT), never a traceback.
 
     ``--cli-auto-prompt`` is resolved here from the raw argv, before argparse, so
     it works without a subcommand, its mutual exclusion with
@@ -385,6 +387,16 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     ``cli_auto_prompt`` config / ``on-partial`` chain is honored (option-handling
     section 3, autoprompt.md).
     """
+    try:
+        return _main(argv, ctx)
+    except KeyboardInterrupt:
+        with contextlib.suppress(Exception):
+            sys.stdout.write("\n")
+        return 130
+
+
+def _main(argv: list[str] | None, ctx: Context | None) -> int:
+    """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -592,7 +604,8 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # aws-cli's handler chain instead of crashing with a traceback + rc 1
         # (the binding exit-code charter, docs/overview.md section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
-        # they still propagate (Ctrl-C keeps its default rc 130).
+        # they still propagate - a Ctrl-C reaches main's aws-shaped backstop
+        # (a bare newline + rc 130, no traceback).
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)
         return rc
