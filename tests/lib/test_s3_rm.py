@@ -224,6 +224,15 @@ class TestRmCancellation:
         assert len(client.delete_objects_calls[0]["Delete"]["Objects"]) == 1000
         assert len(results) == 1000
 
+    def test_dryrun_raises_on_cancelled_token_with_empty_listing(self) -> None:
+        client = _FakeS3Client([{"Contents": []}])
+        storage = S3Storage("s3://b/k/", client=client)
+        token = CancelToken()
+        token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().rm(storage, recursive=True, dryrun=True, cancel_token=token)
+
 
 class TestRmRecursive:
     def test_deletes_all_keys_in_batches(self) -> None:

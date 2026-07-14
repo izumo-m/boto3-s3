@@ -1663,6 +1663,7 @@ class S3:
                 _raise_if_cancelled(cancel_token, "rm")
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
                 _raise_if_cancelled(cancel_token, "rm")
+            _raise_if_cancelled(cancel_token, "rm")
             return
 
         with S3Deleter(
