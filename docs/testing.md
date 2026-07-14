@@ -284,6 +284,9 @@ scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/com
 `scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
 `compose-up.sh` matches the exact container name, and its `mc-init` sidecar
 creates both `test-bucket` (manual play) and `boto3-s3-e2e` (e2e suite).
+The performance benchmarks ([benchmark.md](benchmark.md)) reuse this same
+stack and pinned `aws` but manage their own bucket (`boto3-s3-bench`); they
+never touch `boto3-s3-e2e`.
 Only one stack can own ports 9000/9001 - any other stack on those ports
 conflicts; `compose-up.sh` then fails loudly instead of mistaking it for ours.
 

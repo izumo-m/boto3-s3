@@ -184,6 +184,9 @@ written here.
   `presign` / `sync` / `website` - all `aws s3` subcommands).
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
   contracts, e2e gate, enforcement of the exit code charter).
+- [`benchmark.md`](./benchmark.md) - the local performance benchmarks
+  (E2E differential against the pinned aws-cli, in-process stubbed-S3
+  timings, startup-adjusted comparison, regression flags).
 - [`release.md`](./release.md) - how the two packages are published to PyPI
   (tag-driven GitHub Actions, Trusted Publishing, independent versioning).
 

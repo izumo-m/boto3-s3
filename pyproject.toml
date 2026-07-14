@@ -81,7 +81,7 @@ select = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["boto3_s3", "boto3_s3_cli", "tests"]
+known-first-party = ["boto3_s3", "boto3_s3_cli", "tests", "benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
