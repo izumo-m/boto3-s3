@@ -364,7 +364,10 @@ Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
 <msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
 `Bucket=""` of `rb s3://`) is uniformly **rc 1**, reusing the same
 `usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
-wrapper as `mb` / `rm`'s equivalent empty-bucket check.
+wrapper as `mb` / `rm`'s equivalent empty-bucket check. With `--force` the
+empty-bucket case never reaches that line: aws has no empty-bucket
+short-circuit, so the inner rm runs first and its (inevitable) failure aborts
+at **rc 255** via the `--force` row above, before delete_bucket is attempted.
 
 ### 5.5 `presign`
 
