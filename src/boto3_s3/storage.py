@@ -187,6 +187,15 @@ class Storage(abc.ABC):
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
 
+    # Whether scan()'s context exit still waits for the prefetch worker when
+    # the consumer is unwinding on a KeyboardInterrupt/SystemExit. True (the
+    # default) keeps the no-surviving-worker contract for embedders; an app
+    # that treats such an interrupt as process-fatal (the CLI, matching aws's
+    # immediate death on Ctrl-C) sets False - via the built-ins' constructor
+    # kwarg - so an in-flight page pull cannot delay the exit. Every other
+    # exit always waits (concurrency.prefetch).
+    scan_wait_on_interrupt: bool = True
+
     scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
     scan_pages_filters: ClassVar[bool] = False
@@ -243,6 +252,7 @@ class Storage(abc.ABC):
             pages,
             queue_size=self._scan_prefetch_pages,
             cancel_token=cancel_token,
+            wait_on_interrupt=self.scan_wait_on_interrupt,
         ) as items:
             for info in items:
                 # Safety net: stamp the producing backend so a downstream consumer

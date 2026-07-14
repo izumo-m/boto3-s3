@@ -8,6 +8,7 @@ thread must be gone once the context manager exits (it joins on exit).
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -75,3 +76,101 @@ def test_early_break_tears_down_worker() -> None:
     with prefetch(pages, queue_size=2) as it:
         assert next(it) == 0
     assert not _worker_alive()
+
+
+def _drain_worker(release: threading.Event) -> None:
+    """Let an abandoned worker finish and wait for it to die (test hygiene)."""
+    release.set()
+    deadline = time.monotonic() + 5
+    while _worker_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _worker_alive()
+
+
+def test_interrupt_still_joins_by_default() -> None:
+    # A KeyboardInterrupt unwind keeps the no-surviving-worker contract unless
+    # the app opted out with wait_on_interrupt=False.
+    with pytest.raises(KeyboardInterrupt):
+        with prefetch([[1], [2]]) as it:
+            assert next(it) == 1
+            raise KeyboardInterrupt
+    assert not _worker_alive()
+
+
+def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
+    # wait_on_interrupt=False: a KeyboardInterrupt unwind must not wait for a
+    # page pull in flight (a network fetch can block for a full timeout); the
+    # daemon worker is abandoned to die with the process.
+    pull_started = threading.Event()
+    release = threading.Event()
+
+    def pages() -> Iterator[list[int]]:
+        yield [1]
+        pull_started.set()
+        release.wait(10)  # the slow in-flight pull
+        yield [2]
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            with prefetch(pages(), queue_size=1, wait_on_interrupt=False) as it:
+                assert next(it) == 1
+                assert pull_started.wait(5)
+                raise KeyboardInterrupt
+        # Returning promptly is the point: the exit skipped the join while the
+        # worker is still inside the 10s pull.
+        assert _worker_alive()
+    finally:
+        _drain_worker(release)
+
+
+def test_early_break_still_joins_with_wait_on_interrupt_false() -> None:
+    # The opt-out is interrupt-scoped: GeneratorExit / normal exits keep the
+    # full teardown even when wait_on_interrupt is False.
+    pages = ([i] for i in range(100_000))
+    with prefetch(pages, queue_size=2, wait_on_interrupt=False) as it:
+        assert next(it) == 0
+    assert not _worker_alive()
+
+
+def test_storage_scan_forwards_the_interrupt_policy() -> None:
+    # Storage.scan wires its storage's scan_wait_on_interrupt into prefetch:
+    # with False, a KeyboardInterrupt unwind of the scan returns without
+    # waiting for the in-flight page pull.
+    from typing import BinaryIO, Literal
+
+    from boto3_s3 import Storage
+    from boto3_s3.types import FileInfo, ScanOptions
+
+    pull_started = threading.Event()
+    release = threading.Event()
+
+    class _Blocking(Storage):
+        scan_wait_on_interrupt = False
+
+        def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
+            yield [FileInfo(key="a")]
+            pull_started.set()
+            release.wait(10)
+            yield [FileInfo(key="b")]
+
+        def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+            raise NotImplementedError
+
+        def delete(self, info: FileInfo) -> None:
+            raise NotImplementedError
+
+        def get_fileinfo(self, key: str = "", *, on_warning: object = None) -> FileInfo | None:
+            return None
+
+        def as_text(self) -> str:
+            return "blocking-stub"
+
+    try:
+        scan = _Blocking().scan()
+        assert next(scan).key == "a"
+        assert pull_started.wait(5)
+        with pytest.raises(KeyboardInterrupt):
+            scan.throw(KeyboardInterrupt)
+        assert _worker_alive()  # abandoned mid-pull, not joined
+    finally:
+        _drain_worker(release)

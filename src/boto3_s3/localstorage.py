@@ -1088,6 +1088,7 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
+        scan_wait_on_interrupt: bool = True,
     ) -> None:
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
@@ -1105,6 +1106,9 @@ class LocalStorage(Storage):
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
         self._enumerate_all_entries = enumerate_all_entries
+        # The Ctrl-C exit policy for scan()'s prefetch worker
+        # (Storage.scan_wait_on_interrupt).
+        self.scan_wait_on_interrupt = scan_wait_on_interrupt
         # A library-only durability knob for this local backend as a *destination*
         # (default off = aws parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,

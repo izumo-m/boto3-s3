@@ -125,6 +125,17 @@ Three more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
+- **`scan_wait_on_interrupt: bool`** — the Ctrl-C exit policy of `scan()`'s
+  background page worker. `True` (the default): context exit always waits for
+  a page pull already in flight, so no worker survives the operation — keep it
+  in an app that may catch `KeyboardInterrupt` and continue. `False`: a
+  `KeyboardInterrupt` / `SystemExit` unwind abandons the daemon worker instead
+  of waiting (an in-flight network pull can otherwise hold the exit for a full
+  timeout) — for apps that treat such an interrupt as process-fatal. The
+  built-ins take it as a constructor kwarg; the CLI passes `False` on every
+  scanning storage it builds, matching aws's immediate death on Ctrl-C. Every
+  other exit — exhaustion, an early break, an ordinary exception — always
+  waits (`concurrency.prefetch`).
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
