@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Aligned global-option ordering, help tokens, Ctrl-C, and region fallback with aws-cli; made auto-prompt completion more responsive.
+
 ## [0.5.0] - 2026-07-12
 
 - Added annotation preloading and improved command behavior parity with aws-cli.
