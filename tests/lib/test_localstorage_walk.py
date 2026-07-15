@@ -223,16 +223,23 @@ class TestFullPathBoundaryProbe:
                 return super().triggers_warning(path, notify)
 
         # A leaf whose full path is >= 1000 bytes but far below 1000
-        # characters (CJK components: 3 bytes per character in UTF-8).
+        # characters (CJK components: 3 bytes per character in UTF-8). The
+        # tree must land just past the floor, not overshoot by a whole
+        # component: macOS caps a full path at 1024 bytes, so an overshot
+        # tree fails at mkdir before the walk ever runs.
         component = "あ" * 80  # 80 characters, 240 bytes
+        leaf_bytes = len(os.fsencode(os.sep + "f.txt"))
         parent = tmp_path
-        while len(os.fsencode(str(parent))) < 1000:
+        while (pad := 1000 - leaf_bytes - 1 - len(os.fsencode(str(parent)))) > 240:
             parent = parent / component
+        # A zero pad still needs a final component; 3 extra bytes stay far
+        # under the 1024-byte cap.
+        parent = parent / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
         parent.mkdir(parents=True)
         (parent / "f.txt").write_bytes(b"x")
         (tmp_path / "short.txt").write_bytes(b"x")
         full = str(parent / "f.txt")
-        assert len(full) < 1000 and len(os.fsencode(full)) >= 1000
+        assert len(full) < 1000 and 1000 <= len(os.fsencode(full)) < 1024
 
         storage = LocalStorage(str(tmp_path), walker=_Recording())
         keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
