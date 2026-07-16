@@ -401,7 +401,18 @@ dest-existence check for download. We ported the same three faces:
   floors sit well below the real OS limits, so an ordinary walk never reaches
   them) does the walk re-run the full-path warning battery
   (`LocalFileGenerator.crosses_full_path_boundary`) and drop a leaf it would
-  warn away, so the two agree. Two known residuals: `sym_depth` counts one
+  warn away, so the two agree. On Windows (`have_dir_fd` false) the walk
+  addresses entries by full path, but the scandir-cached stat still hides an
+  over-`MAX_PATH` length on a host without long-path support
+  (`LongPathsEnabled=0`, the default), so the readability probe is what fails
+  there; the probe's failure path re-checks existence by full path and picks
+  the wording aws-cli's exists-first battery emits (`File does not exist.`,
+  never `not readable`) - same skip set, same wording, rc 2 as `aws.exe`
+  (verified against 2.35.18; pinned by
+  `test_over_max_path_entries_warn_does_not_exist_like_aws`). The same
+  re-check makes an entry that races away between its stat and the probe warn
+  `File does not exist.` like aws's full-path battery would, on every
+  platform. Two known residuals: `sym_depth` counts one
   hop per *followed symlinked directory* descended, not the actual number of
   links the kernel resolves for a chain of nested symlinks in one hop, so it
   can undercount relative to the real `SYMLOOP_MAX` counter in an adversarial,

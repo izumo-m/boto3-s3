@@ -968,7 +968,14 @@ class LocalFileGenerator:
         cannot read. The readability probe is dir-relative (``openat`` through
         ``dir_fd`` where the platform allows, ``None`` off POSIX). ``full`` is the
         entry's absolute path (warning wording). Same order / wording as
-        ``triggers_warning``.
+        ``triggers_warning``, with one refinement on the probe's failure path:
+        aws-cli vets by full path and probes existence *first*, so an entry
+        whose full-path resolution fails - over ``MAX_PATH`` on a Windows host
+        without long-path support (the length is invisible to the scandir-cached
+        stat above), or raced away since - warns ``File does not exist.`` there,
+        never ``not readable``. A full-path existence re-check on this rare
+        branch picks the same wording; a genuinely unreadable present entry
+        still warns ``not readable``.
         """
         if _is_special_mode(st.st_mode):
             notify(
@@ -977,7 +984,10 @@ class LocalFileGenerator:
             )
             return True
         if not _is_readable_child(entry.name, full, dir_fd, is_dir=stat_module.S_ISDIR(st.st_mode)):
-            notify(f"Skipping file {full}. File/Directory is not readable.")
+            if not os.path.exists(full):
+                notify(f"Skipping file {full}. File does not exist.")
+            else:
+                notify(f"Skipping file {full}. File/Directory is not readable.")
             return True
         return False
 

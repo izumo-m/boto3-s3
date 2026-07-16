@@ -113,6 +113,65 @@ class TestWalkWarnings:
             (tmp_path / "locked").chmod(0o755)
         assert len(warnings) == 1 and "is not readable" in warnings[0]
 
+    def test_probe_failure_of_a_vanished_entry_warns_does_not_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli vets by full path with the existence probe first, so an entry
+        # whose readability probe fails *because the full path no longer
+        # resolves* (raced away since the stat; on Windows an over-MAX_PATH
+        # path) warns "does not exist" there, never "not readable". Simulate
+        # the race: the probe deletes the entry, then reports failure.
+        _make_tree(tmp_path, "ok.txt", "gone.txt")
+
+        def _vanish(name: str, full: str, dir_fd: int | None, *, is_dir: bool) -> bool:
+            if name == "gone.txt":
+                os.unlink(tmp_path / "gone.txt")
+                return False
+            return True
+
+        monkeypatch.setattr("boto3_s3.localstorage._is_readable_child", _vanish)
+        warnings: list[str] = []
+        assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
+        assert warnings == [f"Skipping file {tmp_path / 'gone.txt'}. File does not exist."]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH band")
+    def test_over_max_path_entries_warn_does_not_exist_like_aws(self, tmp_path: Path) -> None:
+        # With long paths disabled (LongPathsEnabled=0, the Windows default) a
+        # full path over MAX_PATH fails every full-path syscall, while the
+        # scandir-cached stat still vets the entry - so the readability probe
+        # is what catches it, and its failure path must pick aws's "File does
+        # not exist." wording (aws.exe gives the same skip set, same wording,
+        # rc 2). The fixtures ride the \\?\ extended-length prefix, which
+        # bypasses the limit at creation time only.
+        ext = "\\\\?\\"
+        long_file = tmp_path / ("n" * 250)  # over 260 under any tmp root
+        long_dir = tmp_path / ("m" * 250)  # the directory itself crosses
+        with open(ext + str(long_file), "wb") as f:
+            f.write(b"x")
+        os.mkdir(ext + str(long_dir))
+        with open(ext + str(long_dir / "inner.txt"), "wb") as f:
+            f.write(b"x")
+        try:
+            try:
+                os.stat(str(long_file))
+            except OSError:
+                pass
+            else:
+                pytest.skip("long-path support is enabled; the MAX_PATH band does not exist")
+            _make_tree(tmp_path, "ok.txt")
+            warnings: list[str] = []
+            assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
+            assert sorted(warnings) == [
+                f"Skipping file {long_dir}. File does not exist.",
+                f"Skipping file {long_file}. File does not exist.",
+            ]
+        finally:
+            # pytest's own tmp cleanup runs without the \\?\ prefix and would
+            # trip over these; remove them the way they were made.
+            os.unlink(ext + str(long_dir / "inner.txt"))
+            os.rmdir(ext + str(long_dir))
+            os.unlink(ext + str(long_file))
+
     def test_symlink_cycle_descent_warns_like_aws(self, tmp_path: Path) -> None:
         # A directory cycle without detect_symlink_loops (the aws-parity mode):
         # the per-entry vetting is dir-relative (one link per resolution) so
