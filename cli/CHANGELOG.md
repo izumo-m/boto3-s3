@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Aligned global-option ordering, help tokens, Ctrl-C, and region fallback with aws-cli; made auto-prompt completion more responsive.
+- Aligned global-option ordering, help tokens, Ctrl-C, and region fallback with aws-cli, changing some exit codes to match; made auto-prompt completion more responsive.
 
 ## [0.5.0] - 2026-07-12
 
