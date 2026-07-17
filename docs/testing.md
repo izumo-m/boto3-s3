@@ -504,11 +504,29 @@ Tests staged on chmod-revoked access skip themselves on Windows (the
 
 **Goldens on Windows.** The cp/mv/sync goldens resolve to their
 `<name>.windows.json` variants (section 3, "Platform variants"); regenerating
-them needs this Windows setup plus the e2e stack below - `UPDATE_GOLDENS=1`
-from Windows writes only those variants and never touches the POSIX base
-files, so it is safe to run. `cp_case_conflict_warn` deliberately has no
-Windows golden and its functional replay self-skips on a case-insensitive
-filesystem.
+them needs this Windows setup plus the e2e stack below. Work from a fresh
+NTFS copy (above) so its POSIX base goldens are current - the variant is
+written or pruned by comparing the Windows capture against that base - then
+run the suite through the runner below with `UPDATE_GOLDENS=1`, which writes
+only the variants and never the POSIX base:
+
+    cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+
+The variants land in the NTFS copy, not the repo, so sync them back before
+committing - only the variants, and with `--delete`, since a scenario whose
+Windows capture stops differing from the base is pruned:
+
+    rsync -rlt --delete --include='*/' --include='*.windows.json' --exclude='*' \
+      /mnt/c/tmp/boto3-s3-wintest/tests/cli/goldens/  <repo>/tests/cli/goldens/
+
+Windows writes the JSON with CRLF (Python text-mode newline translation) and
+nothing normalizes line endings on commit, so convert the synced variants to
+LF to match the committed goldens:
+
+    find <repo>/tests/cli/goldens -name '*.windows.json' -exec sed -i 's/\r$//' {} +
+
+`cp_case_conflict_warn` deliberately has no Windows golden and its functional
+replay self-skips on a case-insensitive filesystem.
 
 **e2e on Windows.** The differential machinery works unchanged against the
 WSL2 MinIO stack: pin `aws.exe` at the version `scripts/install-awscli.sh`
