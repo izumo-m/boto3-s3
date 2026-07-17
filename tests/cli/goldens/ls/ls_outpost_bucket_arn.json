@@ -3,10 +3,13 @@
     "ls",
     "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/bucket/my-bucket"
   ],
-  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
   "rc": 252,
   "remaining_keys": null,
   "scenario": "ls_outpost_bucket_arn",
+  "src_tree": null,
   "stdout_lines": []
 }

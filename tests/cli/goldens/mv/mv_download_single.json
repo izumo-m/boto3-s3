@@ -4,7 +4,7 @@
     "s3://<BUCKET>/d/a.txt",
     "dest/out.txt"
   ],
-  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
   "head_fields": null,
   "local_tree": [

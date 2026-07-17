@@ -7,7 +7,7 @@
     "invalid",
     "--dryrun"
   ],
-  "aws_version": "aws-cli/2.35.18 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
   "head_fields": null,
   "local_tree": null,
