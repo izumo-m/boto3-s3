@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-17
+
 - Aligned global-option ordering, help tokens, Ctrl-C, and region fallback with aws-cli, changing some exit codes to match; made auto-prompt completion more responsive.
 
 ## [0.5.0] - 2026-07-12
@@ -31,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.5.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.0...HEAD
+[0.6.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.5.0...boto3-s3-cli-v0.6.0
 [0.5.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.4.0...boto3-s3-cli-v0.5.0
 [0.4.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.3.0...boto3-s3-cli-v0.4.0
 [0.3.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.2.0...boto3-s3-cli-v0.3.0
