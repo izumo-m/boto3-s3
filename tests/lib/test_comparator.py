@@ -21,6 +21,9 @@ import pytest
 
 from boto3_s3.comparator import (
     Comparator,
+    DestOnlyPair,
+    MergedPair,
+    SrcOnlyPair,
     SyncPair,
     all_of,
     any_of,
@@ -40,7 +43,7 @@ def _entries(*keys: str) -> list[tuple[str, FileInfo]]:
     return [(key, _info(key)) for key in keys]
 
 
-def _pairs(src: list[tuple[str, FileInfo]], dest: list[tuple[str, FileInfo]]) -> list[SyncPair]:
+def _pairs(src: list[tuple[str, FileInfo]], dest: list[tuple[str, FileInfo]]) -> list[MergedPair]:
     return list(Comparator(_KIND).compare(iter(src), iter(dest)))
 
 
@@ -53,39 +56,39 @@ class TestComparatorPairing:
         pairs = _pairs(src, dest)
         assert pairs == [SyncPair(key="a.txt", transfer_type=_KIND, src=src[0][1], dest=dest[0][1])]
 
-    def test_source_only_key_yields_src_pair(self) -> None:
+    def test_source_only_key_yields_src_only_pair(self) -> None:
         # aws-cli's test_compare_key_less: 'b...' sorts before 'c...', so the
         # source-only entry surfaces first, then the dest-only one.
         src = _entries("bomparator_test.py")
         dest = _entries("comparator_test.py")
         pairs = _pairs(src, dest)
         assert pairs == [
-            SyncPair(key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
-            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
+            SrcOnlyPair(key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
+            DestOnlyPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
         ]
 
-    def test_dest_only_key_yields_dest_pair(self) -> None:
+    def test_dest_only_key_yields_dest_only_pair(self) -> None:
         # aws-cli's test_compare_key_greater: the dest-only entry sorts first.
         src = _entries("domparator_test.py")
         dest = _entries("comparator_test.py")
         pairs = _pairs(src, dest)
         assert pairs == [
-            SyncPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
-            SyncPair(key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
+            DestOnlyPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
+            SrcOnlyPair(key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
         ]
 
     def test_empty_src_flushes_dest(self) -> None:
         dest = _entries("a", "b")
         assert _pairs([], dest) == [
-            SyncPair(key="a", transfer_type=_KIND, dest=dest[0][1]),
-            SyncPair(key="b", transfer_type=_KIND, dest=dest[1][1]),
+            DestOnlyPair(key="a", transfer_type=_KIND, dest=dest[0][1]),
+            DestOnlyPair(key="b", transfer_type=_KIND, dest=dest[1][1]),
         ]
 
     def test_empty_dest_flushes_src(self) -> None:
         src = _entries("a", "b")
         assert _pairs(src, []) == [
-            SyncPair(key="a", transfer_type=_KIND, src=src[0][1]),
-            SyncPair(key="b", transfer_type=_KIND, src=src[1][1]),
+            SrcOnlyPair(key="a", transfer_type=_KIND, src=src[0][1]),
+            SrcOnlyPair(key="b", transfer_type=_KIND, src=src[1][1]),
         ]
 
     def test_both_empty_yields_nothing(self) -> None:
@@ -95,13 +98,13 @@ class TestComparatorPairing:
         src = _entries("a", "c", "d", "f")
         dest = _entries("b", "c", "e", "f")
         pairs = _pairs(src, dest)
-        assert [(p.key, p.src is not None, p.dest is not None) for p in pairs] == [
-            ("a", True, False),
-            ("b", False, True),
-            ("c", True, True),
-            ("d", True, False),
-            ("e", False, True),
-            ("f", True, True),
+        assert [(p.key, type(p)) for p in pairs] == [
+            ("a", SrcOnlyPair),
+            ("b", DestOnlyPair),
+            ("c", SyncPair),
+            ("d", SrcOnlyPair),
+            ("e", DestOnlyPair),
+            ("f", SyncPair),
         ]
 
     def test_stamps_the_run_kind_on_every_pair(self) -> None:
@@ -147,19 +150,12 @@ class TestComparatorOrderGuard:
 
 
 class TestCompareSizeTime:
-    """aws-cli syncstrategy matrix, by direction and variant flag."""
+    """aws-cli syncstrategy matrix, by direction and variant flag.
 
-    def test_source_only_pair_always_copies(self) -> None:
-        # aws-cli's MissingFileSync: no destination entry -> transfer.
-        for transfer_type in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
-            assert (
-                compare_size_time(SyncPair(key="k", transfer_type=transfer_type, src=_info()))
-                is True
-            )
-
-    def test_rejects_pair_without_source(self) -> None:
-        with pytest.raises(ValueError, match="without a source entry"):
-            compare_size_time(SyncPair(key="k", transfer_type=TransferType.UPLOAD, dest=_info()))
+    Only both-sides pairs exist here: aws-cli's ``MissingFileSync`` slot (a key
+    with no destination) is the create lane's territory - a ``SrcOnlyPair`` by
+    type, which ``compare_size_time`` never sees.
+    """
 
     # -- size + last-modified (the default judgment) -----------------------
 
@@ -265,10 +261,16 @@ def _json_only(pair: SyncPair) -> bool:
 
 class TestCombinators:
     def test_all_of_requires_every_predicate(self) -> None:
-        copy_all = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
-        combined = all_of(_json_only, copy_all)
-        assert combined(SyncPair(key="a.json", transfer_type=_KIND, src=_info("a.json"))) is True
-        assert combined(SyncPair(key="a.txt", transfer_type=_KIND, src=_info("a.txt"))) is False
+        copy_changed = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
+        combined = all_of(_json_only, copy_changed)
+
+        def grown(key: str) -> SyncPair:
+            # A size change makes the size+time judgment copy; the name rule
+            # then decides the composition.
+            return SyncPair(key=key, transfer_type=_KIND, src=_info(key), dest=_info(key, size=11))
+
+        assert combined(grown("a.json")) is True
+        assert combined(grown("a.txt")) is False
 
     def test_any_of_passes_on_first_hit(self) -> None:
         # A visibility-style override composed with the size+time default:
@@ -286,7 +288,7 @@ class TestCombinators:
         assert combined(skipped) is False
 
     def test_empty_combinators_follow_all_any_semantics(self) -> None:
-        pair = SyncPair(key="k", transfer_type=_KIND, src=_info())
+        pair = SyncPair(key="k", transfer_type=_KIND, src=_info(), dest=_info())
         assert all_of()(pair) is True
         assert any_of()(pair) is False
 

@@ -72,7 +72,7 @@ def _s3(*, etag: str | None = None, size: int | None = None, key: str = "k") -> 
     return S3FileInfo(key=key, etag=etag, size=size)
 
 
-def _storage_for(info: FileInfo | None) -> Storage | None:
+def _storage_for(info: FileInfo) -> Storage | None:
     """A LocalStorage rooted at a local side's parent dir, so ``open(compare_key)``
     reaches the real file (the readable side the strategy hashes)."""
     if isinstance(info, LocalFileInfo):
@@ -80,15 +80,11 @@ def _storage_for(info: FileInfo | None) -> Storage | None:
     return None
 
 
-def _pair(
-    transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
-) -> SyncPair:
+def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> SyncPair:
     # The backend rides on each side's FileInfo; the strategy reads pair.src.storage
     # / pair.dest.storage to open the readable (local) side.
-    if src is not None:
-        src.storage = _storage_for(src)
-    if dest is not None:
-        dest.storage = _storage_for(dest)
+    src.storage = _storage_for(src)
+    dest.storage = _storage_for(dest)
     return SyncPair(key="k", transfer_type=transfer_type, src=src, dest=dest)
 
 
@@ -219,19 +215,6 @@ class TestCopyDirectEtag:
         pair = _pair(TransferType.COPY, src=_s3(etag="abc", size=10), dest=_s3(etag="abc", size=20))
         assert EtagComparison(check_size=True)(pair) is True
         assert EtagComparison(check_size=False)(pair) is False
-
-
-class TestNewAndMissingSides:
-    @pytest.mark.parametrize("transfer_type", list(TransferType))
-    def test_dest_none_always_copies(self, transfer_type: TransferType) -> None:
-        # The dest-None short-circuit precedes the kind switch, so even MOVE /
-        # DELETE return True here.
-        assert EtagComparison()(_pair(transfer_type, src=_s3(etag="abc"))) is True
-
-    @pytest.mark.parametrize("transfer_type", list(TransferType))
-    def test_src_none_raises(self, transfer_type: TransferType) -> None:
-        with pytest.raises(ValueError, match="without a source entry"):
-            EtagComparison()(_pair(transfer_type, dest=_s3(etag="abc")))
 
 
 class TestTypeMatchedSides:

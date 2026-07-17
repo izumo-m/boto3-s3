@@ -20,6 +20,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from boto3_s3.comparator import SyncPair
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -137,9 +138,9 @@ class TestWriteSlot:
 
         read_back: list[bytes] = []
 
-        def reads_dest(pair: Any) -> bool:
+        def reads_dest(pair: SyncPair) -> bool:
             dest = pair.dest
-            assert dest is not None and dest.storage is not None
+            assert dest.storage is not None
             with dest.storage.open(dest.key, "rb") as fh:
                 read_back.append(fh.read())
             return True
@@ -473,9 +474,9 @@ class TestReadSlot:
         dst.mkdir()
         (dst / "k.txt").write_bytes(b"zzzz")  # pre-existing dest -> the update lane
 
-        def reads_then_bumps_source(pair: Any) -> bool:
+        def reads_then_bumps_source(pair: SyncPair) -> bool:
             src = pair.src
-            assert src is not None and src.storage is not None
+            assert src.storage is not None
             with src.storage.open(src.key, "rb") as fh:
                 assert fh.read() == b"AAAA"  # the filter really reads the old source
             # Mutate the source after its GetObject is captured; the transfer's

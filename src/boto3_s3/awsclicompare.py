@@ -1,18 +1,14 @@
 """``boto3_s3.awsclicompare``: the aws-cli size + last-modified comparison for ``S3.sync``.
 
-``S3.sync``'s copy decision is a ``PairFilter`` (``True``
+``S3.sync``'s update copy decision is a ``PairFilter`` (``True``
 copies the source). ``AwsCliComparison`` is the aws-cli judgment and the
 **explicit form of ``update_filter=None``** - ``update_filter=None`` is equivalent to
 ``AwsCliComparison()``. It decides by size + last-modified, reading the transfer
-direction from each ``SyncPair``. ``S3.sync`` hands it
-only both-sides pairs (a source-only pair is ``create_filter``'s lane):
-
-- a source-only pair (no destination) always copies - a defensive fallback for a
-  standalone caller, matching aws-cli's ``MissingFileSync``;
-- a pair present on both sides copies when the sizes differ, or when the
-  last-modified rule does not rule the copy out - an upload / copy is redundant
-  when the destination is at least as new as the source, a download when the
-  destination is at least as old (aws-cli's direction-asymmetric rule).
+direction from each ``SyncPair`` (the both-sides pair; a new, source-only entry
+is ``create_filter``'s lane): a pair copies when the sizes differ, or when the
+last-modified rule does not rule the copy out - an upload / copy is redundant
+when the destination is at least as new as the source, a download when the
+destination is at least as old (aws-cli's direction-asymmetric rule).
 
 The two flags mirror ``aws s3 sync``'s ``--size-only`` / ``--exact-timestamps``:
 

@@ -7,20 +7,23 @@ scan path, not here. Layer two is *pair decisions*: the surviving streams
 are merge-joined by compare key, then per-pair decisions select what to
 copy or delete. This module is layer two's material:
 
-- ``Comparator`` pairs two key-ordered streams into ``SyncPair``
-  records. It is a **pure pairer** - every key on either side comes out and
-  no copy/delete judgment happens here (unlike aws-cli's comparator, which
-  buries its strategy calls in the merge loop; splitting them keeps each
+- ``Comparator`` pairs two key-ordered streams into ``MergedPair``
+  records - a ``SyncPair`` (both sides), ``SrcOnlyPair`` (source only), or
+  ``DestOnlyPair`` (destination only) per key, the shape telling which
+  side(s) hold it. It is a **pure pairer** - every key on either side comes
+  out and no copy/delete judgment happens here (unlike aws-cli's comparator,
+  which buries its strategy calls in the merge loop; splitting them keeps each
   side replaceable). It only stamps the run's direction (``transfer_type``) onto each
   pair, as context for the filters.
-- A ``PairFilter`` is the **update** judgment: a predicate over a
-  both-sides pair where ``True`` re-copies the source over the destination. It
+- A ``PairFilter`` is the **update** judgment: a predicate over the
+  both-sides ``SyncPair`` where ``True`` re-copies the source over the
+  destination. It
   is what ``S3.sync(update_filter=...)`` selects - the size+time default, a
   content strategy (``EtagComparison`` / ``ChecksumComparison``), or a caller's
-  own. ``S3.sync`` only ever hands it an update pair (both sides present), so it
-  never faces a ``None`` side; the new (source-only) lane is governed by
-  ``create_filter`` and the delete lane by ``delete_filter``, each a ``FileFilter``
-  over the one side it has.
+  own. A ``SyncPair`` carries both sides by construction, so the filter reads
+  ``pair.src`` / ``pair.dest`` directly; the new (``SrcOnlyPair``) lane is
+  governed by ``create_filter`` and the delete (``DestOnlyPair``) lane by
+  ``delete_filter``, each a ``FileFilter`` over the one side it has.
 - ``compare_size_time`` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); it is the judgment
@@ -58,36 +61,68 @@ _T = TypeVar("_T")
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SyncPair:
-    """One compare key's pairing across the two sides of a sync.
+    """A compare key present on **both** sides of a sync - the update pair.
 
-    ``key`` is the compare key - the entry's path relative to its side's
-    listing (directory-relative for a local side, ``Prefix``-relative for an
-    S3 side), ``/``-separated on every platform - so name-based filters
+    The shape ``S3.sync``'s ``update_filter`` judges (aws-cli's
+    ``file_at_src_and_dest`` strategy slot). ``src`` / ``dest`` are the two
+    sides' listing entries, both always present - a filter reads
+    ``pair.src.size`` / ``pair.dest.mtime`` directly, with no ``None``
+    handling. ``key`` is the compare key - the entry's path relative to its
+    side's listing (directory-relative for a local side, ``Prefix``-relative
+    for an S3 side), ``/``-separated on every platform - so name-based filters
     need not care where either side lives. ``transfer_type`` is the sync's
     transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
     pair filter can apply the direction-asymmetric rules without being told the
-    route. ``src`` / ``dest`` are the sides' listing entries; exactly one may
-    be ``None``:
-
-    - both set: the key exists on both sides (copy is an *update*),
-    - ``dest`` is ``None``: source-only (copy is a *new* transfer),
-    - ``src`` is ``None``: destination-only (the delete candidate).
+    route.
 
     The backend each side was listed from rides on that side's entry
     (``pair.src.storage`` / ``pair.dest.storage``, stamped by the producing
     ``Storage.scan``): a content ``update_filter=`` strategy reads the non-S3
-    side's bytes through its ``Storage.open`` - so content comparison works for any
-    backend, not just a local filesystem. A lane only reads the storage of a side
-    it has (the present ``FileInfo``), so a ``None`` side never needs one.
+    side's bytes through its ``Storage.open`` - so content comparison works for
+    any backend, not just a local filesystem.
     """
 
     key: str
     transfer_type: TransferType
-    src: FileInfo | None = None
-    dest: FileInfo | None = None
+    src: FileInfo
+    dest: FileInfo
 
 
-# A pair predicate: `True` performs the action the pair stands for.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SrcOnlyPair:
+    """A compare key present only on the source side - a new entry.
+
+    ``S3.sync`` routes it to the create lane (``create_filter``; aws-cli's
+    ``file_not_at_dest`` slot, where copying is hard-coded). ``key`` and
+    ``transfer_type`` are as on ``SyncPair``; ``src`` is the source listing
+    entry, and there is no ``dest`` attribute at all.
+    """
+
+    key: str
+    transfer_type: TransferType
+    src: FileInfo
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DestOnlyPair:
+    """A compare key present only on the destination side - an orphan.
+
+    The delete candidate: ``S3.sync`` routes it to the delete lane
+    (``delete_filter``; aws-cli's ``file_not_at_src`` slot). ``key`` and
+    ``transfer_type`` are as on ``SyncPair``; ``dest`` is the destination
+    listing entry, and there is no ``src`` attribute at all.
+    """
+
+    key: str
+    transfer_type: TransferType
+    dest: FileInfo
+
+
+# What `Comparator.compare` yields: each merge-joined key as exactly one of the
+# three pair shapes, telling by type which side(s) hold it.
+MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair
+
+# The update judgment: a predicate over the both-sides pair, `True` = copy.
 PairFilter = Callable[[SyncPair], bool]
 
 
@@ -157,7 +192,7 @@ def _byte_ordered(
 
 @dataclass(frozen=True)
 class Comparator:
-    """Merge-join two key-ordered listing streams into ``SyncPair``s.
+    """Merge-join two key-ordered listing streams into ``MergedPair``s.
 
     The classic sorted-merge (aws-cli ``Comparator.call``): advance whichever
     side holds the smaller key, pair equal keys, and flush the survivor once
@@ -165,8 +200,9 @@ class Comparator:
     Inputs must be ascending by compare key - what a ``SORTABLE_SCAN``
     backend's ``scan(sort=True)`` promises (S3 byte order; the local walk sorts
     to match) - and
-    the merge itself never compares sizes or times: feed the resulting pairs
-    to a ``PairFilter`` for that. ``transfer_type`` (the run's direction) is
+    the merge itself never compares sizes or times: that is the lane filters'
+    job (a ``PairFilter`` for the ``SyncPair``s, ``create_filter`` /
+    ``delete_filter`` for the one-sided shapes). ``transfer_type`` (the run's direction) is
     stamped onto every emitted pair - context, not a judgment. Each side's backend
     already rides on its ``FileInfo`` (``pair.src.storage`` / ``pair.dest.storage``,
     stamped by the producing ``Storage.scan``), so a content ``update_filter=``
@@ -179,12 +215,14 @@ class Comparator:
         self,
         src_entries: Iterable[tuple[str, FileInfo]],
         dest_entries: Iterable[tuple[str, FileInfo]],
-    ) -> Iterator[SyncPair]:
-        """Yield every key on either side as a ``SyncPair``.
+    ) -> Iterator[MergedPair]:
+        """Yield every key on either side as its ``MergedPair`` shape.
 
-        ``src_entries`` / ``dest_entries`` are ``(compare_key, info)``
-        streams, lazily consumed - pairing streams page-by-page listings
-        without materializing either side.
+        An equal key on both sides comes out as a ``SyncPair``, a key with no
+        destination match as a ``SrcOnlyPair``, one with no source match as a
+        ``DestOnlyPair``. ``src_entries`` / ``dest_entries`` are
+        ``(compare_key, info)`` streams, lazily consumed - pairing streams
+        page-by-page listings without materializing either side.
         """
         transfer_type = self.transfer_type
         if __debug__:  # dev guard: catch an unsorted SORTABLE_SCAN side (compiled out under -O)
@@ -196,20 +234,20 @@ class Comparator:
         dest = next(dest_iter, None)
         while src is not None and dest is not None:
             if src[0] < dest[0]:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
+                yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
             elif src[0] > dest[0]:
-                yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
                 dest = next(dest_iter, None)
             else:
                 yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
                 src = next(src_iter, None)
                 dest = next(dest_iter, None)
         while src is not None:
-            yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1])
+            yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
         while dest is not None:
-            yield SyncPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
             dest = next(dest_iter, None)
 
 
@@ -222,10 +260,7 @@ def compare_size_time(
     ``AwsCliComparison``, which ``S3.sync`` selects
     for ``update_filter=None``.
     The transfer direction comes from ``pair.transfer_type`` (the time rule is
-    direction-asymmetric). ``S3.sync`` hands this only both-sides pairs (a
-    source-only pair is ``create_filter``'s lane); its dest-``None`` branch is a
-    defensive fallback that copies, matching aws-cli's ``MissingFileSync``, when
-    a strategy is called standalone. For a pair present on both sides:
+    direction-asymmetric). For each pair:
 
     - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
       Ignored when ``exact_timestamps`` is also set: the flags fill the same
@@ -246,10 +281,6 @@ def compare_size_time(
     permissive reading.
     """
     src, dest = pair.src, pair.dest
-    if src is None:
-        raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-    if dest is None:
-        return True
     same_size = src.size is not None and src.size == dest.size
     if size_only and not exact_timestamps:
         return not same_size
@@ -275,11 +306,9 @@ class ContentComparison:
 
     Not itself a strategy: ``EtagComparison`` / ``ChecksumComparison`` extend it
     with their leaf digest work. What lives here is everything the two must
-    agree on - the missing-source guard, the defensive source-only copy (``S3.sync``
-    routes source-only pairs to ``create_filter``, so it is reached only when a
-    strategy is called standalone), the ``check_size`` size-mismatch decision, and
-    the split into the two hooks - so the strategies cannot silently drift apart
-    on the decision shape.
+    agree on - the ``check_size`` size-mismatch decision, which side is the S3
+    side, and the split into the two hooks - so the strategies cannot silently
+    drift apart on the decision shape.
 
     Which side is the S3 object (the stored digest to compare against) is decided
     by **type** - the ``S3FileInfo`` side - not by the transfer direction, so the
@@ -296,10 +325,6 @@ class ContentComparison:
 
     def __call__(self, pair: SyncPair) -> bool:
         src, dest = pair.src, pair.dest
-        if src is None:
-            raise ValueError(f"copy decision consulted without a source entry: {pair.key!r}")
-        if dest is None:
-            return True
         if (
             self.check_size
             and src.size is not None
@@ -373,8 +398,11 @@ def any_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:
 
 __all__ = [
     "Comparator",
+    "DestOnlyPair",
+    "MergedPair",
     "PairFilter",
     "ParallelFilter",
+    "SrcOnlyPair",
     "SyncPair",
     "all_of",
     "any_of",

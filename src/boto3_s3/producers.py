@@ -25,6 +25,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from boto3_s3 import requestparams, transferplan
+from boto3_s3.comparator import SrcOnlyPair, SyncPair
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
@@ -42,8 +43,6 @@ from boto3_s3.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-    from boto3_s3.comparator import SyncPair
 
 
 def walk_source_scan_options(
@@ -913,8 +912,8 @@ def sync_case_gate(
 
     Unlike cp's (which pre-lists the destination for its exact-case
     AlwaysSync arm), sync already pairs against the destination listing:
-    the gate is consulted only for pairs *missing* there, so the
-    membership set is vacuously empty and only the submitted-set /
+    the gate is consulted only for ``SrcOnlyPair``s (keys missing there), so
+    the membership set is vacuously empty and only the submitted-set /
     ``os.path.exists`` conflict check remains - aws-cli's
     ``CaseConflictSync`` in the ``file_not_at_dest`` slot. Scoped to a
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
@@ -974,7 +973,7 @@ def sync_entries(
 
 def sync_transfer_item(
     plan: transferplan.TransferPlan,
-    pair: SyncPair,
+    pair: SrcOnlyPair | SyncPair,
     *,
     transfer_type: TransferType,
     src_bucket: str,
@@ -991,7 +990,6 @@ def sync_transfer_item(
     dry run never touches the backend.
     """
     info = pair.src
-    assert info is not None
     if plan.paths_type == "opens3":
         item = open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
     elif plan.paths_type == "s3open":
@@ -1006,10 +1004,10 @@ def sync_transfer_item(
     elif transfer_type is TransferType.UPLOAD:
         item = upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
     elif transfer_type is TransferType.DOWNLOAD:
-        # The case-conflict gate guards only pairs missing at the
+        # The case-conflict gate guards only SrcOnlyPairs - keys missing at the
         # destination (the aws-cli strategy slot); an exact-key update
         # never conflicts.
-        gate = case_gate if pair.dest is None else None
+        gate = case_gate if isinstance(pair, SrcOnlyPair) else None
         item = download_item_from_info(
             plan,
             info,
@@ -1031,5 +1029,5 @@ def sync_transfer_item(
     # completion can report both sides of the sync pair. A gate that consumed
     # the item returns None - nothing to stamp.
     if item is not None:
-        item.dest_info = pair.dest
+        item.dest_info = pair.dest if isinstance(pair, SyncPair) else None
     return item
