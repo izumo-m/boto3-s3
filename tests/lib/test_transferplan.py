@@ -247,7 +247,8 @@ class TestPlanTransferOpenRoute:
     def test_custom_source_to_s3_is_opens3(self) -> None:
         plan = transferplan.plan_transfer(_FakeOpen(), S3Storage("s3://b/dest/"), recursive=True)
         assert plan.paths_type == "opens3"
-        # the custom side roots at "" and is addressed by relative compare_key
+        # the custom side uses "" as its formatted path and is addressed by
+        # compare_key
         assert (plan.src_root, plan.src.sep) == ("", "/")
         # use_src_name comes from the s3 dest (dir_op -> adopts the source name)
         assert plan.use_src_name is True

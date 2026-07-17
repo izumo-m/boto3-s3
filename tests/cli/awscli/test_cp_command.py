@@ -1,3 +1,18 @@
+# Copyright 2013 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You
+# may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+#     http://aws.amazon.com/apache2.0/
+#
+# or in the "license" file accompanying this file. This file is
+# distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+# ANY KIND, either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# This file has been modified and ported for boto3-s3.
+
 """Port of aws-cli's functional cp tests to ``boto3-s3 cp``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_cp_command.py``
@@ -65,7 +80,9 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 
 Not ported, with reasons:
 
-- ``TestCpWithCRTClient``: the CRT engine is charter exception 2.
+- ``TestCpWithCRTClient``: the CRT data plane bypasses the botocore recording
+  client. Data-plane parity is enforced by the e2e CRT lane; client/serializer
+  configuration is pinned by ``tests/lib/test_crtsupport.py``.
 - ``TestAccesspointCPCommand``: an ARN endpoint-resolution harness; ARN parsing
   is covered by the unit tier (``TestS3ExpressCpRecursive`` *is* ported below).
 - ``TestCpSourceRegion``: a different aws-cli harness (``BaseS3CLIRunnerTest``);

@@ -1,7 +1,8 @@
 # Design of the CRT transfer engine mode
 
-The established design for the `aws s3` CRT transfer engine
-(`preferred_transfer_client`) equivalent. The core of the transfer side lives in
+This document is the established design for boto3-s3's equivalent of the
+`aws s3` CRT transfer engine mode
+(`preferred_transfer_client`). The core of the transfer side lives in
 [`transfer.md`](./transfer.md), the CLI wiring in [`cli.md`](./cli.md) section 8, and
 the tests in [`testing.md`](./testing.md). Behavior matches aws
 2.35.18, cross-checked against MinIO and the aws-cli / boto3 /
@@ -41,13 +42,14 @@ CLI layer = aws-cli-faithful
 s3transfer lock is an arbitration to keep multiple processes of the same
 application from standing up a CRT client simultaneously (boto3 uses `'boto3'`,
 aws-cli uses `'aws-cli'`); it is not observable in a single process's output or
-return code = out of scope for parity. Namespacing it by one's own product name
-is the convention of both. s3transfer stores the lock in a module global created
-once on the first `acquire_crt_s3_process_lock` and returns that stored object on
-every later call (the `name` argument is consulted only at first creation, not
-re-checked), so the lock the CLI acquires when resolving `auto` comes back as the
-same object from the library's re-acquisition call regardless of the name passed,
-and the two-stage acquisition reconciles naturally.
+return code, so it is out of scope for parity. Namespacing it by one's own
+product name is the convention of both. s3transfer stores the lock in a module
+global created once on the first `acquire_crt_s3_process_lock` and returns that
+stored object on every later call (the `name` argument is consulted only at
+first creation, not re-checked). So the lock the CLI acquires when resolving
+`auto` comes back as the same object from the library's re-acquisition call
+regardless of the name passed, and the two-stage acquisition reconciles
+naturally.
 
 ## 2. Components
 
@@ -106,9 +108,9 @@ also read as `'auto'`) with the same rules as boto3.
     partition's `dnsSuffix` plus its dualstack/fips variant suffixes straight
     from botocore's own endpoint data - commercial (`amazonaws.com`,
     `api.aws`), china, gov, the eusc `amazonaws.eu`, and the iso partitions
-    (`c2s.ic.gov`, `sc2s.sgov.gov`, `cloud.adc-e.uk`, `csp.hci.ic.gov`) - so a
-    standard endpoint in any of them re-resolves like boto3 instead of being
-    needlessly pinned. The heuristic's residual limit is what that set cannot
+    (`c2s.ic.gov`, `sc2s.sgov.gov`, `cloud.adc-e.uk`, `csp.hci.ic.gov`). A
+    standard endpoint in any of them therefore re-resolves like boto3 instead
+    of being needlessly pinned. The heuristic's residual limit is what that set cannot
     cover on its own: absent the explicit signal, a custom host *under* an AWS
     suffix would be dropped to `None`, which is exactly why the CLI threads
     `--endpoint-url` through. aws-cli itself has a known bug where, with only the
@@ -123,6 +125,14 @@ also read as `'auto'`) with the same rules as boto3.
   - credentials = no provider if `signature_version is UNSIGNED`
     (`--no-sign-request`), otherwise
     `BotocoreCRTCredentialsWrapper(client._get_credentials())`
+  - serializer session = the caller's session (`S3(session=)` ->
+    `Transferrer(session=)` -> `create_crt_transfer_manager(session=)`), falling
+    back to boto3's default session when one exists, then to a fresh botocore
+    session. Matches aws-cli, which hands its live CLI session to
+    `BotocoreCRTRequestSerializer`; a fresh session re-parses the S3 service
+    model and endpoint data on every process (~40 ms measured), which was the
+    dominant fixed cost of the CRT lane versus aws in the E2E benchmark
+
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
     sentinel (a faithful version of the same rule as the aws-cli factory)
@@ -220,12 +230,19 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
+- **Deletion stays on its established non-CRT routes**: under CRT configuration,
+  single rm keeps its blind `DeleteObject`, recursive rm and S3-side
+  `sync --delete` keep `S3Deleter`'s batched `DeleteObjects`, and local-side
+  sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
+  These are the accepted deletion paths documented in deleter.md section 4;
+  the CRT e2e lane pins the charter-observable rc, output, and end states for
+  single/recursive rm and both sync-delete directions.
 - **awscrt absent x explicit crt**: an area that cannot arise because aws bundles
   awscrt. Our awscrt is an opt-in extra (`boto3-s3-cli[crt]` ->
   `boto3-s3[crt]` -> `boto3[crt]`, transfer.md section 9).
-  - CLI: `resolve_transfer_client` stops it with a `ConfigurationError` (rc 253)
-    (preventing boto3's `MissingDependencyException` from slipping through `main`
-    and dying in a traceback. A CLI-specific degradation, not counted as a
+  - CLI: `resolve_transfer_client` stops it with a `ConfigurationError` (rc 253),
+    preventing boto3's `MissingDependencyException` from slipping through `main`
+    and dying in a traceback (a CLI-specific degradation, not counted as a
     mismatch).
   - Direct library use: it passes boto3's `MissingDependencyException` through, as
     boto3 does (faithful). This is a deliberate exception to the backend-exception

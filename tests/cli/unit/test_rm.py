@@ -267,3 +267,25 @@ class TestAppendFilterAction:
         )
         assert keep is not None
         assert keep(FileInfo(key="anything", compare_key="anything")) is False
+
+
+class TestScanInterruptPolicy:
+    def test_rm_storage_opts_out_of_the_interrupt_join(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ctrl-C is process-fatal in the CLI: the recursive listing must not
+        # wait for an in-flight page pull on the way out (aws dies
+        # immediately); the library default keeps waiting.
+        import boto3_s3
+
+        built: list[Any] = []
+
+        class _Recording(boto3_s3.S3Storage):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                built.append(self)
+
+        monkeypatch.setattr(boto3_s3, "S3Storage", _Recording)
+        client, _calls = make_recording_client([{}])
+        assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=_ctx(client)) == 0
+        assert [s.scan_wait_on_interrupt for s in built] == [False]

@@ -18,7 +18,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
 
 from boto3_s3_cli.autoprompt import completers as completers_mod
 from boto3_s3_cli.autoprompt.completers import AutoCompleter
@@ -74,8 +74,11 @@ class PromptToolkitCompleter(Completer):
             low_level = self._source.autocomplete(text, len(text))
             yield from self._convert(low_level, text_before_cursor)
         except Exception:
-            # Swallow so a completer bug never kills the interactive prompt, but
-            # leave a --debug trail (aws does the same in its adapter).
+            # Swallow so a completer bug never kills the interactive prompt
+            # (aws's adapter does the same). The debug record is emitted for
+            # completeness but stays invisible while the prompt owns the
+            # terminal: the CLI detaches its --debug handlers around the prompt
+            # and has no aws-style debug panel to route records into.
             logger.debug("exception in PromptToolkitCompleter.get_completions", exc_info=True)
             return
 
@@ -145,8 +148,16 @@ class PromptToolkitAutoPrompter(AutoPrompter):
     def prompt_for_args(self, argv: list[str]) -> list[str]:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise RuntimeError("--cli-auto-prompt requires an interactive terminal.")
+        # ThreadedCompleter, like aws's adapter: with complete_while_typing,
+        # candidate generation otherwise runs inside the event loop and every
+        # keystroke blocks on it (the first --region/--profile completion pays
+        # a boto3 session load; FilePathCompleter lists directories). The only
+        # mutable state the completion thread reaches is the Region/Profile
+        # completers' caches, where an overlapping run merely recomputes the
+        # same list.
         session: PromptSession[str] = PromptSession(
-            completer=PromptToolkitCompleter(self._source), complete_while_typing=True
+            completer=ThreadedCompleter(PromptToolkitCompleter(self._source)),
+            complete_while_typing=True,
         )
         text = session.prompt(f"{ROOT} ", default=shlex.join(argv))
         return shlex.split(text)

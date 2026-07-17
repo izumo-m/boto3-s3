@@ -1,6 +1,7 @@
 # sync (`S3.sync` / two-layer pipeline + pure-pairing comparator) design
 
-The established design for the `aws s3 sync` equivalent. For the CLI-side
+This document is the established design for boto3-s3's equivalent of
+`aws s3 sync`. For the CLI-side
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
@@ -9,24 +10,26 @@ against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline
 
-sync runs two layers in series: **visibility** and **pair decision**. Layers
-differ in series, within a layer they combine as booleans - this separation is
-the very structure that produces aws-cli's observable behavior (the exclusion
-protection of `--delete`), and it is the heart of the design.
+sync runs two layers in series: **visibility** and **pair decision**. The
+layers apply one after the other; within a layer, conditions combine as
+booleans. This separation is the very structure that produces aws-cli's
+observable behavior (the exclusion protection of `--delete`), and it is the
+heart of the design.
 
 ```
 src listing -- filter (visibility) --+
                                      +- Comparator (pure pairing)
 dest listing -- filter (visibility) --+        |
-                                                          per SyncPair(key, src, dest):
-                                                          create / update / delete
+                                                          per pair, by type:
+                                                          SrcOnlyPair -> create / SyncPair -> update / DestOnlyPair -> delete
                                                                   |
                                                    Transferrer (transfer) / delete lane
 ```
 
 - **Visibility layer** (before pairing, decided on one side's `FileInfo`
   alone): the single `filter` is applied **to both streams**. A **relative**
-  `--exclude` / `--include` matches each side's root-relative compare key, so it
+  `--exclude` / `--include` matches each side's `compare_key` (directory-relative
+  for local entries, `Prefix`-relative for S3 entries), so it
   prunes the source and destination identically (symmetric); an entry excluded
   this way is "nonexistent" on **both** sides and is thus protected from
   `--delete` (aws's "files excluded by filters are excluded from deletion"). A
@@ -42,7 +45,7 @@ dest listing -- filter (visibility) --+        |
   implementation is `ScanOptions.filter` on both sides (the S3 listing prunes
   at the listing-page stage; the local walk applies the predicate inline
   during the walk).
-- **Pair-decision layer** (after merge, per `SyncPair`): every decision that
+- **Pair-decision layer** (after merge, per pair): every decision that
   looks at both sides - size / timestamp / ETag, etc. - lives here. The default
   is aws-compatible, and this is the only layer an application swaps.
 
@@ -50,7 +53,7 @@ dest listing -- filter (visibility) --+        |
 
 | module | role |
 |---|---|
-| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as a `SyncPair`; makes no decision), the `SyncPair` / `PairFilter` types, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as its `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types and `PairFilter`, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
@@ -75,10 +78,11 @@ S3().sync(src, dest, *,
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
 ```
 
-Each `SyncPair` lands in exactly one lane by which sides it has, and each lane
+Each merge-joined pair lands in exactly one lane by its type, and each lane
 has its own filter deciding whether to act on the entry: **create** a new one
-(`create_filter`, source-only), **overwrite** one present on both sides
-(`update_filter`), or **delete** an orphan (`delete_filter`, destination-only).
+(`create_filter`, a `SrcOnlyPair`), **overwrite** one present on both sides
+(`update_filter`, a `SyncPair`), or **delete** an orphan (`delete_filter`, a
+`DestOnlyPair`).
 `create_filter` and `delete_filter` are the two membership knobs (create / delete) -
 duals of each other, and the reason `create_filter` has no `aws` counterpart is that
 aws hard-codes "always create" (`file_not_at_dest`); `update_filter` is the
@@ -90,16 +94,23 @@ entries are in scope. `create_filter` / `delete_filter` are `FileFilter`s over t
 one side their lane has; `update_filter` is the copy decision over an update
 pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
 
-- `SyncPair(key, transfer_type, src, dest)` - `key` is the relative compare key common to
-  both sides (`/`-separated); `transfer_type` is the sync's direction, stamped on every
-  pair so a filter applies the direction-asymmetric rules without being told the
-  route. `dest is None` = new (the `create_filter` lane), `src is None` = orphan
-  (the `delete_filter` lane), both present = update (the `update_filter` lane).
-- `create_filter` is the new (source-only) lane: `True` (default) copies every new
+- The pair types (`MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair`, what
+  `Comparator.compare` yields) tell by type which sides hold the key:
+  `SrcOnlyPair(key, transfer_type, src)` = new (the `create_filter` lane),
+  `DestOnlyPair(key, transfer_type, dest)` = orphan (the `delete_filter` lane),
+  `SyncPair(key, transfer_type, src, dest)` = update (the `update_filter` lane) -
+  the one-sided shapes have **no attribute at all** for their missing side. In
+  each, `key` is the relative compare key (`/`-separated) and `transfer_type` is
+  the sync's direction, stamped on every pair so a filter applies the
+  direction-asymmetric rules without being told the route. The three shapes map
+  one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->
+  `SrcOnlyPair`, `file_at_src_and_dest` -> `SyncPair`, `file_not_at_src` ->
+  `DestOnlyPair`.
+- `create_filter` is the new (`SrcOnlyPair`) lane: `True` (default) copies every new
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
-  source `FileInfo` / compare key, the same shape as `rm`'s `filter`). This is
-  aws-cli's `MissingFileSync` (source-only always transfers) with an optional
-  scope.
+  source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli
+  fills this slot with `MissingFileSync` (a hard-coded "always transfer", which
+  the `True` default matches); the filter forms add a scope aws has no flag for.
 - `update_filter` is the update (both-sides) copy decision, a single strategy
   (it does not compose): `None` (default) is the aws size + last-modified
   judgment, equivalently `AwsCliComparison()` (it reads the direction from
@@ -107,8 +118,9 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   update, `False` none (additive-only: existing destinations are left as-is);
   any `PairFilter` is a custom strategy - the building blocks `AwsCliComparison`
   (section 4) / `EtagComparison` / `ChecksumComparison` (sections 8-9) are
-  drop-in replacements. Because a pair reaches this lane only when both sides
-  exist, a custom strategy never faces a `None` side. The aws-cli `--size-only`
+  drop-in replacements. The lane's pair type `SyncPair` carries both sides by
+  construction, so a custom strategy reads `pair.src` / `pair.dest` directly -
+  no `None` handling. The aws-cli `--size-only`
   / `--exact-timestamps` tuners are **constructor arguments of
   `AwsCliComparison`** (`AwsCliComparison(size_only=True)`), not `sync` options:
   a content compare replaces the judgment wholesale, so there is nothing for them
@@ -142,11 +154,13 @@ s3.sync(src, dest,
 `compare_size_time(pair, size_only, exact_timestamps)` (direction from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
-write-guard the sync loop applies first (section 3):
+write-guard the sync loop applies first (section 3). A key missing at the
+destination never reaches this judgment: that is the create lane (a
+`SrcOnlyPair`; aws-cli fills that slot with `MissingFileSync`, a hard-coded
+copy, which `create_filter=True` matches):
 
 | condition | decision |
 |---|---|
-| `pair.dest is None` (new) | always copy (aws-cli `MissingFileSync`) |
 | `size_only` (and no `exact_timestamps`) | copy only when the size differs |
 | default | copy when the size differs **or** when the mtime rule says "not redundant" |
 
@@ -171,7 +185,7 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 - The transfer goes through the same item builder + gate as cp
   ([`transfer.md`](./transfer.md) section 8): glacier (download / copy, wording is the
   route word), parent-escape (download), oversize warning (upload). The
-  **case-conflict gate applies only to pairs with no dest** (aws-cli inserts
+  **case-conflict gate applies only to `SrcOnlyPair`s** (aws-cli inserts
   `CaseConflictSync` into the `file_not_at_dest` slot - updating the same key is
   not a conflict).
 - delete: an S3 dest uses `S3Deleter` (the `DeleteObjects` batch; the known
@@ -239,7 +253,7 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
 
 - **s3->s3** compares the two listings' ETags directly (no bytes read);
   **upload / download** reconstructs the local file's single- or multipart
-  S3-style ETag and compares. A source-only pair always copies; a missing /
+  S3-style ETag and compares. A missing /
   non-MD5 ETag is treated as differing (never skip on an indeterminate compare).
 - **`part_size`** is the multipart chunk size, fixed at construction.
   `EtagComparison(s3)` reads it from that `s3`'s active profile
@@ -297,12 +311,13 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   CRC64NVME - the modern default), or part-by-part at the exact `ObjectParts`
   sizes for a `COMPOSITE` one (a SHA-style multipart). **s3->s3** compares the
   two objects' stored checksums directly (a `GetObjectAttributes` on each, no
-  bytes read). A source-only pair always copies.
+  bytes read).
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
-  algorithm across an s3->s3 pair, an algorithm that cannot be computed locally,
-  or any `GetObjectAttributes` error (a 404, a denied `s3:GetObjectAttributes`,
-  an SSE-C object that needs a key) is treated as differing - the strategy never
-  skips on an indeterminate compare.
+  algorithm across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
+  checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
+  `GetObjectAttributes` error (a 404, a denied `s3:GetObjectAttributes`, an SSE-C
+  object that needs a key) is treated as differing - the strategy never skips on
+  an indeterminate compare.
 - **`check_size`** (default on) treats a known size mismatch as differing before
   any call or hash - a shortcut, and for s3->s3 a guard against a CRC collision.
 - **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` (hashlib) are
@@ -358,7 +373,7 @@ botocore client is safe to share for concurrent calls).
   argument. A `ProcessPoolExecutor` will not work (the predicate and its client
   are not picklable) - the pool must be thread-based.
 - **What each lane parallelizes.** The **update** lane pools its both-sides
-  (`dest is not None`) decision, the **new** lane its `create_filter`, the
+  (`SyncPair`) decision, the **new** lane its `create_filter`, the
   **delete** lane its `delete_filter` - each on its own executor when wrapped. A
   lane left unwrapped decides inline on the calling thread in compare-key order.
 - **Ordering.** Pooled decisions are consumed in completion order, so survivors

@@ -95,9 +95,9 @@ class SyncCommand(Command):
         )
 
         # One symmetric filter applied to both sides by S3.sync (sync.md section
-        # 1). It needs no root: a relative pattern matches each entry's
-        # compare_key, an absolute one its full key, so the same filter prunes
-        # the source and destination per-side (globsieve.Anchored).
+        # 1). It needs no source/destination path: a relative pattern matches
+        # each entry's compare_key, an absolute one its full key, so the same
+        # filter prunes the source and destination per-side (globsieve.Anchored).
         item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)

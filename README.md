@@ -15,8 +15,8 @@ Each command is a method on a single `S3` object, taking ordinary keyword
 arguments; bring a boto3 client when you need a specific profile, region, or
 endpoint.
 
-**Status:** early development (pre-1.0) — all subcommands are implemented; the
-public API may still change.
+**Status:** beta (pre-1.0), preparing for 1.0 — all subcommands are implemented;
+the public API may still change.
 **Python:** 3.10+ · **License:** Apache-2.0
 
 Two packages:
@@ -71,7 +71,8 @@ pip install "boto3-s3[crt]"
 
 Create the `S3` object once — it holds no connection of its own and needs no
 cleanup — then call what you need. Its own state is safe to share, but parallel
-operations require separate, prebuilt clients as described below.
+operations require separate, prebuilt clients — see
+[Running operations across threads](#running-operations-across-threads).
 
 ```python
 from boto3_s3 import S3
@@ -114,30 +115,68 @@ s3.sync("s3://my-bucket/site/", "./site")       # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 ```
 
+Unlike `aws s3 sync`, boto3-s3 can decide updates by content instead of size +
+mtime. Pass `EtagComparison` as the update strategy to copy changed content and
+skip unchanged content even when timestamps differ:
+
+```python
+from boto3_s3.etagcompare import EtagComparison
+
+s3.sync(
+    "./site",
+    "s3://my-bucket/site/",
+    update_filter=EtagComparison(s3),
+)
+```
+
+For S3-to-S3 sync this compares the ETags already returned by the listings,
+without reading object bodies. For upload and download it reads the non-S3 side
+and reconstructs its S3-style ETag. When many existing files need that work,
+run the comparison decisions concurrently on a caller-owned thread pool:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+from boto3_s3 import ParallelFilter
+
+with ThreadPoolExecutor(max_workers=16, thread_name_prefix="sync-etag") as pool:
+    s3.sync(
+        "./site",
+        "s3://my-bucket/site/",
+        update_filter=ParallelFilter(EtagComparison(s3), executor=pool),
+    )
+```
+
+`ParallelFilter` parallelizes only the update decisions; transfers continue to
+use the transfer engine's own concurrency. Multipart part size and server-side
+encryption affect when ETags are content-comparable; see the
+[ETag comparison details](https://github.com/izumo-m/boto3-s3/blob/main/docs/sync.md#8-etag-content-comparison-etagcomparison-opt-in).
+
 `sync` makes one of three decisions per entry — the same three cases as
 `aws s3 sync`, each with its own filter:
 
-- **`create_filter`** — whether to **create** an entry that is new (in the source,
-  not yet at the destination). `True` (default) creates every one; `False`
-  creates none; a predicate creates only the ones it keeps. (aws always creates;
-  this is the knob aws does not expose.)
-- **`update_filter`** — for an entry **present on both sides**, whether to
-  **overwrite** it: `None` (default) decides by size + mtime (equivalently
-  `AwsCliComparison()`, tuned via `AwsCliComparison(size_only=True)` /
-  `(exact_timestamps=True)`); `True` always, `False` never (leave existing
-  as-is); or a content strategy `EtagComparison(s3)` /
-  `ChecksumComparison(s3, src, dest)` (wrap any lane's filter in
-  `ParallelFilter(fn, executor=pool)` to decide on a caller-supplied thread pool).
+- **`create_filter`** — whether to **create** an entry that is new (in the
+  source, not yet at the destination). `True` (default) creates every new
+  entry; `False` creates none; a predicate creates the entries it returns
+  `True` for. aws always creates — this is the knob aws does not expose.
+- **`update_filter`** — whether to **overwrite** an entry that is present on
+  both sides. `None` (default) decides by size + mtime — the `aws s3 sync`
+  rule, equivalent to `AwsCliComparison()`. `True` always overwrites; `False`
+  never overwrites. A strategy object replaces the default rule:
+  `AwsCliComparison(size_only=True)` or `AwsCliComparison(exact_timestamps=True)`
+  tunes the aws decision, while `EtagComparison(s3)` and
+  `ChecksumComparison(s3, src, dest)` compare content.
 - **`delete_filter`** — whether to **delete** an orphan (at the destination, no
-  longer in the source). `False` (default) keeps orphans; `True` deletes every
-  one (`aws s3 sync --delete`); a predicate deletes only the ones it keeps. Items
-  hidden by `filter` stay out of deletion too, exactly like `aws s3 sync`.
+  longer in the source). `False` (default) keeps every orphan; `True` deletes
+  them all (`aws s3 sync --delete`); a predicate deletes the orphans it returns
+  `True` for. Orphans hidden by `filter` are never deleted, exactly like
+  `aws s3 sync`.
 
-`create_filter` and `delete_filter` are the two membership knobs (create / delete);
-`update_filter` is the overwrite judgment for the entries on both sides.
-`filter=` is separate — it decides which entries are **visible** at all (pruning
-both sides symmetrically, like `--exclude` / `--include`); **`dryrun=True`**
-previews every transfer and deletion first.
+Any of the three filters can be wrapped in `ParallelFilter(fn, executor=pool)`
+to run its per-entry decisions on a caller-supplied thread pool. `filter=` is
+separate from these three: it decides which entries are **visible** at all,
+pruning both sides symmetrically like `--exclude` / `--include`. **`dryrun=True`**
+previews every transfer and deletion without performing it.
 
 ```python
 # Full mirror: create new, overwrite changed, delete removed.
@@ -222,8 +261,8 @@ s3.cp(
 )
 ```
 
-An S3-compatible endpoint such as MinIO is just a differently-built client —
-set it on the `S3` for every location, or pass a single
+An S3-compatible endpoint such as MinIO is just a differently-built client.
+Build the `S3` object with that endpoint to use it for every location, or pass
 `S3Storage(url, client=minio)` when only one side needs it:
 
 ```python
@@ -359,8 +398,9 @@ Batch operations stream item records instead of returning a list:
 `cp` / `mv` / `sync` aren't limited to local paths and S3: a custom `Storage`
 subclass — an HTTP service, an archive, an in-memory store — can be **one side of
 a transfer, the other side always S3** (the built-in `IOStorage` /
-`StdioStorage` stream wrappers are this same seam). A backend declares its
-`capabilities`, which a transfer pre-checks, failing fast if it needs more.
+`StdioStorage` stream wrappers use this same extension point). A backend
+declares its `capabilities`; a transfer checks them up front and fails fast
+when it needs more.
 
 See **[`docs/storage.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/storage.md)**
 for the `Storage` contract, capabilities, and a worked example.
@@ -404,8 +444,8 @@ set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
 - **OS:** Linux, macOS, Windows (path-separator and case-sensitivity behavior is
   matched to `aws s3` on each).
 - **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2.
-  Features introduced by newer S3 models degrade rather than being emulated.
-  Notable examples include conditional writes (`no_overwrite`), `CRC64NVME`,
+  When the installed SDK predates a feature, boto3-s3 degrades gracefully
+  rather than emulating it. Notable examples include conditional writes (`no_overwrite`), `CRC64NVME`,
   paginated bucket filters, newer `mb` tags / account-regional namespace
   fields, S3 object annotations, `copy_props="all"`, and source-ETag response
   extras. CRT features need the `crt` extra. See

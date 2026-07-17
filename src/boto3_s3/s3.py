@@ -19,7 +19,7 @@ from concurrent.futures import Executor, Future
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from queue import Empty, Queue
-from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec, TypeVar, cast
 
 from typing_extensions import Unpack
 
@@ -27,8 +27,11 @@ from boto3_s3 import producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     Comparator,
+    DestOnlyPair,
+    MergedPair,
     PairFilter,
     ParallelFilter,
+    SrcOnlyPair,
     SyncPair,
 )
 from boto3_s3.deleter import S3Deleter
@@ -75,14 +78,14 @@ if TYPE_CHECKING:
 
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
-    """The prefix root an ``rm`` of ``key`` operates under (aws-cli parity).
+    """The filter prefix an ``rm`` of ``key`` operates under (aws-cli parity).
 
     A recursive target is normalized to end with ``/`` (aws-cli
     ``FileFormat.s3_format``): ``rm s3://b/data --recursive`` lists under
-    ``data/`` and does not touch ``data-sibling.txt``. A non-recursive key
-    roots at its parent "directory", and a bucket-root target at ``""``
+    ``data/`` and does not touch ``data-sibling.txt``. A non-recursive key uses
+    its parent directory, and a bucket-root target uses ``""``
     (aws-cli ``filters._get_s3_root``). ``--exclude`` / ``--include``
-    patterns resolve relative to this root, and the recursive listing uses
+    patterns resolve relative to this prefix, and the recursive listing uses
     it as the ``Prefix``. Always empty or ``/``-terminated.
     """
     if recursive:
@@ -127,50 +130,51 @@ def _is_folder_marker(info: FileInfo) -> bool:
     return info.size == 0 and info.key.endswith("/")
 
 
-def _always(_pair: SyncPair) -> bool:
+def _always(_pair: object) -> bool:
     """A lane decision that always acts (``create_filter=True`` copies every new
     entry, ``update_filter=True`` every update, ``delete_filter=True`` every orphan)."""
     return True
 
 
-def _never(_pair: SyncPair) -> bool:
+def _never(_pair: object) -> bool:
     """A lane decision that never acts (``create_filter=False`` no new entry,
     ``update_filter=False`` no update - additive-only, existing left as-is)."""
     return False
 
 
-def _create_via_filter(keep: FileFilter) -> PairFilter:
-    """``create_filter`` as a ``FileFilter``: copy a new (source-only) pair iff the
-    source entry is kept (matched like ``rm``)."""
+def _create_via_filter(keep: FileFilter) -> Callable[[SrcOnlyPair], bool]:
+    """``create_filter`` as a ``FileFilter``: copy a new (``SrcOnlyPair``) entry iff
+    its source entry is kept (matched like ``rm``)."""
 
-    def decide(pair: SyncPair) -> bool:
-        assert pair.src is not None  # a source-only (new) pair always has a source
+    def decide(pair: SrcOnlyPair) -> bool:
         return keep(pair.src)
 
     return decide
 
 
-def _delete_via_filter(keep: FileFilter) -> PairFilter:
-    """``delete_filter`` as a ``FileFilter``: delete a destination-only (orphan) pair
-    iff the destination entry is kept (matched like ``rm``)."""
+def _delete_via_filter(keep: FileFilter) -> Callable[[DestOnlyPair], bool]:
+    """``delete_filter`` as a ``FileFilter``: delete an orphan (``DestOnlyPair``)
+    iff its destination entry is kept (matched like ``rm``)."""
 
-    def decide(pair: SyncPair) -> bool:
-        assert pair.dest is not None  # a destination-only (orphan) pair always has a dest
+    def decide(pair: DestOnlyPair) -> bool:
         return keep(pair.dest)
 
     return decide
 
 
+_PairT = TypeVar("_PairT")
+
+
 def _resolve_side_lane(
     flt: bool | FileFilter | ParallelFilter[FileInfo],
-    wrap: Callable[[FileFilter], PairFilter],
-) -> tuple[PairFilter, Executor | None]:
+    wrap: Callable[[FileFilter], Callable[[_PairT], bool]],
+) -> tuple[Callable[[_PairT], bool], Executor | None]:
     """Resolve a create / delete lane's filter to ``(decide, executor)``.
 
     ``True`` acts on every pair, ``False`` on none; a ``FileFilter`` is turned by
-    ``wrap`` (``_create_via_filter`` / ``_delete_via_filter``) into a ``PairFilter``
-    over the lane's one side; a ``ParallelFilter`` unwraps to that same filter plus
-    the caller's pool (the executor its ``decide`` should run on).
+    ``wrap`` (``_create_via_filter`` / ``_delete_via_filter``) into a decision
+    over the lane's pair shape; a ``ParallelFilter`` unwraps to that same filter
+    plus the caller's pool (the executor its ``decide`` should run on).
     """
     if flt is True:
         return _always, None
@@ -199,36 +203,37 @@ def _pool_window(executor: Executor) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class _Lane:
+class _Lane(Generic[_PairT]):
     """One of ``S3.sync``'s three pair lanes: how to decide and act on it.
 
-    ``decide`` is the ``PairFilter`` selecting whether to act on a pair;
-    ``submit`` performs it (``submit_copy`` for create / update, ``submit_delete``
-    for delete). ``executor`` is the caller's pool when the lane's filter was
-    wrapped in ``ParallelFilter`` - then ``decide`` runs
+    ``_PairT`` is the lane's pair shape (``SrcOnlyPair`` / ``SyncPair`` /
+    ``DestOnlyPair``). ``decide`` is the predicate selecting whether to act on a
+    pair; ``submit`` performs it (``submit_copy`` for create / update,
+    ``submit_delete`` for delete). ``executor`` is the caller's pool when the
+    lane's filter was wrapped in ``ParallelFilter`` - then ``decide`` runs
     there and ``submit`` runs on the calling thread once the result is in; ``None``
     runs both inline in compare-key order.
     """
 
-    decide: PairFilter
-    submit: Callable[[SyncPair], None]
+    decide: Callable[[_PairT], bool]
+    submit: Callable[[_PairT], None]
     executor: Executor | None
 
 
 def _run_sync_pairs(
-    pairs: Iterator[SyncPair],
+    pairs: Iterator[MergedPair],
     *,
-    create_lane: _Lane,
-    update_lane: _Lane | None,
-    delete_lane: _Lane | None,
+    create_lane: _Lane[SrcOnlyPair],
+    update_lane: _Lane[SyncPair] | None,
+    delete_lane: _Lane[DestOnlyPair] | None,
     cancel_token: CancelToken | None,
 ) -> None:
     """Drive ``S3.sync``'s pair loop, routing each pair to its lane.
 
-    Each pair lands in exactly one lane by which sides it has: a source-only
-    (new) pair -> ``create_lane``, a both-sides (update) pair -> ``update_lane``
-    (``None`` when ``no_overwrite`` rules every update out), a destination-only
-    (orphan) pair -> ``delete_lane`` (``None`` when ``--delete`` is off). A lane
+    Each pair lands in exactly one lane by its type: a ``SrcOnlyPair`` (new)
+    -> ``create_lane``, a ``SyncPair`` (update) -> ``update_lane``
+    (``None`` when ``no_overwrite`` rules every update out), a ``DestOnlyPair``
+    (orphan) -> ``delete_lane`` (``None`` when ``--delete`` is off). A lane
     carrying an ``executor`` runs its ``decide`` on that pool; the survivors'
     ``submit`` (and the gates it reaches - the case-conflict gate, glacier, etc.)
     always run on this calling thread. Pooled decisions are consumed in
@@ -245,6 +250,10 @@ def _run_sync_pairs(
     """
 
     pending: set[Future[bool]] = set()
+    # A pooled decision's completion delivers its pre-bound submit (the lane's
+    # ``submit`` closed over its pair), so the queue needs no pair/lane fields -
+    # each lane keeps its own pair shape without a shared existential type.
+    done: Queue[tuple[Callable[[], None], Future[bool]]] = Queue()
 
     def settle_pending(*, cancel: bool) -> None:
         """Optionally cancel queued decisions, then await every accepted one."""
@@ -264,10 +273,29 @@ def _run_sync_pairs(
         settle_pending(cancel=cancel_token.mode is CancelMode.IMMEDIATE)
         raise CancelledError("sync was cancelled", operation="sync")
 
-    def lane_for(pair: SyncPair) -> _Lane | None:
-        if pair.src is not None:
-            return create_lane if pair.dest is None else update_lane
-        return delete_lane
+    def handle(lane: _Lane[_PairT] | None, pair: _PairT) -> bool:
+        """Decide-and-act on one routed pair; ``True`` iff a decision was pooled."""
+        if lane is None:
+            return False
+        executor = lane.executor
+        if executor is None:
+            accepted = lane.decide(pair)
+            stop_if_cancelled()
+            if accepted:
+                lane.submit(pair)
+            return False
+        future = executor.submit(lane.decide, pair)
+        pending.add(future)
+        submit = functools.partial(lane.submit, pair)
+        future.add_done_callback(lambda f: done.put((submit, f)))
+        return True
+
+    def handle_pair(pair: MergedPair) -> bool:
+        if isinstance(pair, SrcOnlyPair):
+            return handle(create_lane, pair)
+        if isinstance(pair, SyncPair):
+            return handle(update_lane, pair)
+        return handle(delete_lane, pair)
 
     stop_if_cancelled()
 
@@ -286,16 +314,10 @@ def _run_sync_pairs(
     if not pools:
         for pair in pairs:
             stop_if_cancelled()
-            lane = lane_for(pair)
-            if lane is not None:
-                accepted = lane.decide(pair)
-                stop_if_cancelled()
-                if accepted:
-                    lane.submit(pair)
+            handle_pair(pair)
         return
 
     cap = sum(_pool_window(pool) for pool in pools)
-    done: Queue[tuple[SyncPair, Future[bool], _Lane]] = Queue()
     pairs_iter = iter(pairs)
 
     def dispatch() -> bool:
@@ -304,19 +326,8 @@ def _run_sync_pairs(
         # stream is exhausted (return False).
         for pair in pairs_iter:
             stop_if_cancelled()
-            lane = lane_for(pair)
-            if lane is None:
-                continue
-            if lane.executor is None:
-                accepted = lane.decide(pair)
-                stop_if_cancelled()
-                if accepted:
-                    lane.submit(pair)
-                continue
-            future = lane.executor.submit(lane.decide, pair)
-            pending.add(future)
-            future.add_done_callback(lambda f, p=pair, ln=lane: done.put((p, f, ln)))
-            return True
+            if handle_pair(pair):
+                return True
         return False
 
     try:
@@ -326,14 +337,14 @@ def _run_sync_pairs(
         while inflight:
             stop_if_cancelled()
             try:
-                pair, future, lane = done.get(timeout=0.1)
+                submit, future = done.get(timeout=0.1)
             except Empty:
                 continue
             pending.discard(future)
             inflight -= 1
             stop_if_cancelled()
             if future.result():
-                lane.submit(pair)
+                submit()
             if dispatch():
                 inflight += 1
     finally:
@@ -458,10 +469,9 @@ class _SyncDeletes:
             return self._deleter.first_error
         return self._local_first_error
 
-    def submit(self, pair: SyncPair) -> None:
+    def submit(self, pair: DestOnlyPair) -> None:
         """Dispatch one destination orphan through the S3 or backend delete route."""
         info = pair.dest
-        assert info is not None  # the delete lane runs only on destination-only pairs
         dest = self._dest
         if isinstance(dest, S3Storage):
             if self._dryrun:
@@ -838,9 +848,9 @@ class S3:
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
-        ``compare_key`` is stamped to the source path relative to the transfer
-        root - a `GlobFilter` matches that key (a
-        relative pattern) or the full ``key`` (an absolute one) while a richer
+        ``compare_key`` is stamped relative to the source directory or S3
+        ``Prefix`` - a `GlobFilter` matches that key (a relative pattern) or the
+        full ``key`` (an absolute one) while a richer
         predicate can read size / mtime / storage_class. On the stream route (an
         ``IOStorage`` on one side) there is no listing to prune, so ``filter``
         does not apply - aws-cli applies no filter to a stream either.
@@ -992,6 +1002,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
         # into the shared rollup (aws's reverse enumeration shares the result
@@ -1171,6 +1182,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         with transferrer:
             if dryrun:
@@ -1324,9 +1336,9 @@ class S3:
 
         - **Visibility** - both listings are pruned independently *before*
           the sides meet by the single ``filter``, a
-          `FileFilter` applied to each side's
-          root-relative compare key - so it prunes the source and the
-          destination **symmetrically** (matching aws, which evaluates
+          `FileFilter` applied to each side's `compare_key` (directory-relative
+          for local entries, ``Prefix``-relative for S3 entries) - so it prunes
+          the source and destination **symmetrically** (matching aws, which evaluates
           ``--exclude`` / ``--include`` against both sides). Folder markers
           (zero-byte ``/``-terminated objects) never surface on either side -
           sync neither transfers nor deletes them. Because pruning is
@@ -1337,22 +1349,22 @@ class S3:
           belongs in the pair layer below (``create_filter`` / ``update_filter``
           / ``delete_filter``).
         - **Pair decisions** - the surviving streams are merge-joined by
-          compare key (`Comparator`) and each
-          `SyncPair` lands in exactly one of three
-          lanes by which sides it has, each a filter deciding whether to act:
+          compare key (`Comparator`) and each resulting pair lands in exactly
+          one of three lanes by its type (`MergedPair` - the shape says which
+          sides hold the key), each a filter deciding whether to act:
           **create** a new entry, **overwrite** one on both sides, or **delete**
           an orphan. ``create_filter`` and ``delete_filter`` are the two
           membership knobs (create / delete) - duals of each other;
           ``update_filter`` is the overwrite judgment for the intersection. The
           aws equivalent is the default of all three:
 
-          - ``create_filter`` - the **new** (source-only) entries: ``True``
+          - ``create_filter`` - the **new** (`SrcOnlyPair`) entries: ``True``
             (default) copies every one, ``False`` none, a
             `FileFilter` only those it keeps (matched
             against the source ``FileInfo`` / compare key, the same shape as
             ``rm``'s ``filter``). aws hard-codes "always create"
             (``file_not_at_dest``), so this knob has no aws counterpart.
-          - ``update_filter`` - the **update** (both-sides) pairs: ``None``
+          - ``update_filter`` - the **update** (`SyncPair`) pairs: ``None``
             (default) is the aws-cli size + last-modified judgment, equivalently
             ``AwsCliComparison()`` - tune it with
             ``AwsCliComparison(size_only=...)`` / ``(exact_timestamps=...)``;
@@ -1361,9 +1373,9 @@ class S3:
             `PairFilter` is a custom strategy - the
             content building blocks ``EtagComparison`` / ``ChecksumComparison``
             (submodule imports) are drop-in replacements that compare by
-            content. A custom strategy is only ever handed an update pair, so it
-            never faces a ``None`` side.
-          - ``delete_filter`` - the **orphan** (destination-only) entries:
+            content. A `SyncPair` always carries both sides, so a custom
+            strategy reads ``pair.src`` / ``pair.dest`` directly.
+          - ``delete_filter`` - the **orphan** (`DestOnlyPair`) entries:
             ``False`` (default) deletes nothing, ``True`` deletes every one
             (aws ``--delete``), a `FileFilter` only those
             it keeps (same shape as ``rm``'s ``filter``).
@@ -1382,7 +1394,7 @@ class S3:
 
         Transfers run on the engine with cp's gates (glacier, the
         parent-directory guard, the ``--case-conflict`` gate for downloads -
-        applied only to pairs missing at the destination, the aws-cli slot).
+        applied only to `SrcOnlyPair`s, the aws-cli not-at-dest slot).
         Deletions are dispatched as they stream: batched ``DeleteObjects`` for
         an S3 destination, with XML-incompatible keys falling back to
         ``DeleteObject`` (the ``rm`` machinery; ``request_payer`` forwarded),
@@ -1436,9 +1448,10 @@ class S3:
         # write ``sync(no_overwrite=True)``): strip it from the engine options
         # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
         no_overwrite = options.pop("no_overwrite", False)
-        # Each lane resolves to (decide, executor): the PairFilter selecting
-        # whether to act, and the caller's pool when the filter was a
-        # ParallelFilter (else None = decide inline on the calling thread).
+        # Each lane resolves to (decide, executor): the predicate over the
+        # lane's pair shape selecting whether to act, and the caller's pool when
+        # the filter was a ParallelFilter (else None = decide inline on the
+        # calling thread).
         # create_filter: True copies every new (source-only) entry, False none, a
         # FileFilter only those it keeps (matched like rm).
         create_decide, create_pool = _resolve_side_lane(create_filter, _create_via_filter)
@@ -1483,6 +1496,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            session=self._session,
         )
         deletes = _SyncDeletes(
             dest_storage,
@@ -1515,7 +1529,7 @@ class S3:
             )
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
 
-            def submit_copy(pair: SyncPair) -> None:
+            def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
                 item = producers.sync_transfer_item(
                     plan,
                     pair,
@@ -1534,7 +1548,7 @@ class S3:
                 else:
                     transferrer.submit(item)
 
-            def submit_delete(pair: SyncPair) -> None:
+            def submit_delete(pair: DestOnlyPair) -> None:
                 deletes.submit(pair)
 
             # no_overwrite rules out every update up front (an existing
@@ -1596,8 +1610,8 @@ class S3:
 
         ``filter`` keeps an item in the deletion when it is *included*: a
         ``Callable[[FileInfo], bool]`` over the entry's ``FileInfo``. Its
-        ``compare_key`` is stamped to the key relative to `rm_filter_root`
-        before the call, so a `GlobFilter` matches
+        ``compare_key`` is stamped to the key relative to the prefix returned by
+        `rm_filter_root` before the call, so a `GlobFilter` matches
         that key (the CLI maps ``--exclude`` / ``--include`` here) while a
         richer predicate can read ``size`` / ``mtime`` / ``storage_class`` (on
         the blind single-key path ``size`` / ``mtime`` / ``storage_class`` are
@@ -1663,6 +1677,7 @@ class S3:
                 _raise_if_cancelled(cancel_token, "rm")
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
                 _raise_if_cancelled(cancel_token, "rm")
+            _raise_if_cancelled(cancel_token, "rm")
             return
 
         with S3Deleter(
@@ -1692,8 +1707,8 @@ class S3:
     def _rm_scan_filter(item_filter: FileFilter | None, *, sweep: bool) -> FileFilter | None:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
-        The scan stamps each entry's root-relative ``compare_key`` (the listing is
-        anchored at the prefix), so a glob/user filter reads it directly. The
+        The scan stamps each entry's ``Prefix``-relative ``compare_key``, so a
+        glob/user filter reads it directly. The
         keyless sweep additionally restricts to folder markers (marker test first,
         then the user filter - aws-cli order). ``None`` when there is nothing to
         test, so unfiltered paths pay no per-object call. Evaluated page by page on
@@ -1720,8 +1735,8 @@ class S3:
         """The blind single-key path (no listing; aws ``_list_single_object``).
 
         No scan runs here, so the entry's ``compare_key`` (its key relative to
-        ``root`` = `rm_filter_root`, what a glob filter matches) is stamped
-        on the hand-built ``FileInfo``.
+        the prefix returned by `rm_filter_root`, what a glob filter matches) is
+        stamped on the hand-built ``FileInfo``.
         """
         key = storage.key
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)

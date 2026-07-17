@@ -35,7 +35,7 @@ class FileKind(enum.Enum):
 
 @dataclass(slots=True, kw_only=True)
 class FileInfo:
-    """Cross-backend listing entry yielded by `Storage.scan` or delivered by `S3.ls`.
+    """Cross-backend entry produced by `Storage` or delivered by `S3.ls`.
 
     One uniform type for every entry a backend can list: files, directories /
     prefixes, and buckets are distinguished by ``kind``, not by separate
@@ -50,23 +50,27 @@ class FileInfo:
     a relative path and never platform ``os.sep``. It doubles as the
     cross-backend merge/sort key: two ``Storage.scan`` streams
     ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
-    is relativized to its scan root, so every backend must emit ``/``-separated
+    is expressed as ``compare_key``, so every backend must emit ``/``-separated
     keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
     populated for ``FILE`` entries and may be ``None`` for directories /
     prefixes; ``BUCKET`` entries carry the bucket's ``CreationDate`` as ``mtime``
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.
 
-    ``compare_key`` is the entry's key *relative to its scan root* - the
-    ``--exclude`` / ``--include`` matching space, and the axis ``sync`` merge-joins
-    on (two ``scan`` sides relativized to their roots share one ``compare_key``
-    space, while ``key`` stays the full identifier the transfer / delete uses and
-    differs per side). Each backend's ``scan_pages`` stamps it on every entry it
+    ``compare_key`` is the relative form of the entry's key: for a local scan,
+    the key relative to the directory being enumerated; for an S3 object listing,
+    the entry key with the ``ListObjectsV2`` ``Prefix`` removed. A bucket listing
+    uses the bucket name unchanged. It is the ``--exclude`` / ``--include``
+    matching space and the axis ``sync`` merge-joins on (two
+    ``scan`` sides expressed as ``compare_key`` share one key space, while ``key``
+    stays the full identifier the transfer / delete uses and differs per side).
+    Each backend's ``scan_pages`` stamps it on every entry it
     yields (a contract of the backend's listing, not of the base ``Storage.scan``),
     so a custom ``ScanOptions.filter`` predicate - notably ``GlobFilter`` - matches
-    the root-relative key directly, without re-deriving it from ``key``. The name
-    mirrors aws-cli's ``FileInfo.compare_key``. It is ``None`` only on a
-    ``FileInfo`` built by hand rather than produced by ``scan``.
+    it directly without re-deriving it from ``key``. The built-in
+    ``get_fileinfo`` methods use the basename for a single entry. The name mirrors
+    aws-cli's ``FileInfo.compare_key``; a hand-built ``FileInfo`` may leave it as
+    ``None``.
 
     ``storage`` is the backend the entry was listed from - the ``Storage`` whose
     ``scan`` (or single-key path) produced it - stamped by the producer during the
@@ -94,7 +98,7 @@ class LocalFileInfo(FileInfo):
     """``FileInfo`` for a local filesystem entry.
 
     Its ``key`` is the **absolute** path with ``os.sep`` normalized to ``/``
-    (``LocalStorage`` anchors every scan at the absolutized root); ``to_native_path``
+    (``LocalStorage`` anchors every scan at its absolutized ``path``); ``to_native_path``
     turns it back into a host path for I/O. ``key`` keeps the path *as walked* -
     a symlinked directory or file stays under its link name, never resolved to
     the target (``follow_symlinks=True`` only follows to descend / stat, matching
@@ -171,7 +175,7 @@ class ScanOptions:
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
     prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
     / ``mv``, and sync's *visibility* layer: each side's listing is pruned
-    independently (its own ``--exclude`` / ``--include`` root) before the
+    independently (its own ``--exclude`` / ``--include`` matching space) before the
     comparator pairs the streams - which is exactly why filtered-out destination
     entries are protected from ``--delete`` (an entry a producer does not return
     is simply absent, so it is not a delete candidate). Keep the predicate
@@ -418,7 +422,12 @@ class CancelToken:
 
     def __init__(self) -> None:
         self._event = threading.Event()
-        self._lock = threading.Lock()
+        # RLock, not Lock: cancel() is signal-handler-safe by contract, and a
+        # CPython signal handler runs on the main thread - it must be able to
+        # re-enter while that same thread holds the lock inside mode/cancel.
+        # The monotonic check-then-set stays correct under such re-entry
+        # because every write branch re-reads _mode.
+        self._lock = threading.RLock()
         self._mode: CancelMode | None = None
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
@@ -492,8 +501,8 @@ ListingCallback = Callable[[FileInfo], None]
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
 # visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
 # predicate over the ``FileInfo`` returning True to keep the entry. The operation
-# stamps ``info.compare_key`` (the key relative to its root, aws-cli
-# --exclude/--include space) before consulting it, so a glob predicate matches
+# stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space)
+# before consulting it, so a glob predicate matches
 # ``compare_key`` while a richer predicate can decide on ``size`` / ``mtime`` /
 # ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``
 # (e.g. a HeadObject for a tag the listing omits).

@@ -46,7 +46,7 @@ def _keys(
     for info in LocalStorage(root, **config).walk_local(on_warning=on_warning):
         assert info.key.startswith(prefix)
         rel = info.key[len(prefix) :]
-        # walk_local stamps compare_key with this same root-relative key.
+        # walk_local stamps compare_key with this same directory-relative key.
         assert info.compare_key == rel
         out.append(rel)
     return out
@@ -87,6 +87,22 @@ class TestWalkWarnings:
         ]
 
     @skip_if_chmod_is_inert
+    def test_no_follow_unreadable_root_warning_drops_the_separator(self, tmp_path: Path) -> None:
+        # aws-cli's should_ignore_file rebinds the separator-stripped path
+        # before its warning battery in the no-follow mode, so the warning
+        # names the scanned root without the trailing separator (the default
+        # follow mode strips nothing on either side and keeps it).
+        _make_tree(tmp_path, "locked/inner.txt")
+        locked = tmp_path / "locked"
+        locked.chmod(0)
+        warnings: list[str] = []
+        try:
+            assert _keys(locked, follow_symlinks=False, on_warning=warnings.append) == []
+        finally:
+            locked.chmod(0o755)
+        assert warnings == [f"Skipping file {locked}. File/Directory is not readable."]
+
+    @skip_if_chmod_is_inert
     def test_unreadable_directory_warns_once_and_prunes(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt", "locked/inner.txt")
         (tmp_path / "locked").chmod(0)
@@ -96,6 +112,65 @@ class TestWalkWarnings:
         finally:
             (tmp_path / "locked").chmod(0o755)
         assert len(warnings) == 1 and "is not readable" in warnings[0]
+
+    def test_probe_failure_of_a_vanished_entry_warns_does_not_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli vets by full path with the existence probe first, so an entry
+        # whose readability probe fails *because the full path no longer
+        # resolves* (raced away since the stat; on Windows an over-MAX_PATH
+        # path) warns "does not exist" there, never "not readable". Simulate
+        # the race: the probe deletes the entry, then reports failure.
+        _make_tree(tmp_path, "ok.txt", "gone.txt")
+
+        def _vanish(name: str, full: str, dir_fd: int | None, *, is_dir: bool) -> bool:
+            if name == "gone.txt":
+                os.unlink(tmp_path / "gone.txt")
+                return False
+            return True
+
+        monkeypatch.setattr("boto3_s3.localstorage._is_readable_child", _vanish)
+        warnings: list[str] = []
+        assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
+        assert warnings == [f"Skipping file {tmp_path / 'gone.txt'}. File does not exist."]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH band")
+    def test_over_max_path_entries_warn_does_not_exist_like_aws(self, tmp_path: Path) -> None:
+        # With long paths disabled (LongPathsEnabled=0, the Windows default) a
+        # full path over MAX_PATH fails every full-path syscall, while the
+        # scandir-cached stat still vets the entry - so the readability probe
+        # is what catches it, and its failure path must pick aws's "File does
+        # not exist." wording (aws.exe gives the same skip set, same wording,
+        # rc 2). The fixtures ride the \\?\ extended-length prefix, which
+        # bypasses the limit at creation time only.
+        ext = "\\\\?\\"
+        long_file = tmp_path / ("n" * 250)  # over 260 under any tmp root
+        long_dir = tmp_path / ("m" * 250)  # the directory itself crosses
+        with open(ext + str(long_file), "wb") as f:
+            f.write(b"x")
+        os.mkdir(ext + str(long_dir))
+        with open(ext + str(long_dir / "inner.txt"), "wb") as f:
+            f.write(b"x")
+        try:
+            try:
+                os.stat(str(long_file))
+            except OSError:
+                pass
+            else:
+                pytest.skip("long-path support is enabled; the MAX_PATH band does not exist")
+            _make_tree(tmp_path, "ok.txt")
+            warnings: list[str] = []
+            assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
+            assert sorted(warnings) == [
+                f"Skipping file {long_dir}. File does not exist.",
+                f"Skipping file {long_file}. File does not exist.",
+            ]
+        finally:
+            # pytest's own tmp cleanup runs without the \\?\ prefix and would
+            # trip over these; remove them the way they were made.
+            os.unlink(ext + str(long_dir / "inner.txt"))
+            os.rmdir(ext + str(long_dir))
+            os.unlink(ext + str(long_file))
 
     def test_symlink_cycle_descent_warns_like_aws(self, tmp_path: Path) -> None:
         # A directory cycle without detect_symlink_loops (the aws-parity mode):
@@ -184,6 +259,57 @@ class TestWalkWarnings:
         infos = list(LocalStorage(str(tmp_path)).walk_local(on_warning=warnings.append))
         assert [info.mtime for info in infos] == [datetime(1970, 1, 1, tzinfo=timezone.utc)]
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+
+
+class TestFullPathBoundaryProbe:
+    """The fd-relative fast walk re-vets a file leaf by full path near the OS
+    limits (`crosses_full_path_boundary`). PATH_MAX is a byte limit, so the
+    length floor counts bytes: a multibyte path must reach the probe at a few
+    hundred characters (a 1024-byte PATH_MAX host would otherwise admit a
+    leaf that aws-cli's full-path stat warn-skips)."""
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="targets the POSIX dir_fd fast path; Windows length limits "
+        "depend on the LongPathsEnabled policy",
+    )
+    def test_length_floor_counts_bytes_not_characters(self, tmp_path: Path) -> None:
+        recorded: list[str] = []
+
+        class _Recording(LocalFileGenerator):
+            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
+                recorded.append(path)
+                return super().triggers_warning(path, notify)
+
+        # A leaf whose full path is >= 1000 bytes but far below 1000
+        # characters (CJK components: 3 bytes per character in UTF-8). The
+        # tree must land just past the floor, not overshoot by a whole
+        # component: macOS caps a full path at 1024 bytes, so an overshot
+        # tree fails at mkdir before the walk ever runs.
+        component = "あ" * 80  # 80 characters, 240 bytes
+        leaf_bytes = len(os.fsencode(os.sep + "f.txt"))
+        parent = tmp_path
+        while (pad := 1000 - leaf_bytes - 1 - len(os.fsencode(str(parent)))) > 240:
+            parent = parent / component
+        # A zero pad still needs a final component; 3 extra bytes stay far
+        # under the 1024-byte cap.
+        parent = parent / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
+        parent.mkdir(parents=True)
+        (parent / "f.txt").write_bytes(b"x")
+        (tmp_path / "short.txt").write_bytes(b"x")
+        full = str(parent / "f.txt")
+        assert len(full) < 1000 and 1000 <= len(os.fsencode(full)) < 1024
+
+        storage = LocalStorage(str(tmp_path), walker=_Recording())
+        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
+        # This host's PATH_MAX sits above the floor, so the full-path battery
+        # finds nothing wrong and the leaf stays in the scan set; the point is
+        # that the byte-measured floor consulted it at all.
+        assert any(key.endswith("f.txt") for key in keys)
+        assert full in recorded
+        # An ordinary short leaf stays off the probe (fsencode never runs on
+        # the hot path, and the battery is never consulted for it).
+        assert str(tmp_path / "short.txt") not in recorded
 
 
 class TestSymlinks:
@@ -470,9 +596,11 @@ class TestWalkIsCustomizable:
 class TestEnumerateAllEntries:
     """The complete filesystem-entry view selected before filtering."""
 
-    def test_complete_view_surfaces_every_directory_and_the_root(self, tmp_path: Path) -> None:
-        # Complete enumeration includes the walk root:
-        # its record leads the stream at compare_key "" (sorts before every
+    def test_complete_view_surfaces_every_directory_and_scanned_directory(
+        self, tmp_path: Path
+    ) -> None:
+        # Complete enumeration includes the scanned directory. Its record leads
+        # the stream at compare_key "" (sorts before every
         # child key). foo/ lands between foo.txt and foo/bar ('.' < '/'), and
         # an empty directory surfaces despite owning no files.
         _make_tree(tmp_path, "a.txt", "foo.txt", "foo/bar")
@@ -485,9 +613,9 @@ class TestEnumerateAllEntries:
         assert kinds[""] is FileKind.DIRECTORY
         assert kinds["foo/"] is FileKind.DIRECTORY
         assert kinds["foo/bar"] is FileKind.FILE
-        root = infos[0]
-        assert root.stat_result is not None
-        assert root.key.endswith("/")  # the walk anchor, separator-folded
+        scanned_directory = infos[0]
+        assert scanned_directory.stat_result is not None
+        assert scanned_directory.key.endswith("/")  # the walk anchor, separator-folded
 
     def test_complete_no_follow_view_keeps_links_as_lstat_leaves(self, tmp_path: Path) -> None:
         # Complete no-follow enumeration returns every link as an lstat-based leaf. The dir
@@ -566,6 +694,10 @@ class TestEnumerateAllEntries:
             f"Skipping file {loop}. File does not exist.",
         }
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows caches DirEntry lstat metadata, so this unlink race is not reproducible",
+    )
     def test_complete_followed_view_reports_once_when_link_disappears_before_lstat(
         self, tmp_path: Path
     ) -> None:
@@ -656,10 +788,10 @@ class TestEnumerateAllEntries:
         assert infos[1].stat_result is not None
         assert len(warnings) == 1 and "is not readable" in warnings[0]
 
-    def test_root_record_and_the_scan_filter_on_its_empty_key(self, tmp_path: Path) -> None:
-        # The root's compare_key is "": a glob '*' matches it (fnmatch), a
-        # non-empty literal does not - so an exclude-everything filter drops
-        # the root record too, while a targeted exclude leaves it standing.
+    def test_scanned_directory_record_and_filter_on_its_empty_key(self, tmp_path: Path) -> None:
+        # The scanned directory's compare_key is "": a glob '*' matches it
+        # (fnmatch), while a non-empty literal does not. An exclude-everything
+        # filter drops that record too; a targeted exclude leaves it standing.
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
@@ -671,7 +803,7 @@ class TestEnumerateAllEntries:
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_non_recursive_complete_view_returns_root_and_immediate_entries(
+    def test_non_recursive_complete_view_returns_scanned_directory_and_immediate_entries(
         self, tmp_path: Path
     ) -> None:
         _make_tree(tmp_path, "real/inner.txt", "target.txt")
@@ -695,12 +827,12 @@ class TestEnumerateAllEntries:
             ("target.txt", FileKind.FILE, False),
         ]
 
-    def test_non_recursive_root_record_obeys_the_scan_filter_on_its_empty_key(
+    def test_non_recursive_scanned_directory_record_obeys_filter_on_empty_key(
         self, tmp_path: Path
     ) -> None:
-        # Same empty-key filter contract as the recursive root: a glob '*'
-        # matches "" so exclude-all drops the root too, a non-empty literal
-        # does not so a targeted exclude leaves it standing.
+        # Same empty-key filter contract as the recursive scanned-directory
+        # record: a glob '*' matches "" so exclude-all drops the record too; a
+        # non-empty literal does not, so a targeted exclude leaves it standing.
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
@@ -712,12 +844,12 @@ class TestEnumerateAllEntries:
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
-    def test_complete_leaf_root_is_the_only_entry_for_both_scan_shapes(
+    def test_complete_scanned_file_is_the_only_entry_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
-        root = tmp_path / "one.txt"
-        root.write_bytes(b"one")
-        storage = LocalStorage(root)
+        scanned_file = tmp_path / "one.txt"
+        scanned_file.write_bytes(b"one")
+        storage = LocalStorage(scanned_file)
 
         for recursive in (True, False):
             infos = list(
@@ -726,7 +858,7 @@ class TestEnumerateAllEntries:
             assert [(i.compare_key, i.kind, i.size) for i in infos] == [("", FileKind.FILE, 3)]
             assert infos[0].stat_result is not None
 
-    def test_complete_no_follow_symlink_root_is_an_lstat_leaf_for_both_scan_shapes(
+    def test_complete_no_follow_scanned_symlink_is_lstat_leaf_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
         real = tmp_path / "real"
@@ -753,13 +885,13 @@ class TestEnumerateAllEntries:
         assert warnings == []
 
     @skip_if_chmod_is_inert
-    def test_unreadable_root_record_survives_failed_descent_for_both_scan_shapes(
+    def test_unreadable_scanned_directory_survives_failed_descent_for_both_scan_shapes(
         self, tmp_path: Path
     ) -> None:
-        root = tmp_path / "locked"
-        root.mkdir()
-        (root / "a.txt").write_bytes(b"x")
-        root.chmod(0)
+        scanned_directory = tmp_path / "locked"
+        scanned_directory.mkdir()
+        (scanned_directory / "a.txt").write_bytes(b"x")
+        scanned_directory.chmod(0)
         outcomes: list[tuple[list[str], list[str]]] = []
         try:
             for recursive in (True, False):
@@ -769,10 +901,10 @@ class TestEnumerateAllEntries:
                     enumerate_all_entries=True,
                     on_warning=warnings.append,
                 )
-                keys = [i.compare_key for i in LocalStorage(str(root)).scan(opts)]
+                keys = [i.compare_key for i in LocalStorage(str(scanned_directory)).scan(opts)]
                 outcomes.append((keys, warnings))
         finally:
-            root.chmod(0o755)
+            scanned_directory.chmod(0o755)
         assert outcomes[0] == outcomes[1]
         assert outcomes[0][0] == [""]
         assert len(outcomes[0][1]) == 1 and "is not readable" in outcomes[0][1][0]
@@ -782,9 +914,10 @@ class TestScanPagesAreScandirAligned:
     """``scan_pages`` hands off one page per directory file-run (one ``os.scandir``)."""
 
     def test_pages_fall_on_directory_boundaries(self, tmp_path: Path) -> None:
-        # root=[a.txt, sub/, z.txt], sub=[b.txt]. Byte order interleaves sub's
-        # page between root's two file-runs, so the pages are [a.txt], [sub/b.txt],
-        # [z.txt] - not one arbitrary fixed-size batch.
+        # scanned directory=[a.txt, sub/, z.txt], sub=[b.txt]. Byte order
+        # interleaves sub's page between the scanned directory's two file-runs,
+        # so the pages are [a.txt], [sub/b.txt], [z.txt] - not one arbitrary
+        # fixed-size batch.
         _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
         pages = [
             [info.compare_key for info in page]
@@ -939,7 +1072,7 @@ class TestLocalStorageScan:
         infos = list(LocalStorage(tmp_path).scan(LocalScanOptions(recursive=True)))
         prefix = str(tmp_path).replace(os.sep, "/")
         assert [info.key for info in infos] == [f"{prefix}/a.txt", f"{prefix}/a/inner.txt"]
-        # scan stamps the root-relative compare_key on every entry.
+        # scan stamps the directory-relative compare_key on every entry.
         assert [info.compare_key for info in infos] == ["a.txt", "a/inner.txt"]
 
     def test_non_recursive_lists_one_level_with_directories(self, tmp_path: Path) -> None:

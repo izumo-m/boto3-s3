@@ -176,7 +176,7 @@ def _s3(key: str = "obj", *, size: int | None = None) -> S3FileInfo:
     return S3FileInfo(key=key, size=size)
 
 
-def _storage_for(info: FileInfo | None) -> Storage | None:
+def _storage_for(info: FileInfo) -> Storage | None:
     """A LocalStorage rooted at a local side's parent dir, so ``open(compare_key)``
     reaches the real file the strategy hashes."""
     if isinstance(info, LocalFileInfo):
@@ -184,15 +184,11 @@ def _storage_for(info: FileInfo | None) -> Storage | None:
     return None
 
 
-def _pair(
-    transfer_type: TransferType, *, src: FileInfo | None = None, dest: FileInfo | None = None
-) -> SyncPair:
+def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> SyncPair:
     # The backend rides on each side's FileInfo; the strategy reads pair.src.storage
     # / pair.dest.storage to open the readable (local) side.
-    if src is not None:
-        src.storage = _storage_for(src)
-    if dest is not None:
-        dest.storage = _storage_for(dest)
+    src.storage = _storage_for(src)
+    dest.storage = _storage_for(dest)
     return SyncPair(key="obj", transfer_type=transfer_type, src=src, dest=dest)
 
 
@@ -245,22 +241,6 @@ class TestConstruction:
             _Counting("s3://b/q"),
         )
         assert calls == ["a", "b"]
-
-
-# -- new / missing / unsupported sides ----------------------------------------
-
-
-class TestNewAndMissingSides:
-    @pytest.mark.parametrize("transfer_type", list(TransferType))
-    def test_dest_none_always_copies(self, transfer_type: TransferType) -> None:
-        f = _upload_filter(_FakeClient({}))
-        assert f(_pair(transfer_type, src=_local("k", size=1))) is True
-
-    @pytest.mark.parametrize("transfer_type", list(TransferType))
-    def test_src_none_raises(self, transfer_type: TransferType) -> None:
-        f = _upload_filter(_FakeClient({}))
-        with pytest.raises(ValueError, match="without a source entry"):
-            f(_pair(transfer_type, dest=_s3()))
 
 
 # -- size pre-check ------------------------------------------------------------

@@ -410,3 +410,31 @@ class TestFioOptions:
             "disk_throughput_gbps": 8.0,  # 1e9 bytes/s * 8 / 1e9
             "direct_io": True,
         }
+
+
+class TestBotocoreSession:
+    """`_botocore_session` preference: caller's session, boto3 default, fresh.
+
+    The serializer must reuse a warm session when one is reachable - a fresh
+    botocore session re-parses the S3 model per process, the CRT lane's
+    dominant fixed cost versus aws-cli (docs/crt.md, benchmark-measured).
+    """
+
+    def test_prefers_the_callers_session(self) -> None:
+        inner = object()
+        caller = SimpleNamespace(_session=inner)
+        assert crtsupport._botocore_session(caller) is inner  # pyright: ignore[reportArgumentType]
+
+    def test_falls_back_to_the_boto3_default_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import boto3
+
+        inner = object()
+        monkeypatch.setattr(boto3, "DEFAULT_SESSION", SimpleNamespace(_session=inner))
+        assert crtsupport._botocore_session(None) is inner
+
+    def test_fresh_session_when_nothing_is_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import boto3
+        from botocore.session import Session
+
+        monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+        assert isinstance(crtsupport._botocore_session(None), Session)

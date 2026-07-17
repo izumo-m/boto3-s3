@@ -23,8 +23,8 @@ S3**. Its bytes move through `open()` while the S3 side keeps riding
 - **S3 → custom** (`s3open`): the backend is the destination; each object is
   downloaded into its `open("wb")` (whose `close()` flushes the write).
 
-So `cp` / `mv` / `sync` are the only operations a custom backend joins, and never
-custom↔custom. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
+So a custom backend takes part only in `cp` / `mv` / `sync`, and never in a
+custom↔custom pair. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
 `website` — require an actual `S3Storage` and are not part of this seam. (The
 built-in `IOStorage` / `StdioStorage` stream wrappers use the very same seam: a
 stream is a degenerate single-entry backend.)
@@ -53,37 +53,44 @@ declared capabilities promise:
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
   stays unimplemented, since every S3 write rides `s3transfer`.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
-  container one page of `FileInfo` at a time. `options.filter` (the
-  `--exclude`/`--include` predicate) is applied by **`scan()` as a safety net** by
-  default, so a `scan_pages` that forgets it cannot silently leak excluded entries
-  into `--exclude`/`--include` or, on a `sync --delete` destination, into deletion.
-  A backend that filters at its source, or prunes early (e.g. a custom
-  `LocalFileGenerator.finalize_children` calling `options.filter`), applies it in
-  `scan_pages` and declares **`scan_pages_filters = True`** to skip the redundant
-  re-filter (`storage.sieve_pages` is the helper). Honour
-  `options.sort` when `SORTABLE_SCAN` is declared. `options` carries the
-  operation-inherent knobs the caller decides per invocation
-  (`recursive` / `sort` / `filter` / `on_warning`, and `S3ScanOptions`'s internal
-  `prefix`); the **source-config** knobs — how a particular source is read — are
-  configured on the storage constructor and seeded into every scan by
-  `default_scan_options()` (see below), so a `ScanOptions` subclass still carries
-  them to `scan_pages` but the caller does not pass them per operation
-  (`S3ScanOptions` = the `ListObjectsV2` knobs `page_size` / `fetch_owner`, plus
-  the operation-set `request_payer` / `prefix`; `LocalScanOptions` =
-  `follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`). The
-  local complete-entry setting widens candidates before filtering: it includes
-  the root, directories, symlinks, special files, and metadata-readable entries
-  whose content is unreadable. High-level operations preserve it; a caller that
-  opts in must filter out entries its transfer cannot consume, or accept the
-  operation's normal failure, blocking, device-side-effect, and deletion behavior.
-  The default `False` keeps aws-cli transfer enumeration. A subclass keeps one backend's knobs
-  from leaking into another's; the built-ins reject a foreign options type, and a
-  custom backend reads its own knobs from its own subclass or from its instance
-  state, taking the common base otherwise. `LocalStorage` also takes one
-  **destination-side** constructor knob that is *not* a scan source-config:
-  `fsync` (default off = aws parity), a library extension the transfer engine
-  reads off the destination to make an `mv` download durable before deleting the
-  S3 source (transfer.md section 11).
+  container one page of `FileInfo` at a time.
+
+  `options.filter` (the `--exclude`/`--include` predicate) is applied by
+  **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
+  cannot silently leak excluded entries into `--exclude`/`--include` or, on a
+  `sync --delete` destination, into deletion. A backend that filters at its
+  source, or prunes early (e.g. a custom `LocalFileGenerator.finalize_children`
+  calling `options.filter`), applies it in `scan_pages` and declares
+  **`scan_pages_filters = True`** to skip the redundant re-filter
+  (`storage.sieve_pages` is the helper). Honor `options.sort` when
+  `SORTABLE_SCAN` is declared.
+
+  `options` carries the operation-inherent knobs the caller decides per
+  invocation (`recursive` / `sort` / `filter` / `on_warning`, and
+  `S3ScanOptions`'s internal `prefix`). The **source-config** knobs — how a
+  particular source is read — are configured on the storage constructor and
+  seeded into every scan by `default_scan_options()` (see below): a
+  `ScanOptions` subclass still carries them to `scan_pages`, but the caller
+  does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
+  knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
+  `prefix`; `LocalScanOptions` = `follow_symlinks` / `detect_symlink_loops` /
+  `enumerate_all_entries`). A subclass keeps one backend's knobs from leaking
+  into another's; the built-ins reject a foreign options type, and a custom
+  backend reads its own knobs from its own subclass or from its instance
+  state, taking the common base otherwise.
+
+  The local complete-entry setting (`enumerate_all_entries`) widens candidates
+  before filtering: it includes the root, directories, symlinks, special
+  files, and metadata-readable entries whose content is unreadable. High-level
+  operations preserve it; a caller that opts in must filter out entries its
+  transfer cannot consume, or accept the operation's normal failure, blocking,
+  device-side-effect, and deletion behavior. The default `False` keeps aws-cli
+  transfer enumeration.
+
+  `LocalStorage` also takes one **destination-side** constructor knob that is
+  *not* a scan source-config: `fsync` (default off = aws parity), a library
+  extension the transfer engine reads off the destination to make an `mv`
+  download durable before deleting the S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no transferable entry
@@ -118,6 +125,17 @@ Three more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
+- **`scan_wait_on_interrupt: bool`** — the Ctrl-C exit policy of `scan()`'s
+  background page worker. `True` (the default): context exit always waits for
+  a page pull already in flight, so no worker survives the operation — keep it
+  in an app that may catch `KeyboardInterrupt` and continue. `False`: a
+  `KeyboardInterrupt` / `SystemExit` unwind abandons the daemon worker instead
+  of waiting (an in-flight network pull can otherwise hold the exit for a full
+  timeout) — for apps that treat such an interrupt as process-fatal. The
+  built-ins take it as a constructor kwarg; the CLI passes `False` on every
+  scanning storage it builds, matching aws's immediate death on Ctrl-C. Every
+  other exit — exhaustion, an early break, an ordinary exception — always
+  waits (`concurrency.prefetch`).
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
@@ -125,10 +143,10 @@ Three more members come with working defaults a custom backend normally keeps:
   transfer plan (the per-side half of aws-cli's `FileFormat.format`, resolved
   polymorphically; `S3Storage` / `LocalStorage` override it with aws's
   `s3_format` / `local_format` on their own held state). The default is the
-  open-route rule: the root is `""` — a custom backend encapsulates its own
-  location, its `open` receives the scan-root-relative `compare_key`
-  unprefixed (`""` for the single location), and its `delete` receives the
-  entry's `FileInfo` (keyed by `info.key`; section "Keys" below) — and
+  open-route rule. The root is `""`: a custom backend encapsulates its own
+  location, its `open` receives `compare_key`, which addresses an entry relative
+  to that location (`""` for the single location), and its `delete` receives the
+  entry's `FileInfo` (keyed by `info.key`; section "Keys" below).
   `use_src_name` follows the S3 convention
   (`dir_op` or a trailing `/` on `as_text()`).
 
@@ -142,18 +160,18 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
 - **`key`** is the entry's full, `/`-separated identifier **in the backend's own
   address space** — what `delete(info)` acts on (the built-ins key on
   `info.key`). A backend chooses its own space (`S3Storage`'s `key` is the full
-  bucket key, `LocalStorage`'s an absolute path). A typical custom backend
-  rooted at its location uses keys relative to that root, so a recursive
-  entry's `key` is its `compare_key` and the single location is `""`. `open`'s
+  bucket key, `LocalStorage`'s an absolute path). A typical custom backend uses
+  keys relative to its location, so a recursive entry's `key` is its
+  `compare_key` and the single location is `""`. `open`'s
   address argument is backend-specific: `S3Storage.open` takes the full bucket
   key, `LocalStorage.open` joins its key under the location (an absolute key
   resolves to itself), and a **custom** backend's `open` must resolve the
-  scan-root-relative key the engine passes (`compare_key`; `""` for the single
+  `compare_key` the engine passes relative to its location (`""` for the single
   location — the open route and the content strategies both pass that space).
   For the typical custom backend (`key == compare_key`) the two spaces
   coincide, so `info.storage.open(info.key, "rb")` reads built-in and typical
   custom entries alike.
-- **`compare_key`** is the same entry **relative to the scan root**: the
+- **`compare_key`** is the relative form of the same entry: the
   `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
   `scan` must stamp it on every entry.
 
@@ -184,8 +202,8 @@ at all. The exact per-route gates are in [`sync.md`](./sync.md) /
 
 ## 4. Example
 
-A minimal in-memory backend — a `dict[str, bytes]` keyed by `compare_key`
-(root-relative), so a single entry uses `""`:
+A minimal in-memory backend — a `dict[str, bytes]` keyed by `compare_key`, so a
+single entry uses `""`:
 
 ```python
 import io
@@ -221,7 +239,7 @@ class DictStorage(Storage):
         return io.BytesIO(self._store[key]) if mode == "rb" else _Committing(self._store, key)
 
     def scan_pages(self, options: ScanOptions):
-        infos = [FileInfo(key=k, size=len(v), compare_key=k)    # compare_key = root-relative
+        infos = [FileInfo(key=k, size=len(v), compare_key=k)    # relative key
                  for k, v in sorted(self._store.items())]       # sorted -> byte order (sync)
         if options.filter is not None:                          # the scan_pages contract: return
             infos = [i for i in infos if options.filter(i)]     # filtered pages (or push the
@@ -244,8 +262,8 @@ S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download
 
 `IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
 as a single `open`-able endpoint, so a stream can be one side of a
-non-recursive `cp` - or the destination of a non-recursive `mv` - (the other
-side always S3) without a temp file:
+non-recursive `cp`, or the destination of a non-recursive `mv` (the other side
+always S3), without a temp file:
 
 ```python
 import gzip

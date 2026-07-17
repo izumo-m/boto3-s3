@@ -201,6 +201,21 @@ class TestForce:
         )
         assert client.delete_bucket_calls == []
 
+    def test_force_empty_uri_is_255_and_skips_delete_bucket(self) -> None:
+        # aws has no empty-bucket short-circuit: rb s3:// --force runs the
+        # inner rm first, whose (inevitable) failure aborts through the
+        # RuntimeError path (255) before delete_bucket - measured on aws
+        # 2.35.18, where the non-force rb s3:// stays rc 1.
+        client, calls = make_recording_client([])
+        result = run_cli_in_process(["rb", "s3://", "--force"], ctx=_ctx(client))
+        assert result.rc == 255
+        assert "fatal error:" in result.stderr
+        assert (
+            "boto3-s3: [ERROR]: remove_bucket failed: Unable to delete all objects in the "
+            "bucket, bucket will not be deleted." in result.stderr
+        )
+        assert calls == []
+
     def test_force_carries_globals_and_rm_defaults(self) -> None:
         # Pins the namespace synthesis: the factory runs once for rb and once
         # for the inner rm; globals reach both, rm defaults come from its own

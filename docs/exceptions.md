@@ -1,6 +1,6 @@
 # boto3-s3 Exception Model (current state / source of truth)
 
-This document is the **established current state (source of truth)** for the
+This document is the **authoritative reference (source of truth)** for the
 exception design of `boto3-s3`. When a design decision changes, update this
 document first.
 
@@ -108,14 +108,18 @@ Local `OSError`s are converted by one shared translator
 An S3 `ClientError` code is matched first against `S3_CODE_CATEGORIES`
 (`s3storage.py`); a code not in the table falls back to HTTP-status widening:
 403 -> `AccessDeniedError`, 404 -> `NotFoundError`, 5xx -> `TransportError`,
-other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. That last
-fallback, `translate_boto_error`'s final clause for an exception nothing
-classifies, and the deleter's per-key `Errors[]` translation (whose entries
-carry a bare code with no HTTP status to widen on - an unknown code is the
-base category, deleter.md section 3) are the only places the error
-*translation* creates a direct base instance; the remaining direct-base site
-is the message envelope on WARNED / NOTICE `OpResult` records
-(`Warner.warn` / `Transferrer.notice` in `transfer.py` - section 1).
+other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
+*translation* creates a direct base instance in only three places:
+
+- that final widening fallback;
+- `translate_boto_error`'s last clause, for an exception nothing classifies;
+- the deleter's per-key `Errors[]` translation, whose entries carry a bare code
+  with no HTTP status to widen on (an unknown code becomes the base category,
+  deleter.md section 3).
+
+The one remaining direct-base site is the message envelope on WARNED / NOTICE
+`OpResult` records (`Warner.warn` / `Transferrer.notice` in `transfer.py` -
+section 1).
 
 ## 4. The batch aggregation exception `BatchError`
 

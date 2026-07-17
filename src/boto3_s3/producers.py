@@ -25,6 +25,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from boto3_s3 import requestparams, transferplan
+from boto3_s3.comparator import SrcOnlyPair, SyncPair
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, s3_errors
@@ -42,8 +43,6 @@ from boto3_s3.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-    from boto3_s3.comparator import SyncPair
 
 
 def walk_source_scan_options(
@@ -100,8 +99,8 @@ def _compare_key(info: FileInfo) -> str:
 
     Every ``Storage.scan`` (listing) and ``Storage.get_fileinfo`` (single) entry
     carries it (the single-object HEAD path stamps it too), so a transfer reads it
-    instead of re-deriving the root-relative key. ``None`` would mean a producer
-    skipped the stamp - a bug.
+    instead of re-deriving it. ``None`` would mean a producer skipped the stamp -
+    a bug.
     """
     key = info.compare_key
     assert key is not None, "compare_key must be stamped before transfer"
@@ -523,7 +522,7 @@ def scan_s3_source(
 
     The shared transfer-side enumeration: cp/mv scan their source here,
     and sync scans whichever of its sides is S3 (the destination too).
-    Folder markers never surface; the scan stamps each entry's prefix-relative
+    Folder markers never surface; the scan stamps each entry's ``Prefix``-relative
     ``compare_key``, which ``item_filter`` matches against. Built from the passed
     ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
     config and a custom ``S3Storage`` subclass survive), with the operation-inherent
@@ -883,7 +882,7 @@ def cp_case_gate(
     here reads the destination storage's own source-config
     (``default_scan_options``), warns into the transfer rollup, and applies
     the run's ``item_filter``, exactly like a source walk. Each entry's
-    stamped ``compare_key`` is the root-relative membership key. Scoped to
+    stamped ``compare_key`` is the membership key. Scoped to
     ``s3local`` (a case-insensitive *filesystem* destination); a custom
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
@@ -913,8 +912,8 @@ def sync_case_gate(
 
     Unlike cp's (which pre-lists the destination for its exact-case
     AlwaysSync arm), sync already pairs against the destination listing:
-    the gate is consulted only for pairs *missing* there, so the
-    membership set is vacuously empty and only the submitted-set /
+    the gate is consulted only for ``SrcOnlyPair``s (keys missing there), so
+    the membership set is vacuously empty and only the submitted-set /
     ``os.path.exists`` conflict check remains - aws-cli's
     ``CaseConflictSync`` in the ``file_not_at_dest`` slot. Scoped to a
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
@@ -974,7 +973,7 @@ def sync_entries(
 
 def sync_transfer_item(
     plan: transferplan.TransferPlan,
-    pair: SyncPair,
+    pair: SrcOnlyPair | SyncPair,
     *,
     transfer_type: TransferType,
     src_bucket: str,
@@ -991,7 +990,6 @@ def sync_transfer_item(
     dry run never touches the backend.
     """
     info = pair.src
-    assert info is not None
     if plan.paths_type == "opens3":
         item = open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
     elif plan.paths_type == "s3open":
@@ -1006,10 +1004,10 @@ def sync_transfer_item(
     elif transfer_type is TransferType.UPLOAD:
         item = upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
     elif transfer_type is TransferType.DOWNLOAD:
-        # The case-conflict gate guards only pairs missing at the
+        # The case-conflict gate guards only SrcOnlyPairs - keys missing at the
         # destination (the aws-cli strategy slot); an exact-key update
         # never conflicts.
-        gate = case_gate if pair.dest is None else None
+        gate = case_gate if isinstance(pair, SrcOnlyPair) else None
         item = download_item_from_info(
             plan,
             info,
@@ -1031,5 +1029,5 @@ def sync_transfer_item(
     # completion can report both sides of the sync pair. A gate that consumed
     # the item returns None - nothing to stamp.
     if item is not None:
-        item.dest_info = pair.dest
+        item.dest_info = pair.dest if isinstance(pair, SyncPair) else None
     return item

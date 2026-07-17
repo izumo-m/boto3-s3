@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
+    from boto3.session import Session
     from mypy_boto3_s3 import S3Client
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,11 @@ def should_use_crt(preferred: str) -> bool:
 
 
 def create_crt_transfer_manager(
-    client: S3Client, config: Any | None, *, endpoint: str | None = None
+    client: S3Client,
+    config: Any | None,
+    *,
+    endpoint: str | None = None,
+    session: Session | None = None,
 ) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
 
@@ -230,8 +235,12 @@ def create_crt_transfer_manager(
     it is ``None`` the host-heuristic default (``_derive_endpoint``) decides,
     which is boto3-faithful for a real AWS endpoint and still pins a non-AWS
     custom host such as MinIO.
+
+    ``session`` is the caller's boto3 session (``S3.session`` threads it via
+    the ``Transferrer``); the CRT request serializer is built from it rather
+    than a fresh one - see ``_botocore_session`` for why that matters.
     """
-    crt_s3_client = _get_crt_s3_client(client, config, endpoint)
+    crt_s3_client = _get_crt_s3_client(client, config, endpoint, session)
     if not _is_compatible_request(client, crt_s3_client, endpoint):
         return None
     assert crt_s3_client is not None
@@ -263,19 +272,43 @@ def create_crt_transfer_manager(
 
 
 def _get_crt_s3_client(
-    client: S3Client, config: Any | None, endpoint: str | None
+    client: S3Client, config: Any | None, endpoint: str | None, session: Session | None
 ) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(client, config, endpoint)
+            serializer, crt_s3_client = _initialize(client, config, endpoint, session)
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
     return _crt_s3_client
 
 
+def _botocore_session(session: Session | None) -> Any:
+    """The botocore session the CRT request serializer is built from.
+
+    aws-cli hands its live CLI session to ``BotocoreCRTRequestSerializer``
+    (``factory.py``), so the serializer's internal client build hits an
+    already-warm loader. A fresh ``botocore.session.Session()`` here instead
+    re-reads and re-parses the S3 service model and endpoint data on every
+    process - measured at ~40 ms per invocation (2026-07-14), the dominant
+    fixed cost of the CRT lane versus aws. Preference order: the caller's
+    session, then boto3's default session when one exists (``S3.client()``
+    without a session creates it, loader already warm), then a fresh session
+    for callers that brought a bare client from elsewhere.
+    """
+    import boto3
+
+    if session is not None:
+        return session._session  # pyright: ignore[reportPrivateUsage]
+    if boto3.DEFAULT_SESSION is not None:
+        return boto3.DEFAULT_SESSION._session  # pyright: ignore[reportPrivateUsage]
+    from botocore.session import Session as BotocoreSession
+
+    return BotocoreSession()
+
+
 def _initialize(
-    client: S3Client, config: Any | None, endpoint: str | None
+    client: S3Client, config: Any | None, endpoint: str | None, session: Session | None
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
@@ -291,12 +324,10 @@ def _initialize(
         # Another process of this application holds the CRT client; classic.
         return None, None
 
-    from botocore.session import Session
-
     region = client.meta.region_name
     endpoint_url = _resolve_endpoint(client, endpoint)
     serializer = BotocoreCRTRequestSerializer(
-        Session(), {"region_name": region, "endpoint_url": endpoint_url}
+        _botocore_session(session), {"region_name": region, "endpoint_url": endpoint_url}
     )
 
     create_kwargs: dict[str, Any] = {

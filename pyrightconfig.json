@@ -2,7 +2,7 @@
     "venvPath": ".",
     "venv": ".venv",
     "pythonVersion": "3.10",
-    "include": ["src", "cli/src", "tests"],
+    "include": ["src", "cli/src", "tests", "benchmarks"],
     "exclude": ["vendor", "**/__pycache__", ".venv"],
     "typeCheckingMode": "strict",
     "executionEnvironments": [
@@ -29,6 +29,22 @@
             "reportUnknownArgumentType": "none",
             "reportUnknownLambdaType": "none",
             "reportUnusedFunction": "none"
+        },
+        {
+            // The benchmark harness handles the same untyped surfaces as the
+            // tests (Any-typed boto3 clients, botocore request/response
+            // internals), so it takes the same relaxations; every other
+            // strict check still runs here.
+            "root": "benchmarks",
+            "extraPaths": ["."],
+            "reportPrivateUsage": "none",
+            "reportPrivateImportUsage": "none",
+            "reportArgumentType": "none",
+            "reportAttributeAccessIssue": "none",
+            "reportUnknownMemberType": "none",
+            "reportUnknownVariableType": "none",
+            "reportUnknownArgumentType": "none",
+            "reportUnknownLambdaType": "none"
         }
     ]
 }

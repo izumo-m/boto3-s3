@@ -14,6 +14,9 @@ build/
 .ruff_cache/
 .pytest_cache/
 
+# Benchmark run output (host-specific timings; see docs/benchmark.md)
+/benchmarks/results/
+
 # Coverage
 .coverage
 .coverage.*

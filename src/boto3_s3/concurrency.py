@@ -12,7 +12,9 @@ without limit. A worker-side exception surfaces on the consumer's next pull.
 Cleanup is cooperative -- the worker checks a stop flag between puts. The
 owner must exit the `prefetch` context when it stops consuming; context exit
 drops buffered pages and waits for a page pull already in progress before
-returning, so no worker survives the operation.
+returning, so no worker survives the operation. The single opt-out is
+``wait_on_interrupt=False`` for apps that treat a Ctrl-C as process-fatal
+(see `prefetch`).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ def prefetch(
     *,
     queue_size: int = 4,
     cancel_token: CancelToken | None = None,
+    wait_on_interrupt: bool = True,
 ) -> Generator[Iterator[T]]:
     """Run ``pages`` on a worker thread; yield a flattened iterator.
 
@@ -57,6 +60,17 @@ def prefetch(
     worker is signalled to stop and joined; unread chunks are dropped. A
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
+
+    ``wait_on_interrupt`` narrows the exit wait for terminal unwinds: when
+    ``False`` and the context is unwinding on a ``KeyboardInterrupt`` /
+    ``SystemExit``, the final join is skipped and the daemon worker is
+    abandoned to die with the process - a page pull already in flight (which
+    can block for a full network timeout) no longer delays the exit, matching
+    ``aws``'s immediate death on Ctrl-C. Only safe when such an interrupt
+    terminates the process: an app that catches the interrupt and continues
+    would leave the worker pulling one more page in the background. Every
+    other exit - normal exhaustion, an early break (``GeneratorExit``), any
+    ``Exception`` - always joins, keeping the no-surviving-worker contract.
 
     `queue_size` must be positive. `queue.Queue` treats non-positive values as
     unbounded, which would violate this helper's bounded-backpressure contract.
@@ -116,8 +130,15 @@ def prefetch(
             chunk: Sequence[T] = item  # pyright: ignore[reportAssignmentType]
             yield from chunk
 
+    interrupted = False
     try:
         yield _consume()
+    except (KeyboardInterrupt, SystemExit):
+        # The consumer is unwinding toward process exit; the exit policy below
+        # may abandon the worker instead of waiting. GeneratorExit (an early
+        # break) and ordinary exceptions never take this path.
+        interrupted = True
+        raise
     finally:
         stop.set()
         # Free a producer blocked on put() by making room.
@@ -129,8 +150,10 @@ def prefetch(
         # A page pull already in progress is accepted work: wait for it to
         # finish rather than returning with a live worker. Botocore's request
         # timeouts bound a stuck S3 fetch; local/custom backends must likewise
-        # make their page producer eventually return.
-        worker.join()
+        # make their page producer eventually return. The one exception is a
+        # terminal interrupt under wait_on_interrupt=False (see docstring).
+        if wait_on_interrupt or not interrupted:
+            worker.join()
 
 
 __all__ = ["prefetch"]

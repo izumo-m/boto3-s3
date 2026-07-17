@@ -4,8 +4,8 @@ Thanks for your interest in boto3-s3. This document covers local setup, the test
 suite, and the coding and commit conventions. For the project's purpose, scope,
 and design policy, start with [`docs/overview.md`](docs/overview.md).
 
-The project is in early development (pre-1.0). Breaking changes are expected and
-backward compatibility is not yet a goal.
+The project is in beta and preparing for 1.0. Changes that might break the
+public API or aws-cli compatibility must be discussed before implementation.
 
 ## Project layout
 
@@ -22,12 +22,14 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 
 Prerequisites:
 
-- Python 3.10+ (the floor is 3.10; see `.python-version`).
+- Python 3.10+ (`.python-version` pins development to the 3.10 floor).
 - [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- For the end-to-end suite only: Docker (with Compose), plus the `aws` CLI v2
-  matching the pinned aws-cli source revision — installed into `.venv/bin` by
-  `scripts/install-awscli.sh` (below), not an arbitrary `PATH` aws, which can
-  drift the goldens.
+- For any end-to-end run: the `aws` CLI v2 at the pinned reference version.
+  Install it into `.venv/bin` with `scripts/install-awscli.sh` (below); an
+  arbitrary `aws` found on `PATH` may behave differently and invalidate the
+  goldens.
+- For the local MinIO end-to-end environment: Docker with Compose. A run against
+  real S3 does not need Docker.
 
 Install the workspace and its dev tools into a local virtualenv:
 
@@ -42,7 +44,9 @@ Run any tool through `uv run` so it uses that environment, e.g. `uv run pytest`.
 
 ## Quality gates
 
-Run these before every commit; all must pass:
+Run these before every commit that changes Python code or test data; all must
+pass. A docs-only commit can skip them: ruff and basedpyright act only on the
+Python sources, and the test suite does not read the documentation.
 
 ```bash
 uv run ruff format       # format
@@ -59,8 +63,8 @@ Ruff is configured for a line length of 100 and a Python 3.10 target.
 which self-skip unless pointed at a live endpoint — so no Docker is needed for
 the default run.
 
-The e2e suite differentially compares `boto3-s3` against the real `aws` command
-against a local MinIO endpoint:
+The e2e suite runs `boto3-s3` and the real `aws` command against a local MinIO
+endpoint and compares their behavior:
 
 ```bash
 scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
@@ -70,9 +74,9 @@ uv run pytest tests/cli/e2e  # run the parity suite
 scripts/compose.sh down      # tear the stack down
 ```
 
-Goldens (the recorded real-aws behavior the in-process suite replays) are
-regenerated against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
-tests/cli/e2e`; review the diff before committing. The full picture — test
+Goldens are the recorded real-aws behavior that the in-process suite replays.
+Regenerate them against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
+tests/cli/e2e`, and review the diff before committing. The full picture — test
 tiers, the exit-code charter, and the golden contract — is in
 [`docs/testing.md`](docs/testing.md).
 

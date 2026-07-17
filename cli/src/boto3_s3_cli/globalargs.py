@@ -163,8 +163,9 @@ def add_common_arguments(
     conn.add_argument("--no-sign-request", action="store_true", default=flag)
     # Not argparse type=int on purpose: aws coerces these in a post-parse session
     # handler (globalargs._resolve_timeout), so a non-integer value raises there
-    # and exits 255 - not the parse-time 252 a type=int would give. build_client
-    # coerces and maps a bad value to rc 255 (matching aws and --page-size).
+    # and exits 255 - not the parse-time 252 a type=int would give. The dispatch
+    # pre-pass coerces both up front at aws's top-level-args-parsed timing (read
+    # before connect), and the client builders coerce again when they build.
     conn.add_argument("--cli-read-timeout", metavar="SECONDS", default=value)
     conn.add_argument("--cli-connect-timeout", metavar="SECONDS", default=value)
     conn.add_argument("--debug", action="store_true", default=flag)

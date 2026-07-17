@@ -57,9 +57,9 @@ class TransferPlan:
     a native absolute path, and a custom ``open`` side as ``""`` (it addresses
     entries by the relative ``compare_key`` its own ``open`` takes); directory
     semantics are expressed by a trailing separator. ``--exclude`` / ``--include``
-    need no root here: ``boto3_s3.globsieve`` matches a relative pattern
-    against each item's ``compare_key`` and a root-anchored one against its full
-    ``key`` at match time.
+    need no source/destination path here: ``boto3_s3.globsieve`` matches a
+    relative pattern against each item's ``compare_key`` and a root-anchored one
+    against its full ``key`` at match time.
     """
 
     paths_type: PathsType
@@ -144,7 +144,7 @@ def plan_transfer(
 
 
 def dest_for(plan: TransferPlan, compare_key: str) -> str:
-    """The destination path for an item from its root-relative ``compare_key``.
+    """The destination path for an item's operation-relative ``compare_key``.
 
     The destination half of aws-cli's ``find_dest_path_comp_key``: the
     ``/``-separated ``compare_key`` is appended (separator-translated) to the

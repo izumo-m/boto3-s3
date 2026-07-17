@@ -340,7 +340,14 @@ class TestUploadRoute:
                 on_result=cancel_after_first,
             )
 
-        assert calls == ["PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"]
+        # Sorted: graceful drain guarantees every submitted transfer runs, not
+        # the order it runs in - the s3transfer submission pool races per-file
+        # prep, so queued transfers may reach the request queue out of order.
+        assert sorted(calls) == [
+            "PutObject:p/a.txt",
+            "PutObject:p/b.txt",
+            "PutObject:p/c.txt",
+        ]
         assert [result.outcome for result in results] == [
             OpOutcome.SUCCEEDED,
             OpOutcome.SUCCEEDED,

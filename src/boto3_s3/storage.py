@@ -187,6 +187,15 @@ class Storage(abc.ABC):
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
 
+    # Whether scan()'s context exit still waits for the prefetch worker when
+    # the consumer is unwinding on a KeyboardInterrupt/SystemExit. True (the
+    # default) keeps the no-surviving-worker contract for embedders; an app
+    # that treats such an interrupt as process-fatal (the CLI, matching aws's
+    # immediate death on Ctrl-C) sets False - via the built-ins' constructor
+    # kwarg - so an in-flight page pull cannot delay the exit. Every other
+    # exit always waits (concurrency.prefetch).
+    scan_wait_on_interrupt: bool = True
+
     scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
     scan_pages_filters: ClassVar[bool] = False
@@ -243,6 +252,7 @@ class Storage(abc.ABC):
             pages,
             queue_size=self._scan_prefetch_pages,
             cancel_token=cancel_token,
+            wait_on_interrupt=self.scan_wait_on_interrupt,
         ) as items:
             for info in items:
                 # Safety net: stamp the producing backend so a downstream consumer
@@ -280,13 +290,13 @@ class Storage(abc.ABC):
         sub-"directory" (S3 ``Delimiter='/'``). ``options.sort`` requests UTF-8 byte order (by
         ``compare_key``): a backend declaring ``SORTABLE_SCAN`` MUST honor it, so
         two recursive streams can be merge-joined (what ``sync`` relies on) after
-        each is relativized to its scan root; when ``sort`` is ``False`` (``cp`` /
-        ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper natural order.
+        each is expressed as ``compare_key``; when ``sort`` is ``False``
+        (``cp`` / ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper
+        natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
         pages), the local walk sorts for aws parity - so they ignore the flag.
-        ``key`` itself is the full, ``/``-separated identifier; the root-relative
-        form is what ``compare_key`` carries - stamp it here on every entry this
-        producer yields.
+        ``key`` itself is the full, ``/``-separated identifier; stamp its relative
+        form as ``compare_key`` on every entry this producer yields.
         """
 
     @abc.abstractmethod
@@ -393,8 +403,8 @@ class Storage(abc.ABC):
         This default is the ``open``-route rule for a custom backend (aws-cli
         has no counterpart): the root is ``""`` because such a backend
         encapsulates its own location and addresses entries by their
-        scan-root-relative ``compare_key`` - its ``open`` / ``delete`` receive
-        that relative key unprefixed. ``use_src_name`` mirrors the S3 rule: a
+        relative ``compare_key`` - its ``open`` / ``delete`` receive that key
+        unprefixed. ``use_src_name`` mirrors the S3 rule: a
         ``dir_op`` or an explicit trailing ``/`` on ``as_text`` means the
         destination adopts the source's name.
         """

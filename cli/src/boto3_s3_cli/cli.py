@@ -8,7 +8,8 @@ import importlib
 import io
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from boto3_s3 import (
@@ -203,6 +204,21 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_globals_parser() -> argparse.ArgumentParser:
+    """Globals-only parser for the aws-shaped top-level pre-pass (``_dispatch``).
+
+    aws parses the top-level globals over the *full* argv first
+    (``MainArgParser.parse_known_args``) and resolves them ahead of any
+    command-layer parsing. ``add_help=False`` keeps ``-h`` / ``--help`` in the
+    remainder (they win over the resolutions, like ``--version``'s parse-time
+    exit); everything this parser does not know - the subcommand token and its
+    options - passes through untouched.
+    """
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
+    globalargs.add_common_arguments(parser)
+    return parser
+
+
 def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParser:
     """The determined subcommand's real parser (stage 2).
 
@@ -265,6 +281,32 @@ def _enable_debug_logging() -> None:
             if any(isinstance(f, SecretMaskingFilter) for f in handler.filters):
                 logger.removeHandler(handler)
         set_stream_logger(name, logging.DEBUG, stream=sys.stderr, mask_secrets=True)
+
+
+@contextmanager
+def _debug_handlers_detached() -> Generator[None, None, None]:
+    """Detach the ``--debug`` stream handlers while the prompt owns the terminal.
+
+    The on-partial trial dispatch can enable debug logging before its usage
+    error falls back to the prompt; live stderr DEBUG handlers would then paint
+    over the prompt_toolkit screen (the first ``--region`` / ``--profile``
+    completion triggers a boto3 session load, dozens of botocore DEBUG lines).
+    aws swaps every logger's handlers into its debug-panel buffer for the
+    duration of the app run; there is no panel here, so records emitted during
+    the prompt are dropped instead, and the handlers come back for the
+    re-dispatch.
+    """
+    saved: list[tuple[logging.Logger, list[logging.Handler]]] = []
+    for name in _DEBUG_LOGGERS:
+        logger = logging.getLogger(name)
+        if logger.handlers:
+            saved.append((logger, logger.handlers[:]))
+            logger.handlers.clear()
+    try:
+        yield
+    finally:
+        for logger, handlers in saved:
+            logger.handlers[:] = handlers
 
 
 def exit_code_for(exc: Boto3S3Error) -> int:
@@ -335,7 +377,9 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     *ctx* carries the runtime dependencies the command resolves (the S3 client
     factory, the auto-prompt backend); tests inject a ``Context`` built
     around fakes. Always returns the exit code - argparse's ``SystemExit`` is
-    absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2.
+    absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
+    and a Ctrl-C anywhere mirrors aws's ``InterruptExceptionHandler``: a bare
+    newline on stdout and rc 130 (128+SIGINT), never a traceback.
 
     ``--cli-auto-prompt`` is resolved here from the raw argv, before argparse, so
     it works without a subcommand, its mutual exclusion with
@@ -343,6 +387,16 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     ``cli_auto_prompt`` config / ``on-partial`` chain is honored (option-handling
     section 3, autoprompt.md).
     """
+    try:
+        return _main(argv, ctx)
+    except KeyboardInterrupt:
+        with contextlib.suppress(Exception):
+            sys.stdout.write("\n")
+        return 130
+
+
+def _main(argv: list[str] | None, ctx: Context | None) -> int:
+    """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -403,7 +457,8 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
             from boto3_s3_cli.autoprompt.prompt import build_default_prompter
 
             prompter = build_default_prompter()
-        completed = prompter.prompt_for_args(seed)
+        with _debug_handlers_detached():
+            completed = prompter.prompt_for_args(seed)
     except (KeyboardInterrupt, EOFError):
         return 130
     except Exception as exc:
@@ -444,6 +499,42 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         if suppress_usage_errors
         else contextlib.nullcontext()
     )
+
+    # aws-shaped top-level pre-pass: aws parses the globals over the full argv
+    # (MainArgParser.parse_known_args) and resolves them - the --query compile
+    # (252), the --endpoint-url scheme check (252), then the timeout coercions
+    # (255, read before connect, aws's registration order) - before ANY
+    # command-layer parsing, so those errors beat an invalid choice, unknown
+    # options, and missing arguments (measured on aws 2.35.18). A parse-time
+    # -h/--help/--version wins instead (aws's parser actions fire before the
+    # resolutions), and an exactly-['help'] remainder is aws's help-token
+    # rule: the top-level help page, rc 0. The pre-pass output is discarded -
+    # on a pre-pass parse error, stage 1 below reproduces the canonical
+    # message itself.
+    try:
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            head, remainder = _build_globals_parser().parse_known_args(argv)
+    except SystemExit:
+        head, remainder = None, []
+    if head is not None and "-h" not in remainder and "--help" not in remainder:
+        from boto3_s3_cli import clientfactory
+
+        try:
+            globalargs.validate_query(head)
+            clientfactory.validate_endpoint_url(head)
+            clientfactory.resolve_cli_timeouts(head)
+        except Boto3S3Error as exc:
+            rc = exit_code_for(exc)
+            if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
+                _write_error(exc, rc=rc)
+            return rc
+        if remainder == ["help"]:
+            _build_stage1_parser().print_help()
+            return 0
+
     try:
         with silencer:
             args, extras = _build_stage1_parser().parse_known_args(argv)
@@ -467,6 +558,12 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     if hasattr(args, _REST_DEST):
         delattr(args, _REST_DEST)
     command = _load_command(args.command)()
+    if rest == ["help"]:
+        # aws's help-token rule at the subcommand level (its ArgTableArgParser
+        # special-cases an exactly-['help'] remainder): the command's help
+        # page, rc 0 - even where a normal parse would fail or run a listing.
+        _build_command_parser(args.command, command).print_help()
+        return 0
     try:
         with silencer:
             args, extras = _build_command_parser(args.command, command).parse_known_args(
@@ -507,7 +604,8 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # aws-cli's handler chain instead of crashing with a traceback + rc 1
         # (the binding exit-code charter, docs/overview.md section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
-        # they still propagate (Ctrl-C keeps its default rc 130).
+        # they still propagate - a Ctrl-C reaches main's aws-shaped backstop
+        # (a bare newline + rc 130, no traceback).
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)
         return rc

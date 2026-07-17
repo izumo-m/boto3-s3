@@ -1,13 +1,14 @@
 """CRT-engine parity: ``boto3-s3`` vs ``aws s3`` with ``preferred_transfer_client = crt``.
 
 Both CLIs run against the same endpoint with a temporary
-``AWS_CONFIG_FILE`` selecting the CRT transfer client, exercising the real
-``CRTTransferManager`` (upload / download / mv / sync, single-part and
-multipart). The lane is differential - no goldens - because the CRT manager's
-stdout is byte-identical to the classic engine's (aws-cli ``s3handler`` has no
-CRT branch), so the signal is that our CRT mode agrees with aws's CRT mode on
-rc, stdout, the bucket end state, the local destination and source trees, and
-the download mtime.
+``AWS_CONFIG_FILE`` selecting the CRT transfer client. Upload / download / mv /
+sync exercise the real ``CRTTransferManager``. The rm and upload-sync-delete
+cases cover S3 deletion at the CLI boundary because boto3-s3's accepted
+``DeleteObject`` / batched ``S3Deleter`` routes do not share aws-cli's per-key
+CRT transport; download sync-delete covers the local deletion both CLIs
+perform. The lane is differential - no goldens - and asserts that our
+CRT-configured mode agrees with aws's on rc, stdout, the bucket end state, the
+local destination and source trees, and the download mtime.
 
 Gated twice: the e2e ``BOTO3_S3_E2E_BUCKET`` opt-in (conftest) and an
 ``awscrt`` import check here (the CRT manager needs it). Against a custom

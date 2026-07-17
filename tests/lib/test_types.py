@@ -54,6 +54,18 @@ class TestCancelToken:
 
         assert token.mode is t.CancelMode.IMMEDIATE
 
+    def test_cancel_reenters_while_the_same_thread_holds_the_lock(self) -> None:
+        # cancel() is signal-handler-safe by contract, and CPython delivers
+        # signal handlers on the main thread: a handler's cancel() must not
+        # deadlock when the interrupted frame is inside mode/cancel holding
+        # the token lock. Holding it here reproduces that interrupted state.
+        token = t.CancelToken()
+
+        with token._lock:  # pyright: ignore[reportPrivateUsage]
+            token.cancel(mode=t.CancelMode.IMMEDIATE)
+
+        assert token.mode is t.CancelMode.IMMEDIATE
+
 
 class TestFileInfo:
     def test_construct_with_all_required_fields(self) -> None:

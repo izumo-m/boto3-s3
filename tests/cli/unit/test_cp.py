@@ -695,6 +695,37 @@ class TestSourceScanWiring:
         assert calls[0].operation == "ListObjectsV2"
         assert calls[0].params["MaxKeys"] == 5
 
+    def test_scanning_storages_opt_out_of_the_interrupt_join(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ctrl-C is process-fatal in the CLI, so the storages the CLI builds
+        # for a transfer must not wait for an in-flight page pull on the way
+        # out (aws dies immediately); the library default keeps waiting.
+        import boto3_s3
+
+        built: list[Any] = []
+
+        class _RecS3(boto3_s3.S3Storage):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                built.append(self)
+
+        class _RecLocal(boto3_s3.LocalStorage):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                built.append(self)
+
+        monkeypatch.setattr(boto3_s3, "S3Storage", _RecS3)
+        monkeypatch.setattr(boto3_s3, "LocalStorage", _RecLocal)
+        (tmp_path / "f.txt").write_bytes(b"x")
+        ctx, _calls = _recording_ctx([{}])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
+        assert rc == 0
+        transfer_sides = [s for s in built if s.scan_wait_on_interrupt is False]
+        # Both real transfer sides opt out; plan-only throwaways (path_storage)
+        # keep the library default and never scan.
+        assert len(transfer_sides) == 2
+
 
 class TestCaseConflict:
     def test_skip_warns_and_skips_the_twin(

@@ -131,7 +131,11 @@ class RmCommand(Command):
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
         # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
         # from the now non-raising construction) through main -> rc 252, matching aws.
-        storage = S3Storage(target, client=s3.client(), page_size=page_size)
+        # scan_wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so the
+        # recursive listing must not wait for an in-flight page pull on the way out.
+        storage = S3Storage(
+            target, client=s3.client(), page_size=page_size, scan_wait_on_interrupt=False
+        )
         storage.validate()
 
         item_filter = filters.compile_filter(args.filters)

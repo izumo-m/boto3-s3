@@ -22,6 +22,19 @@ solidified design is added here.
   `SystemExit` is also absorbed inside `main` and converted into an exit code, so
   `main` always returns an int. The exit codes for exceptions and usage errors
   are covered in section 6 (the implementation of the exit code parity charter).
+- Before the two parse stages, `_dispatch` runs the aws-shaped **top-level
+  pre-pass**: a globals-only `parse_known_args` over the full argv (aws's
+  `MainArgParser`), then the `--query` compile, the `--endpoint-url` scheme
+  check, and the `--cli-read-timeout` / `--cli-connect-timeout` coercions in
+  aws's registration order - so those errors beat an invalid choice, unknown
+  options, and missing arguments (measured; section 5.7/6). A parse-time
+  `-h` / `--help` / `--version` wins over the resolutions (aws's parser
+  actions fire before its `top-level-args-parsed` event), and aws's
+  **help-token rule** applies: an exactly-`help` pre-pass remainder, or an
+  exactly-`help` stage-2 remainder after a subcommand, prints the
+  corresponding help page at rc 0 (`ls help` shows ls's help rather than
+  listing a bucket named `help`; `help foo` stays the invalid-choice 252,
+  like aws).
 - `ctx` (`Context`) is the injection point for runtime dependencies (section 3.1). When
   not supplied, the real one (the default `Context()`) is assembled. Tests pass a
   `Context` loaded with fakes.
@@ -52,7 +65,7 @@ solidified design is added here.
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
 | `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
-| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_filter`: compile a globsieve matcher and wrap it so a relative pattern matches `FileInfo.compare_key` and an absolute one `FileInfo.key`. No root needed - the anchor comes from each entry's key at match time, so the one filter prunes sync's two sides per-side) |
+| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_filter`: compile a globsieve matcher and wrap it so a relative pattern matches `FileInfo.compare_key` and an absolute one `FileInfo.key`. No source/destination path is needed - the anchor comes from each entry's key at match time, so the one filter prunes sync's two sides per-side) |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator; a non-string `fileb://` value is rejected at parse like aws's schema validation) |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator |
@@ -86,20 +99,26 @@ dependencies through a `Context`.
   progress, etc.) in instance attributes, so calling `main()` multiple times in a
   single process does not carry state over (this corresponds to how aws-cli's
   `ListCommand._run_main` holds `self._total_objects` and the like).
-- `Context` is the container for the runtime dependencies that `main()` resolves.
-  Currently these are `client_factory` (`argparse.Namespace -> S3Client`, default
-  `clientfactory.build_client`), `service_client_factory`
-  (`(service, args, *, region=None) -> client`, default
-  `clientfactory.build_service_client` - the injection point where mv's
-  `--validate-same-s3-paths` creates the s3control / sts clients, section 5.8), and
-  `transfer_config` (`TransferConfig | None`. Overrides the transfer engine's
-  defaults - tests inject `use_threads=False` to make the multipart call order
-  deterministic. **Only when it is `None`** do cp / mv / sync build the config
-  from `[s3]` (section 8), so an injected value always takes precedence),
-  `auto_prompter` (`AutoPrompter | None`. The backend for `--cli-auto-prompt`.
-  Default `None` -> `main` lazily creates the prompt_toolkit implementation. Tests
-  inject a fake that returns canned argv to verify re-dispatch without a tty -
-  [`autoprompt.md`](./autoprompt.md) section 7). Tests inject a fake client via
+- `Context` is the container for the runtime dependencies that `main()`
+  resolves. Currently these are:
+  - `client_factory` (`argparse.Namespace -> S3Client`, default
+    `clientfactory.build_client`).
+  - `service_client_factory` (`(service, args, *, region=None) -> client`,
+    default `clientfactory.build_service_client`) - the injection point where
+    mv's `--validate-same-s3-paths` creates the s3control / sts clients
+    (section 5.8).
+  - `transfer_config` (`TransferConfig | None`) - overrides the transfer
+    engine's defaults; tests inject `use_threads=False` to make the multipart
+    call order deterministic. **Only when it is `None`** do cp / mv / sync
+    build the config from `[s3]` (section 8), so an injected value always
+    takes precedence.
+  - `auto_prompter` (`AutoPrompter | None`) - the backend for
+    `--cli-auto-prompt`. Default `None` -> `main` lazily creates the
+    prompt_toolkit implementation. Tests inject a fake that returns canned
+    argv to verify re-dispatch without a tty
+    ([`autoprompt.md`](./autoprompt.md) section 7).
+
+  Tests inject a fake client via
   `cli.main(argv, ctx=Context(client_factory=<fake>))` (no monkeypatching of
   module attributes).
 
@@ -274,9 +293,10 @@ is not guaranteed):
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
 non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
 head order of section 5.7 (the `--query` compile 252 -> `--endpoint-url`
-scheme 252 -> `--page-size` paramfile expansion 252 -> its conversion 255 ->
+scheme 252 -> the `--cli-read/connect-timeout` conversions 255 ->
+`--page-size` paramfile expansion 252 -> its conversion 255 ->
 session profile 255, so `rm badpath --profile <bad>` is the profile's 255,
-like aws; `ls` and `presign` share the query/endpoint/paramfile/conversion
+like aws; `ls` and `presign` share the query/endpoint/timeout/paramfile/conversion
 prefix for their integer options). The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
@@ -302,7 +322,7 @@ aws-cli's behavior):
 | `--dryrun` | Calls no delete API, emitting only `(dryrun) delete:` lines (the recursive ListObjectsV2 still runs = a listing failure is fatal even under dryrun) |
 | `--quiet` | **Suppresses all output** (not just success lines but also `delete failed:` / `fatal error:` lines. aws does not create the printer at all. The rc is unchanged) |
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
-| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it into a globsieve matcher (a relative pattern matches the root-relative key, an absolute one the full key - inert for an anchorless s3 key) and passes it to `S3.rm(filter=)` |
+| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it into a globsieve matcher (a relative pattern matches the `Prefix`-relative `compare_key`, an absolute one the full key - inert for an anchorless s3 key) and passes it to `S3.rm(filter=)` |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
 | `--page-size N` | `S3Storage(url, page_size=N)` (storage config, as for ls). No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
@@ -358,7 +378,10 @@ Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
 <msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
 `Bucket=""` of `rb s3://`) is uniformly **rc 1**, reusing the same
 `usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
-wrapper as `mb` / `rm`'s equivalent empty-bucket check.
+wrapper as `mb` / `rm`'s equivalent empty-bucket check. With `--force` the
+empty-bucket case never reaches that line: aws has no empty-bucket
+short-circuit, so the inner rm runs first and its (inevitable) failure aborts
+at **rc 255** via the `--force` row above, before delete_bucket is attempted.
 
 ### 5.5 `presign`
 
@@ -448,7 +471,11 @@ Two of these are **source-config**, not `S3.cp` / `mv` / `sync` arguments:
 follow_symlinks=…)` for a local side and `S3Storage(url, page_size=…)` for an S3
 side - because the library reads how a source is walked / listed from the storage
 itself (`default_scan_options`), not from a per-operation argument. `ls` / `rm`
-likewise build `S3Storage(url, page_size=…)`.
+likewise build `S3Storage(url, page_size=…)`. Every scanning storage the CLI
+builds also passes `scan_wait_on_interrupt=False` (the same constructor
+channel): Ctrl-C is process-fatal in the CLI, so a scan's exit must not wait
+for an in-flight listing page pull, matching aws's immediate death - the
+library default keeps waiting ([`storage.md`](./storage.md) section 2).
 
 **streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
 `sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In
@@ -501,7 +528,11 @@ The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws 2.35.18):
 **`--query` compile (252**, aws resolves it at `top-level-args-parsed`, ahead
 of everything else) -> **`--endpoint-url` scheme (252**, aws validates the
-value at parse time) -> **the direct-option paramfile loads and the two
+value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
+coercions (255**, read before connect - aws's registration order at the same
+event; all three resolutions run in `_dispatch`'s top-level pre-pass, so they
+also beat stage 1's invalid-choice / unknown-options / missing-argument
+rejections, section 1) -> **the direct-option paramfile loads and the two
 integer coercions, interleaved per aws's `TRANSFER_ARGS` registration order**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
 blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
@@ -611,9 +642,7 @@ first).
 
 Checksum path-type validation (`--checksum-algorithm` is locals3 / s3s3,
 `--checksum-mode` is s3local only. `Expected <param> parameter to be used with one
-of following path formats: ...` 252) is shared by cp / mv (transferargs.py. mv's
-probe revealed that it was unimplemented on the cp side, and it was added at the
-same time).
+of following path formats: ...` 252) is shared by cp / mv (`transferargs.py`).
 
 **The source deletion** is the engine's job, not the CLI's (transfer.md section 11): for
 each successful item, an upload deletes the source through its `Storage.delete`
@@ -705,6 +734,7 @@ v2's convention (aws-cli's `awscli/constants.py`).
 | code | condition | the name on the aws-cli side |
 |---|---|---|
 | 0 | Success. `--help` / `--version`, and `BrokenPipeError`, are also 0 | - |
+| 130 | Ctrl-C (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
@@ -782,8 +812,11 @@ Because argparse's `type=int` would turn the same error into
 a usage error (252), it is not used; instead, each `run()` converts at the top via
 `parse_integer_option` in `commands/base.py` (before the client factory = exits
 255 with the SDK still unloaded), raising `InvalidValueError` - the class
-`exit_code_for` sends to 255 (the CLI timeouts' `_coerce_cli_timeout` uses the
-same class). **The exception is cp's `--expected-size`**:
+`exit_code_for` sends to 255. The CLI timeouts' `_coerce_cli_timeout` uses the
+same class, but runs earlier: `_dispatch`'s top-level pre-pass coerces both
+timeouts (read, then connect) ahead of every command-layer parse, aws's
+`top-level-args-parsed` timing (section 1; the client builders coerce the same
+strings again when they build). **The exception is cp's `--expected-size`**:
 because aws does a bare `int()` at submit time (within the pipeline) and **only on
 the streaming-upload route**, a non-integer there is not 255 but a `fatal error:`
 of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0

@@ -82,7 +82,7 @@ the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
 
 The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
 exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None`
-- a documented degradation, like the awscrt extra.
+- a documented degradation ([`overview.md`](./overview.md) section 2).
 
 ### `capture_response` - the full S3 responses
 

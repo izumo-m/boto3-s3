@@ -1,3 +1,18 @@
+# Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You
+# may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+#     http://aws.amazon.com/apache2.0/
+#
+# or in the "license" file accompanying this file. This file is
+# distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+# ANY KIND, either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# This file has been modified and ported for boto3-s3.
+
 """Port of aws-cli's functional rm tests to ``boto3-s3 rm``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_rm_command.py``
@@ -26,8 +41,9 @@ Adaptation rules (on top of the ls port's - see
   ``Quiet: True``. ``RequestPayer`` must still appear on both operations.
 - ``MaxKeys: 1000`` appears in recorded ListObjectsV2 params (boto3-s3 sends
   its explicit page-size default where aws-cli sends nothing).
-- The aws-cli ``TestRmWithCRTClient`` class (2 tests) is not ported: the CRT
-  transfer client is charter exception 2 (docs/overview.md section 3).
+- The aws-cli ``TestRmWithCRTClient`` class (2 tests) cannot use the botocore
+  recording client because the aws-cli CRT data plane bypasses it. The single
+  and recursive delete shapes are covered by the e2e CRT parity lane instead.
 """
 
 from __future__ import annotations

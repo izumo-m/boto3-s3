@@ -82,7 +82,7 @@ crt = [
 
 [[package]]
 name = "boto3-s3"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -132,7 +132,7 @@ dev = [
 
 [[package]]
 name = "boto3-s3-cli"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "boto3" },

@@ -2,9 +2,9 @@
 
 ## Supported Versions
 
-boto3-s3 is in early development (pre-1.0). Only the latest release of each
-package — `boto3-s3` and `boto3-s3-cli` — receives security fixes; they are not
-backported to earlier versions.
+boto3-s3 is in beta, preparing for the 1.0 release. Only the latest release of
+each package — `boto3-s3` and `boto3-s3-cli` — receives security fixes; fixes
+are not backported to earlier versions.
 
 ## Reporting a Vulnerability
 

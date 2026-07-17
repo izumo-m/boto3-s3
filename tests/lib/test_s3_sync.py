@@ -4,7 +4,7 @@ Behavioral parity pins (aws-cli refs in the implementation): the size+mtime
 judgment with its direction asymmetry,
 ``--delete`` driven purely by the destination-only pairs (folder markers and
 filtered entries protected), the visibility layer pruning each side against
-its own root, dry runs that list but never act, the missing-source 255 shape,
+its own listing, dry runs that list but never act, the missing-source 255 shape,
 a source *file* degrading to the aws-cli's walk warning, and ``no_overwrite``
 applied as an orthogonal write-guard in the sync loop (no ``IfNoneMatch`` on
 the wire).

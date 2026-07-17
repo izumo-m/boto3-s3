@@ -6,15 +6,17 @@ understands and records the trailing fragment to complete, never erroring. It is
 command-agnostic; the command/option knowledge comes from the injected
 ``CompletionModel``.
 
-Adapted from the aws-cli source in two ways. First the root token: aws normalizes
-the executable to ``'aws'`` and nests services under it; we normalize to
-``ROOT`` with the subcommands directly
+Adapted from the aws-cli source in three ways. First the root token: aws
+normalizes the executable to ``'aws'`` and nests services under it; we normalize
+to ``ROOT`` with the subcommands directly
 beneath. Second, ``_handle_positional`` is tuned for completion *usability* over
 a byte-faithful port (the auto-prompt UI is charter-exempt - ``docs/autoprompt.md``
 section 2): a value typed for an option before any positional keeps ``current_param`` on
 that option, and a token after a filled positional slot (cp/mv/sync take two
 paths) keeps the command's options live instead of dropping into
-``unparsed_items``. Pure Python (no ``prompt_toolkit``).
+``unparsed_items``. Third, ``_consume_value`` handles an *integer* ``nargs``
+(``mb --tags KEY VALUE``), which aws's parser lacks - a deliberate improvement
+over the original behavior, same section. Pure Python (no ``prompt_toolkit``).
 """
 
 from __future__ import annotations
@@ -156,6 +158,27 @@ class CLIParser:
                     break
                 value.append(remaining_parts.pop(0))
             return value
+        elif isinstance(nargs, int):
+            # DELIBERATE IMPROVEMENT over aws's original behavior (do not
+            # "re-align"): aws's parser has no integer-nargs branch, so its
+            # fall-through binds `mb --tags KEY ` KEY-first to the path
+            # positional and pops the full option menu while the user still
+            # owes VALUE. Consume up to `nargs` tokens like the +/* branch and
+            # keep `current_param` until the count is met, so the owed value
+            # keeps its (silent, free-text) completion context and the token
+            # after a complete pair binds to the positional correctly
+            # (docs/autoprompt.md section 2).
+            counted: list[str] = []
+            while len(counted) < nargs and remaining_parts and remaining_parts != [WORD_BOUNDARY]:
+                if remaining_parts[0].startswith("--"):
+                    state.current_param = None
+                    break
+                if len(remaining_parts) == 1:
+                    break
+                counted.append(remaining_parts.pop(0))
+            if len(counted) == nargs:
+                state.current_param = None
+            return counted
         return None
 
     def _split_to_parts(

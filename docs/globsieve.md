@@ -9,16 +9,19 @@ that matches wins, and a key that matches none is included**.
 submodule path (`from boto3_s3 import globsieve` / `from boto3_s3.globsieve
 import ...`); only `GlobFilter` / `GlobPattern` are additionally re-exported at
 the package root. Because the module is this self-contained, the whole engine
-is public - the entry points (`compile`, `GlobFilter`, `GlobPattern`,
-`PatternKind`, the `Matcher` / `SetMatcher` protocols), every matcher class
-`compile` picks from (the section 2 tables), and the two building-block
-helpers: `compile_set_matcher(patterns)` (the shape-specialized `SetMatcher`
-that `IncludeOnly` / `ExcludeOnly` / `Sequential` consume; an empty list yields
-a never-matching one) and `is_anchored(pattern)` (the root-anchored/relative
-split of section 1). Kept internal: the shape predicates behind
-`compile_set_matcher`'s partitioning (`_is_literal` / `_is_pure_suffix` /
-`_is_pure_prefix`) - implementation detail of the specialization, not part of
-the semantics.
+is public:
+
+- the entry points (`compile`, `GlobFilter`, `GlobPattern`, `PatternKind`, the
+  `Matcher` / `SetMatcher` protocols);
+- every matcher class `compile` picks from (the section 2 table);
+- the two building-block helpers: `compile_set_matcher(patterns)` (the
+  shape-specialized `SetMatcher` that `IncludeOnly` / `ExcludeOnly` /
+  `Sequential` consume; an empty list yields a never-matching one) and
+  `is_anchored(pattern)` (the root-anchored/relative split of section 1).
+
+Kept internal: the shape predicates behind `compile_set_matcher`'s partitioning
+(`_is_literal` / `_is_pure_suffix` / `_is_pure_prefix`) - an implementation
+detail of the specialization, not part of the semantics.
 
 ## 1. API
 
@@ -36,7 +39,7 @@ m.included("foo.log")  # False
 - `GlobPattern.include(p)` / `GlobPattern.exclude(p)` - one rule. fnmatch form
   (`*` is greedy across `/`).
 - `compile(patterns) -> Matcher` - `Matcher.included(compare_key, full_key=None)
-  -> bool`. A **relative** pattern matches `compare_key` (the root-relative key);
+  -> bool`. A **relative** pattern matches `compare_key`;
   a **root-anchored** (absolute) pattern matches `full_key` (the entry's full
   path) - see section 2. Relative-only lists ignore `full_key`.
 - `GlobFilter()` - the ergonomic front end and the type the operations consume
@@ -64,7 +67,7 @@ aws-cli joins every pattern onto the operation root with `os.path.join` and
 fnmatches the result against the entry's full path (`filters.py`). `os.path.join`
 *drops* the root for an absolute right-hand side, so an absolute pattern is
 effectively matched against the full path and a relative one against its
-root-relative tail. globsieve mirrors that split: a pattern is **anchored** when
+relative tail. globsieve mirrors that split: a pattern is **anchored** when
 `os.path.isabs` says so (POSIX `/foo`; Windows `C:/foo` / UNC), plus the Windows
 single-leading-separator forms `/foo` and `\foo`. The explicit Windows check is
 needed on Python 3.13+, where `ntpath.isabs` stopped recognizing those forms even
@@ -93,7 +96,7 @@ a literal - aws-cli-faithful on both.
 **Drive-relative patterns (Windows-only)**: a pattern like `C:foo` (a drive
 letter with no separator) is not anchored (`os.path.isabs` is false for it).
 aws-cli's `os.path.join` merges such a pattern onto a same-drive root as a
-plain root-relative tail (`ntpath.join('C:\\root', 'C:foo') ==
+plain relative tail (`ntpath.join('C:\\root', 'C:foo') ==
 'C:\\root\\foo'`), so `compile` mirrors that at compile time: it strips the
 drive (`_strip_drive_relative`) and matches what remains against
 `compare_key`, like any other relative pattern. `C:/foo` (drive-*absolute*)
@@ -143,20 +146,21 @@ first use).
 entry's `FileInfo` - returning True = include (a deletion target), False = skip
 (silently; as with aws, no OpResult is emitted either).
 
-The listing stamps **`info.compare_key`** on each entry - a contract the
-concrete backend's `scan_pages` producer fulfils, not the base `Storage.scan`
-(the single-key path stamps it inline): the entry's key relative to the root
-determined by `rm_filter_root(key,
-recursive=...)`. The root is, for recursive = the prefix normalized to a
-`/`-terminated form, for a single key = its parent "directory", for the bucket
-root = `""` (equivalent to the composition of aws's `filters._get_s3_root` plus
-`FileFormat.s3_format`). The relative form is what keeps `Exclude("*")`
+The listing stamps **`info.compare_key`** on each entry: the entry's key
+relative to the prefix that `rm_filter_root(key, recursive=...)` determines.
+(Stamping is a contract the concrete backend's `scan_pages` producer fulfils,
+not the base `Storage.scan`; the single-key path stamps it inline.) The prefix
+is: for recursive, the target normalized to a `/`-terminated form; for a single
+key, everything through its final `/`; for a bucket-level target, `""`
+(equivalent to the composition of aws's `filters._get_s3_root` plus
+`FileFormat.s3_format`). The
+relative form is what keeps `Exclude("*")`
 recognized as the catch-all and the section 2 optimizations in effect; the
 bucket name does not affect the decision under either aws's join or the
-relativization, so it is not part of the root.
+relativization, so it is not part of the prefix.
 
 - **`GlobFilter`** (and any glob predicate) matches a relative pattern against
-  `info.compare_key`, so it sees the same root-relative key aws-cli's `--exclude`
+  `info.compare_key`, so it sees the same key aws-cli's `--exclude`
   / `--include` match, with the section 2 fast paths intact; an absolute pattern
   it anchors against `info.key` (section 1). For `rm` the source is always s3,
   whose key has no anchor, so an absolute pattern is inert and only the relative
@@ -172,7 +176,7 @@ relativization, so it is not part of the root.
 
 `S3.rm` wraps the filter (for the folder-marker sweep) and passes it as
 `ScanOptions.filter` to the enumeration; the backend's `scan_pages` producer
-stamps each entry's root-relative `compare_key` (`info.key[len(root):]`) before
+stamps each entry's `Prefix`-relative `compare_key` (`info.key[len(prefix):]`) before
 the predicate runs.
 The evaluation is the **producer's** job: `scan_pages` returns already-filtered
 pages (`Storage.scan` flattens + prefetches them, re-applying the filter as a
@@ -184,9 +188,9 @@ and the local backend applies it inside the walk (after the aws-cli vetting, so
 an excluded file still emits the warnings aws-cli would). Whatever a producer
 omits is simply absent downstream, which makes the filter's effect easy to reason
 about (the per-side `sync` semantics - a filtered source entry versus a filtered
-destination entry - are the visibility layer described below). It runs **per
-page** on the listing's prefetch worker thread (an excluded
-entry is not handed to the consumer, a page wiped out entirely never reaches the
+destination entry - are the visibility layer described below). The predicate
+runs **per page** on the listing's prefetch worker thread (an excluded entry is
+not handed to the consumer; a page wiped out entirely never reaches the
 hand-off queue), so it must be thread-safe and lightweight.
 
 The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync (all
@@ -211,8 +215,9 @@ Every key the filter sees is **POSIX `/`-separated on every OS** - never the
 host `os.sep`. S3 keys are `/`-separated natively, and a local walk translates
 `os.sep` to `/` (`LocalFileInfo`), so both backends feed one key space (the
 basis of sync's merge-join). The **compare key** a glob filter is matched against
-(`GlobFilter`, via `FileInfo.compare_key`) is this `/`-form key with the scan
-root stripped (`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
+(`GlobFilter`, via `FileInfo.compare_key`) is this `/`-form key made relative to
+the local directory or S3 `Prefix` being enumerated
+(`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
 Matching therefore happens in `/`-space, so **a pattern must be `/`-form to
 match**:
 

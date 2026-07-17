@@ -1,8 +1,8 @@
 # Testing
 
-How the test suite is organized, what runs by default, and how aws-cli parity
-is enforced. The exit-code charter this enforces lives in
-[`overview.md`](./overview.md) section 3.
+This document describes how the test suite is organized, what runs by default,
+and how aws-cli parity is enforced. The exit-code charter this enforces lives
+in [`overview.md`](./overview.md) section 3.
 
 ## 1. Tiers
 
@@ -20,8 +20,8 @@ except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
 quality gates and package builds on Linux, then runs this default suite on
 Linux and macOS at the Python 3.10 floor, plus Python 3.14 on Linux and Windows.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
-runs the library and CLI compatibility seams whose expected request models are
-stable at that SDK generation. It needs no Docker because e2e self-skips without
+runs the library and CLI compatibility-seam tests whose expected request
+models are stable at that SDK generation. It needs no Docker because e2e self-skips without
 `BOTO3_S3_E2E_BUCKET`.
 
 One small group needs a **case-insensitive filesystem**: the `--case-conflict`
@@ -284,6 +284,9 @@ scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/com
 `scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
 `compose-up.sh` matches the exact container name, and its `mc-init` sidecar
 creates both `test-bucket` (manual play) and `boto3-s3-e2e` (e2e suite).
+The performance benchmarks ([benchmark.md](benchmark.md)) reuse this same
+stack and pinned `aws` but manage their own bucket (`boto3-s3-bench`); they
+never touch `boto3-s3-e2e`.
 Only one stack can own ports 9000/9001 - any other stack on those ports
 conflicts; `compose-up.sh` then fails loudly instead of mistaking it for ours.
 
@@ -356,8 +359,14 @@ goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
 `s3handler` has no CRT branch), so the signal is that our CRT mode agrees
 with aws's CRT mode on rc / stdout / bucket state / local tree / download
 mtime across upload, download, mv, and sync (single-part and 9 MiB
-multipart). A separate `--debug` check pins that our side actually engaged
-the CRT engine by asserting the transfer-time breadcrumb
+multipart). The same lane covers the missing CRT-configured deletion shapes:
+single/recursive `rm` and upload/download `sync --delete`. Those cases assert
+CLI-observable parity rather than transport identity: boto3-s3 deliberately
+keeps `DeleteObject` / batched `S3Deleter` for the S3-side deletions instead of
+aws-cli's per-key CRT DELETE requests, while download sync-delete removes local
+files on both sides (deleter.md section 4). A separate `--debug` check
+pins that our side actually engaged the CRT engine by asserting the
+transfer-time breadcrumb
 `Transferrer._get_manager` emits (`transfer engine: CRTTransferManager`),
 which names the engine *after* any CRT->classic fallback - guarding against a
 silent classic fallback (the `s3transfer.crt` throughput log fires at CRT
@@ -365,7 +374,8 @@ silent classic fallback (the `s3transfer.crt` throughput log fires at CRT
 real CRT transfer from a fallback). A further case
 (`test_crt_ignores_classic_only_config`) pins the charter: `[s3]` classic-only
 keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws, not a
-traceback. Gated by the e2e opt-in plus an `awscrt` import check. The selection matrix and `[s3]`
+traceback. The lane is gated by the e2e opt-in plus an `awscrt` import check.
+The selection matrix and `[s3]`
 parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
 `test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
 process lock monkeypatched.

@@ -219,6 +219,36 @@ class TestMaskTextNotation:
         assert '"SecretAccessKey": "***"' in out
         assert '"SessionToken": "***"' in out
 
+    def test_imds_parsed_credentials_dict_repr_masked(self) -> None:
+        # botocore's instance-metadata fetcher logs the *parsed* credentials
+        # dict when a response misses a required field - a Python dict repr,
+        # so single quotes and the metadata-service key name ``Token``.
+        out = m.mask_text(
+            "Error response received when retrieving credentials: "
+            f"{{'AccessKeyId': '{ACCESS_KEY_ID}', 'SecretAccessKey': '{SECRET_KEY}', "
+            f"'Token': '{SESSION_TOKEN}', 'Code': 'Success'}}."
+        )
+        assert SECRET_KEY not in out and SESSION_TOKEN not in out
+        assert "'SecretAccessKey': '***" in out
+        assert "'Token': '***" in out
+
+    def test_ecs_metadata_json_body_token_masked(self) -> None:
+        # The container-metadata fetcher logs the raw response body on
+        # malformed JSON; the session token rides under ``Token`` there.
+        out = m.mask_text(
+            f'Unable to parse JSON returned from ECS metadata: {{"AccessKeyId": '
+            f'"{ACCESS_KEY_ID}", "SecretAccessKey": "{SECRET_KEY}", '
+            f'"Token": "{SESSION_TOKEN}"'
+        )
+        assert SECRET_KEY not in out and SESSION_TOKEN not in out
+        assert '"Token": "***' in out
+
+    def test_listing_continuation_tokens_stay_visible(self) -> None:
+        # The quote anchored to the key name keeps pagination tokens (which
+        # merely end in ...Token) out of the credential mask.
+        text = '{"NextContinuationToken": "1dpEcSGKtHnzkiE", "ContinuationToken": "3qmQzXfE"}'
+        assert m.mask_text(text) == text
+
     def test_signature_mismatch_byte_dump_masked(self) -> None:
         # A SignatureDoesNotMatch (403) body echoes the canonical request as a hex
         # byte-dump; bytes.fromhex would reconstruct the x-amz-security-token line,
