@@ -4,7 +4,7 @@
     "src/data.json",
     "s3://<BUCKET>/up/data.json"
   ],
-  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
   "head_fields": {
     "ContentType": "application/json"
