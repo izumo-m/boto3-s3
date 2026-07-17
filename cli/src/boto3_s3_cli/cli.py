@@ -505,7 +505,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # (252), the --endpoint-url scheme check (252), then the timeout coercions
     # (255, read before connect, aws's registration order) - before ANY
     # command-layer parsing, so those errors beat an invalid choice, unknown
-    # options, and missing arguments (measured on aws 2.35.18). A parse-time
+    # options, and missing arguments (measured on the pinned aws-cli). A parse-time
     # -h/--help/--version wins instead (aws's parser actions fire before the
     # resolutions), and an exactly-['help'] remainder is aws's help-token
     # rule: the top-level help page, rc 0. The pre-pass output is discarded -
@@ -547,7 +547,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # like aws, never handed to a command parser that may define the same
         # flag. boto3-s3's top command is `aws s3`-equivalent, so this matches the
         # customizations command layer's wording (awscli customizations/commands.py
-        # joins with "," and NO space - verified against real aws 2.35.18, unlike the
+        # joins with "," and NO space - verified against the pinned aws-cli, unlike the
         # top-level clidriver.py which uses ", "), prefixed like aws's error handler
         # (errorformat.py "<prog>: [ERROR]: <msg>").
         if not suppress_usage_errors:

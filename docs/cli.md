@@ -525,7 +525,7 @@ are subject to it only when awscrt is present (overview.md section 3, transfer.m
 Signing stays pure-Python via the pin of section 4.
 
 The validation order of `run()` (corresponding to aws's stages; the
-combined-error cases are measured against the pinned aws 2.35.18):
+combined-error cases are measured against the pinned aws-cli):
 **`--query` compile (252**, aws resolves it at `top-level-args-parsed`, ahead
 of everything else) -> **`--endpoint-url` scheme (252**, aws validates the
 value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
@@ -752,7 +752,7 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
 ([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
-validation failures mapped to 252 use aws-cli 2.35.18's default enhanced-style
+validation failures mapped to 252 use aws-cli's default enhanced-style
 envelope,
 `An error occurred (ParamValidation): <message>`. This includes argparse
 failures, unknown options, plain `ValidationError`, and the auto-prompt flag

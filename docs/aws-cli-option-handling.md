@@ -9,7 +9,7 @@ share the same command machinery (see section 2.1).
 
 Reference points:
 
-- Reference CLI: **AWS CLI v2.35.18** (the pinned aws-cli). `aws s3` semantics
+- Reference CLI: **the pinned aws-cli** (AWS CLI v2). `aws s3` semantics
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's
@@ -84,7 +84,7 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 matches that.
 
 `--cli-error-format` controls the top-level CLI exception rendering in
-aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli 2.35.18's
+aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli's
 default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
 table renderings remain outside the parity target. In particular, parameter
 validation failures use `An error occurred (ParamValidation): <message>`.
@@ -274,7 +274,7 @@ The default enhanced-style parameter-validation envelope is reproduced where
 practical: parser failures, unknown options, path/option validation failures,
 and auto-prompt flag conflicts use
 `An error occurred (ParamValidation): <message>`. This target is the default
-output of aws-cli 2.35.18; selecting another `--cli-error-format` does not alter
+output of aws-cli; selecting another `--cli-error-format` does not alter
 `boto3-s3-cli` output, as described in section 2.1.
 
 Two deliberate output-pipeline deviations sit under this umbrella

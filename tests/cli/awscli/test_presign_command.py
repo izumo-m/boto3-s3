@@ -16,7 +16,7 @@
 """Port of aws-cli's functional presign tests to ``boto3-s3 presign``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_presign_command.py``
-(aws-cli 2.35.18). Test names, argv, and the expected URLs -
+(aws-cli 2.36.1). Test names, argv, and the expected URLs -
 the exact frozen-time signatures included - are kept verbatim so the file
 stays diffable against the aws-cli original.
 

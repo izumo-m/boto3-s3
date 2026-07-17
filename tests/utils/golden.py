@@ -105,7 +105,7 @@ def detect_aws_version() -> str:
     return proc.stdout.decode(errors="replace").strip() or "unknown"
 
 
-# The version inside an ``aws --version`` line ("aws-cli/2.35.18 Python/... ...").
+# The version inside an ``aws --version`` line ("aws-cli/2.36.1 Python/... ...").
 _AWS_VERSION_RE = re.compile(r"aws-cli/(\d+(?:\.\d+)*)")
 
 _VENDORED_AWSCLI_INIT = (

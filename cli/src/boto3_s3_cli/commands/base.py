@@ -150,8 +150,8 @@ def _expand_string_paramfile(
     Shared body of the string option and positional helpers below. aws expands
     both prefixes at parse time, so a missing reference is the load 252; a
     ``file://`` yields text, while a ``fileb://`` yields bytes that botocore
-    then rejects for a string parameter with its own 252 (measured against aws
-    2.35.18: ``value: b'...', valid types: <class 'str'>``). A value without a
+    then rejects for a string parameter with its own 252 (measured against the
+    pinned aws-cli: ``value: b'...', valid types: <class 'str'>``). A value without a
     prefix (or a non-string, e.g. an integer default) is untouched. *name* is
     the argument name aws reports in the load failure.
     """

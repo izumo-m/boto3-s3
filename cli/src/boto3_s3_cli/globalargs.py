@@ -45,7 +45,7 @@ def validate_query(args: argparse.Namespace) -> None:
     aws-cli compiles ``--query`` at ``top-level-args-parsed`` (its globalargs
     ``_resolve_query``) - before it resolves ``--endpoint-url`` and before any
     paramfile expansion - so a bad expression is its ParamValidation 252 ahead
-    of every other head check (measured against aws 2.35.18: it beats a bad
+    of every other head check (measured against the pinned aws-cli: it beats a bad
     ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
     ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
     a botocore dependency that is always importable, and it is loaded only when

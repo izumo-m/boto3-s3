@@ -45,7 +45,7 @@ class LsCommand(Command):
         # the positional, then --page-size (paramfile load 252, then the bare
         # int() coercion 255), then the bucket-listing filters. So a bad
         # --page-size value fires ahead of a bad --bucket-name-prefix /
-        # --bucket-region paramfile (measured on aws 2.35.18).
+        # --bucket-region paramfile (measured on the pinned aws-cli).
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")

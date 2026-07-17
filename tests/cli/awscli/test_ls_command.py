@@ -16,7 +16,7 @@
 """Port of aws-cli's functional ls tests to ``boto3-s3 ls``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_ls_command.py``
-(aws-cli 2.35.18). Test names, canned responses, and expected stdout/rc are
+(aws-cli 2.36.1). Test names, canned responses, and expected stdout/rc are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 

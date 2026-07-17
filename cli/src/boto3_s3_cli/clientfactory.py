@@ -83,7 +83,7 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
     aws-cli validates the value at parse time - before the integer coercions,
     the session profile, and every path validation - so this runs first in
     the commands whose later checks could otherwise mask it (measured against
-    aws 2.35.18: ``--page-size abc --endpoint-url badurl`` is the endpoint's
+    the pinned aws-cli: ``--page-size abc --endpoint-url badurl`` is the endpoint's
     252, not the conversion's 255). Also called inside the client builders,
     where botocore would otherwise raise a bare ``ValueError``.
     """

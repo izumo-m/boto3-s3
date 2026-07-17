@@ -4,8 +4,8 @@ This document is the established design for boto3-s3's equivalent of the
 `aws s3` CRT transfer engine mode
 (`preferred_transfer_client`). The core of the transfer side lives in
 [`transfer.md`](./transfer.md), the CLI wiring in [`cli.md`](./cli.md) section 8, and
-the tests in [`testing.md`](./testing.md). Behavior matches aws
-2.35.18, cross-checked against MinIO and the aws-cli / boto3 /
+the tests in [`testing.md`](./testing.md). Behavior matches the pinned
+aws-cli, cross-checked against MinIO and the aws-cli / boto3 /
 s3transfer source.
 
 ## 1. The two-layer split of responsibilities

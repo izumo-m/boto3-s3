@@ -456,7 +456,7 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
   ignored (harmless - the EXCLUDE both CLIs now send on every copy rides
   through the copy lanes unchanged, goldens unaffected) and
   ListObjectAnnotations answers 500, so `--copy-props all` cannot be
-  exercised end-to-end. Measured against aws 2.35.18: single-part `all`
+  exercised end-to-end. Measured against the pinned aws-cli: single-part `all`
   exits 0 on both sides (nothing annotation-related on the wire); the
   multipart carryover fails with rc 1 and **identical stderr** on both. The
   live-only `cp_copy_props_all_multipart` scenario pins the defining end state:
@@ -523,7 +523,7 @@ system PATH edits, any installed AWS CLI stays untouched) into
 junction. The NTFS test copy carries no aws-cli source checkout, so pass the
 version explicitly there (on a full checkout the argument is optional):
 
-    cmd.exe /c "scripts\install-awscli.cmd 2.35.18"
+    cmd.exe /c "scripts\install-awscli.cmd 2.36.1"
 
 The MinIO variables must be set in the **Windows** process - WSLENV
 propagation cannot be relied on - which is what `scripts/minio-env.cmd` (the

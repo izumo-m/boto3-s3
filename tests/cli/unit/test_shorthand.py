@@ -58,7 +58,7 @@ class TestParseMapOption:
 class TestAtEqualsParamfile:
     """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
     ``file://`` loads text, ``fileb://`` bytes, a prefix-less value passes
-    through (verified against aws 2.35.18: ``--metadata a@=file://f`` parses
+    through (verified against the pinned aws-cli: ``--metadata a@=file://f`` parses
     and transfers)."""
 
     def test_plain_value_passes_through(self) -> None:
@@ -129,7 +129,7 @@ class TestParseMapOptionErrors:
 class TestSyntaxErrorWordingParity:
     """Byte-exact aws parser wording for the shorthand syntax-error paths.
 
-    Each expected string was measured against the pinned aws 2.35.18
+    Each expected string was measured against the pinned aws-cli
     (``aws s3 cp ... --metadata <input>``): aws single-quote-wraps the offending
     character literally (not via ``repr``), prefixes the echoed input line with
     one space, and places the caret with ``ShorthandParseError._error_location``

@@ -204,8 +204,8 @@ class TestForce:
     def test_force_empty_uri_is_255_and_skips_delete_bucket(self) -> None:
         # aws has no empty-bucket short-circuit: rb s3:// --force runs the
         # inner rm first, whose (inevitable) failure aborts through the
-        # RuntimeError path (255) before delete_bucket - measured on aws
-        # 2.35.18, where the non-force rb s3:// stays rc 1.
+        # RuntimeError path (255) before delete_bucket - measured on the
+        # pinned aws-cli, where the non-force rb s3:// stays rc 1.
         client, calls = make_recording_client([])
         result = run_cli_in_process(["rb", "s3://", "--force"], ctx=_ctx(client))
         assert result.rc == 255

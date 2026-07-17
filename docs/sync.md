@@ -5,7 +5,7 @@ This document is the established design for boto3-s3's equivalent of
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
-[`testing.md`](./testing.md). Behavior matches aws 2.35.18, cross-checked
+[`testing.md`](./testing.md). Behavior matches the pinned aws-cli, cross-checked
 against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline

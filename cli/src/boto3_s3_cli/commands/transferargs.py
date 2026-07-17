@@ -156,7 +156,7 @@ def add_transfer_arguments(
         "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
     )
     parser.add_argument("--checksum-mode", choices=["ENABLED"])
-    # This set matches aws-cli 2.35.18's CHECKSUM_ALGORITHM choices verbatim
+    # This set matches the pinned aws-cli's CHECKSUM_ALGORITHM choices verbatim
     # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
     # SHA512 / XXHASH* because that build predates them - a version skew, not a
     # parity bug: the design tracks the aws-cli source, not whatever `aws`
@@ -200,7 +200,7 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     option comes first - a bad ``--progress-frequency`` (255) beats a later
     ``--page-size file://missing`` (252), while an earlier ``--content-type
     file://missing`` (252) beats ``--page-size abc`` (255); all measured
-    against aws 2.35.18. The order here mirrors that: the SSE-C key blob,
+    against the pinned aws-cli. The order here mirrors that: the SSE-C key blob,
     ``--sse-kms-key-id``, the copy-source blob, ``--grants``, the free-string
     text block, then ``--progress-frequency`` and ``--page-size`` (paramfile
     then coercion). Returns the two coerced integers. ``--metadata`` (a map)
@@ -240,8 +240,8 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     ``fileb://`` its bytes - the grant parser then consumes that verbatim
     (a text file iterates character by character, bytes int by int, both
     surfacing in-flight the way aws does). A multi-element ``--grants`` or a
-    prefix-less value stays the list argparse produced. Measured against aws
-    2.35.18: ``--grants file:///missing`` is the load 252.
+    prefix-less value stays the list argparse produced. Measured against the pinned
+    aws-cli: ``--grants file:///missing`` is the load 252.
     """
     grants: object = args.grants
     if isinstance(grants, list):
@@ -308,7 +308,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     """The shared ``run()`` head, in aws's parse-to-validation order.
 
     The order is exit-code-load-bearing, identical across cp/mv/sync, and
-    measured against aws 2.35.18 on the combined-error cases: the ``--query``
+    measured against the pinned aws-cli on the combined-error cases: the ``--query``
     compile (252, aws resolves it at ``top-level-args-parsed``, ahead of
     everything) -> the ``--endpoint-url`` scheme check (252, aws validates the
     value at parse time) -> the direct-option paramfiles and the two integer

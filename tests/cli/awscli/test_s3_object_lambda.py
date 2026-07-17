@@ -16,7 +16,7 @@
 """Port of aws-cli's functional S3 Object Lambda rejection tests.
 
 Provenance: aws-cli's ``tests/functional/s3/test_s3_object_lambda.py``
-(aws-cli 2.35.18). The two ARN spellings, optional key, nine command shapes,
+(aws-cli 2.36.1). The two ARN spellings, optional key, nine command shapes,
 exit code, and stable error token are kept verbatim. The aws-cli harness's
 ``run_cmd`` becomes the in-process CLI runner plus a recording client; the
 empty call list proves rejection happens before any service request.

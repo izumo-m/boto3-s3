@@ -108,7 +108,7 @@ class TestParamfile:
     def test_fileb_on_a_string_option_is_a_param_validation(self, tmp_path: Path) -> None:
         # aws loads the fileb:// bytes and botocore rejects them for a
         # string-typed parameter (rc 252); the wording is byte-exact and
-        # names the generic "input" parameter (measured against aws 2.35.18).
+        # names the generic "input" parameter (measured against the pinned aws-cli).
         p = tmp_path / "ct.bin"
         p.write_bytes(b"hi\n")
         with pytest.raises(ValidationError) as excinfo:

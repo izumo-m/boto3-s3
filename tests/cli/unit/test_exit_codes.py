@@ -156,7 +156,7 @@ class TestMainExitCodes:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws s3 joins multiple unknown options with "," and NO space (the
-        # customizations command layer; verified against real aws 2.35.18), not
+        # customizations command layer; verified against the pinned aws-cli), not
         # ", ". Both option positions share this wording.
         assert cli.main(["cp", "a.txt", "s3://b/", "--foo", "--bar"]) == 252
         assert "Unknown options: --foo,--bar" in capsys.readouterr().err
@@ -249,7 +249,7 @@ class TestMainExitCodes:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
-        # and rc 130 (128+SIGINT), never a traceback (measured on aws 2.35.18).
+        # and rc 130 (128+SIGINT), never a traceback (measured on the pinned aws-cli).
         # KeyboardInterrupt is a BaseException, so it passes _dispatch's
         # handlers and reaches main's backstop.
         class _InterruptClient:
@@ -349,7 +349,7 @@ class TestValidationOrder:
 
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
-    against the pinned aws 2.35.18; docs/cli.md section 5.7, table in
+    against the pinned aws-cli; docs/cli.md section 5.7, table in
     section 6): the ``--query`` compile (252) -> the ``--endpoint-url`` scheme
     check (252) -> the ``--cli-read-timeout`` / ``--cli-connect-timeout``
     coercions (255, read first; resolved in the dispatch pre-pass, so they
@@ -617,7 +617,7 @@ class TestRecursiveDestDirCreation:
 class TestHelpToken:
     """aws's parser turns an exactly-``['help']`` token list into the help
     page (rc 0) at every level - its ``ArgTableArgParser`` special case.
-    Measured on aws 2.35.18: ``s3 help`` and ``s3 ls help`` are 0,
+    Measured on the pinned aws-cli: ``s3 help`` and ``s3 ls help`` are 0,
     ``s3 help foo`` is 252, and a bad timeout still beats the token (255)."""
 
     def test_top_level_help_token(self, capsys: pytest.CaptureFixture[str]) -> None:

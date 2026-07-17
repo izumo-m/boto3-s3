@@ -16,7 +16,7 @@
 """Port of aws-cli's functional mb tests to ``boto3-s3 mb``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_mb_command.py``
-(aws-cli 2.35.18). Test names, argv, canned responses, and
+(aws-cli 2.36.1). Test names, argv, canned responses, and
 expected params/rc are kept verbatim where possible so the file stays
 diffable against the aws-cli original when aws-cli is updated.
 

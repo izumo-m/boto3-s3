@@ -408,7 +408,7 @@ dest-existence check for download. We ported the same three faces:
   there; the probe's failure path re-checks existence by full path and picks
   the wording aws-cli's exists-first battery emits (`File does not exist.`,
   never `not readable`) - same skip set, same wording, rc 2 as `aws.exe`
-  (verified against 2.35.18; pinned by
+  (verified against the pinned aws-cli; pinned by
   `test_over_max_path_entries_warn_does_not_exist_like_aws`). The same
   re-check makes an entry that races away between its stat and the probe warn
   `File does not exist.` like aws's full-path battery would, on every
