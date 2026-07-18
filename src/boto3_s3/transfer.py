@@ -1182,6 +1182,7 @@ class Transferrer:
         if not crtsupport.should_use_crt(str(preferred)):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
+        _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
         return crtsupport.create_crt_transfer_manager(
             self._client,
             self._transfer_config,
@@ -1195,6 +1196,7 @@ class Transferrer:
         from s3transfer.manager import TransferManager
 
         _allow_if_none_match()
+        _allow_inline_mpu_tagging()
         config: Any = self._transfer_config
         if config is None:
             config = S3TransferConfig()
@@ -1968,16 +1970,37 @@ class _SetMetadataDirectiveProps:
         )
 
 
+def _allow_inline_mpu_tagging() -> None:
+    """Realign s3transfer's create-multipart blacklist with aws-cli's.
+
+    aws-cli's bundled s3transfer keeps a plain ``Tagging`` off its copy
+    ``CREATE_MULTIPART_ARGS_BLACKLIST``, so `_SetTags`' inline small-tag
+    header rides CreateMultipartUpload - the destination is created with its
+    tags atomically, no separate write. Upstream s3transfer 0.19 blacklists
+    the arg (its own ``TaggingDirective``-driven tag copy replaced the
+    pass-through - a path `_SetTags` does not use because it has no
+    destination rollback when the tagging write fails), which would silently
+    strip the header and force every small tag set through the post-copy
+    PutObjectTagging fallback: a wire divergence, and a failure-timing one
+    (aws fails at create and keeps the source where tagging is denied).
+    Removed idempotently; a no-op on older s3transfer that never blacklisted
+    it.
+    """
+    from s3transfer.copies import CopySubmissionTask
+
+    blacklist = CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+    if "Tagging" in blacklist:
+        blacklist.remove("Tagging")
+
+
 def _mpu_inline_tagging_supported() -> bool:
     """Whether s3transfer forwards an inline ``Tagging`` header to
     CreateMultipartUpload.
 
-    Upstream s3transfer >= 0.19 blacklists the arg from the create call
-    (``CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST``) in favor of its
-    own ``TaggingDirective``-driven tag copy, which `_SetTags` does not use
-    because that path has no destination rollback when the tagging write
-    fails. Where the header would be silently dropped, `_SetTags` routes the
-    tag set through its post-copy PutObjectTagging instead.
+    `_allow_inline_mpu_tagging` makes this hold on every supported s3transfer
+    at manager build; the probe stays as a guard so a future upstream that
+    reshapes the table degrades to the post-copy PutObjectTagging fallback
+    instead of silently dropping the header.
     """
     from s3transfer.copies import CopySubmissionTask
 
@@ -1989,10 +2012,12 @@ class _SetTags:
 
     Single-part copies inherit tags via ``TaggingDirective=COPY``; multipart
     copies read GetObjectTagging from the source and either inline the
-    percent-encoded set in the ``Tagging`` header (<= ~2 KiB, only where
-    s3transfer still forwards it to CreateMultipartUpload - see
-    `_mpu_inline_tagging_supported`) or apply it with a post-copy
-    PutObjectTagging - rolling the destination object back with a delete
+    percent-encoded set in the ``Tagging`` header on CreateMultipartUpload
+    (<= ~2 KiB - `_allow_inline_mpu_tagging` keeps the header off upstream's
+    create blacklist, like aws-cli's bundled table; the
+    `_mpu_inline_tagging_supported` probe guards the alignment) or apply it
+    with a post-copy PutObjectTagging - rolling the destination object back
+    with a delete
     when that tagging write fails, then surfacing the tagging failure on the
     transfer future. If the rollback delete itself also fails, aws-cli lets
     that delete error escape the done callback (s3transfer swallows it) and

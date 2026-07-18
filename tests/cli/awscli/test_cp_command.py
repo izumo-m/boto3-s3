@@ -51,11 +51,9 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
 - ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
   page-size default; rm port rule) and never show ``EncodingType``.
 - The aws-cli's inline MPU-copy ``Tagging`` expectation (a small tag set
-  riding CreateMultipartUpload) holds only where the installed s3transfer
-  forwards that header; upstream s3transfer >= 0.19 blacklists it from the
-  create call and the engine applies the set with the post-copy
-  PutObjectTagging instead. The affected tests branch on
-  ``_INLINE_MPU_TAGGING`` (the blacklist probed directly).
+  riding CreateMultipartUpload) holds verbatim: the engine removes upstream
+  s3transfer >= 0.19's ``Tagging`` create-blacklist entry at manager build
+  (``_allow_inline_mpu_tagging``), realigning with aws-cli's bundled table.
 - ``--copy-props all``'s multipart annotation carryover rides upstream
   s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
   SetAnnotationsSubscriber (docs/transfer.md section 4), so the
@@ -146,9 +144,6 @@ SOURCE_KEY = "source-key"
 TARGET_BUCKET = "target-bucket"
 TARGET_KEY = "target-key"
 MULTIPART_THRESHOLD = 8 * MB
-# Whether s3transfer forwards inline Tagging to CreateMultipartUpload
-# (module docstring adaptation rule; upstream >= 0.19 blacklists it).
-_INLINE_MPU_TAGGING = "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
 
 
 def _run_cmd(
@@ -1339,23 +1334,10 @@ class TestCopyPropsDefaultCpCommand:
             get_object_tagging_response(tags),
             *mp_copy_responses(),
         ]
-        if not _INLINE_MPU_TAGGING:
-            responses.append({})  # PutObjectTagging
         _, calls = _run_cmd(responses, copy_command(copy_props="default"))
         expected = all_metadata_directive_props()
-        if _INLINE_MPU_TAGGING:
-            expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
+        expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
         _assert_in_operations_called(calls, "CreateMultipartUpload", create_mpu_request(**expected))
-        if not _INLINE_MPU_TAGGING:
-            _assert_in_operations_called(
-                calls,
-                "PutObjectTagging",
-                {
-                    "Bucket": TARGET_BUCKET,
-                    "Key": TARGET_KEY,
-                    "Tagging": {"TagSet": get_object_tagging_response(tags)["TagSet"]},
-                },
-            )
 
     def test_mp_copy_object_no_tags(self, tmp_path: Path) -> None:
         _, calls = _run_cmd(
@@ -1398,25 +1380,12 @@ class TestCopyPropsDefaultCpCommand:
             get_object_tagging_response(tags),
             *mp_copy_responses(),
         ]
-        if not _INLINE_MPU_TAGGING:
-            responses.append({})  # PutObjectTagging
         _, calls = _run_cmd(responses, recursive_copy_command(copy_props="default"))
         expected = all_metadata_directive_props()
-        if _INLINE_MPU_TAGGING:
-            expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
+        expected["Tagging"] = "tag-key=tag-value&tag-key2=tag-value2"
         _assert_in_operations_called(
             calls, "CreateMultipartUpload", create_mpu_request(key=SOURCE_KEY, **expected)
         )
-        if not _INLINE_MPU_TAGGING:
-            _assert_in_operations_called(
-                calls,
-                "PutObjectTagging",
-                {
-                    "Bucket": TARGET_BUCKET,
-                    "Key": SOURCE_KEY,
-                    "Tagging": {"TagSet": get_object_tagging_response(tags)["TagSet"]},
-                },
-            )
 
     def test_recursive_mp_copy_tags_exceed_2k(self, tmp_path: Path) -> None:
         big_tags = {"tag-key": "value" * (2 * 1024)}
@@ -1581,7 +1550,6 @@ class TestCopyPropsAllCpCommand:
             *self.mp_copy_responses_with_dest_identity(),
             {},  # PutObjectAnnotation ann1
             {},  # PutObjectAnnotation ann2
-            {},  # PutObjectTagging (post-copy on s3transfer >= 0.19)
         ]
         _, calls = _run_cmd(responses, copy_command(copy_props="all"))
         assert _operations(calls) == [
@@ -1595,11 +1563,12 @@ class TestCopyPropsAllCpCommand:
             "CompleteMultipartUpload",
             "PutObjectAnnotation",
             "PutObjectAnnotation",
-            "PutObjectTagging",
         ]
         # The directive rides extra_args only; the blacklist keeps it off the
-        # CreateMultipartUpload call.
+        # CreateMultipartUpload call. The small tag set rides the create
+        # inline (module docstring), so no post-copy PutObjectTagging.
         assert "AnnotationDirective" not in calls[5].params
+        assert calls[5].params["Tagging"] == "tag-key=tag-value"
         _assert_in_operations_called(
             calls,
             "ListObjectAnnotations",
