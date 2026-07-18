@@ -212,6 +212,11 @@ class TestCreateCrtTransferManager:
         assert client_kwargs == {
             "region_name": "us-east-1",
             "endpoint_url": "http://127.0.0.1:9000",
+            # The client's own Config rides along so the serializer's nested
+            # client keeps the caller's endpoint/addressing settings (the CLI's
+            # us-east-1 regional pin included - aws v2's bundled botocore is
+            # regional-only there, stock botocore is not).
+            "config": client.meta.config,
         }
         [manager_kwargs] = stubs.manager_kwargs
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client

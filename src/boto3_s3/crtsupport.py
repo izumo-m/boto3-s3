@@ -326,8 +326,18 @@ def _initialize(
 
     region = client.meta.region_name
     endpoint_url = _resolve_endpoint(client, endpoint)
+    # The caller's client Config rides into the serializer's nested botocore
+    # client (the serializer merges signature_version=UNSIGNED on top). Without
+    # it, a None endpoint re-resolves under *stock botocore's* defaults, which
+    # send us-east-1 to the legacy global endpoint (s3.amazonaws.com) - aws v2's
+    # bundled botocore is regional-only there, and the CLI pins the classic
+    # engine to regional the same way (its us_east_1_regional_endpoint
+    # override, clientfactory), so the CRT lane must serialize with the same
+    # Config to keep one Host across engines. Addressing-style and
+    # accelerate/dualstack settings carry over for the same reason.
     serializer = BotocoreCRTRequestSerializer(
-        _botocore_session(session), {"region_name": region, "endpoint_url": endpoint_url}
+        _botocore_session(session),
+        {"region_name": region, "endpoint_url": endpoint_url, "config": client.meta.config},
     )
 
     create_kwargs: dict[str, Any] = {
