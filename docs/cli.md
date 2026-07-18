@@ -27,9 +27,14 @@ solidified design is added here.
   `MainArgParser`), then the `--query` compile, the `--endpoint-url` scheme
   check, and the `--cli-read-timeout` / `--cli-connect-timeout` coercions in
   aws's registration order - so those errors beat an invalid choice, unknown
-  options, and missing arguments (measured; section 5.7/6). A parse-time
-  `-h` / `--help` / `--version` wins over the resolutions (aws's parser
-  actions fire before its `top-level-args-parsed` event), and aws's
+  options, and missing arguments (measured; section 5.7/6). The parse itself
+  settles two outcomes even earlier, replayed from the pre-pass capture: a
+  global that fails to parse (invalid choice, missing value) is the run's
+  error - beating the invalid-subcommand rejection and a `-h` anywhere in
+  argv - and a parse-time `--version` prints and exits 0 even beside an
+  invalid subcommand (both measured). A parse-time `-h` / `--help` wins over
+  the resolutions (aws's parser actions fire before its
+  `top-level-args-parsed` event), and aws's
   **help-token rule** applies: an exactly-`help` pre-pass remainder, or an
   exactly-`help` stage-2 remainder after a subcommand, prints the
   corresponding help page at rc 0 (`ls help` shows ls's help rather than
@@ -526,8 +531,11 @@ Signing stays pure-Python via the pin of section 4.
 
 The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws-cli):
-**`--query` compile (252**, aws resolves it at `top-level-args-parsed`, ahead
-of everything else) -> **`--endpoint-url` scheme (252**, aws validates the
+**a top-level global that fails to parse, or a parse-time `--version` (252 /
+0**, settled during `_dispatch`'s pre-pass parse itself - ahead of everything
+below, the invalid-subcommand rejection and `-h` included; section 1) ->
+**`--query` compile (252**, aws resolves it at `top-level-args-parsed`, the
+first of the resolutions) -> **`--endpoint-url` scheme (252**, aws validates the
 value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
 coercions (255**, read before connect - aws's registration order at the same
 event; all three resolutions run in `_dispatch`'s top-level pre-pass, so they

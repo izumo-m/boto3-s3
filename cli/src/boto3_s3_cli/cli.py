@@ -208,13 +208,19 @@ def _build_globals_parser() -> argparse.ArgumentParser:
     """Globals-only parser for the aws-shaped top-level pre-pass (``_dispatch``).
 
     aws parses the top-level globals over the *full* argv first
-    (``MainArgParser.parse_known_args``) and resolves them ahead of any
-    command-layer parsing. ``add_help=False`` keeps ``-h`` / ``--help`` in the
-    remainder (they win over the resolutions, like ``--version``'s parse-time
-    exit); everything this parser does not know - the subcommand token and its
-    options - passes through untouched.
+    (``MainArgParser.parse_known_args``), and that parse settles two outcomes
+    on the spot: a global that fails to parse (invalid choice, missing value)
+    and a parse-time ``--version``. ``add_help=False`` keeps ``-h`` /
+    ``--help`` in the remainder - they win over the later resolutions but NOT
+    over a parse error (measured: ``s3 ls -h --output bad`` errors instead of
+    helping); everything this parser does not know - the subcommand token and
+    its options - passes through untouched. Its captured output is the
+    dispatcher's replay source on those exits, so the usage line is pinned to
+    stage 1's: the replayed error must render byte-identically to the stage-1
+    report it supersedes.
     """
-    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
+    usage = _build_stage1_parser().format_usage().removeprefix("usage: ").rstrip("\n")
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=usage)
     globalargs.add_common_arguments(parser)
     return parser
 
@@ -506,20 +512,33 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # (255, read before connect, aws's registration order) - before ANY
     # command-layer parsing, so those errors beat an invalid choice, unknown
     # options, and missing arguments (measured on the pinned aws-cli). A parse-time
-    # -h/--help/--version wins instead (aws's parser actions fire before the
-    # resolutions), and an exactly-['help'] remainder is aws's help-token
-    # rule: the top-level help page, rc 0. The pre-pass output is discarded -
-    # on a pre-pass parse error, stage 1 below reproduces the canonical
-    # message itself.
+    # -h/--help/--version wins over the resolutions (aws's parser actions fire
+    # first), and an exactly-['help'] remainder is aws's help-token rule: the
+    # top-level help page, rc 0. The parse itself settles even earlier: a
+    # global that fails to parse, and a parse-time --version, exit during
+    # aws's very first parse and beat everything downstream - the
+    # invalid-subcommand error and a -h anywhere in argv included (measured:
+    # `s3 bogus --output bad` blames --output, `s3 ls -h --output bad` errors
+    # instead of helping, `s3 bogus --version` prints the version). Those two
+    # exits are replayed from the capture; falling through to stage 1 would
+    # blame the subcommand first.
+    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
     try:
         with (
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(pre_stdout),
+            contextlib.redirect_stderr(pre_stderr),
         ):
             head, remainder = _build_globals_parser().parse_known_args(argv)
-    except SystemExit:
-        head, remainder = None, []
-    if head is not None and "-h" not in remainder and "--help" not in remainder:
+    except SystemExit as exc:
+        if not exc.code:
+            # --version fired - the globals parser's only zero-exit action
+            # (add_help=False keeps -h out of it).
+            sys.stdout.write(pre_stdout.getvalue())
+            return 0
+        if not suppress_usage_errors:
+            sys.stderr.write(pre_stderr.getvalue())
+        return _PARAM_VALIDATION_ERROR_RC
+    if "-h" not in remainder and "--help" not in remainder:
         from boto3_s3_cli import clientfactory
 
         try:

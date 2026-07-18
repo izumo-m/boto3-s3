@@ -347,6 +347,69 @@ class TestValidationOrder:
         assert rc == 252
 
 
+class TestPreParseErrorAttribution:
+    """A global that fails to parse - or a parse-time ``--version`` - settles
+    the run in the pre-pass, like aws's ``MainArgParser``: it beats the
+    invalid-subcommand error and a ``-h`` anywhere in argv (measured against
+    the pinned aws-cli: ``s3 bogus --output bad`` blames ``--output``,
+    ``s3 ls -h --output bad`` errors instead of helping, ``s3 bogus
+    --version`` prints the version at rc 0)."""
+
+    def test_bad_global_choice_beats_the_invalid_subcommand(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["nosuchcmd", "--output", "bad"]) == 252
+        err = capsys.readouterr().err
+        assert "argument --output: Found invalid choice 'bad'" in err
+        assert "nosuchcmd" not in err
+
+    def test_missing_global_value_beats_the_invalid_subcommand(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["nosuchcmd", "--profile"]) == 252
+        err = capsys.readouterr().err
+        assert "argument --profile: expected one argument" in err
+        assert "nosuchcmd" not in err
+
+    def test_version_beats_the_invalid_subcommand(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["nosuchcmd", "--version"]) == 0
+        assert capsys.readouterr().out.startswith("boto3-s3-cli/")
+
+    def test_parse_error_beats_help_in_either_position(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's main parse precedes its help handling entirely, so -h cannot
+        # rescue a bad global even when it comes first.
+        assert cli.main(["ls", "-h", "--output", "bad"]) == 252
+        assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
+        assert cli.main(["--help", "--output", "bad"]) == 252
+        assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
+
+    def test_replayed_error_renders_the_stage1_usage(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The pre-pass replay must be byte-identical to the stage-1 report it
+        # supersedes: same [ERROR] line, same usage block (the globals parser
+        # borrows stage 1's usage, <command> token and all).
+        assert cli.main(["ls", "--output", "bad"]) == 252
+        err = capsys.readouterr().err
+        assert "argument --output: Found invalid choice 'bad'" in err
+        assert "usage: boto3-s3 " in err
+        assert "<command>" in err
+
+    def test_bare_invalid_subcommand_is_still_blamed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # With no global parse error the attribution stays on the subcommand -
+        # including beside unknown options and a trailing -h (all measured).
+        assert cli.main(["nosuchcmd"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+        assert cli.main(["nosuchcmd", "--unknown-opt"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+        assert cli.main(["nosuchcmd", "-h"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+
+
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
     against the pinned aws-cli; docs/cli.md section 5.7, table in
