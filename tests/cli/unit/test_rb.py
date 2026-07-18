@@ -240,4 +240,4 @@ class TestForce:
         assert rm_args.paths == "s3://b"
         assert rm_args.recursive is True
         assert rm_args.dryrun is False
-        assert rm_args.page_size == 1000
+        assert rm_args.page_size is None  # aws parity: unset sends no MaxKeys

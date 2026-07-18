@@ -189,7 +189,7 @@ def identify_type(path: str) -> str:
     return "s3" if path.startswith("s3://") else "local"
 
 
-def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tuple[int, int]:
+def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tuple[int | None, int]:
     """Resolve the direct-option paramfiles and integer coercions, in aws order.
 
     aws processes each argument one at a time in its ``TRANSFER_ARGS``
@@ -228,6 +228,9 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
             )
             setattr(args, option, resolved)
     progress_frequency = _resolve_integer_option(args, "progress_frequency", operation=operation)
+    # --progress-frequency's argparse default is 0, so its unset-None branch is
+    # unreachable; --page-size's default is None (nothing sent, aws parity).
+    assert progress_frequency is not None
     page_size = _resolve_integer_option(args, "page_size", operation=operation)
     return page_size, progress_frequency
 
@@ -252,7 +255,7 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
                 args.grants = loaded
 
 
-def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int:
+def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int | None:
     """Expand a string-typed integer option's paramfile, then coerce.
 
     aws expands the paramfile then runs its bare ``int()`` at the option's
@@ -294,7 +297,7 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 class TransferPaths(NamedTuple):
     """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
 
-    page_size: int
+    page_size: int | None
     progress_frequency: int
     src: str
     dest: str
@@ -589,7 +592,7 @@ def resolve_locations(
     *,
     src_type: str,
     dest_type: str,
-    page_size: int,
+    page_size: int | None,
 ) -> tuple[object, object]:
     """Build the library-side location pair for the non-stream routes.
 

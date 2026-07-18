@@ -41,9 +41,6 @@ Adaptation rules (aws-cli harness -> ``tests.utils.recorder``):
   ``set_list_objects_encoding_type_url``, applied to aws-cli and boto3-s3
   alike, decoded symmetrically) never shows up here and is dropped from
   expected params.
-- ``boto3-s3 ls`` always passes its ``--page-size`` default (1000) to the
-  paginator, so ``MaxKeys: 1000`` appears in recorded object-listing params
-  where aws-cli sends nothing (server default is the same 1000).
 - The aws-cli's ``assertNotIn('delimiter', ...)`` (lowercase, vacuously true)
   is tightened to the real ``'Delimiter'`` key.
 """
@@ -230,14 +227,12 @@ class TestLSCommand:
         )
         assert result.rc == 0
         # aws-cli expectation minus ``EncodingType: "url"`` (botocore injects
-        # it after the recording point; see module docstring) plus
-        # ``MaxKeys: 1000`` (boto3-s3 sends its explicit page-size default).
+        # it after the recording point; see module docstring).
         assert calls[0].params == {
             "Bucket": "mybucket",
             "Delimiter": "/",
             "RequestPayer": "requester",
             "Prefix": "foo/",
-            "MaxKeys": 1000,
         }
 
     def test_requester_pays_with_no_args(self) -> None:
@@ -249,7 +244,6 @@ class TestLSCommand:
             "Delimiter": "/",
             "RequestPayer": "requester",
             "Prefix": "foo/",
-            "MaxKeys": 1000,
         }
 
     def test_accesspoint_arn(self) -> None:

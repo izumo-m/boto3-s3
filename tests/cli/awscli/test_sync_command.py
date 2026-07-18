@@ -39,8 +39,6 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
   batch through ``DeleteObjects`` (accepted wire-level deviation,
   docs/deleter.md section 4 - the rm port rule), so per-key expectations become
   one ``DeleteObjects`` carrying the keys with ``Quiet: True``.
-- ``ListObjectsV2`` expectations gain our explicit ``MaxKeys: 1000``
-  page-size default (rm port rule).
 - The per-algorithm checksum matrices are parametrized instead of being
   nine near-identical methods (cp port rule).
 - The aws-cli's ``_oserror`` / ``_valueerror`` file-deleted-mid-walk pair
@@ -90,7 +88,7 @@ _SYNC_CONFIG = TransferConfig(use_threads=False)
 # keeps the gate deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
-_LIST_BASE = {"MaxKeys": 1000}
+_LIST_BASE: dict[str, object] = {}
 
 
 def _run_cmd(

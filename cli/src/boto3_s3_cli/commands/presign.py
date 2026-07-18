@@ -50,6 +50,9 @@ class PresignCommand(Command):
         expand_positional_paramfile(args, "path", name="path", operation="presign")
         expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
+        # --expires-in's argparse default is 3600, so the unset-None branch of
+        # parse_integer_option is unreachable here.
+        assert expires_in is not None
         # Import the library entry point only when this execution path needs it.
         from boto3_s3 import S3Storage
 

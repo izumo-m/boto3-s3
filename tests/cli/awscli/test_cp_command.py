@@ -48,8 +48,7 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   default), so the recorded HEAD matches aws.
 - ``LastModified`` strings become ``datetime`` objects and string
   ``ContentLength``/sizes become ints (no output parser runs, recorder rule).
-- ``ListObjectsV2`` expectations gain ``MaxKeys: 1000`` (our explicit
-  page-size default; rm port rule) and never show ``EncodingType``.
+- ``ListObjectsV2`` expectations never show ``EncodingType`` (recorder rule).
 - The aws-cli's inline MPU-copy ``Tagging`` expectation (a small tag set
   riding CreateMultipartUpload) holds verbatim: the engine removes upstream
   s3transfer >= 0.19's ``Tagging`` create-blacklist entry at manager build
@@ -930,7 +929,6 @@ class TestCpCommandWithRequesterPayer:
                     "Bucket": "mybucket",
                     "Prefix": "",
                     "RequestPayer": "requester",
-                    "MaxKeys": 1000,
                 },
             ),
             ("GetObject", {"Bucket": "mybucket", "Key": "mykey", "RequestPayer": "requester"}),
@@ -1036,7 +1034,6 @@ class TestCpCommandWithRequesterPayer:
                     "Bucket": "sourcebucket",
                     "Prefix": "",
                     "RequestPayer": "requester",
-                    "MaxKeys": 1000,
                 },
             ),
             (

@@ -559,10 +559,10 @@ class TestDownloadRoute:
         results: list[OpResult] = []
         S3().cp(S3Storage("s3://bucket", client=client), str(tmp_path), on_result=results.append)
         assert _ops(calls) == ["ListObjectsV2"]
+        # No MaxKeys: the unset page size sends nothing, like aws-cli.
         assert calls[0].params == {
             "Bucket": "bucket",
             "Prefix": "",
-            "MaxKeys": 1000,
         }
         assert results == []
 

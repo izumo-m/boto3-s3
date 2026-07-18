@@ -324,7 +324,9 @@ class S3Storage(Storage):
     region / endpoint / profile, pass a pre-built ``client``.
 
     How this source is *listed* is configured on the constructor too: ``page_size``
-    (the ``ListObjectsV2`` page size) and ``fetch_owner`` (populate each entry's
+    (the ``ListObjectsV2`` page size; the default ``None`` sends no ``MaxKeys``,
+    like aws-cli's unset ``--page-size``, so the server pages at its own
+    default) and ``fetch_owner`` (populate each entry's
     owner) are held on the instance and seeded into every scan via
     ``default_scan_options``, so a listing is tuned once here rather than per
     operation.
@@ -477,7 +479,7 @@ class S3Storage(Storage):
         url: str | os.PathLike[str],
         *,
         client: S3Client | None = None,
-        page_size: int = 1000,
+        page_size: int | None = None,
         fetch_owner: bool = False,
         scan_wait_on_interrupt: bool = True,
     ) -> None:

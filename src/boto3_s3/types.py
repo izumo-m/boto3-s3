@@ -213,8 +213,10 @@ class S3ScanOptions(ScanOptions):
     ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
     like aws-cli, they pass through to the service, which decides (``page_size=0``
     lists nothing, negative values fail with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both). ``fetch_owner`` sends ``FetchOwner=True``
-    to populate ``S3FileInfo.owner``.
+    charter requires reproducing both). The default ``None`` sends no
+    ``MaxKeys`` at all, exactly like aws-cli's unset ``--page-size`` (the
+    server pages at its own default, 1000). ``fetch_owner`` sends
+    ``FetchOwner=True`` to populate ``S3FileInfo.owner``.
 
     ``prefix`` overrides the listing anchor: the backend lists under it (as the
     ``Prefix``, relativizing ``compare_key`` to it) instead of the storage's own
@@ -225,7 +227,7 @@ class S3ScanOptions(ScanOptions):
     its ``scan_pages`` override) survives. ``None`` uses the storage's key.
     """
 
-    page_size: int = 1000
+    page_size: int | None = None
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None

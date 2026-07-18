@@ -178,8 +178,9 @@ class TestS3ScanOptions:
     def test_defaults_and_inherits_common(self) -> None:
         opts = t.S3ScanOptions()
         assert isinstance(opts, t.ScanOptions)  # a ScanOptions subclass
+        # page_size None sends no MaxKeys (aws-cli's unset --page-size).
         assert (opts.page_size, opts.request_payer, opts.fetch_owner, opts.prefix) == (
-            1000,
+            None,
             None,
             False,
             None,
