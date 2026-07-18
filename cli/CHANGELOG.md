@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Aligned shorthand trailing-whitespace parsing, legacy retry-mode rejection, paramfile text encoding, and the unset `--page-size` wire shape with aws-cli.
+- Matched aws-cli's deeper classic-download IO queue (1000 buffered chunks where boto3 defaults to 100).
 
 ## [0.6.0] - 2026-07-17
 
