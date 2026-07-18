@@ -101,6 +101,14 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     )
     for leak in ("AWS_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
         monkeypatch.delenv(leak, raising=False)
+    # A prior test's boto3.client() / session-less S3() installs a
+    # process-global default session built under THAT test's env, and
+    # AwsConfig.from_session(None) deliberately reuses the installed session
+    # (the one the zero-config clients actually use). Reset it per test so a
+    # config read never sees a stale session's cached AWS_CONFIG_FILE.
+    import boto3
+
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
 
 
 @pytest.fixture(autouse=True)

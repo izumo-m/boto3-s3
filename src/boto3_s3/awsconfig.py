@@ -226,8 +226,12 @@ class AwsConfig:
     def from_session(cls, session: boto3.Session | None = None) -> AwsConfig:
         """Build a reader from a boto3 session (or a default ``AWS_PROFILE``-aware one).
 
-        ``None`` builds ``boto3.Session()`` - the same default/``AWS_PROFILE``
-        resolution the zero-config ``S3()`` uses for its client.
+        ``None`` reuses ``boto3.DEFAULT_SESSION`` when one exists - the session
+        ``boto3.client()``, and therefore the zero-config ``S3()``'s client,
+        actually uses, so a ``boto3.setup_default_session(profile_name=...)``
+        binds this reader and those clients to the same profile - and builds a
+        plain ``boto3.Session()`` otherwise (the same default/``AWS_PROFILE``
+        resolution, without installing a global default as a side effect).
         """
         # Deferred: importing boto3 drags in botocore + s3transfer (~100ms), so
         # only an actual config read pays it (import contract, docs/imports.md).
@@ -241,7 +245,7 @@ class AwsConfig:
             # who passes their own session has already constructed it, so any
             # such error surfaced at their call, not here.
             try:
-                session = boto3.Session()
+                session = boto3.DEFAULT_SESSION or boto3.Session()
             except BotoCoreError as exc:
                 raise InvalidConfigError(str(exc)) from exc
         # aws-cli reads the same botocore session surface (the scoped/full config
