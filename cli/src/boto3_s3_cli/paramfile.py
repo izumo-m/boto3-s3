@@ -13,21 +13,41 @@ presign ``--expires-in``). Every load failure is a
 
 from __future__ import annotations
 
+import locale
 import os
 
 from boto3_s3 import ValidationError
+
+
+def _text_encoding() -> str:
+    """The ``file://`` text encoding - aws's ``compat.getpreferredencoding``.
+
+    ``AWS_CLI_FILE_ENCODING`` wins when present (even empty - the unknown
+    codec fails in ``open``, present-wins like aws). Without it, a ``C`` /
+    ``POSIX`` ``LC_CTYPE`` reads as UTF-8: aws implements PEP 540's
+    locale coercion itself (its frozen build lacks the interpreter's), so a
+    ``LC_ALL=C`` run decodes UTF-8 content where the plain locale default
+    would be ASCII - matched here for the case where the interpreter's own
+    coercion is disabled (``PYTHONCOERCECLOCALE=0``). Otherwise the locale
+    default (``locale.getpreferredencoding``, like aws).
+    """
+    encoding = os.environ.get("AWS_CLI_FILE_ENCODING")
+    if encoding is not None:
+        return encoding
+    if locale.setlocale(locale.LC_CTYPE) in ("C", "POSIX"):
+        return "UTF-8"
+    return locale.getpreferredencoding()
 
 
 def read_text_paramfile(original: str, *, name: str, operation: str) -> str:
     """Load a ``file://`` reference as text (aws paramfile ``mode='r'``).
 
     Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``
-    (expanduser inner). The encoding honors ``AWS_CLI_FILE_ENCODING`` (aws's
-    ``compat_open`` / ``getpreferredencoding``), falling back to the locale
-    default (``open``'s default when ``encoding`` is ``None``).
+    (expanduser inner). The encoding is `_text_encoding` (aws's
+    ``compat_open`` / ``getpreferredencoding``).
     """
     path = os.path.expandvars(os.path.expanduser(original[len("file://") :]))
-    encoding = os.environ.get("AWS_CLI_FILE_ENCODING")
+    encoding = _text_encoding()
     try:
         with open(path, encoding=encoding) as handle:
             return handle.read()
