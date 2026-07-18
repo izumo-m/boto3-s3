@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Aligned shorthand trailing-whitespace parsing, legacy retry-mode rejection, paramfile text encoding, and the unset `--page-size` wire shape with aws-cli.
+
 ## [0.6.0] - 2026-07-17
 
 - Aligned global-option ordering, help tokens, Ctrl-C, and region fallback with aws-cli, changing some exit codes to match; made auto-prompt completion more responsive.

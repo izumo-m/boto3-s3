@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Aligned more behavior with aws-cli: an unset page size sends no `MaxKeys`, small multipart-copy tag sets stay inline on the create call, deferred annotation copies paginate, and CRT requests keep the caller's client configuration.
+- Reused the installed default boto3 session for config reads, masked S3 Express session tokens, refused `--no-overwrite` uploads on too-old s3transfer, and fixed the module-level helpers' reported signatures.
+
 ## [0.7.0] - 2026-07-17
 
 - `SyncPair` now always carries both sides (`src` / `dest` non-optional); one-sided sync pairs became the new `SrcOnlyPair` / `DestOnlyPair` types (`MergedPair` union).
