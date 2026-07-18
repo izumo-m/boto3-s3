@@ -375,20 +375,26 @@ def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
     user-visible difference in how ``aws s3`` behaves under throttling. The
     aws default fills in only when neither ``AWS_RETRY_MODE`` /
     ``AWS_MAX_ATTEMPTS`` nor the profile's ``retry_mode`` / ``max_attempts``
-    supplies a value, exactly like the bundled default chain. An
-    unconvertible ``max_attempts`` raises ``ValueError`` like the bundled
-    botocore's int cast (aws's general handler, rc 255 - main()'s backstop
-    maps it the same).
+    supplies a value, exactly like the bundled default chain. A supplied mode
+    is validated here against the bundled botocore's restricted set -
+    ``standard`` / ``adaptive`` only, with aws's exact wording (measured, rc
+    255): stock botocore would otherwise *accept* ``legacy`` (its own valid
+    mode) where aws v2 rejects it. An unconvertible ``max_attempts`` raises
+    ``ValueError`` like the bundled botocore's int cast (aws's general
+    handler, rc 255 - main()'s backstop maps it the same).
     """
     scoped = botocore_session.get_scoped_config()
     # Present-wins reads, like the profile/region env chains: aws treats a
     # present-but-empty AWS_RETRY_MODE / AWS_MAX_ATTEMPTS as a fatal value
-    # (rc 255), never as "unset" - the empty string flows through and fails
-    # at client construction here too (mode via botocore's retry-config
-    # validation, attempts via the int cast below).
+    # (rc 255), never as "unset" - the empty string fails the mode validation
+    # below (attempts via the int cast).
     mode = os.environ.get("AWS_RETRY_MODE")
     if mode is None:
         mode = scoped.get("retry_mode", "standard")
+    if mode not in ("standard", "adaptive"):
+        raise InvalidConfigError(
+            f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
+        )
     attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
     if attempts_raw is None:
         attempts_raw = scoped.get("max_attempts")

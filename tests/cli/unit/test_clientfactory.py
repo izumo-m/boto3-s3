@@ -59,10 +59,22 @@ class TestBuildClient:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The aws default only fills in; the user's env/config still wins.
-        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        monkeypatch.setenv("AWS_RETRY_MODE", "adaptive")
         monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
         client = clientfactory.build_client(_parse([]))
-        assert client.meta.config.retries == {"mode": "legacy", "total_max_attempts": 7}
+        assert client.meta.config.retries == {"mode": "adaptive", "total_max_attempts": 7}
+
+    def test_legacy_retry_mode_rejected_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws v2's bundled botocore restricts retry modes to standard/adaptive;
+        # stock botocore would accept "legacy" (its own valid mode), so the
+        # factory validates with aws's exact wording (measured: rc 255).
+        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        with pytest.raises(
+            InvalidConfigError,
+            match='Invalid value provided to "mode": "legacy" must be one of: '
+            '"standard" or "adaptive"',
+        ):
+            clientfactory.build_client(_parse([]))
 
     def test_empty_retry_env_is_present_and_fatal_like_aws(
         self, monkeypatch: pytest.MonkeyPatch
