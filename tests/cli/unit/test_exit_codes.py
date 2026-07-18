@@ -355,20 +355,39 @@ class TestPreParseErrorAttribution:
     ``s3 ls -h --output bad`` errors instead of helping, ``s3 bogus
     --version`` prints the version at rc 0)."""
 
+    # Every choices-validated global; aws rejects each the same way (measured
+    # per option against the pinned aws-cli, same [ERROR] line and rc).
+    @pytest.mark.parametrize(
+        "option", ["--output", "--color", "--cli-error-format", "--cli-binary-format"]
+    )
     def test_bad_global_choice_beats_the_invalid_subcommand(
-        self, capsys: pytest.CaptureFixture[str]
+        self, option: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert cli.main(["nosuchcmd", "--output", "bad"]) == 252
+        assert cli.main(["nosuchcmd", option, "bad"]) == 252
         err = capsys.readouterr().err
-        assert "argument --output: Found invalid choice 'bad'" in err
+        assert f"argument {option}: Found invalid choice 'bad'" in err
         assert "nosuchcmd" not in err
 
+    # Every value-taking global left without its value; aws rejects each the
+    # same way (measured per option against the pinned aws-cli).
+    @pytest.mark.parametrize(
+        "option",
+        [
+            "--profile",
+            "--region",
+            "--endpoint-url",
+            "--ca-bundle",
+            "--query",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+        ],
+    )
     def test_missing_global_value_beats_the_invalid_subcommand(
-        self, capsys: pytest.CaptureFixture[str]
+        self, option: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert cli.main(["nosuchcmd", "--profile"]) == 252
+        assert cli.main(["nosuchcmd", option]) == 252
         err = capsys.readouterr().err
-        assert "argument --profile: expected one argument" in err
+        assert f"argument {option}: expected one argument" in err
         assert "nosuchcmd" not in err
 
     def test_version_beats_the_invalid_subcommand(self, capsys: pytest.CaptureFixture[str]) -> None:
