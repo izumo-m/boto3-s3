@@ -177,10 +177,18 @@ class _Parser:
         if first == "'":
             # "singled quoted" reproduces aws-cli's _NamedRegex name verbatim
             # (typo included) so the unterminated-quote wording matches byte for byte.
-            return self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
-        if first == '"':
-            return self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
-        return self._first_value_unquoted()
+            value = self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
+        elif first == '"':
+            value = self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
+        else:
+            value = self._first_value_unquoted()
+        # aws's _csv_value consumes whitespace after the value before its
+        # EOF/comma check, so a trailing space - or the newline a file://
+        # paramfile keeps at its end - after a *quoted* value is accepted
+        # (`--metadata "title='hello' "`). The unquoted regex already consumes
+        # trailing whitespace (and rstrips it), making this a no-op there.
+        self._consume_whitespace()
+        return value
 
     def _first_value_unquoted(self) -> str:
         match = _FIRST_VALUE_RE.match(self._value[self._index :])

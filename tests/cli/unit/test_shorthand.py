@@ -44,6 +44,22 @@ class TestParseMapOption:
     def test_single_quoted_value_with_comma(self) -> None:
         assert _parse("k='a,b',j=c") == {"k": "a,b", "j": "c"}
 
+    def test_trailing_whitespace_after_quoted_value(self) -> None:
+        # aws's _csv_value consumes whitespace after the value before its
+        # EOF/comma check (verified against the pinned aws-cli: rc 0). The
+        # newline form is the natural shape of a file:// paramfile that keeps
+        # its trailing newline.
+        assert _parse("title='hello' ") == {"title": "hello"}
+        assert _parse("title='hello'\n") == {"title": "hello"}
+        assert _parse('k="a,b" ,j=c') == {"k": "a,b", "j": "c"}
+
+    def test_non_comma_after_quoted_value_and_whitespace_rejected(self) -> None:
+        # The whitespace is consumed first, so the error names the offending
+        # character, matching aws's wording (verified against the pinned
+        # aws-cli).
+        with pytest.raises(ValidationError, match="Expected: ',', received: 'x'"):
+            _parse("title='hello' x")
+
     def test_json_object_form(self) -> None:
         assert _parse('{"a":"b","c":"d"}') == {"a": "b", "c": "d"}
 
