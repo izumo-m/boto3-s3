@@ -1742,8 +1742,10 @@ class _SetAnnotations:
     in the memory and tempfile modes. A per-copy source-client adapter then
     serves those bytes to s3transfer's post-complete annotation writer, keeping
     its destination ETag/VersionId pinning and partial-write error handling.
-    The deferred mode passes the real source client through and retains
-    s3transfer's post-copy reads. `Transferrer` refuses `copy_props=ALL` up
+    The deferred mode retains s3transfer's post-copy reads through
+    `_PaginatingAnnotationClient`, which only completes the name listing
+    (s3transfer's single-shot ``list_object_annotations`` would drop every
+    page after the first). `Transferrer` refuses `copy_props=ALL` up
     front on an SDK that cannot honor the native write path.
     """
 
@@ -1765,12 +1767,13 @@ class _SetAnnotations:
         self._temp_dir = temp_dir
         self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
         self._preloaded_client = _PreloadedAnnotationClient(source_client, self)
+        self._paginating_client = _PaginatingAnnotationClient(source_client)
 
     @property
     def source_client(self) -> Any:
-        """The real source client for deferred reads, otherwise the cache adapter."""
+        """The pagination-completing adapter for deferred reads, otherwise the cache adapter."""
         if self._mode is AnnotationCopyMode.DEFERRED:
-            return self._source_client
+            return self._paginating_client
         return self._preloaded_client
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
@@ -1906,6 +1909,32 @@ class _PreloadedAnnotationClient:
     def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
         name = kwargs["AnnotationName"]
         return {"AnnotationPayload": io.BytesIO(self._preloader.annotation_payload(name))}
+
+
+class _PaginatingAnnotationClient:
+    """Source-client adapter completing s3transfer's single-shot annotation list.
+
+    The deferred mode keeps s3transfer's post-complete annotation reads on the
+    source client, but s3transfer calls ``list_object_annotations`` once and
+    never follows ``NextContinuationToken`` - a source with more annotations
+    than one page would silently lose the tail. aws-cli's subscriber collects
+    the names with a paginator; this adapter restores that by merging every
+    page into the single response s3transfer expects. Names are small, so the
+    merge does not defeat the mode's point (payload reads stay lazy per-name
+    pass-throughs on the underlying client).
+    """
+
+    def __init__(self, source_client: Any) -> None:
+        self._source_client = source_client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source_client, name)
+
+    def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
+        annotations: list[dict[str, Any]] = []
+        for page in self._source_client.get_paginator("list_object_annotations").paginate(**kwargs):
+            annotations.extend(page.get("Annotations", []))
+        return {"Annotations": annotations}
 
 
 class _SetMetadataDirectiveProps:

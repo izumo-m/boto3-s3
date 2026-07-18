@@ -552,6 +552,55 @@ class TestCopy:
         }
         assert transferrer.succeeded == 1
 
+    def test_all_multipart_deferred_lists_every_annotation_page(self) -> None:
+        # s3transfer's own post-complete read calls list_object_annotations
+        # once and never follows NextContinuationToken; the deferred-mode
+        # adapter paginates underneath so a multi-page source keeps its tail
+        # (aws-cli collects the names with a paginator). Payload reads stay
+        # lazy per-name pass-throughs.
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation ann1
+            {},  # PutObjectAnnotation ann2
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {
+                "Annotations": [{"AnnotationName": "ann1"}],
+                "NextContinuationToken": "next",
+            },
+            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"AnnotationPayload": io.BytesIO(b"one")},
+            {"AnnotationPayload": io.BytesIO(b"two")},
+        ]
+
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+            ),
+        )
+
+        assert _ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[3].params["ContinuationToken"] == "next"
+        assert [call.params["AnnotationName"] for call in calls[-2:]] == ["ann1", "ann2"]
+        assert transferrer.succeeded == 1
+
     def test_all_multipart_deferred_read_failure_happens_after_destination(self) -> None:
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY,
