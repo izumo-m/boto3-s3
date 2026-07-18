@@ -201,13 +201,17 @@ keys).
 - **Resolved to classic**: all keys to the ctor. Because `max_queue_size` is not
   in the boto3 ctor, it is attached afterward onto the `max_request_queue_size`
   attribute, and `max_in_memory_upload/download_chunks` is fixed at 6 (the value
-  the aws-cli factory permanently installs for classic).
+  the aws-cli factory permanently installs for classic). `max_io_queue_size`
+  (the download disk-writer's buffered-chunk cap) is fixed at 1000: aws-cli's
+  bundled s3transfer defaults to 1000 and no `[s3]` key maps to it, while
+  boto3's `TransferConfig` overrides the same s3transfer default down to 100.
 - **Resolved to crt**: only the keys the CRT client actually reads
   (`multipart_chunksize` / `target_bandwidth` / `should_stream` /
   `disk_throughput` / `direct_io` = those that aws-cli `_create_crt_client`
   references). The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
-  attributes (queue size, in-memory chunk cap) are **not passed**. This is to
+  attributes (queue size, in-memory chunk cap, download IO queue depth) are
+  **not passed**. This is to
   match aws-cli ignoring these on the CRT path, and to prevent the case where
   placing `io_chunksize` / `max_bandwidth` on a crt-preferred config gets rejected
   by boto3's `_validate_crt_transfer_config` and turns into an rc 1 traceback

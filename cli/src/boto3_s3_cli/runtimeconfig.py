@@ -52,6 +52,16 @@ _TRANSFER_CONFIG_CTOR_KEYS = {
 # aws-cli's TransferManagerFactory pins this on every classic manager.
 _MAX_IN_MEMORY_CHUNKS = 6
 
+# aws-cli's bundled s3transfer defaults the classic download IO queue
+# (``max_io_queue_size``, the disk-writer's buffered-chunk cap) to 1000, and no
+# ``[s3]`` key maps to it, so aws always runs at 1000. boto3's TransferConfig
+# overrides that same s3transfer default down to 100, which would leave slow
+# disks holding a tenth of aws's readahead. Pinned classic-only, like the chunk
+# caps; the buffered ceiling is max_io_queue_size x io_chunksize (~256 MiB at
+# the default 256 KiB) per concurrent download, reached only when the disk
+# lags the network.
+_MAX_IO_QUEUE_SIZE = 1000
+
 # The ``[s3]`` keys the CRT engine actually consumes (aws-cli factory
 # ``_create_crt_client``: the part size, the throughput target and the file-I/O
 # options). Every other key is classic-only - aws-cli silently ignores it under
@@ -332,11 +342,12 @@ def build_transfer_config(
     The config is engine-specific, exactly like aws-cli (aws-cli factory builds
     the classic ``TransferConfig`` and the CRT client from separate key sets).
     Under CRT only the keys the CRT client consumes (``_CRT_CONSUMED_KEYS``)
-    are forwarded, and the classic-only tuning (the request queue size and the
-    in-memory chunk caps) is omitted - both because the CRT manager ignores it
-    and because forwarding ``io_chunksize`` / ``max_bandwidth`` would trip
-    boto3's CRT config validation (crt.md section 4). Under classic every key flows
-    through and the aws-cli in-memory chunk caps are pinned.
+    are forwarded, and the classic-only tuning (the request queue size, the
+    in-memory chunk caps and the download IO queue depth) is omitted - both
+    because the CRT manager ignores it and because forwarding ``io_chunksize``
+    / ``max_bandwidth`` would trip boto3's CRT config validation (crt.md
+    section 4). Under classic every key flows through and the aws-cli
+    in-memory chunk caps and download IO queue depth are pinned.
     """
     from boto3_s3 import TransferConfig
 
@@ -355,10 +366,13 @@ def build_transfer_config(
     if not crt:
         # Classic-only tuning aws-cli applies solely to its classic
         # TransferManager (aws-cli factory): the request queue size boto3's
-        # constructor does not expose (s3transfer's max_request_queue_size)
-        # and the in-memory chunk caps. The CRT manager ignores both.
+        # constructor does not expose (s3transfer's max_request_queue_size),
+        # the in-memory chunk caps, and the download IO queue depth boto3
+        # dials down from the s3transfer default aws runs at. The CRT manager
+        # ignores them all.
         if "max_queue_size" in scoped:
             config.max_request_queue_size = runtime_config["max_queue_size"]
         config.max_in_memory_upload_chunks = _MAX_IN_MEMORY_CHUNKS
         config.max_in_memory_download_chunks = _MAX_IN_MEMORY_CHUNKS
+        config.max_io_queue_size = _MAX_IO_QUEUE_SIZE
     return config

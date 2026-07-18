@@ -882,7 +882,9 @@ the library. The overall design and the library side (boto3-faithful) are in
   `UNSET_DEFAULT` sentinel = "a CRT part_size only when `multipart_chunksize` is
   explicit" holds). The config is built **per engine** (the same as the aws-cli
   factory): classic gets all keys + `max_request_queue_size` +
-  `max_in_memory_*_chunks=6`, while crt gets only the keys the CRT client reads
+  `max_in_memory_*_chunks=6` + `max_io_queue_size=1000` (the s3transfer default
+  aws runs at; boto3 alone dials it down to 100), while crt gets only the keys
+  the CRT client reads
   and does not pass classic-only keys (`io_chunksize` / `max_bandwidth`, etc.)
   (matching the fact that aws's CRT ignores them + so as not to die in boto3's CRT
   config validation, crt.md section 4). The resolved engine is placed in
