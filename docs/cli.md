@@ -579,7 +579,11 @@ normal return is **2** if the warned count > 0, else 0.
 `upload|download|copy: <src> to <dest>` (stdout. the local side is rendered
 relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryrun) `
 prefix, failure `<transfer_type> failed: <src> to <dest> <err>` (stderr), warning `warning:
-<body>` (stderr, the body assembled by the library with aws-cli wording). Progress
+<body>` (stderr, the body assembled by the library with aws-cli wording). A
+CANCELLED record (an item revoked by a fatal elsewhere - opresult.md) prints
+**nothing** and counts as nothing: aws surfaces only the run's single
+`fatal error:` line and drops its cancelled items from output and counts
+(measured against the pinned aws-cli). Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask
 it). The suppression matrix is the same shape as rm: `--quiet` = no printer at

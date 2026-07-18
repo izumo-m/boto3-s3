@@ -96,6 +96,27 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
 
+    def test_cancelled_is_silent_and_not_counted_failed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws surfaces only the run's single fatal line for a cancellation
+        # (measured live: a fatal mid-listing prints zero per-item lines for
+        # the cancelled set, and its recorder never counts them as failures).
+        with TransferPrinter() as printer:
+            printer.on_result(_result(OpOutcome.CANCELLED, error=RuntimeError("fatal elsewhere")))
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == ("", "")
+        assert printer.failed == 0
+
+    def test_cancelled_backfills_untransferred_remainder(self) -> None:
+        # A queued-then-cancelled transfer closes its meter share like a
+        # failed one, so the byte progress still reaches the expected total.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 10))  # queued
+            printer.on_result(_result(OpOutcome.CANCELLED, key="a", error=RuntimeError("fatal")))
+        assert printer._done_bytes == printer._expected_bytes == 10
+        assert printer._inflight == {}
+
 
 class TestSuppression:
     def test_quiet_silences_everything_but_keeps_counts(

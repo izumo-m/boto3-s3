@@ -245,13 +245,14 @@ class TransferPrinter:
                 # printers and its warned count - so even --quiet shows them.
                 record = _ResultRecord(result.outcome, "", None, None, str(result.error))
             else:
-                if result.outcome in (OpOutcome.SUCCEEDED, OpOutcome.FAILED):
+                if result.outcome in (OpOutcome.SUCCEEDED, OpOutcome.FAILED, OpOutcome.CANCELLED):
                     self._finished_files += 1
                     inflight = self._inflight.pop(result.key, None)
-                    if result.outcome is OpOutcome.FAILED and inflight is not None:
+                    if result.outcome is not OpOutcome.SUCCEEDED and inflight is not None:
                         # aws adds a failed file's untransferred remainder to the
                         # meter (results.py bytes_failed_to_transfer) so the byte
-                        # progress still reaches the expected total.
+                        # progress still reaches the expected total; a cancelled
+                        # item closes its meter share the same way.
                         done_bytes, total_bytes = inflight
                         if total_bytes is not None:
                             self._done_bytes += total_bytes - done_bytes
@@ -285,7 +286,10 @@ class TransferPrinter:
         if outcome is OpOutcome.SUCCEEDED:
             return not self._only_show_errors
         # aws's OnlyShowErrorsResultPrinter does not override dryrun; SKIPPED
-        # is silent (aws prints nothing for non-warning skips).
+        # is silent (aws prints nothing for non-warning skips), and so is
+        # CANCELLED - aws surfaces only the run's single fatal line and drops
+        # its cancelled items from output entirely (measured live: a fatal
+        # mid-listing prints zero per-item lines for the cancelled set).
         return outcome in (OpOutcome.DRYRUN, OpOutcome.FAILED, OpOutcome.WARNED)
 
     # -- rendering (the printer thread) ----------------------------------------
