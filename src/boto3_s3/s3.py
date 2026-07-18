@@ -12,6 +12,7 @@ back to ``boto3.client("s3")``. To target a custom endpoint / profile / region
 from __future__ import annotations
 
 import functools
+import inspect
 import os
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1921,6 +1922,16 @@ def _delegate(method: Callable[Concatenate[S3, _P], _R]) -> Callable[_P, _R]:
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         return method(S3(), *args, **kwargs)
 
+    # ``functools.wraps`` sets ``__wrapped__``, which would make
+    # ``inspect.signature`` report the method's signature *with* ``self``. Pin
+    # the self-stripped signature explicitly (it wins over ``__wrapped__``) so
+    # runtime introspection matches the documented contract - the method's
+    # exact signature minus ``self`` (docs/s3.md) - for help generators and
+    # ``Signature.bind`` consumers, not just for type checkers.
+    method_signature = inspect.signature(method)
+    wrapper.__signature__ = method_signature.replace(  # pyright: ignore[reportAttributeAccessIssue]
+        parameters=list(method_signature.parameters.values())[1:]
+    )
     return wrapper
 
 

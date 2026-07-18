@@ -312,3 +312,26 @@ class TestTransferConfigDefault:
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
         assert _captured_transfer_config["transfer_config"] is call_tc
+
+
+class TestModuleLevelConvenienceSignatures:
+    """The module-level wrappers introspect as their method minus ``self``
+    (docs/s3.md): ``functools.wraps`` alone would expose the method's
+    signature *with* ``self`` through ``__wrapped__``."""
+
+    def test_signature_strips_self(self) -> None:
+        import inspect
+
+        import boto3_s3
+
+        for name in ("cp", "ls", "mv", "rm", "mb", "rb", "presign", "sync", "website"):
+            signature = inspect.signature(getattr(boto3_s3, name))
+            assert "self" not in signature.parameters, name
+
+    def test_signature_binds_positionally_like_the_method(self) -> None:
+        import inspect
+
+        import boto3_s3
+
+        bound = inspect.signature(boto3_s3.cp).bind("local.txt", "s3://bucket/key")
+        assert bound.args == ("local.txt", "s3://bucket/key")
