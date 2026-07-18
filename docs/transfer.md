@@ -340,15 +340,22 @@ dest-existence check for download. We ported the same three faces:
 - **SDK floor gate** (the overview.md section 2 degradation): the write op's S3
   model must define the `IfNoneMatch` input member (PutObject /
   CompleteMultipartUpload for uploads, CopyObject for copies), which older
-  botocore lacks. `Transferrer` rejects `no_overwrite` at construction with a
-  `ConfigurationError` instead of failing deep in botocore with an opaque
-  "Unknown parameter in input". The probe behind that gate is public:
+  botocore lacks - and an **upload** additionally needs s3transfer's
+  create-multipart blocklist (`CREATE_MULTIPART_BLOCKLIST`, s3transfer 0.11):
+  older s3transfer hands the full extra_args to CreateMultipartUpload, whose
+  model has no `IfNoneMatch`, failing every multipart-threshold upload - a real
+  pairing, since boto3 1.35.16+ pins s3transfer 0.10.x while its botocore
+  already models the param. `Transferrer` rejects `no_overwrite` at
+  construction with a `ConfigurationError` instead of failing deep in botocore
+  with an opaque "Unknown parameter in input". The probe behind that gate is
+  public:
   **`conditional_write_unsupported_reason(client, is_copy=...)`** returns the
-  rejection wording (naming the minimum botocore as a hint) or `None` when
-  supported - it introspects the client's model directly, version-agnostic. A
+  rejection wording (naming the minimum botocore / s3transfer as a hint) or
+  `None` when supported - it introspects the client's model and s3transfer's
+  table directly, version-agnostic. A
   compatible tool calls it *before* the pipeline to reproduce aws's up-front
   rejection (the CLI's `validate_no_overwrite_supported` maps it to rc 252);
-  aws itself never gates here because it bundles a current botocore. Download
+  aws itself never gates here because it bundles a current SDK. Download
   and `sync` never send `IfNoneMatch`, so they stay usable on an old botocore.
 
 ## 8. The semantics of gates and warnings

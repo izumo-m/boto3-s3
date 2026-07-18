@@ -216,10 +216,11 @@ def _allow_if_none_match() -> None:
     # Back-compat (supported floor s3transfer 0.6.2): UploadSubmissionTask grew
     # CREATE_MULTIPART_BLOCKLIST only in s3transfer 0.11.0. On older s3transfer
     # the create-multipart call is handed the full extra_args (no per-arg
-    # blocklist to extend), so skip it when the attribute is absent. IfNoneMatch
-    # itself needs a newer botocore S3 model, so --no-overwrite is unavailable on
-    # those installs regardless. Drop this getattr guard once the s3transfer floor
-    # is raised to >= 0.11.
+    # blocklist to extend), so skip it when the attribute is absent - and
+    # `conditional_write_unsupported_reason` refuses --no-overwrite uploads on
+    # such installs up front (botocore can model IfNoneMatch there: boto3
+    # 1.35.16+ pins s3transfer 0.10.x). Drop this getattr guard once the
+    # s3transfer floor is raised to >= 0.11.
     create_blocklist = getattr(upload_cls, "CREATE_MULTIPART_BLOCKLIST", None)
     if create_blocklist is not None and "IfNoneMatch" not in create_blocklist:
         create_blocklist.append("IfNoneMatch")
@@ -240,27 +241,52 @@ def _allow_if_none_match() -> None:
 # in input: IfNoneMatch". Drop this gate once the botocore floor reaches them.
 _CONDITIONAL_WRITE_MIN_BOTOCORE = {"upload": "1.35.16", "copy": "1.41.0"}
 
+# Uploads additionally need s3transfer's create-multipart blocklist
+# (`UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST`, s3transfer 0.11.0): older
+# s3transfer hands the *full* extra_args to CreateMultipartUpload, whose model
+# has no IfNoneMatch -> ParamValidationError on any multipart-threshold upload.
+# The combination is real, not theoretical: boto3 1.35.16+ pins s3transfer
+# 0.10.x while its botocore already models IfNoneMatch, so the botocore gate
+# above passes there. Rejected up front (uniformly, small files included -
+# sizes are unknown at validation time and a size-dependent refusal would be
+# unpredictable). Drop once the s3transfer floor reaches 0.11.
+_CONDITIONAL_WRITE_MIN_S3TRANSFER = "0.11.0"
+
 
 def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> str | None:
-    """Why the installed botocore cannot honor ``--no-overwrite`` here, or ``None``.
+    """Why the installed SDK cannot honor ``--no-overwrite`` here, or ``None``.
 
     ``--no-overwrite`` maps to a conditional write (``IfNoneMatch="*"``), applied
     to PutObject (and CompleteMultipartUpload) on uploads and CopyObject on
-    copies. The client's S3 model must define that input member; it is
-    introspected directly (version-agnostic), while the returned message names
-    the minimum botocore as a hint. Returns ``None`` when the param is supported.
+    copies. The client's S3 model must define that input member, and an upload
+    additionally needs s3transfer's create-multipart blocklist so the param
+    stays off CreateMultipartUpload (see `_CONDITIONAL_WRITE_MIN_S3TRANSFER`).
+    Both are introspected directly (version-agnostic), while the returned
+    message names the minimum version as a hint. Returns ``None`` when
+    supported.
     """
     op = "CopyObject" if is_copy else "PutObject"
     members = getattr(client.meta.service_model.operation_model(op).input_shape, "members", {})
-    if "IfNoneMatch" in members:
-        return None
-    from importlib.metadata import version
+    if "IfNoneMatch" not in members:
+        from importlib.metadata import version
 
-    minimum = _CONDITIONAL_WRITE_MIN_BOTOCORE["copy" if is_copy else "upload"]
-    return (
-        f"--no-overwrite requires botocore >= {minimum} for {op} "
-        f"(S3 conditional writes); the installed botocore is {version('botocore')}."
-    )
+        minimum = _CONDITIONAL_WRITE_MIN_BOTOCORE["copy" if is_copy else "upload"]
+        return (
+            f"--no-overwrite requires botocore >= {minimum} for {op} "
+            f"(S3 conditional writes); the installed botocore is {version('botocore')}."
+        )
+    if not is_copy:
+        from s3transfer.upload import UploadSubmissionTask
+
+        if getattr(UploadSubmissionTask, "CREATE_MULTIPART_BLOCKLIST", None) is None:
+            from importlib.metadata import version
+
+            return (
+                f"--no-overwrite requires s3transfer >= {_CONDITIONAL_WRITE_MIN_S3TRANSFER} "
+                "for uploads (keeping IfNoneMatch off the CreateMultipartUpload call); "
+                f"the installed s3transfer is {version('s3transfer')}."
+            )
+    return None
 
 
 # Feature-level degradation (docs/overview.md section 2): S3 object

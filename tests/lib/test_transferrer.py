@@ -1607,6 +1607,29 @@ class TestConditionalWriteSupport:
         assert reason is not None
         assert "1.41.0" in reason and "CopyObject" in reason
 
+    def test_upload_refused_without_s3transfer_create_blocklist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # s3transfer < 0.11 hands the full extra_args to CreateMultipartUpload
+        # (no CREATE_MULTIPART_BLOCKLIST), so a botocore that models
+        # IfNoneMatch - the real boto3 1.35.16+ / s3transfer 0.10.x pairing -
+        # would fail every multipart --no-overwrite upload deep in botocore.
+        # The probe refuses uploads up front instead.
+        monkeypatch.delattr("s3transfer.upload.UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST")
+        client = model_only_client({"PutObject", "CompleteMultipartUpload"})
+        reason = conditional_write_unsupported_reason(client, is_copy=False)
+        assert reason is not None
+        assert "0.11.0" in reason and "CreateMultipartUpload" in reason
+
+    def test_copy_unaffected_by_missing_upload_blocklist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The copy-side blacklist exists across the whole supported s3transfer
+        # range; only the upload path needs the 0.11 refusal.
+        monkeypatch.delattr("s3transfer.upload.UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST")
+        client = model_only_client({"CopyObject"})
+        assert conditional_write_unsupported_reason(client, is_copy=True) is None
+
     def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
         # ConfigurationError: the environment (SDK floor) lacks the
         # capability, not the caller's arguments (exceptions.md section 3).
