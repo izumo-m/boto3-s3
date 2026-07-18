@@ -81,10 +81,15 @@ _AWS_ACCESS_KEY_ID_PARAM_RE = re.compile(
 # form, and the dict-repr header form botocore logs in
 # ``AWSPreparedRequest.__repr__`` (``'X-Amz-Security-Token': '...'``). ``key``
 # swallows the name, the ``:`` / ``=`` separator, and any opening quote so only
-# the value is replaced.
+# the value is replaced. ``x-amz-s3session-token`` is the same-shape secret on
+# the S3 Express (directory bucket) auth flow - the CreateSession-minted
+# session token botocore signs every zonal request with (its response-body twin
+# is already covered by the ``<SessionToken>`` / ``'SessionToken':`` patterns
+# below).
 _TOKEN_VALUE = r"[^\s'\"&,\\}]+"
 _SECURITY_TOKEN_RE = re.compile(
-    rf"(?P<key>x-amz-security-token['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
+    rf"(?P<key>x-amz-(?:security|s3session)-token['\"]?\s*[:=]\s*(?:b?['\"])?)"
+    rf"(?P<val>{_TOKEN_VALUE})",
     re.IGNORECASE,
 )
 

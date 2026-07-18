@@ -129,6 +129,19 @@ class TestMaskTextNotation:
         assert SESSION_TOKEN not in out
         assert "'X-Amz-Security-Token': b'***'" in out
 
+    def test_s3express_session_token_header_forms(self) -> None:
+        # The S3 Express (directory bucket) flow signs every zonal request with
+        # the CreateSession-minted x-amz-s3session-token - the same secret
+        # grade as x-amz-security-token, in the same canonical-request and
+        # dict-repr DEBUG surfaces.
+        out = m.mask_text(f"x-amz-s3session-token:{SESSION_TOKEN}")
+        assert SESSION_TOKEN not in out
+        assert out.startswith("x-amz-s3session-token:***")
+        out = m.mask_text(f"{{'X-Amz-S3session-Token': '{SESSION_TOKEN}', 'Host': 'b.s3'}}")
+        assert SESSION_TOKEN not in out
+        assert "'X-Amz-S3session-Token': '***'" in out
+        assert "'Host': 'b.s3'" in out
+
     def test_sse_c_key_dict_repr_header_masked_md5_kept(self) -> None:
         # The base64 customer key is the symmetric encryption key (a true
         # secret); the companion -md5 header is a non-secret hash and is kept.

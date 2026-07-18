@@ -37,7 +37,11 @@ in the `http.client` wire dump (verified against live botocore).
   rendered a Python dict repr; the patterns cover both).
 - `botocore/auth.py` emits `CanonicalRequest:\n<...>`, `StringToSign:\n<...>`, and
   `Signature:\n<hex>` at DEBUG level (the first two include the signed headers,
-  i.e. `x-amz-security-token`).
+  i.e. `x-amz-security-token`). On the S3 Express (directory bucket) flow the
+  same surfaces carry `x-amz-s3session-token` instead - the CreateSession-minted
+  session token - masked by the same pattern; the CreateSession *response body*
+  that mints it is the ordinary `<SessionToken>` / `'SessionToken':` shape
+  already covered below.
 - An SSE-C transfer (`cp/mv/sync --sse-c --sse-c-key ...`) carries the base64
   customer key - the symmetric encryption key itself - in the signed
   `x-amz-server-side-encryption-customer-key` header (and the copy-source
