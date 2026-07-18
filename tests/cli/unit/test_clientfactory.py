@@ -64,6 +64,23 @@ class TestBuildClient:
         client = clientfactory.build_client(_parse([]))
         assert client.meta.config.retries == {"mode": "adaptive", "total_max_attempts": 7}
 
+    def test_scalar_s3_section_fails_at_client_build_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `s3 = max_concurrent_requests=1` (a scalar where a section is
+        # expected): both aws v2 and stock botocore die at client construction
+        # (_resolve_use_dualstack_endpoint calls .get on the str) with
+        # AttributeError "'str' object has no attribute 'get'" -> the general
+        # backstop's rc 255 and the same message (measured on the pinned
+        # aws-cli and this CLI, ls and cp alike). Pinned so a future flow
+        # reorder (reading [s3] ahead of the client build) cannot turn the
+        # typo into a silent default.
+        config_file = tmp_path / "config"
+        config_file.write_text("[default]\ns3 = max_concurrent_requests=1\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
     def test_legacy_retry_mode_rejected_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws v2's bundled botocore restricts retry modes to standard/adaptive;
         # stock botocore would accept "legacy" (its own valid mode), so the
