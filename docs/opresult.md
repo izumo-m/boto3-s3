@@ -16,7 +16,7 @@ the record only needs to say *what happened to this item*.
 |---|---|
 | `transfer_type` | the verb (aws-cli's `transfer_type`): `upload` / `download` / `copy` / `move` / `delete`. |
 | `key` | the operation-relative identity - the transfer `compare_key`, or the deleted object's key. Also the token the CLI matches byte-progress against. |
-| `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE`. |
+| `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE` / `CANCELLED`. |
 | `bytes_transferred` | bytes moved (0 for a delete or an advisory). |
 | `error` | a `Boto3S3Error` on a failure; the advisory text on `WARNED` / `NOTICE`. Always the library taxonomy (every path translates into it), never a raw exception. |
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
@@ -54,7 +54,7 @@ fields are kept because they are populated even where the entry is absent - a
 |---|---|---|---|---|
 | `transfer_type` | upload / download / copy (mv → `move`) | upload / download / copy | `delete` | the run's verb |
 | `key` | `compare_key` | `compare_key` | the object key | `compare_key` (often `""`) |
-| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
+| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN / CANCELLED | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
 | `src` / `dest` | both | both | `src` only | — / — |
 | `bytes_transferred` | bytes | bytes | 0 | 0 |
 | `error` | on FAILED | on FAILED | on FAILED | the message body |
@@ -67,6 +67,44 @@ fields are kept because they are populated even where the entry is absent - a
 A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
 `dest_info` are both `None` and the stream endpoint renders as `-`; the
 `src_storage` / `dest_storage` are still the two sides.
+
+## When `on_result` fires (the contract)
+
+Every item that reaches the operation layer produces **exactly one outcome
+record**: `SUCCEEDED` / `FAILED` / `SKIPPED` / `DRYRUN` / `CANCELLED`. An item
+that never reaches it - filtered out during enumeration, or never enumerated
+because the run died first - produces nothing. `WARNED` / `NOTICE` sit outside
+that one-per-item rule: they are advisory records, not tied 1:1 to an item (a
+walk warning has no transfer item at all, and a `NOTICE` may precede the same
+item's real outcome). Aggregate counts always agree with the records: the
+engine's rollup counters and `BatchError`'s fields are the per-outcome record
+counts ([`exceptions.md`](./exceptions.md) section 4).
+
+A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode,
+Ctrl-C) resolves the accepted transfer items like this:
+
+- accepted but not yet running - or abandoned mid-flight - reports
+  `CANCELLED`, with `error` a `CancelledError` naming the cause;
+- an in-flight request that completes despite the cancellation reports its
+  real outcome: a running request cannot be interrupted, its bytes really
+  landed, and s3transfer lets the completion win over the cancel mark;
+- work never accepted (a graceful cancel stops the submission loop before the
+  next item) produces no record.
+
+A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
+items run to completion and report their real outcomes, so no `CANCELLED`
+records arise. A cancelling run always ends by raising (the fatal, or
+`CancelledError`), never by returning a `BatchError` - so `CANCELLED` records
+appear in no `BatchError` count, and the engine's `cancelled` rollup counter
+is exact once the operation has raised. (`rm` / `sync --delete` deletions go
+through `S3Deleter`, whose own contract is
+[`deleter.md`](./deleter.md) section 2.)
+
+aws-cli cancels the same transfer set (measured against the pinned aws-cli)
+but reports it differently: one `fatal error:` line, with the cancelled items
+dropped from its output and its counts entirely. The per-item `CANCELLED`
+records are the library's deliberately richer surface; the CLI maps them back
+to aws's silence.
 
 ## `extra_info` (result metadata)
 
@@ -132,9 +170,11 @@ events - the delete calls are issued directly - so it works on any engine.
 ## `error`
 
 `error` is always a `Boto3S3Error` (the library exception taxonomy) or `None` -
-never a raw exception. A `FAILED` record carries the failure; a `WARNED` /
-`NOTICE` record carries the advisory text - a `WARNED` body is bare (the CLI
-prints `warning: {error}`), while a `NOTICE` body already carries its own
+never a raw exception. A `FAILED` record carries the failure; a `CANCELLED`
+record carries a `CancelledError` whose message names what revoked the item
+(the fatal's text, or the cancel reason); a `WARNED` / `NOTICE` record carries
+the advisory text - a `WARNED` body is bare (the CLI prints
+`warning: {error}`), while a `NOTICE` body already carries its own
 `warning: ` prefix (the CLI prints it verbatim).
 
 ## Example

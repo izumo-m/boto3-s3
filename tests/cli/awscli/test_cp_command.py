@@ -2083,8 +2083,10 @@ class TestCpRecursiveCaseConflict:
 
     # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
-        # The first (admitted) key still downloads; only the conflicting
-        # second key trips the error gate - so one GetObject is scripted.
+        # The gate's fatal cancels the already-admitted first twin, so its
+        # GetObject normally never fires; the response is scripted defensively
+        # because the cancellation races the worker by nature (aws's original
+        # scripts only the listing and asserts no operations).
         result, _ = _run_cmd(
             [list_objects_response([self.UPPER_KEY, self.LOWER_KEY]), get_object_response()],
             self._cmd(tmp_path, "error"),

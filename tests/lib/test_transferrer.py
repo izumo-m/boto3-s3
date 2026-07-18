@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -21,7 +22,12 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3 import transfer
-from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
+from boto3_s3.exceptions import (
+    CancelledError,
+    ConfigurationError,
+    NotFoundError,
+    ValidationError,
+)
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import (
     TransferItem,
@@ -905,6 +911,99 @@ class TestNonTransferOutcomes:
         assert progress[0].bytes_done == 0  # queued notification
         assert progress[-1].bytes_done == 1000
         assert all(p.bytes_total == 1000 for p in progress)
+
+
+class TestFatalCancellation:
+    """A fatal escaping the submission loop cancels the accepted transfers
+    (aws's manager-context behavior, measured live: a mid-listing fatal
+    leaves every queued transfer unrun), and each revoked item reports one
+    CANCELLED record naming the fatal (docs/opresult.md)."""
+
+    def test_fatal_mid_enumeration_cancels_queued_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from s3transfer.manager import TransferCoordinatorController
+
+        names = ("a.bin", "b.bin", "c.bin")
+        for name in names:
+            (tmp_path / name).write_bytes(b"x")
+        items = [
+            TransferItem(
+                compare_key=name,
+                size=1,
+                src_path=str(tmp_path / name),
+                dest_bucket="b",
+                dest_key=f"p/{name}",
+                src_display=str(tmp_path / name),
+                dest_display=f"s3://b/p/{name}",
+            )
+            for name in names
+        ]
+        client, _ = make_recording_client([])
+        api_calls: list[str] = []
+        first_started = threading.Event()
+        release_first = threading.Event()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            api_calls.append(f"{operation}:{params['Key']}")
+            if len(api_calls) == 1:
+                first_started.set()
+                assert release_first.wait(5.0)
+            return {}
+
+        client._make_api_call = api_call  # type: ignore[method-assign]
+
+        # Release the blocked in-flight request only once the shutdown's
+        # cancel has revoked every pending coordinator, so the "queued items
+        # never reach the API" assertion cannot race the worker. The in-flight
+        # one still finishes - a running request cannot be interrupted - and
+        # reports SUCCEEDED: s3transfer lets a completing task overwrite the
+        # mid-flight cancel mark (the bytes really landed; aws's engine does
+        # the same, its printer just never shows it).
+        original_cancel = TransferCoordinatorController.cancel
+
+        def cancel(self: Any, *args: Any, **kwargs: Any) -> None:
+            original_cancel(self, *args, **kwargs)
+            release_first.set()
+
+        monkeypatch.setattr(TransferCoordinatorController, "cancel", cancel)
+
+        results: list[OpResult] = []
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(max_concurrency=1),
+            on_result=results.append,
+        )
+        with pytest.raises(NotFoundError, match="listing died"):
+            with transferrer:
+                for item in items:
+                    transferrer.submit(item)
+                # Let the first request actually start before the fatal: the
+                # shape under test is "in-flight finishes, queued revoked" -
+                # without this the fatal can also beat the worker and revoke
+                # all three (a legal but different outcome).
+                assert first_started.wait(5.0)
+                raise NotFoundError("listing died mid-enumeration")
+
+        # Only the already-running first transfer reached the API; the queued
+        # two were revoked before ever becoming requests (aws's transfer set:
+        # its uploads in flight at the fatal land on S3 the same way). Record
+        # order is not part of the contract - a revoked item's record fires
+        # from the cancelling thread or the executor's skip path, whichever
+        # its submission had reached.
+        assert len(api_calls) == 1
+        by_key = {result.key: result for result in results}
+        assert len(results) == 3 and set(by_key) == {"a.bin", "b.bin", "c.bin"}
+        assert by_key["a.bin"].outcome is OpOutcome.SUCCEEDED
+        for key in ("b.bin", "c.bin"):
+            result = by_key[key]
+            assert result.outcome is OpOutcome.CANCELLED
+            assert isinstance(result.error, CancelledError)
+            assert "listing died mid-enumeration" in str(result.error)
+        assert (transferrer.succeeded, transferrer.failed, transferrer.cancelled) == (1, 0, 2)
+        # first_error stays reserved for real failures (BatchError's sample).
+        assert transferrer.first_error is None
 
 
 class TestNoOverwrite:

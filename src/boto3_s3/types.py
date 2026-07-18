@@ -306,7 +306,14 @@ class OpOutcome(enum.Enum):
     text on ``error`` (aws prints some advisories - the case-conflict
     messages - straight to stderr without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
-    real outcome.
+    real outcome. ``CANCELLED`` reports an accepted item revoked before it
+    could complete - a fatal error elsewhere in the run, an immediate cancel,
+    or Ctrl-C shut the engine down; its ``error`` is a `CancelledError`
+    naming the cause. It is distinct from ``FAILED``: nothing is wrong with
+    the item itself, and the run's outcome is carried by the fatal /
+    `CancelledError` the operation raises, not by these records (aws-cli
+    surfaces only the one fatal line and drops its cancelled items from
+    output and counts entirely).
     """
 
     SUCCEEDED = "succeeded"
@@ -315,6 +322,7 @@ class OpOutcome(enum.Enum):
     SKIPPED = "skipped"
     DRYRUN = "dryrun"
     NOTICE = "notice"
+    CANCELLED = "cancelled"
 
 
 class CaseConflictMode(enum.Enum):

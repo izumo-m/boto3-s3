@@ -95,7 +95,10 @@ accepting new work, discard work not yet accepted, drain accepted work, reclaim
 their workers, and then raise `CancelledError`. Passing
 `mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
 pending and in-flight futures. Synchronous external I/O already running cannot
-be killed safely and may still finish. Cancellation is monotonic and idempotent:
+be killed safely and may still finish - such a completion reports its real
+outcome, while a revoked accepted item reports one `CANCELLED` record
+([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error
+cancels the same way). Cancellation is monotonic and idempotent:
 an immediate request upgrades graceful cancellation, and later requests never
 downgrade it. `on_result` may call `cancel()`; it only changes token state and
 never shuts an engine down from the callback's worker thread.
@@ -143,6 +146,10 @@ class BatchError(Boto3S3Error):
 - The raise condition is **only when `failed > 0`** (Model 1). It does not raise
   for `warned`/`skipped` alone (`failed == 0`). In that case, obtain the counts
   through the `on_result` hook (for the exit code, see section 5).
+- `CANCELLED` records never reach a `BatchError`: a cancelling run ends by
+  raising the fatal (or `CancelledError`) instead, and cancelled items are not
+  failures - the engine's separate `cancelled` rollup counter carries them
+  ([`opresult.md`](./opresult.md), the `on_result` contract).
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
 - `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item

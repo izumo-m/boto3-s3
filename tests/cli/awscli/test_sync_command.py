@@ -776,8 +776,10 @@ class TestSyncCaseConflict:
         assert f"Failed to download bucket/{self.upper_key}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
-        # The first (admitted) key still downloads; only the conflicting
-        # second key trips the error gate - so one GetObject is scripted.
+        # The gate's fatal cancels the already-admitted first twin, so its
+        # GetObject normally never fires; the response is scripted defensively
+        # because the cancellation races the worker by nature (aws's original
+        # scripts only the listing and asserts no operations).
         result, _ = _run_cmd(
             [
                 list_objects_response([self.upper_key, self.lower_key]),

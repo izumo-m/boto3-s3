@@ -79,15 +79,22 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `TransferConfig.max_request_queue_size` (default 1000) blocks the submit
   thread when it is full. This is the same mechanism aws-cli relies on; we keep
   no in-flight window of our own.
-- context manager: on normal completion and on a **normal exception** (a fatal
-  in mid-enumeration) it performs a graceful shutdown (submitted transfers run
-  to completion = aws's behavior). `CancelMode.GRACEFUL` has the same drain
-  behavior after stopping new submissions. `CancelMode.IMMEDIATE` additionally
-  calls `cancel()` on the active top-level transfer futures; futures already
-  running may still finish. Active futures are tracked only until their done
-  subscriber fires, keeping cancellation tracking bounded by concurrency rather
-  than total item count. `KeyboardInterrupt` keeps the manager's direct
-  best-effort cancellation path.
+- context manager: on normal completion it drains (waits for submitted
+  transfers). On **any exception** - a fatal in mid-enumeration included - it
+  shuts down **cancelling**, by delegating to the s3transfer manager's own
+  `__exit__` (aws's actual path; measured live: a mid-listing fatal leaves
+  every queued transfer unrun, prints only the one `fatal error:` line, and
+  exits 1). The exception to that is `CancelMode.GRACEFUL`'s
+  `CancelledError`, which drains by definition (graceful cancel = stop
+  submitting, run accepted work; exceptions.md). `CancelMode.IMMEDIATE`
+  additionally calls `cancel()` on the active top-level transfer futures.
+  Futures already running may still finish - a cancelled-mid-flight transfer
+  that completes reports its real outcome (s3transfer lets the completion
+  win), while a revoked one reports one `CANCELLED` record
+  ([`opresult.md`](./opresult.md)). Active futures are tracked only until
+  their done subscriber fires, keeping cancellation tracking bounded by
+  concurrency rather than total item count. `KeyboardInterrupt` keeps the
+  manager's direct best-effort cancellation path.
 
 ## 3. Subscriber composition (follows the order of aws-cli `s3handler`)
 

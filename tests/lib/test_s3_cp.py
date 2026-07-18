@@ -403,9 +403,13 @@ class TestUploadRoute:
             assert watcher_running.wait(5.0)
             token.cancel(mode=CancelMode.IMMEDIATE)
 
-        def cancel_after_first(_result: OpResult) -> None:
-            token.cancel()
-            threading.Thread(target=escalate, daemon=True).start()
+        results: list[OpResult] = []
+
+        def cancel_after_first(result: OpResult) -> None:
+            results.append(result)
+            if len(results) == 1:
+                token.cancel()
+                threading.Thread(target=escalate, daemon=True).start()
 
         threading.Timer(0.2, release_first.set).start()
         with pytest.raises(CancelledError):
@@ -425,6 +429,17 @@ class TestUploadRoute:
         # run, in no guaranteed order (the pool races per-file prep).
         assert 1 <= len(calls) <= 2
         assert set(calls) <= {"PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"}
+        # Every accepted item keeps its one record: a transfer whose request
+        # ran to completion reports SUCCEEDED (a running request cannot be
+        # interrupted, and s3transfer lets the completion win over the cancel
+        # mark), while a revoked queued one reports CANCELLED - never FAILED.
+        assert len(results) == 3
+        outcomes = [result.outcome for result in results]
+        assert outcomes.count(OpOutcome.SUCCEEDED) == len(calls)
+        assert outcomes.count(OpOutcome.CANCELLED) == 3 - len(calls)
+        for result in results:
+            if result.outcome is OpOutcome.CANCELLED:
+                assert isinstance(result.error, CancelledError)
 
 
 class TestFilters:

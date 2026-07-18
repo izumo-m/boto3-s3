@@ -192,6 +192,23 @@ def _is_precondition_failed(exc: BaseException) -> bool:
         return False
 
 
+def _is_cancellation(exc: BaseException) -> bool:
+    """A future outcome meaning "revoked", not "failed".
+
+    Classic s3transfer settles cancelled futures with its own
+    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass); the
+    CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead, so
+    that is matched by the error's ``name`` without importing awscrt. The
+    library's own `CancelledError` is included for symmetry (a subscriber
+    re-raising a translated cancellation).
+    """
+    from s3transfer.exceptions import CancelledError as S3TransferCancelledError
+
+    if isinstance(exc, (CancelledError, S3TransferCancelledError)):
+        return True
+    return getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
+
+
 def _allow_if_none_match() -> None:
     """Teach pip s3transfer the ``IfNoneMatch`` upload/copy argument.
 
@@ -575,13 +592,22 @@ class Transferrer:
     """Submit transfer items of one kind and aggregate their outcomes.
 
     Use as a context manager around the submission loop: ``__exit__`` shuts
-    the manager down - waiting for in-flight transfers on a clean exit *and*
-    on an ordinary exception (aws stops submitting but lets submitted work
-    finish). A `CancelledError` backed by a graceful `CancelToken` drains too;
-    immediate mode asks tracked futures to cancel, while a non-`Exception`
-    interrupt (Ctrl-C) uses the manager's direct cancellation path. The rollup
-    counters are approximate while transfers are in flight and exact after the
-    `with` block exits.
+    the manager down - waiting for in-flight transfers on a clean exit, and
+    **cancelling accepted work on any exception** except a graceful cancel
+    (aws's manager context cancels everything still pending when a fatal
+    escapes the submission loop - measured: a mid-listing fatal leaves the
+    queued transfers unrun and prints only the one fatal line). The exception
+    is a `CancelledError` backed by a graceful `CancelToken`: a graceful
+    cancel means "drain accepted work", so submitted transfers still run to
+    completion; immediate mode cancels them, and a non-`Exception` interrupt
+    (Ctrl-C) uses the manager's direct cancellation path. Every accepted item
+    still gets its one result record under a cancellation: an item that never
+    ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
+    `CancelledError` naming the cause, while an in-flight request that
+    completes despite the cancel reports its real outcome (s3transfer lets
+    the completion win; docs/opresult.md). The rollup counters are
+    approximate while transfers are in flight and exact after the `with`
+    block exits.
 
     ``client`` is the manager-owning side: the destination client for uploads
     and copies, the source client for downloads; ``source_client`` (copies
@@ -713,6 +739,7 @@ class Transferrer:
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
+        self._cancelled = 0
         self._first_error: Boto3S3Error | None = None
         # The shared warning sink: the walk (ScanOptions.on_warning) and this
         # engine both report through it, so a warning never routes into the
@@ -736,17 +763,32 @@ class Transferrer:
         exc: BaseException | None,
         tb: object,
     ) -> None:
-        """Drain submitted work, escalating cancellation when the exit requires it."""
+        """Drain submitted work, cancelling it when the exit requires that.
+
+        Any exception cancels the accepted transfers, like aws's manager
+        context (its ``__exit__`` cancels with ``FatalError(str(exc))`` on a
+        fatal and ``CancelledError`` on Ctrl-C; measured live: a fatal
+        mid-listing leaves every queued transfer unrun). The one drain-on-
+        exception case is a graceful token's `CancelledError`: graceful
+        cancellation is *defined* as draining accepted work (exceptions.md),
+        and the watcher thread keeps a mid-drain escalation to immediate
+        effective. The cancelling shutdown is delegated to the manager's own
+        ``__exit__`` - aws's actual path - because s3transfer's public
+        ``shutdown()`` forwards its arguments shifted (``(cancel, cancel,
+        cancel_msg)``), which would cancel a pending coordinator with the
+        message as the exception *class*; ``__exit__`` also picks aws's
+        exception shape (``FatalError(str(exc))``, Ctrl-C's plain
+        ``CancelledError``) and exists on both engines, so each ``CANCELLED``
+        record names the fatal that revoked it.
+        """
         if self._manager is None:
             return
-        token_requests_immediate = (
-            self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE
+        graceful_drain = (
+            isinstance(exc, CancelledError)
+            and self._cancel_token is not None
+            and self._cancel_token.mode is CancelMode.GRACEFUL
         )
-        cancel = exc is not None and (
-            token_requests_immediate
-            or (isinstance(exc, CancelledError) and self._cancel_token is None)
-            or not isinstance(exc, Exception)
-        )
+        cancel = exc is not None and not graceful_drain
         watcher: threading.Thread | None = None
         if self._cancel_token is not None and not cancel:
             watcher = threading.Thread(
@@ -756,7 +798,10 @@ class Transferrer:
             )
             watcher.start()
         try:
-            self._manager.shutdown(cancel=cancel)
+            if cancel:
+                self._manager.__exit__(type(exc), exc, None)
+            else:
+                self._manager.shutdown()
         finally:
             self._shutdown_done.set()
             if watcher is not None:
@@ -809,6 +854,10 @@ class Transferrer:
     @property
     def failed(self) -> int:
         return self._failed
+
+    @property
+    def cancelled(self) -> int:
+        return self._cancelled
 
     @property
     def warned(self) -> int:
@@ -1330,10 +1379,28 @@ class Transferrer:
         return None, None
 
     def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
-        """Classify a terminal exception as a no-overwrite skip or failed result."""
-        # Failed / skipped items surface no captured response, but the entry
-        # must still leave the store (see _drain_captured).
+        """Classify a terminal exception as a cancellation, no-overwrite skip, or failure."""
+        # Failed / skipped / cancelled items surface no captured response, but
+        # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
+        if _is_cancellation(exc):
+            # An accepted item revoked by the engine shutdown (a fatal
+            # elsewhere, an immediate cancel, Ctrl-C): CANCELLED, not FAILED -
+            # nothing is wrong with the item itself, and the run's outcome is
+            # the exception the operation raises. Deliberately richer than
+            # aws-cli, which drops cancelled items from output and counts;
+            # first_error stays reserved for real failures (BatchError's
+            # diagnostic sample).
+            error = CancelledError(
+                str(exc) or "canceled",
+                operation=self._operation,
+                bucket=item.dest_bucket or item.src_bucket,
+                key=item.dest_key or item.src_key,
+            )
+            with self._lock:
+                self._cancelled += 1
+            self._emit(self._result(item, OpOutcome.CANCELLED, error=error))
+            return
         if _is_precondition_failed(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a
