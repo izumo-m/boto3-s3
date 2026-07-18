@@ -354,7 +354,9 @@ class TestUploadRoute:
             OpOutcome.SUCCEEDED,
         ]
 
-    def test_immediate_escalation_cancels_queued_transfers(self, tmp_path: Path) -> None:
+    def test_immediate_escalation_cancels_queued_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
             (tmp_path / name).write_bytes(name.encode())
         client, _ = make_recording_client([])
@@ -373,10 +375,37 @@ class TestUploadRoute:
         client._make_api_call = api_call  # type: ignore[method-assign]
         token = CancelToken()
 
+        # The escalation path under test is: a graceful cancel starts the drain
+        # (which spawns the immediate-cancel watcher), then the token upgrades to
+        # IMMEDIATE while that drain waits. Synchronize on the watcher and on the
+        # future-cancel it performs instead of sleeping, so the assertion never
+        # races the watcher's 0.1s poll - fixed sleeps flake on a busy CI runner.
+        watcher_running = threading.Event()
+        original_watch = Transferrer._watch_for_immediate_cancel
+
+        def watch(self: Transferrer) -> None:
+            watcher_running.set()
+            original_watch(self)
+
+        monkeypatch.setattr(Transferrer, "_watch_for_immediate_cancel", watch)
+
+        original_cancel_futures = Transferrer._cancel_futures
+
+        def cancel_futures(self: Transferrer) -> None:
+            original_cancel_futures(self)
+            # Queued transfers are now cancelled; let the accepted in-flight
+            # transfer finish so the drain (and cp) can complete.
+            release_running.set()
+
+        monkeypatch.setattr(Transferrer, "_cancel_futures", cancel_futures)
+
+        def escalate() -> None:
+            assert watcher_running.wait(5.0)
+            token.cancel(mode=CancelMode.IMMEDIATE)
+
         def cancel_after_first(_result: OpResult) -> None:
             token.cancel()
-            threading.Timer(0.05, lambda: token.cancel(mode=CancelMode.IMMEDIATE)).start()
-            threading.Timer(0.2, release_running.set).start()
+            threading.Thread(target=escalate, daemon=True).start()
 
         threading.Timer(0.2, release_first.set).start()
         with pytest.raises(CancelledError):
@@ -389,13 +418,13 @@ class TestUploadRoute:
                 on_result=cancel_after_first,
             )
 
-        # The request executor may start b before a's completion callback runs;
-        # that request is accepted work and cannot be interrupted safely. c is
-        # still queued and is cancelled before it becomes an S3 request.
-        assert calls in (
-            ["PutObject:p/a.txt"],
-            ["PutObject:p/a.txt", "PutObject:p/b.txt"],
-        )
+        # The first accepted transfer runs; the submission pool may already have
+        # accepted a second before the drain began, and that request cannot be
+        # interrupted safely. The escalation cancels every transfer still queued,
+        # so the last file never becomes an S3 request: at most two of the three
+        # run, in no guaranteed order (the pool races per-file prep).
+        assert 1 <= len(calls) <= 2
+        assert set(calls) <= {"PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"}
 
 
 class TestFilters:
