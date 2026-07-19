@@ -223,7 +223,7 @@ def s3_errors(
 
 def _page_to_infos(
     page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str, storage: S3Storage
-) -> list[FileInfo]:
+) -> list[S3FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
     Runs on the prefetch worker thread. Non-recursive listings emit one
@@ -238,7 +238,7 @@ def _page_to_infos(
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
     """
-    infos: list[FileInfo] = []
+    infos: list[S3FileInfo] = []
     if not recursive:
         for common in page.get("CommonPrefixes", []):
             dir_prefix = common.get("Prefix")
@@ -274,7 +274,7 @@ def _page_to_infos(
     return infos
 
 
-def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[FileInfo]:
+def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[S3FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
     Runs on the consumer's iteration thread - ``S3.ls`` iterates
@@ -286,7 +286,7 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
     """
-    infos: list[FileInfo] = []
+    infos: list[S3FileInfo] = []
     for bucket in page.get("Buckets", []):
         name = bucket.get("Name")
         if name is None:
@@ -617,8 +617,8 @@ class S3Storage(Storage):
         return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
 
     @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
+    def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
+        """Yield one ``list[S3FileInfo]`` per ``ListObjectsV2`` page (paginated).
 
         Object listing only - the openable-entity enumeration ``scan`` promises
         (aws-cli's ``_list_all_objects``). ``options.recursive`` omits
@@ -653,8 +653,8 @@ class S3Storage(Storage):
             raw = sieve_pages(raw, options.filter)
         yield from raw
 
-    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
+    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[S3FileInfo]]:
+        """Yield one raw ``list[S3FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
 
         ``options.prefix`` overrides the storage's own key as the listing anchor
         (a transfer's normalized prefix) - both the ``Prefix`` and the

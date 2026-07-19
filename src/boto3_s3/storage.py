@@ -47,15 +47,20 @@ import abc
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import Flag, auto
-from typing import Any, BinaryIO, ClassVar, Literal
+from typing import Any, BinaryIO, ClassVar, Literal, TypeVar
 
 from boto3_s3.concurrency import prefetch
 from boto3_s3.types import CancelToken, FileInfo, ScanOptions
 
 
+# Preserves a backend's concrete info type through sieve_pages, so a narrowed
+# scan_pages (list[S3FileInfo] pages) stays narrowed after filtering.
+_InfoT = TypeVar("_InfoT", bound="FileInfo")
+
+
 def sieve_pages(
-    pages: Iterator[Sequence[FileInfo]], keep: Callable[[FileInfo], bool]
-) -> Iterator[list[FileInfo]]:
+    pages: Iterator[Sequence[_InfoT]], keep: Callable[[FileInfo], bool]
+) -> Iterator[list[_InfoT]]:
     """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
 
     The building block a ``Storage.scan_pages`` implementation uses to honor

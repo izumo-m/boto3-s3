@@ -1198,7 +1198,7 @@ class LocalStorage(Storage):
         )
 
     @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[LocalFileInfo]]:
         """Yield entries under ``path``, one directory read (``os.scandir``) per page.
 
         Recursive enumeration drives the walker's
@@ -1271,7 +1271,7 @@ class LocalStorage(Storage):
             replace(self.default_scan_options(), on_warning=on_warning, storage=self),
         )
 
-    def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[FileInfo]:
+    def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
         """Yield immediate entries of scanned ``root`` for non-recursive scanning.
 
         ``root`` is the path being scanned. This is the one-level counterpart to
