@@ -102,7 +102,8 @@ also read as `'auto'`) with the same rules as boto3.
     explicit endpoint (`endpoint=None`, the default and every non-CLI caller),
     `_derive_endpoint` falls back to the host form of `client.meta.endpoint_url`:
     `None` for an AWS-default form (boto3-faithful - botocore re-resolves it per
-    request), the value itself for a custom host (MinIO, etc.). "AWS-default" is
+    request, under the caller's `Config`; see the `config` bullet below), the
+    value itself for a custom host (MinIO, etc.). "AWS-default" is
     recognized across every partition the installed botocore knows, not just
     the two commercial suffixes: `_aws_dns_suffixes` collects, once, every
     partition's `dnsSuffix` plus its dualstack/fips variant suffixes straight
@@ -132,6 +133,14 @@ also read as `'auto'`) with the same rules as boto3.
     `BotocoreCRTRequestSerializer`; a fresh session re-parses the S3 service
     model and endpoint data on every process (~40 ms measured), which was the
     dominant fixed cost of the CRT lane versus aws in the E2E benchmark
+  - config = the caller's `client.meta.config`, threaded into the serializer
+    with the region and endpoint (the serializer merges
+    `signature_version=UNSIGNED` on top). This keeps a `None` endpoint's
+    per-request re-resolution under the caller's configuration rather than
+    stock botocore's defaults: us-east-1 stays on the regional endpoint like
+    the classic engine's `us_east_1_regional_endpoint` override (one Host
+    across engines), and addressing-style and accelerate/dualstack settings
+    carry over the same way
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
