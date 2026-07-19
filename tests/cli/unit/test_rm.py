@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import FileInfo
+from boto3_s3 import FileInfo, S3Storage
 from boto3_s3.globsieve import GlobPattern, PatternKind
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
@@ -254,19 +254,24 @@ class TestAppendFilterAction:
         ]
 
     def test_compile_filter_none_for_no_patterns(self) -> None:
-        assert filters.compile_filter(None) is None
-        assert filters.compile_filter([]) is None
+        target = S3Storage("s3://b")
+        assert filters.compile_filter(None, src=target, dest=target, dir_op=True) is None
+        assert filters.compile_filter([], src=target, dest=target, dir_op=True) is None
 
     def test_absolute_pattern_is_dead_against_an_s3_key(self) -> None:
-        # rm lists S3 keys, which carry no drive / UNC anchor, so an absolute
-        # pattern can never match one (os.path.join drops the root onto an
-        # anchorless key, fnmatch misses) - exactly aws-cli, whose s3 paths are
-        # anchorless. Only the relative '*' bites here.
+        # rm lists S3 keys, whose bucket/key paths carry no drive / UNC anchor,
+        # so an absolute pattern can never match one (os.path.join replaces the
+        # base with it, fnmatch misses the anchorless path) - exactly aws-cli.
+        # Only the relative '*' bites here.
+        target = S3Storage("s3://b")
         keep = filters.compile_filter(
-            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")]
+            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
+            src=target,
+            dest=target,
+            dir_op=True,
         )
         assert keep is not None
-        assert keep(FileInfo(key="anything", compare_key="anything")) is False
+        assert keep(FileInfo(key="anything", compare_key="anything", storage=target)) is False
 
 
 class TestScanInterruptPolicy:

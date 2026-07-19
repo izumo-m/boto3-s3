@@ -37,9 +37,11 @@ dest listing -- filter (visibility) --+        |
   it prunes **per-side** - the same per-side roots aws gets from joining the
   pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching only
   the source leaves the destination visible, so `--delete` still removes it).
-  The same one filter expresses both because `globsieve.Anchored` routes a
-  relative pattern to `compare_key` and an absolute one to the full key (one is
-  symmetric, the other per-side automatically); see globsieve.md. Folder markers
+  A library `GlobFilter` expresses both in one filter because
+  `globsieve.Anchored` routes a relative pattern to `compare_key` and an
+  absolute one to the full key (one is symmetric, the other per-side
+  automatically; see globsieve.md); the CLI reaches the same per-side outcome
+  through its own base-joined filter, aws's actual mechanism (cli.md). Folder markers
   (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
   produces them - either way sync neither transfers nor deletes markers. The
   implementation is `ScanOptions.filter` on both sides (the S3 listing prunes

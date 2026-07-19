@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "cp",
+    "s3://<BUCKET>/d",
+    "s3://<BUCKET>/d/backup",
+    "--recursive",
+    "--exclude",
+    "x*"
+  ],
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
+  "bucket_exists": null,
+  "head_fields": null,
+  "local_tree": null,
+  "rc": 0,
+  "remaining_keys": [
+    "d/backup/x1.txt",
+    "d/backup/y.txt",
+    "d/y.txt"
+  ],
+  "scenario": "cp_copy_nested_dest_filter_cross",
+  "src_tree": null,
+  "stdout_lines": [
+    "copy: s3://<BUCKET>/d/y.txt to s3://<BUCKET>/d/backup/y.txt"
+  ]
+}

@@ -70,7 +70,7 @@ solidified design is added here.
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
 | `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
-| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction (`compile_filter`: compile a globsieve matcher and wrap it so a relative pattern matches `FileInfo.compare_key` and an absolute one `FileInfo.key`. No source/destination path is needed - the anchor comes from each entry's key at match time, so the one filter prunes sync's two sides per-side) |
+| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction. `compile_filter` is the aws `create_filter` + `Filter` equivalent: each side's already-built Storage contributes a base (aws's `rootdir`: `bucket/key`, or the absolutized local path; the parent for a single-file operation), every pattern is joined onto both bases with `os.path.join`, and the joined forms are fnmatched against each entry's full path, last match winning - glob characters in the base and cross-side application included, exactly like aws. When that is provably equivalent to matching the pattern against `FileInfo.compare_key` (plain bases, relative patterns, no nested s3<->s3 pair), it delegates to the specialized globsieve engine |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator; a non-string `fileb://` value is rejected at parse like aws's schema validation) |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator |
@@ -327,7 +327,7 @@ aws-cli's behavior):
 | `--dryrun` | Calls no delete API, emitting only `(dryrun) delete:` lines (the recursive ListObjectsV2 still runs = a listing failure is fatal even under dryrun) |
 | `--quiet` | **Suppresses all output** (not just success lines but also `delete failed:` / `fatal error:` lines. aws does not create the printer at all. The rc is unchanged) |
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
-| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it into a globsieve matcher (a relative pattern matches the `Prefix`-relative `compare_key`, an absolute one the full key - inert for an anchorless s3 key) and passes it to `S3.rm(filter=)` |
+| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it against the target's base (`bucket/key`, both sides for rm - aws sets `dest = src`) and passes it to `S3.rm(filter=)`; usually that is the `Prefix`-relative `compare_key` match, but glob characters in the target path glob-interpret the base exactly like aws (`[1]` in a prefix is a character class there, defeating `--exclude '*'`) |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
 | `--page-size N` | `S3Storage(url, page_size=N)` (storage config, as for ls). No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
@@ -452,8 +452,9 @@ Equivalent to `aws s3 cp <src> <dest>` (aws-cli `CpCommand`; transfer family =
 `s3://` prefix (upload / download / s3->s3 copy. local->local is a usage error
 252). Path shapes - the meaning of an existing dir / a trailing-separator dest,
 which of the two names to adopt, the bucket-root normalization of a keyless
-`s3://bucket`, the filter root - are derived by `boto3_s3.transferplan` (a port of aws's
-`FileFormat`), shared between the CLI and the library.
+`s3://bucket` - are derived by `boto3_s3.transferplan` (a port of aws's
+`FileFormat`), shared between the CLI and the library. The filter bases are a
+separate derivation (`filters.py`, aws's `rootdir` - like aws keeps its two).
 
 **The declaration surface is the full aws-cli ARG_TABLE**:
 `--recursive` `--dryrun` `--quiet` `--only-show-errors` `--no-progress`
@@ -717,13 +718,15 @@ factory):
    attach IfNoneMatch. sync.md section 3)
 
 **The filter is compiled once**: the `--exclude` / `--include` sequence is turned
-into a single `FileFilter` (no root needed) and passed to `S3.sync(filter=)`,
-which applies it to both sides. A **relative** pattern matches each side's compare
-key symmetrically, so "what the filter excludes is also excluded from `--delete`"
-falls out (sync.md section 1); an **absolute** pattern matches each side's full
-key, so it prunes per-side - a source-rooted absolute pattern leaves the
-anchorless destination visible, and `--delete` still removes it, exactly like aws's
-per-side roots (`globsieve.Anchored`).
+into a single `FileFilter` with both sides' bases (`filters.py`: aws joins every
+pattern onto the source AND destination `rootdir` and applies both joined forms
+to every entry) and passed to `S3.sync(filter=)`, which applies it to both
+sides. A **relative** pattern under plain bases matches each side's compare key
+symmetrically, so "what the filter excludes is also excluded from `--delete`"
+falls out (sync.md section 1); an **absolute** pattern replaces the base in the
+join, so it prunes per-side - a source-anchored pattern leaves the anchorless
+`bucket/key` destination visible, and `--delete` still removes it, exactly like
+aws.
 
 **Output**: the transfer lines are the same as section 5.7 (the verb is the route word
 upload / download / copy). A deletion is `delete: <endpoint>` (**no `to` clause** -

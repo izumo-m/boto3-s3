@@ -138,7 +138,10 @@ class RmCommand(Command):
         )
         storage.validate()
 
-        item_filter = filters.compile_filter(args.filters)
+        # The target is both filter sides (aws sets dest = src for rm).
+        item_filter = filters.compile_filter(
+            args.filters, src=storage, dest=storage, dir_op=args.recursive
+        )
         printer = _DeletePrinter(
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )

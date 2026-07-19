@@ -55,6 +55,15 @@ _FILTERED: Mapping[str, int] = {
     "f/sub/c.txt": 5,
 }
 
+# A prefix containing glob metacharacters: aws joins the operation path into
+# each filter pattern, so the "[1]" becomes a character class there and the
+# joined pattern cannot match the literal "f[1]/" keys (task #184 parity).
+_GLOB_PREFIX: Mapping[str, int] = {
+    "f[1]/a.txt": 3,
+    "f[1]/sub/b.txt": 4,
+    "f-plain.txt": 2,
+}
+
 _PAGED: Mapping[str, int] = {f"pg/k{i:02d}": 1 for i in range(12)}
 
 
@@ -132,6 +141,14 @@ SCENARIOS: tuple[RmScenario, ...] = (
         "rm_exclude_single_key",
         ("rm", f"s3://{BUCKET_TOKEN}/data/a.txt", "--exclude", "*"),
         _TREE,
+    ),
+    # The prefix's "[1]" is glob-interpreted inside the joined pattern, so
+    # --exclude '*' matches nothing and everything is deleted anyway
+    # (verified against aws 2.36.1).
+    RmScenario(
+        "rm_exclude_glob_chars_prefix",
+        ("rm", f"s3://{BUCKET_TOKEN}/f[1]/", "--recursive", "--exclude", "*"),
+        _GLOB_PREFIX,
     ),
     # The single key roots at its parent: the basename pattern must match.
     RmScenario(

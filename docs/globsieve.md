@@ -164,8 +164,12 @@ relativization, so it is not part of the prefix.
   / `--include` match, with the section 2 fast paths intact; an absolute pattern
   it anchors against `info.key` (section 1). For `rm` the source is always s3,
   whose key has no anchor, so an absolute pattern is inert and only the relative
-  ones bite. The CLI `compile`s the patterns in their order of appearance and
-  wraps the result as a `FileFilter` (`cli/src/boto3_s3_cli/filters.py`).
+  ones bite. The CLI's `compile_filter` (`cli/src/boto3_s3_cli/filters.py`)
+  compiles the patterns in their order of appearance with the operation's two
+  bases (aws's `rootdir`s) and delegates to this engine whenever the joined
+  matching aws performs is provably the `compare_key` match - see cli.md;
+  glob characters in the operation path, absolute patterns, and nested
+  s3<->s3 pairs stay on its own aws-faithful joined engine instead.
 - **a custom predicate** can instead decide on size / mtime / storage_class
   (e.g. `filter=lambda info: info.size == 0`), or read `info.compare_key` for a
   relative-path rule of its own. On the non-recursive blind single-key path
@@ -221,15 +225,14 @@ the local directory or S3 `Prefix` being enumerated
 Matching therefore happens in `/`-space, so **a pattern must be `/`-form to
 match**:
 
-- **CLI**: patterns are written `/`-form. A **relative** pattern matches the
-  `/`-form `compare_key` directly. An **absolute** pattern is joined onto the
-  entry's `key` with `os.path.join` and the result folded back to `/`
-  (`Anchored`); the host `os.path` thus handles a Windows user's `\` and drive /
-  UNC anchoring, collapsing aws-cli's per-side rewrite into one `/`-space match.
-  On Windows aws-cli additionally `normcase`s both sides, making the match
-  **case-insensitive**; `cli/src/boto3_s3_cli/filters.py` reproduces this by
-  lower-casing patterns at compile and keys at match (`os.name == "nt"`), and
-  stays byte-exact on POSIX.
+- **CLI**: patterns are written `/`-form and the CLI's `compile_filter` owns
+  full aws-cli fidelity with its own base-joined matching (cli.md), delegating
+  to this engine only for the plain relative case where the two coincide - so
+  what this engine sees from the CLI is always a `/`-form relative pattern
+  against the `/`-form `compare_key`. On Windows aws-cli `normcase`s both
+  sides, making the match **case-insensitive**; `cli/src/boto3_s3_cli/filters.py`
+  reproduces this by lower-casing patterns at compile and keys at match
+  (`os.name == "nt"`), and stays byte-exact on POSIX.
 - **library**: a `GlobFilter` matches a relative pattern against the `/`-form
   `compare_key` (so that pattern must be `/`-form too) and an absolute one
   against `info.key` (the `/`-form **full** key, which differs per side - whereas

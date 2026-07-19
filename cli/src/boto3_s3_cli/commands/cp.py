@@ -126,7 +126,11 @@ class CpCommand(Command):
 
         item_filter = None
         if not is_stream:
-            item_filter = filters.compile_filter(args.filters)
+            # Non-stream: the locations are the resolve_locations pair, whose
+            # bases the filter joins its patterns onto (aws create_filter).
+            item_filter = filters.compile_filter(
+                args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
+            )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.

@@ -71,6 +71,13 @@ _SEED_TREE: Mapping[str, bytes] = {
     "d/marker/": b"",
     "d-sibling.txt": b"sibling\n",
 }
+
+# Nested s3->s3 filter cross-application (task #184): the source subtree
+# already contains the destination prefix.
+_SEED_NESTED: Mapping[str, bytes] = {
+    "d/y.txt": b"copy me\n",
+    "d/backup/x1.txt": b"already backed up\n",
+}
 _SEED_SINGLE: Mapping[str, bytes] = {"d/a.txt": b"download body\n"}
 _SEED_PAGED: Mapping[str, bytes] = {f"pg/k{i:02d}": b"p" for i in range(5)}
 _SEED_CASE: Mapping[str, bytes] = {"cc/A.txt": b"upper", "cc/a.txt": b"lower"}
@@ -641,6 +648,22 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed_kwargs=_SEED_BIG_KWARGS,
         head_key="cp/big.bin",
         head_fields=("ContentType", "Metadata"),
+    ),
+    CpScenario(
+        # Nested s3->s3 paths: aws joins every pattern onto BOTH sides, so the
+        # dest-joined "<bucket>/d/backup/x*" excludes the *source* entry
+        # d/backup/x1.txt even though "x*" does not match its source-relative
+        # form (task #184 parity; verified against aws 2.36.1).
+        name="cp_copy_nested_dest_filter_cross",
+        argv=(
+            "cp",
+            f"s3://{BUCKET_TOKEN}/d",
+            f"s3://{BUCKET_TOKEN}/d/backup",
+            "--recursive",
+            "--exclude",
+            "x*",
+        ),
+        seed=_SEED_NESTED,
     ),
     CpScenario(
         name="cp_copy_missing_key",

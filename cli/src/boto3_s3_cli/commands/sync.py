@@ -94,11 +94,14 @@ class SyncCommand(Command):
             page_size=page_size,
         )
 
-        # One symmetric filter applied to both sides by S3.sync (sync.md section
-        # 1). It needs no source/destination path: a relative pattern matches
-        # each entry's compare_key, an absolute one its full key, so the same
-        # filter prunes the source and destination per-side (globsieve.Anchored).
-        item_filter = filters.compile_filter(args.filters)
+        # One filter applied to both sides by S3.sync (sync.md section 1),
+        # compiled with both sides as its bases: aws joins every pattern onto
+        # the source AND destination rootdir and applies both joined forms to
+        # every entry, which compile_filter reproduces (delegating to the
+        # symmetric compare_key match when provably identical).
+        item_filter = filters.compile_filter(
+            args.filters, src=src_location, dest=dest_location, dir_op=True
+        )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)
 
