@@ -112,8 +112,11 @@ def _deleter_worker_alive() -> bool:
 class TestConstruction:
     @pytest.mark.parametrize("batch_size", [0, -1, S3_DELETE_BATCH + 1])
     def test_batch_size_out_of_bounds_rejected(self, batch_size: int) -> None:
-        with pytest.raises(ValueError, match="batch_size"):
+        # Exact type: the caller-argument guard raises inside the taxonomy,
+        # like the storage-type guard above it.
+        with pytest.raises(ValidationError, match="batch_size") as excinfo:
             _deleter(_FakeS3Client(), batch_size=batch_size)
+        assert type(excinfo.value) is ValidationError
 
     @pytest.mark.parametrize("batch_size", [1, S3_DELETE_BATCH])
     def test_batch_size_bounds_accepted(self, batch_size: int) -> None:

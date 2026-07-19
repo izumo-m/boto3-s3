@@ -139,8 +139,11 @@ class S3Deleter:
                 operation=operation,
             )
         if not 1 <= batch_size <= S3_DELETE_BATCH:
-            raise ValueError(
-                f"batch_size must be between 1 and {S3_DELETE_BATCH} (got {batch_size!r})"
+            # Same taxonomy as the storage-type guard above: a caller-argument
+            # problem raises ValidationError, not a bare ValueError.
+            raise ValidationError(
+                f"batch_size must be between 1 and {S3_DELETE_BATCH} (got {batch_size!r})",
+                operation=operation,
             )
         # Eager: resolve the client and bucket now, so a bad storage fails on
         # the caller thread and the worker never triggers the lazy
