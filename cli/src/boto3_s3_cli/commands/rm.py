@@ -49,14 +49,17 @@ class _DeletePrinter:
     def __call__(self, result: OpResult) -> None:
         if self._quiet:
             return
+        # The printed line needs the full object key; a delete record's
+        # compare_key is the operation-relative form (docs/opresult.md), and
+        # the listed entry always rides on src_info.
+        info = result.src_info
+        key = info.key if info is not None else result.compare_key
         if result.outcome is OpOutcome.FAILED:
-            sys.stderr.write(
-                output.format_delete_failed(self._bucket, result.key, result.error) + "\n"
-            )
+            sys.stderr.write(output.format_delete_failed(self._bucket, key, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
-            sys.stdout.write(output.format_delete(self._bucket, result.key, dryrun=True) + "\n")
+            sys.stdout.write(output.format_delete(self._bucket, key, dryrun=True) + "\n")
         elif not self._only_show_errors:
-            sys.stdout.write(output.format_delete(self._bucket, result.key, dryrun=False) + "\n")
+            sys.stdout.write(output.format_delete(self._bucket, key, dryrun=False) + "\n")
 
 
 class RmCommand(Command):

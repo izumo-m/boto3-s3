@@ -185,7 +185,7 @@ class TestSyncUpload:
         def update(pair: SyncPair) -> bool:
             assert pair.src.stat_result is not None
             threads.add(threading.get_ident())
-            events.append(("update", pair.key))
+            events.append(("update", pair.compare_key))
             return True
 
         def delete(info: FileInfo) -> bool:
@@ -393,10 +393,12 @@ class TestSyncUpload:
             on_result=results.append,
         )
         assert _ops(calls) == ["ListObjectsV2"]
-        outcomes = {(r.transfer_type, r.key): r.outcome for r in results}
+        # Both lanes report in the shared compare-key space: the delete record's
+        # compare_key is dest-prefix-relative ("p/extra.txt" stays on src_info.key).
+        outcomes = {(r.transfer_type, r.compare_key): r.outcome for r in results}
         assert outcomes == {
             (TransferType.UPLOAD, "new.txt"): OpOutcome.DRYRUN,
-            (TransferType.DELETE, "p/extra.txt"): OpOutcome.DRYRUN,
+            (TransferType.DELETE, "extra.txt"): OpOutcome.DRYRUN,
         }
 
     def test_update_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
@@ -861,7 +863,7 @@ class TestParallelFilter:
             _write(src, name, b"xx")
 
         def decide(pair: SyncPair) -> bool:
-            return pair.key in {"a.txt", "c.txt"}  # only update pairs reach here
+            return pair.compare_key in {"a.txt", "c.txt"}  # only update pairs reach here
 
         listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
         client, calls = make_recording_client([listing, {}, {}, {}])
@@ -1004,7 +1006,7 @@ class TestParallelFilter:
         errors: list[BaseException] = []
 
         def decide(pair: SyncPair) -> bool:
-            if pair.key == "a.txt":
+            if pair.compare_key == "a.txt":
                 assert second_started.wait(5.0)
                 first_raised.set()
                 raise ValueError("decide blew up")

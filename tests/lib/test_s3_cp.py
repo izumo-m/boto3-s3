@@ -601,7 +601,7 @@ class TestDownloadRoute:
         assert _ops(calls) == ["ListObjectsV2", "GetObject"]
         assert calls[0].params["Prefix"] == "pre/"
         assert (tmp_path / "out" / "a.txt").read_bytes() == b"payload"
-        outcomes = {result.key: result.outcome for result in results}
+        outcomes = {result.compare_key: result.outcome for result in results}
         assert outcomes["../evil"] is OpOutcome.WARNED
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
         assert str(warned.error) == ("Skipping file ../evil. File references a parent directory.")

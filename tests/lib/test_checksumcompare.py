@@ -189,7 +189,7 @@ def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> Sync
     # / pair.dest.storage to open the readable (local) side.
     src.storage = _storage_for(src)
     dest.storage = _storage_for(dest)
-    return SyncPair(key="obj", transfer_type=transfer_type, src=src, dest=dest)
+    return SyncPair(compare_key="obj", transfer_type=transfer_type, src=src, dest=dest)
 
 
 # -- construction --------------------------------------------------------------
@@ -406,7 +406,10 @@ class TestCopyDirect:
 
     def _pair(self, **kw: Any) -> SyncPair:
         return SyncPair(
-            key="k", transfer_type=TransferType.COPY, src=_s3("src", **kw), dest=_s3("dest", **kw)
+            compare_key="k",
+            transfer_type=TransferType.COPY,
+            src=_s3("src", **kw),
+            dest=_s3("dest", **kw),
         )
 
     def test_equal_checksums_skip(self) -> None:
@@ -432,7 +435,7 @@ class TestCopyDirect:
         assert f(self._pair(size=10)) is False  # same size -> trust equality
         f2 = self._copy(_full("crc32", "ABC"), _full("crc32", "ABC"))
         pair = SyncPair(
-            key="k",
+            compare_key="k",
             transfer_type=TransferType.COPY,
             src=_s3("src", size=10),
             dest=_s3("dest", size=20),
@@ -448,7 +451,9 @@ class TestCopyDirect:
         )
         s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dest": _FakeStorage("b", dest)})
         f = ChecksumComparison(s3, "s3://b/src", "s3://b/dest")  # pyright: ignore[reportArgumentType]
-        pair = SyncPair(key="k", transfer_type=TransferType.COPY, src=_s3("src"), dest=_s3("dest"))
+        pair = SyncPair(
+            compare_key="k", transfer_type=TransferType.COPY, src=_s3("src"), dest=_s3("dest")
+        )
         assert f(pair) is False
         assert len(src.calls) == 1
         assert len(dest.calls) == 1

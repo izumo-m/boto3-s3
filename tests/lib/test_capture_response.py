@@ -119,7 +119,7 @@ class TestWriteSlot:
         # Each result carries its own object's response (keyed by Bucket/Key).
         for r in out:
             info = cast("dict[str, Any]", r.extra_info)
-            assert info["write"]["ETag"] == _etag(contents[r.key]), r.key
+            assert info["write"]["ETag"] == _etag(contents[r.compare_key]), r.compare_key
 
     def test_filter_read_never_satisfies_the_write_slot(
         self, s3_client: Any, tmp_path: Path
@@ -412,7 +412,8 @@ class TestRmDeleteSlot:
 
         S3().rm(f"s3://{BUCKET}/d", recursive=True, capture_response=True, on_result=cb)
 
-        assert {result.key for result in out} == set(keys)
+        # Delete records report the "d/"-relative compare_key.
+        assert {result.compare_key for result in out} == {"ordinary.txt", "control-\x01.txt"}
         assert all(result.outcome is OpOutcome.SUCCEEDED for result in out)
         assert all(
             cast("dict[str, Any]", result.extra_info)["delete"].get("DeleteMarker") is True

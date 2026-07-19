@@ -54,7 +54,9 @@ class TestComparatorPairing:
         src = _entries("a.txt")
         dest = _entries("a.txt")
         pairs = _pairs(src, dest)
-        assert pairs == [SyncPair(key="a.txt", transfer_type=_KIND, src=src[0][1], dest=dest[0][1])]
+        assert pairs == [
+            SyncPair(compare_key="a.txt", transfer_type=_KIND, src=src[0][1], dest=dest[0][1])
+        ]
 
     def test_source_only_key_yields_src_only_pair(self) -> None:
         # aws-cli's test_compare_key_less: 'b...' sorts before 'c...', so the
@@ -63,8 +65,8 @@ class TestComparatorPairing:
         dest = _entries("comparator_test.py")
         pairs = _pairs(src, dest)
         assert pairs == [
-            SrcOnlyPair(key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
-            DestOnlyPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
+            SrcOnlyPair(compare_key="bomparator_test.py", transfer_type=_KIND, src=src[0][1]),
+            DestOnlyPair(compare_key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
         ]
 
     def test_dest_only_key_yields_dest_only_pair(self) -> None:
@@ -73,22 +75,22 @@ class TestComparatorPairing:
         dest = _entries("comparator_test.py")
         pairs = _pairs(src, dest)
         assert pairs == [
-            DestOnlyPair(key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
-            SrcOnlyPair(key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
+            DestOnlyPair(compare_key="comparator_test.py", transfer_type=_KIND, dest=dest[0][1]),
+            SrcOnlyPair(compare_key="domparator_test.py", transfer_type=_KIND, src=src[0][1]),
         ]
 
     def test_empty_src_flushes_dest(self) -> None:
         dest = _entries("a", "b")
         assert _pairs([], dest) == [
-            DestOnlyPair(key="a", transfer_type=_KIND, dest=dest[0][1]),
-            DestOnlyPair(key="b", transfer_type=_KIND, dest=dest[1][1]),
+            DestOnlyPair(compare_key="a", transfer_type=_KIND, dest=dest[0][1]),
+            DestOnlyPair(compare_key="b", transfer_type=_KIND, dest=dest[1][1]),
         ]
 
     def test_empty_dest_flushes_src(self) -> None:
         src = _entries("a", "b")
         assert _pairs(src, []) == [
-            SrcOnlyPair(key="a", transfer_type=_KIND, src=src[0][1]),
-            SrcOnlyPair(key="b", transfer_type=_KIND, src=src[1][1]),
+            SrcOnlyPair(compare_key="a", transfer_type=_KIND, src=src[0][1]),
+            SrcOnlyPair(compare_key="b", transfer_type=_KIND, src=src[1][1]),
         ]
 
     def test_both_empty_yields_nothing(self) -> None:
@@ -98,7 +100,7 @@ class TestComparatorPairing:
         src = _entries("a", "c", "d", "f")
         dest = _entries("b", "c", "e", "f")
         pairs = _pairs(src, dest)
-        assert [(p.key, type(p)) for p in pairs] == [
+        assert [(p.compare_key, type(p)) for p in pairs] == [
             ("a", SrcOnlyPair),
             ("b", DestOnlyPair),
             ("c", SyncPair),
@@ -121,13 +123,13 @@ class TestComparatorPairing:
         src = iter(_entries("a", "b", "c"))
         dest = iter(_entries("a", "b", "c"))
         stream = Comparator(_KIND).compare(src, dest)
-        assert next(stream).key == "a"
+        assert next(stream).compare_key == "a"
         assert next(src, None) is not None, "source stream was drained eagerly"
 
 
 def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: bool) -> bool:
     return compare_size_time(
-        SyncPair(key=src.key, transfer_type=transfer_type, src=src, dest=dest), **flags
+        SyncPair(compare_key=src.key, transfer_type=transfer_type, src=src, dest=dest), **flags
     )
 
 
@@ -256,7 +258,7 @@ class TestCompareSizeTime:
 
 
 def _json_only(pair: SyncPair) -> bool:
-    return pair.key.endswith(".json")
+    return pair.compare_key.endswith(".json")
 
 
 class TestCombinators:
@@ -267,7 +269,9 @@ class TestCombinators:
         def grown(key: str) -> SyncPair:
             # A size change makes the size+time judgment copy; the name rule
             # then decides the composition.
-            return SyncPair(key=key, transfer_type=_KIND, src=_info(key), dest=_info(key, size=11))
+            return SyncPair(
+                compare_key=key, transfer_type=_KIND, src=_info(key), dest=_info(key, size=11)
+            )
 
         assert combined(grown("a.json")) is True
         assert combined(grown("a.txt")) is False
@@ -278,17 +282,17 @@ class TestCombinators:
         base = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
         combined = any_of(_json_only, base)
         up_to_date = SyncPair(
-            key="a.json", transfer_type=_KIND, src=_info("a.json"), dest=_info("a.json")
+            compare_key="a.json", transfer_type=_KIND, src=_info("a.json"), dest=_info("a.json")
         )
         assert base(up_to_date) is False
         assert combined(up_to_date) is True
         skipped = SyncPair(
-            key="a.txt", transfer_type=_KIND, src=_info("a.txt"), dest=_info("a.txt")
+            compare_key="a.txt", transfer_type=_KIND, src=_info("a.txt"), dest=_info("a.txt")
         )
         assert combined(skipped) is False
 
     def test_empty_combinators_follow_all_any_semantics(self) -> None:
-        pair = SyncPair(key="k", transfer_type=_KIND, src=_info(), dest=_info())
+        pair = SyncPair(compare_key="k", transfer_type=_KIND, src=_info(), dest=_info())
         assert all_of()(pair) is True
         assert any_of()(pair) is False
 

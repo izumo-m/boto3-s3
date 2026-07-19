@@ -85,7 +85,7 @@ def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> Sync
     # / pair.dest.storage to open the readable (local) side.
     src.storage = _storage_for(src)
     dest.storage = _storage_for(dest)
-    return SyncPair(key="k", transfer_type=transfer_type, src=src, dest=dest)
+    return SyncPair(compare_key="k", transfer_type=transfer_type, src=src, dest=dest)
 
 
 def _md5_hex_of(path: Path) -> str:

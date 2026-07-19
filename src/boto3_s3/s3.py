@@ -132,7 +132,7 @@ def _emit_result(
         on_result(
             OpResult(
                 transfer_type=TransferType.DELETE,
-                key=info.key,
+                compare_key=info.compare_key or info.key,
                 outcome=outcome,
                 error=error,
                 src=f"s3://{storage.bucket}/{info.key}",
@@ -524,7 +524,7 @@ class _SyncDeletes:
         display = (
             to_native_path(info.key)
             if isinstance(dest, LocalStorage)
-            else producers.open_side_display(dest, pair.key)
+            else producers.open_side_display(dest, pair.compare_key)
         )
         if self._dryrun:
             self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
@@ -581,7 +581,7 @@ class _SyncDeletes:
             self._on_result(
                 OpResult(
                     transfer_type=TransferType.DELETE,
-                    key=info.key,
+                    compare_key=info.compare_key or info.key,
                     outcome=outcome,
                     error=error,
                     src=src,

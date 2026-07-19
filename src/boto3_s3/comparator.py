@@ -67,7 +67,7 @@ class SyncPair:
     ``file_at_src_and_dest`` strategy slot). ``src`` / ``dest`` are the two
     sides' listing entries, both always present - a filter reads
     ``pair.src.size`` / ``pair.dest.mtime`` directly, with no ``None``
-    handling. ``key`` is the compare key - the entry's path relative to its
+    handling. ``compare_key`` is the entry's path relative to its
     side's listing (directory-relative for a local side, ``Prefix``-relative
     for an S3 side), ``/``-separated on every platform - so name-based filters
     need not care where either side lives. ``transfer_type`` is the sync's
@@ -82,7 +82,7 @@ class SyncPair:
     any backend, not just a local filesystem.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     src: FileInfo
     dest: FileInfo
@@ -93,12 +93,12 @@ class SrcOnlyPair:
     """A compare key present only on the source side - a new entry.
 
     ``S3.sync`` routes it to the create lane (``create_filter``; aws-cli's
-    ``file_not_at_dest`` slot, where copying is hard-coded). ``key`` and
+    ``file_not_at_dest`` slot, where copying is hard-coded). ``compare_key`` and
     ``transfer_type`` are as on ``SyncPair``; ``src`` is the source listing
     entry, and there is no ``dest`` attribute at all.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     src: FileInfo
 
@@ -108,12 +108,12 @@ class DestOnlyPair:
     """A compare key present only on the destination side - an orphan.
 
     The delete candidate: ``S3.sync`` routes it to the delete lane
-    (``delete_filter``; aws-cli's ``file_not_at_src`` slot). ``key`` and
+    (``delete_filter``; aws-cli's ``file_not_at_src`` slot). ``compare_key`` and
     ``transfer_type`` are as on ``SyncPair``; ``dest`` is the destination
     listing entry, and there is no ``src`` attribute at all.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     dest: FileInfo
 
@@ -234,20 +234,22 @@ class Comparator:
         dest = next(dest_iter, None)
         while src is not None and dest is not None:
             if src[0] < dest[0]:
-                yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
+                yield SrcOnlyPair(compare_key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
             elif src[0] > dest[0]:
-                yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                yield DestOnlyPair(compare_key=dest[0], transfer_type=transfer_type, dest=dest[1])
                 dest = next(dest_iter, None)
             else:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
+                yield SyncPair(
+                    compare_key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1]
+                )
                 src = next(src_iter, None)
                 dest = next(dest_iter, None)
         while src is not None:
-            yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
+            yield SrcOnlyPair(compare_key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
         while dest is not None:
-            yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            yield DestOnlyPair(compare_key=dest[0], transfer_type=transfer_type, dest=dest[1])
             dest = next(dest_iter, None)
 
 

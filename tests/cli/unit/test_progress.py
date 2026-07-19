@@ -33,13 +33,18 @@ def _result(
     error: BaseException | None = None,
 ) -> OpResult:
     return OpResult(
-        transfer_type=transfer_type, key=key, outcome=outcome, src=src, dest=dest, error=error
+        transfer_type=transfer_type,
+        compare_key=key,
+        outcome=outcome,
+        src=src,
+        dest=dest,
+        error=error,
     )
 
 
 def _progress(key: str, done: int, total: int | None) -> TransferProgress:
     return TransferProgress(
-        transfer_type=TransferType.UPLOAD, key=key, bytes_done=done, bytes_total=total
+        transfer_type=TransferType.UPLOAD, compare_key=key, bytes_done=done, bytes_total=total
     )
 
 

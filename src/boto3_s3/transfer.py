@@ -579,7 +579,7 @@ class Warner:
             self._on_result(
                 OpResult(
                     transfer_type=self._transfer_type,
-                    key=key,
+                    compare_key=key,
                     outcome=OpOutcome.WARNED,
                     error=Boto3S3Error(body, operation=self._operation),
                     src_storage=self._src_storage,
@@ -908,7 +908,7 @@ class Transferrer:
         self._emit(
             OpResult(
                 transfer_type=self._result_transfer_type,
-                key=key,
+                compare_key=key,
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
                 src_storage=self._src_storage,
@@ -1282,7 +1282,7 @@ class Transferrer:
         """Build one public result with the run's storage and display context."""
         return OpResult(
             transfer_type=self._result_transfer_type,
-            key=item.compare_key,
+            compare_key=item.compare_key,
             outcome=outcome,
             bytes_transferred=bytes_transferred,
             error=error,
@@ -1502,7 +1502,7 @@ class _Progress:
         self._callback(
             TransferProgress(
                 transfer_type=self._transfer_type,
-                key=self._key,
+                compare_key=self._key,
                 bytes_done=bytes_done,
                 bytes_total=self._size,
             )

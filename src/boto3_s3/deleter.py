@@ -465,7 +465,7 @@ class S3Deleter:
             self._on_result(
                 OpResult(
                     transfer_type=TransferType.DELETE,
-                    key=info.key,
+                    compare_key=info.compare_key or info.key,
                     outcome=outcome,
                     error=error,
                     src=f"s3://{self._bucket}/{info.key}",

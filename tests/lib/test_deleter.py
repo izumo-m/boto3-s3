@@ -81,7 +81,9 @@ def _deleter(fake: _FakeS3Client, **kwargs: Any) -> S3Deleter:
 
 
 def _info(key: str) -> S3FileInfo:
-    """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters)."""
+    """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters;
+    with no ``compare_key`` stamped, the emitted record's ``compare_key`` falls
+    back to the full key)."""
     return S3FileInfo(key=key)
 
 
@@ -225,7 +227,7 @@ class TestBatching:
         deleter.submit(_info("k"))
         deleter.close()
         assert _keys(fake.calls) == [["k", "k"]]
-        assert [r.key for r in results] == ["k", "k"]
+        assert [r.compare_key for r in results] == ["k", "k"]
         assert deleter.succeeded == 2
 
 
@@ -253,7 +255,7 @@ class TestXmlIncompatibleFallback:
             "control-\x01",
             "noncharacter-\uffff",
         ]
-        assert [result.key for result in results] == list(keys)
+        assert [result.compare_key for result in results] == list(keys)
         assert all(result.outcome is OpOutcome.SUCCEEDED for result in results)
 
     def test_all_incompatible_keys_skip_delete_objects(self) -> None:
@@ -319,7 +321,7 @@ class TestResults:
         for key in ("a", "b", "c"):
             deleter.submit(_info(key))
         deleter.close()
-        assert [r.key for r in results] == ["a", "b", "c"]
+        assert [r.compare_key for r in results] == ["a", "b", "c"]
         assert all(r.transfer_type is TransferType.DELETE for r in results)
         assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
         assert all(r.bytes_transferred == 0 for r in results)
@@ -380,7 +382,7 @@ class TestResults:
         for key in ("a", "b", "c"):
             deleter.submit(_info(key))
         deleter.close()
-        assert [(r.key, r.outcome) for r in results] == [
+        assert [(r.compare_key, r.outcome) for r in results] == [
             ("a", OpOutcome.SUCCEEDED),
             ("b", OpOutcome.FAILED),
             ("c", OpOutcome.SUCCEEDED),
@@ -483,7 +485,7 @@ class TestResults:
         seen: list[str] = []
 
         def explosive(result: OpResult) -> None:
-            seen.append(result.key)
+            seen.append(result.compare_key)
             if len(seen) == 2:
                 raise RuntimeError("callback boom")
 
@@ -571,7 +573,7 @@ class TestThreading:
             fake.gate.set()
             with contextlib.suppress(Exception):
                 deleter.close()
-        assert [r.key for r in results] == ["a", "b"]
+        assert [r.compare_key for r in results] == ["a", "b"]
 
     def test_second_flush_waits_for_first(self) -> None:
         fake = _FakeS3Client()
@@ -609,7 +611,7 @@ class TestThreading:
             fake.gate.set()
             with contextlib.suppress(Exception):
                 deleter.close(flush=False)
-        assert [r.key for r in results] == ["a", "b"]
+        assert [r.compare_key for r in results] == ["a", "b"]
         assert deleter.succeeded == 2
         assert not _deleter_worker_alive()
 
@@ -714,4 +716,4 @@ class TestLifecycle:
                 deleter.submit(_info("c"))  # buffered; must be abandoned
                 raise ValueError("body boom")
         assert _keys(fake.calls) == [["a", "b"]]  # "c" was never sent
-        assert [r.key for r in results] == ["a", "b"]  # the in-flight batch was awaited
+        assert [r.compare_key for r in results] == ["a", "b"]  # the in-flight batch was awaited

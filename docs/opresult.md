@@ -15,7 +15,7 @@ the record only needs to say *what happened to this item*.
 | field | meaning |
 |---|---|
 | `transfer_type` | the verb (aws-cli's `transfer_type`): `upload` / `download` / `copy` / `move` / `delete`. |
-| `key` | the operation-relative identity - the transfer `compare_key`, or the deleted object's key. Also the token the CLI matches byte-progress against. |
+| `compare_key` | the operation-relative identity: the item's compare key (`/`-separated, relative to the operation's root) - the same key space filters match against. A delete record's full object key stays on `src_info.key`. Also the token the CLI matches byte-progress against. |
 | `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE` / `CANCELLED`. |
 | `bytes_transferred` | bytes moved (0 for a delete or an advisory). |
 | `error` | a `Boto3S3Error` on a failure; the advisory text on `WARNED` / `NOTICE`. Always the library taxonomy (every path translates into it), never a raw exception. |
@@ -53,7 +53,7 @@ fields are kept because they are populated even where the entry is absent - a
 | field | cp / mv | sync (copy) | rm / sync (delete) | warning · notice |
 |---|---|---|---|---|
 | `transfer_type` | upload / download / copy (mv → `move`) | upload / download / copy | `delete` | the run's verb |
-| `key` | `compare_key` | `compare_key` | the object key | `compare_key` (often `""`) |
+| `compare_key` | the transfer's compare key | the transfer's compare key | the operation-relative compare key (full object key: `src_info.key`) | the compare key, often `""` |
 | `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN / CANCELLED | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
 | `src` / `dest` | both | both | `src` only | — / — |
 | `bytes_transferred` | bytes | bytes | 0 | 0 |
@@ -188,10 +188,10 @@ def on_result(r: OpResult) -> None:
     if r.outcome is not OpOutcome.SUCCEEDED:
         return
     if r.transfer_type is TransferType.DELETE:
-        print("removed", r.src_info.key if r.src_info else r.key)
+        print("removed", r.src_info.key if r.src_info else r.compare_key)
         return
     etag = (r.extra_info or {}).get("ETag")  # copy / download; upload only under capture_response
-    print("transferred", r.src_info.key if r.src_info else r.key, etag)
+    print("transferred", r.src_info.key if r.src_info else r.compare_key, etag)
 ```
 
 Re-reaching the result object (e.g. to HEAD it):

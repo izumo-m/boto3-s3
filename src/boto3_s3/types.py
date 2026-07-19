@@ -371,7 +371,7 @@ class TransferProgress:
     """Byte-level progress for one in-flight item, passed to ``on_progress``."""
 
     transfer_type: TransferType
-    key: str
+    compare_key: str
     bytes_done: int
     bytes_total: int | None = None
 
@@ -394,7 +394,7 @@ class OpResult:
     """
 
     transfer_type: TransferType
-    key: str
+    compare_key: str
     outcome: OpOutcome
     bytes_transferred: int = 0
     error: Boto3S3Error | None = None

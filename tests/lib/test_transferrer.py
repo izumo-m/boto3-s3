@@ -993,7 +993,7 @@ class TestFatalCancellation:
         # from the cancelling thread or the executor's skip path, whichever
         # its submission had reached.
         assert len(api_calls) == 1
-        by_key = {result.key: result for result in results}
+        by_key = {result.compare_key: result for result in results}
         assert len(results) == 3 and set(by_key) == {"a.bin", "b.bin", "c.bin"}
         assert by_key["a.bin"].outcome is OpOutcome.SUCCEEDED
         for key in ("b.bin", "c.bin"):

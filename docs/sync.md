@@ -98,11 +98,11 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
 
 - The pair types (`MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair`, what
   `Comparator.compare` yields) tell by type which sides hold the key:
-  `SrcOnlyPair(key, transfer_type, src)` = new (the `create_filter` lane),
-  `DestOnlyPair(key, transfer_type, dest)` = orphan (the `delete_filter` lane),
-  `SyncPair(key, transfer_type, src, dest)` = update (the `update_filter` lane) -
+  `SrcOnlyPair(compare_key, transfer_type, src)` = new (the `create_filter` lane),
+  `DestOnlyPair(compare_key, transfer_type, dest)` = orphan (the `delete_filter` lane),
+  `SyncPair(compare_key, transfer_type, src, dest)` = update (the `update_filter` lane) -
   the one-sided shapes have **no attribute at all** for their missing side. In
-  each, `key` is the relative compare key (`/`-separated) and `transfer_type` is
+  each, `compare_key` is the entry's relative compare key (`/`-separated) and `transfer_type` is
   the sync's direction, stamped on every pair so a filter applies the
   direction-asymmetric rules without being told the route. The three shapes map
   one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->

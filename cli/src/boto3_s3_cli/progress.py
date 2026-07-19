@@ -205,13 +205,13 @@ class TransferPrinter:
                 # do the same so a long enumeration phase before the first byte
                 # does not deflate the displayed rate.
                 self._start = time.monotonic()
-            is_new = progress.key not in self._inflight
+            is_new = progress.compare_key not in self._inflight
             if is_new:
                 self._expected_files += 1
                 if progress.bytes_total is not None:
                     self._expected_bytes += progress.bytes_total
-            previous = self._inflight.get(progress.key, (0, None))[0]
-            self._inflight[progress.key] = (progress.bytes_done, progress.bytes_total)
+            previous = self._inflight.get(progress.compare_key, (0, None))[0]
+            self._inflight[progress.compare_key] = (progress.bytes_done, progress.bytes_total)
             self._done_bytes += progress.bytes_done - previous
             if not self._show_progress:
                 return
@@ -247,7 +247,7 @@ class TransferPrinter:
             else:
                 if result.outcome in (OpOutcome.SUCCEEDED, OpOutcome.FAILED, OpOutcome.CANCELLED):
                     self._finished_files += 1
-                    inflight = self._inflight.pop(result.key, None)
+                    inflight = self._inflight.pop(result.compare_key, None)
                     if result.outcome is not OpOutcome.SUCCEEDED and inflight is not None:
                         # aws adds a failed file's untransferred remainder to the
                         # meter (results.py bytes_failed_to_transfer) so the byte
@@ -258,7 +258,7 @@ class TransferPrinter:
                             self._done_bytes += total_bytes - done_bytes
                 elif (
                     result.outcome is OpOutcome.SKIPPED
-                    and self._inflight.pop(result.key, None) is not None
+                    and self._inflight.pop(result.compare_key, None) is not None
                 ):
                     # A queued-then-skipped transfer (cp/mv upload/copy 412 under
                     # --no-overwrite): on_queued already counted it into
