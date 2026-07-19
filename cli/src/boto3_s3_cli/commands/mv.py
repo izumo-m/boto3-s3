@@ -161,12 +161,14 @@ class MvCommand(Command):
         )
         if enabled:
             src_resolver = S3PathResolver(
-                ctx.service_client("s3control", args, s3, region=args.source_region),
-                ctx.service_client("sts", args, s3),
+                s3control_client=ctx.service_client(
+                    "s3control", args, s3, region=args.source_region
+                ),
+                sts_client=ctx.service_client("sts", args, s3),
             )
             dest_resolver = S3PathResolver(
-                ctx.service_client("s3control", args, s3, region=args.region),
-                ctx.service_client("sts", args, s3),
+                s3control_client=ctx.service_client("s3control", args, s3, region=args.region),
+                sts_client=ctx.service_client("sts", args, s3),
             )
             src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
             dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)

@@ -79,7 +79,7 @@ class S3PathResolver:
     bucket name resolves to itself without any API call.
     """
 
-    def __init__(self, s3control_client: Any, sts_client: Any) -> None:
+    def __init__(self, *, s3control_client: Any, sts_client: Any) -> None:
         self._s3control_client = s3control_client
         self._sts_client = sts_client
 

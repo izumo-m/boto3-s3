@@ -90,14 +90,14 @@ class TestResolve:
     def test_plain_bucket_passes_through_without_any_call(self) -> None:
         s3control = _FakeS3Control()
         sts = _FakeSts()
-        resolver = S3PathResolver(s3control, sts)
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
         assert resolver.resolve_underlying_s3_paths("s3://plain/k.txt") == ["s3://plain/k.txt"]
         assert s3control.calls == []
         assert sts.calls == []
 
     def test_accesspoint_arn_resolves_via_get_access_point(self) -> None:
         s3control = _FakeS3Control(bucket="real-bucket")
-        resolver = S3PathResolver(s3control, _FakeSts())
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         assert resolver.resolve_underlying_s3_paths(f"s3://{_AP_ARN}/d/k.txt") == [
             "s3://real-bucket/d/k.txt"
         ]
@@ -107,7 +107,7 @@ class TestResolve:
 
     def test_outpost_arn_passes_the_whole_arn_as_name(self) -> None:
         s3control = _FakeS3Control(bucket="outpost-bucket")
-        resolver = S3PathResolver(s3control, _FakeSts())
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         assert resolver.resolve_underlying_s3_paths(f"s3://{_OUTPOST_ARN}/k.txt") == [
             "s3://outpost-bucket/k.txt"
         ]
@@ -118,7 +118,7 @@ class TestResolve:
     def test_alias_asks_sts_for_the_account(self) -> None:
         s3control = _FakeS3Control(bucket="aliased-bucket")
         sts = _FakeSts(account="999988887777")
-        resolver = S3PathResolver(s3control, sts)
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
         assert resolver.resolve_underlying_s3_paths("s3://my-ap-s3alias/k.txt") == [
             "s3://aliased-bucket/k.txt"
         ]
@@ -140,7 +140,7 @@ class TestResolve:
             },
         ]
         s3control = _FakeS3Control(mrap_pages=pages)
-        resolver = S3PathResolver(s3control, _FakeSts())
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         assert resolver.resolve_underlying_s3_paths(f"s3://{_MRAP_ARN}/k.txt") == [
             "s3://bucket-east/k.txt",
             "s3://bucket-west/k.txt",
@@ -150,7 +150,7 @@ class TestResolve:
 
     def test_mrap_not_found_uses_the_awscli_wording(self) -> None:
         s3control = _FakeS3Control(mrap_pages=[{"AccessPoints": []}])
-        resolver = S3PathResolver(s3control, _FakeSts())
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         with pytest.raises(ValidationError) as excinfo:
             resolver.resolve_underlying_s3_paths(f"s3://{_MRAP_ARN}/k.txt")
         assert str(excinfo.value) == (
@@ -160,7 +160,7 @@ class TestResolve:
 
     def test_outpost_alias_is_unresolvable(self) -> None:
         s3control = _FakeS3Control()
-        resolver = S3PathResolver(s3control, _FakeSts())
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         with pytest.raises(ValidationError) as excinfo:
             resolver.resolve_underlying_s3_paths("s3://my-outpost--op-s3/k.txt")
         assert str(excinfo.value) == (
@@ -174,7 +174,7 @@ class TestResolve:
         # The CLI maps a kept ClientError cause to rc 254 - what aws exits
         # when the validation calls themselves fail.
         sts = _FakeSts(error=_client_error("InvalidClientTokenId", "GetCallerIdentity"))
-        resolver = S3PathResolver(_FakeS3Control(), sts)
+        resolver = S3PathResolver(s3control_client=_FakeS3Control(), sts_client=sts)
         with pytest.raises(Boto3S3Error) as excinfo:
             resolver.resolve_underlying_s3_paths("s3://my-ap-s3alias/k.txt")
         assert isinstance(excinfo.value.__cause__, ClientError)
