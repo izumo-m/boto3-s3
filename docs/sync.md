@@ -317,9 +317,12 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
   algorithm across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
   checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
-  `GetObjectAttributes` error (a 404, a denied `s3:GetObjectAttributes`, an SSE-C
-  object that needs a key) is treated as differing - the strategy never skips on
-  an indeterminate compare.
+  `GetObjectAttributes` **`ClientError`** (a 404, a denied
+  `s3:GetObjectAttributes`, an SSE-C object that needs a key) is treated as
+  differing - the strategy never skips on an indeterminate compare. A
+  `BotoCoreError` (no credentials, an unreachable endpoint, a timeout) is not
+  per-object: it aborts the sync, translated to the library taxonomy
+  (silently "copy everything" would mask a broken environment).
 - **`check_size`** (default on) treats a known size mismatch as differing before
   any call or hash - a shortcut, and for s3->s3 a guard against a CRC collision.
 - **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` (hashlib) are

@@ -239,11 +239,15 @@ def _fetch_remote(
     ``None`` means "cannot compare, copy": no checksum on the object, a COMPOSITE
     object whose parts could not be read, or any ``ClientError`` anywhere in the
     read (a 404, a denied ``s3:GetObjectAttributes``, an SSE-C object needing a
-    key, a failure mid part-size pagination, ...) - errors are swallowed so a
-    filter never aborts the sync. ``need_parts=False`` (an s3-to-s3 compare, which
+    key, a failure mid part-size pagination, ...) - a per-object rejection never
+    aborts the sync. A ``BotoCoreError`` (no credentials, an unreachable
+    endpoint, a read timeout) is not per-object: it raises, translated to the
+    library taxonomy. ``need_parts=False`` (an s3-to-s3 compare, which
     uses the value string directly) skips the COMPOSITE part-size pagination.
     """
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from boto3_s3.s3storage import translate_boto_error
 
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     try:
@@ -274,6 +278,12 @@ def _fetch_remote(
         return _RemoteChecksum(algorithm=algorithm, value=value, part_sizes=part_sizes)
     except ClientError:
         return None
+    except BotoCoreError as exc:
+        # Transport / credential failures are not a per-object "indeterminate"
+        # (swallowing NoCredentialsError would silently copy everything): they
+        # abort the sync, translated per the exception contract
+        # (docs/exceptions.md - the public API never leaks a raw botocore error).
+        raise translate_boto_error(exc, operation="sync", bucket=bucket, key=key) from exc
 
 
 def _part_sizes(

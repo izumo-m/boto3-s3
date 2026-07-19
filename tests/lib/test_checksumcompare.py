@@ -36,6 +36,7 @@ from boto3_s3.checksumcompare import (
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
 )
 from boto3_s3.comparator import SyncPair
+from boto3_s3.exceptions import ConfigurationError, TransportError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, LocalFileInfo, S3FileInfo, TransferType
@@ -514,6 +515,46 @@ class TestClientErrorIndeterminate:
             TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
         )
         assert _upload_filter(client)(pair) is True
+
+
+class TestBotoCoreErrorAborts:
+    """A ``BotoCoreError`` from the remote read is not per-object indeterminate.
+
+    Swallowing a credential or transport failure like a ``ClientError`` would
+    silently copy everything: ``_fetch_remote`` raises instead, translated to
+    the library taxonomy with the original at ``__cause__``.
+    """
+
+    def _pair_at(self, tmp_path: Path) -> SyncPair:
+        p = _write(tmp_path)
+        return _pair(
+            TransferType.UPLOAD, src=_local(_key(p), size=len(_DATA)), dest=_s3(size=len(_DATA))
+        )
+
+    def test_endpoint_connection_error_raises_transport_error(self, tmp_path: Path) -> None:
+        from botocore.exceptions import EndpointConnectionError
+
+        err = EndpointConnectionError(endpoint_url="https://x")
+        client = _FakeClient({"obj": err})
+        with pytest.raises(TransportError) as excinfo:
+            _upload_filter(client)(self._pair_at(tmp_path))
+        assert type(excinfo.value) is TransportError
+        assert excinfo.value.__cause__ is err
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "sync",
+            "b",
+            "obj",
+        )
+
+    def test_no_credentials_error_raises_configuration_error(self, tmp_path: Path) -> None:
+        from botocore.exceptions import NoCredentialsError
+
+        err = NoCredentialsError()
+        client = _FakeClient({"obj": err})
+        with pytest.raises(ConfigurationError) as excinfo:
+            _upload_filter(client)(self._pair_at(tmp_path))
+        assert type(excinfo.value) is ConfigurationError
+        assert excinfo.value.__cause__ is err
 
 
 # -- request payer -------------------------------------------------------------
