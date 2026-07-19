@@ -349,10 +349,6 @@ def set_stream_logger(
 
 
 __all__ = [
-    "MASK",
-    "MASK_MIN_LEN",
-    "MASK_REVEAL_LEN",
     "SecretMaskingFilter",
-    "mask_text",
     "set_stream_logger",
 ]

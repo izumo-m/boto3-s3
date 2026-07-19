@@ -19,6 +19,8 @@ SESSION_TOKEN = "FQoGZXIvYXdzEMPLELONGSESSIONTOKENvalue1234567890abcdefABCDEF+/=
 # A 44-char base64 SSE-C customer key (raw 32-byte AES-256 key, base64-encoded).
 SSE_C_KEY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"
 
+# Importable module attributes; only SURFACE_NAMES form the documented
+# tier-2 surface (the primitives are internal helpers).
 MODULE_NAMES = [
     "MASK",
     "MASK_MIN_LEN",
@@ -27,6 +29,7 @@ MODULE_NAMES = [
     "mask_text",
     "set_stream_logger",
 ]
+SURFACE_NAMES = ["SecretMaskingFilter", "set_stream_logger"]
 
 
 @contextmanager
@@ -509,7 +512,7 @@ class TestPublicModuleSurface:
         assert hasattr(m, name)
 
     def test_module_all_lists_exactly_the_names(self) -> None:
-        assert sorted(m.__all__) == sorted(MODULE_NAMES)
+        assert sorted(m.__all__) == sorted(SURFACE_NAMES)
 
     def test_set_stream_logger_is_public_top_level(self) -> None:
         assert "set_stream_logger" in boto3_s3.__all__

@@ -14,7 +14,6 @@ the laziness is invisible to them.
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from boto3_s3 import globsieve
     from boto3_s3.comparator import (
         Comparator,
         DestOnlyPair,
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
         all_of,
         any_of,
     )
-    from boto3_s3.concurrency import prefetch
     from boto3_s3.deleter import S3Deleter
     from boto3_s3.exceptions import (
         AccessDeniedError,
@@ -42,7 +40,12 @@ if TYPE_CHECKING:
     )
     from boto3_s3.globsieve import GlobFilter, GlobPattern
     from boto3_s3.iostorage import IOStorage, StdioStorage
-    from boto3_s3.localstorage import LocalFileGenerator, LocalStorage, WalkChild
+    from boto3_s3.localstorage import (
+        LocalFileGenerator,
+        LocalStorage,
+        LoopDetector,
+        WalkChild,
+    )
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
     from boto3_s3.s3 import (
@@ -115,6 +118,7 @@ __all__ = [
     "LocalScanOptions",
     "LocalStorage",
     "Location",
+    "LoopDetector",
     "MergedPair",
     "NotFoundError",
     "OpOutcome",
@@ -145,12 +149,10 @@ __all__ = [
     "all_of",
     "any_of",
     "cp",
-    "globsieve",
     "has_underlying_s3_path",
     "ls",
     "mb",
     "mv",
-    "prefetch",
     "presign",
     "rb",
     "rm",
@@ -163,8 +165,10 @@ __all__ = [
 # Each public name's home module; ``__getattr__`` imports the module and pulls
 # the attribute on first access. Must mirror the ``TYPE_CHECKING`` imports and
 # ``__all__`` (``test_import_contract`` resolves every ``__all__`` entry, so
-# drift fails the suite). ``globsieve`` (a submodule) and ``__version__``
-# (metadata lookup) are resolved as special cases instead.
+# drift fails the suite). ``__version__`` (metadata lookup) is resolved as a
+# special case instead. Submodules are not re-exported: ``from boto3_s3
+# import globsieve`` still works through the import system's submodule
+# fallback, but the root ``__all__`` carries symbols only.
 _EXPORT_HOMES: dict[str, str] = {
     "TransferConfig": "boto3_s3.transferconfig",
     "Comparator": "boto3_s3.comparator",
@@ -176,7 +180,6 @@ _EXPORT_HOMES: dict[str, str] = {
     "SyncPair": "boto3_s3.comparator",
     "all_of": "boto3_s3.comparator",
     "any_of": "boto3_s3.comparator",
-    "prefetch": "boto3_s3.concurrency",
     "S3Deleter": "boto3_s3.deleter",
     "AccessDeniedError": "boto3_s3.exceptions",
     "BatchError": "boto3_s3.exceptions",
@@ -194,6 +197,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "StdioStorage": "boto3_s3.iostorage",
     "LocalFileGenerator": "boto3_s3.localstorage",
     "LocalStorage": "boto3_s3.localstorage",
+    "LoopDetector": "boto3_s3.localstorage",
     "WalkChild": "boto3_s3.localstorage",
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",
@@ -253,8 +257,6 @@ def __getattr__(name: str) -> Any:
 
     if name == "__version__":
         value: Any = _resolve_version()
-    elif name == "globsieve":
-        value = importlib.import_module("boto3_s3.globsieve")
     else:
         home = _EXPORT_HOMES.get(name)
         if home is None:

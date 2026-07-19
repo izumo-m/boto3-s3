@@ -2203,6 +2203,7 @@ class _SetTags:
 __all__ = [
     "TransferItem",
     "Transferrer",
+    "Warner",
     "annotations_copy_unsupported_reason",
     "conditional_write_unsupported_reason",
 ]

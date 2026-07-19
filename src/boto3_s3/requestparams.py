@@ -247,15 +247,6 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
         params["IfNoneMatch"] = "*"
 
 
-__all__ = [
-    "map_copy_object_params",
-    "map_delete_object_params",
-    "map_get_object_annotation_params",
-    "map_get_object_params",
-    "map_get_object_tagging_params",
-    "map_head_object_params",
-    "map_head_object_params_with_copy_source_sse",
-    "map_list_object_annotations_params",
-    "map_put_object_params",
-    "map_put_object_tagging_params",
-]
+# Package-internal: the mappers are consumed by producers/transfer only and
+# carry no documented surface (docs/imports.md).
+__all__: list[str] = []

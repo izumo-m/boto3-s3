@@ -1707,12 +1707,14 @@ class TestCrtSubscriberCompat:
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (docs/transfer.md):
-        # the engine pair plus the SDK-floor probes (--no-overwrite, section 7;
-        # copy_props=ALL, section 4). A symbol added or dropped must be a
-        # deliberate __all__ / docs decision.
+        # the engine pair, the Warner protocol its `warner` seam returns, and
+        # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
+        # section 4). A symbol added or dropped must be a deliberate
+        # __all__ / docs decision.
         assert set(transfer.__all__) == {
             "TransferItem",
             "Transferrer",
+            "Warner",
             "annotations_copy_unsupported_reason",
             "conditional_write_unsupported_reason",
         }

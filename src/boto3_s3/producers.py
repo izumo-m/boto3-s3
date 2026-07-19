@@ -1031,3 +1031,8 @@ def sync_transfer_item(
     if item is not None:
         item.dest_info = pair.dest if isinstance(pair, SyncPair) else None
     return item
+
+
+# Package-internal: the shared producer/gate helpers are consumed by s3.py and
+# transfer.py only and carry no documented surface (docs/imports.md).
+__all__: list[str] = []

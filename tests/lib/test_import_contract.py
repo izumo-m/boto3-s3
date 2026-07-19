@@ -153,7 +153,7 @@ class TestLazyExports:
 
         for name in boto3_s3.__all__:
             assert getattr(boto3_s3, name) is not None, name
-        assert set(boto3_s3._EXPORT_HOMES) | {"globsieve", "__version__"} == set(boto3_s3.__all__)
+        assert set(boto3_s3._EXPORT_HOMES) | {"__version__"} == set(boto3_s3.__all__)
 
     def test_every_root_export_is_in_its_home_module_all(self) -> None:
         # The two-tier surface contract (docs/imports.md): a root export must
