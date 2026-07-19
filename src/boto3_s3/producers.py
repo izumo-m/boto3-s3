@@ -42,7 +42,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
 
 def walk_source_scan_options(
@@ -182,7 +182,19 @@ def _glacier_gate(
     if not _glacier_blocked(info, options=options):
         return False
     if options.get("ignore_glacier_warnings"):
-        transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
+        # Carry the listing entry like the no_overwrite skip does, so an
+        # on_result consumer reads the same record shape from both silent
+        # skips (the destination fields stay unset - the gate runs before
+        # the destination is derived).
+        transferrer.skip(
+            TransferItem(
+                compare_key=compare_key,
+                size=info.size,
+                mtime=info.mtime,
+                src_info=info,
+                src_display=src_display,
+            )
+        )
     else:
         transferrer.warner.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
     return True
@@ -267,7 +279,7 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
-) -> Iterator[TransferItem]:
+) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
 
     A recursive source enumerates through ``plan.src.scan`` so a ``LocalStorage``
@@ -346,7 +358,7 @@ def s3_source_items(
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
     operation: str,
-) -> Iterator[TransferItem]:
+) -> Generator[TransferItem, None, None]:
     """Materialize download/copy items from an S3 source, gates applied."""
     src_bucket = src_storage.bucket
     if plan.dir_op:
@@ -680,7 +692,7 @@ def open_upload_items(
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
-) -> Iterator[TransferItem]:
+) -> Generator[TransferItem, None, None]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
     The open-route mirror of ``upload_items`` - a recursive source
@@ -723,11 +735,18 @@ def open_upload_items(
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
     for info in infos:
-        yield open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
+        yield open_upload_item(
+            plan, info, dest_bucket=dest_bucket, transferrer=transferrer, dryrun=dryrun
+        )
 
 
 def open_upload_item(
-    plan: transferplan.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
+    plan: transferplan.TransferPlan,
+    info: FileInfo,
+    *,
+    dest_bucket: str,
+    transferrer: Transferrer,
+    dryrun: bool,
 ) -> TransferItem:
     """One upload item reading the custom source through ``Storage.open``.
 
@@ -737,6 +756,15 @@ def open_upload_item(
     compare_key = _compare_key(info)
     open_key = compare_key if plan.dir_op else ""
     dest = transferplan.dest_for(plan, compare_key)
+    if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
+        # The open-route mirror of upload_item_from_info's oversize warning
+        # (aws-cli's _warn_if_too_large): warn but still attempt, rendered
+        # through the open side's own display form.
+        transferrer.warner.warn(
+            f"File {open_side_display(plan.src, open_key)} exceeds s3 upload limit of "
+            f"{_MAX_UPLOAD_SIZE_TEXT}.",
+            key=compare_key,
+        )
     return TransferItem(
         compare_key=compare_key,
         size=info.size,
@@ -764,7 +792,7 @@ def open_download_items(
     options: TransferOptions,
     operation: str,
     dryrun: bool,
-) -> Iterator[TransferItem]:
+) -> Generator[TransferItem, None, None]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
     The open-route mirror of the S3-source half of ``s3_source_items``:
@@ -936,7 +964,7 @@ def sync_entries(
     item_filter: FileFilter | None,
     transferrer: Transferrer,
     options: TransferOptions,
-) -> Iterator[tuple[str, FileInfo]]:
+) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
     A local side walks in aws-cli byte order with its warnings routed to
@@ -991,7 +1019,9 @@ def sync_transfer_item(
     """
     info = pair.src
     if plan.paths_type == "opens3":
-        item = open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
+        item = open_upload_item(
+            plan, info, dest_bucket=dest_bucket, transferrer=transferrer, dryrun=dryrun
+        )
     elif plan.paths_type == "s3open":
         item = open_download_item(
             plan,

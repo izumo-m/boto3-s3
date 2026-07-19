@@ -614,6 +614,24 @@ class TestSyncDownload:
         S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
         assert out.is_dir()
 
+    def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:
+        # The pre-cancel check acts before any side effect - here the
+        # destination pre-create above: a cancelled run must not leave a
+        # fresh empty directory behind.
+        out = tmp_path / "fresh" / "nested"
+        client, calls = make_recording_client([])
+        token = CancelToken()
+        token.cancel()
+        with pytest.raises(CancelledError):
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                str(out),
+                cancel_token=token,
+                transfer_config=_SERIAL,
+            )
+        assert calls == []
+        assert not out.exists()
+
     def test_delete_removes_local_files_synchronously(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         stale = _write(out, "stale.txt", b"xx")

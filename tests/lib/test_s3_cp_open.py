@@ -246,6 +246,46 @@ class TestOpenUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
 
+    def test_upload_guesses_content_type_from_the_entry_key(self) -> None:
+        # Open-route uploads are shaped like local ones (docs/transfer.md
+        # section 12): the default guess reads the entry's key, so a custom
+        # backend's .jpg lands as image/jpeg without the backend doing
+        # anything. Only a true stream (no filename) skips the guess.
+        src = _MemStorage({"img/photo.jpg": b"x"}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert calls[0].params["ContentType"] == "image/jpeg"
+
+    def test_oversize_upload_warns_but_still_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The open-route mirror of the local route's oversize pre-warning
+        # (aws-cli's _warn_if_too_large): warn but still attempt, rendering
+        # through the open side's own display form.
+        monkeypatch.setattr("boto3_s3.producers._MAX_UPLOAD_SIZE", 1)
+        src = _MemStorage({"big.bin": b"xx"}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert _ops(calls) == ["PutObject"]  # warned, never skipped
+        outcomes = [r.outcome for r in results]
+        assert outcomes.count(OpOutcome.WARNED) == 1
+        assert outcomes.count(OpOutcome.SUCCEEDED) == 1
+        warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
+        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
+        assert "big.bin" in str(warned.error)
+
     def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
         # sync is the only order-sensitive consumer (docs/storage.md section 3):
         # a recursive cp consumes a custom backend's entries exactly as its

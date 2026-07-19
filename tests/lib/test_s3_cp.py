@@ -307,6 +307,24 @@ class TestUploadRoute:
             S3().cp(str(src), S3Storage("s3://b/k", client=client), cancel_token=token)
         assert calls == []
 
+    def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:
+        # The pre-cancel check acts before any side effect - here the
+        # recursive local-destination pre-create: a cancelled download run
+        # must not leave a fresh empty directory behind.
+        dest = tmp_path / "fresh" / "nested"
+        token = CancelToken()
+        token.cancel()
+        client, calls = make_recording_client([])
+        with pytest.raises(CancelledError):
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                str(dest),
+                recursive=True,
+                cancel_token=token,
+            )
+        assert calls == []
+        assert not dest.exists()
+
     def test_graceful_cancel_from_result_drains_submitted_transfers(self, tmp_path: Path) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
             (tmp_path / name).write_bytes(name.encode())
@@ -706,6 +724,10 @@ class TestGlacierGate:
         )
         assert _ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+        # The silent skip carries the listing entry like the no_overwrite
+        # skip does, so both silent-skip records read the same shape.
+        assert results[0].src_info is not None
+        assert results[0].src_info.size == 7
 
 
 class TestCopyRoute:

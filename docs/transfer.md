@@ -637,6 +637,11 @@ and outside aws parity.
   destination key derives from `transferplan.dest_for` exactly as for the built-in
   routes (a `/`-terminated or `dir_op` custom destination adopts the source
   name).
+- **upload shaping**: an `opens3` upload is shaped like a local one - the
+  default ContentType guess reads the entry's key (its filename; the
+  destination key for a single `""` source), and the >`5 GiB x 10000` oversize
+  pre-warning fires too. Only a true stream (section 6) has no filename and
+  skips the guess.
 - **enumeration / single source**: `opens3` enumerates a recursive source
   through `Storage.scan` and resolves a single source through
   `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided

@@ -987,6 +987,10 @@ class S3:
         """
         src_storage.validate()
         dest_storage.validate()
+        # A pre-cancelled token acts before any side effect: the destination
+        # pre-create below, the client builds, and the case-gate's destination
+        # walk (ls / rm poll right after resolution the same way).
+        _raise_if_cancelled(cancel_token, operation)
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=recursive, operation=operation
         )
@@ -1101,17 +1105,32 @@ class S3:
             # then discard on cancellation would leak that open fileobj. Pulling
             # only once the run is still live means a cancelled run never opens an
             # item it will not submit.
-            item_iter = iter(items)
-            while True:
-                _raise_if_cancelled(cancel_token, operation)
-                try:
-                    item = next(item_iter)
-                except StopIteration:
-                    break
-                if dryrun:
-                    transferrer.dryrun(item)
-                else:
-                    transferrer.submit(item)
+            interrupted = False
+            try:
+                item_iter = iter(items)
+                while True:
+                    _raise_if_cancelled(cancel_token, operation)
+                    try:
+                        item = next(item_iter)
+                    except StopIteration:
+                        break
+                    if dryrun:
+                        transferrer.dryrun(item)
+                    else:
+                        transferrer.submit(item)
+            except (KeyboardInterrupt, SystemExit):
+                interrupted = True
+                raise
+            finally:
+                # Close the producer (joining its scan prefetch worker) before
+                # Transferrer.__exit__ shuts down and unregisters the capture
+                # handlers - the teardown mirror of prepare()'s
+                # register-before-enumeration ordering, so no listing traffic
+                # emits on the client during the deregistration. A terminal
+                # interrupt skips it: the KI unwind must not wait on an
+                # in-flight page pull (Storage.scan_wait_on_interrupt).
+                if not interrupted:
+                    items.close()
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
             raise BatchError(
@@ -1321,6 +1340,14 @@ class S3:
                 "mv supports a stream destination only for a single object (non-recursive)",
                 operation="mv",
             )
+        if isinstance(dest_storage, IOStorage) and options.get("no_overwrite"):
+            # cp's stream gate, ported: a streaming download has no existing
+            # destination to guard, so no_overwrite is meaningless - fail loud
+            # rather than silently ignore it and delete the source anyway.
+            raise ValidationError(
+                "no_overwrite is not supported for streaming downloads",
+                operation="mv",
+            )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
             if src_storage.same_path_as(dest_storage):
                 # aws words the error with the keyless-normalized URIs
@@ -1458,6 +1485,9 @@ class S3:
         dest_storage = self.resolve(dest)
         src_storage.validate()
         dest_storage.validate()
+        # A pre-cancelled token acts before any side effect (the destination
+        # pre-create below, the client builds), like cp/mv/ls/rm.
+        _raise_if_cancelled(cancel_token, "sync")
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=True, operation="sync"
         )
@@ -1564,6 +1594,23 @@ class S3:
                 transferrer=transferrer,
                 options=options,
             )
+
+            def _close_scans(
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: object,
+            ) -> None:
+                # Close both sides' producers (joining their scan prefetch
+                # workers) before the stack unwinds into Transferrer.__exit__'s
+                # capture deregistration - the teardown mirror of prepare()'s
+                # register-before-enumeration ordering. A terminal interrupt
+                # skips it: the KI unwind must not wait on an in-flight page
+                # pull (Storage.scan_wait_on_interrupt).
+                if exc_type is None or not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+                    dest_entries.close()
+                    src_entries.close()
+
+            stack.push(_close_scans)
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
 
             def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
@@ -1710,7 +1757,9 @@ class S3:
         )
 
         if dryrun:
-            for info in storage.scan(options):
+            # cancel_token on the scan too (like ls): the prefetch producer
+            # stops between page pulls instead of fetching pages nobody reads.
+            for info in storage.scan(options, cancel_token=cancel_token):
                 _raise_if_cancelled(cancel_token, "rm")
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
                 _raise_if_cancelled(cancel_token, "rm")
@@ -1725,7 +1774,9 @@ class S3:
             operation="rm",
             capture_response=capture_response,
         ) as deleter:
-            for info in storage.scan(options):
+            # cancel_token on the scan too (like ls): the prefetch producer
+            # stops between page pulls instead of fetching pages nobody reads.
+            for info in storage.scan(options, cancel_token=cancel_token):
                 _raise_if_cancelled(cancel_token, "rm")
                 deleter.submit(info)
             _raise_if_cancelled(cancel_token, "rm")

@@ -106,6 +106,21 @@ class TestStreams:
         with pytest.raises(ValidationError, match="only for a single object"):
             S3().mv(S3Storage("s3://bucket/pre/"), IOStorage(io.BytesIO()), recursive=True)
 
+    def test_stream_destination_no_overwrite_rejected(self) -> None:
+        # cp's stream gate, ported: a streaming download has no existing
+        # destination to guard, so no_overwrite must fail loud instead of
+        # being silently ignored (and the source deleted anyway).
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                IOStorage(io.BytesIO()),
+                no_overwrite=True,
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "no_overwrite is not supported for streaming downloads"
+        assert calls == []
+
 
 class TestSamePathGuard:
     """aws-cli's ``Cannot mv a file onto itself`` - before any client work."""
