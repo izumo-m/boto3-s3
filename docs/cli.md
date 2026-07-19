@@ -199,7 +199,11 @@ These implement the policy in
      difference under throttling. `_retry_defaults` fills the aws values in
      only when neither the env (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`,
      present-wins - an empty value is fatal like aws, rc 255) nor the
-     profile config supplies one; both client builders apply it.
+     profile config supplies one; both client builders apply it. The resolved
+     mode is validated against aws v2's restricted set - anything but
+     `standard` / `adaptive` (notably stock botocore's `legacy`, which aws v2
+     dropped) is rejected with aws's exact wording (`InvalidConfigError`,
+     rc 255).
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
   / `--no-cli-pager` / `--color` / `--cli-error-format`.
   They are accepted (the `choices` are validated) and have no effect on behavior.
