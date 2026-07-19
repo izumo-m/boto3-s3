@@ -40,6 +40,7 @@ from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
     CancelledError,
+    InvalidConfigError,
     NotFoundError,
     ValidationError,
 )
@@ -651,22 +652,29 @@ class S3:
         one explicitly via ``S3Storage(url, client=s3.client())``. A failed build
         raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
         unresolvable credentials / region, its ``InvalidConfigError``
-        refinement for a set-but-unusable ``AWS_PROFILE`` or partial
-        credentials - never the raw botocore error (docs/exceptions.md
-        section 1).
+        refinement for a set-but-unusable ``AWS_PROFILE``, partial
+        credentials, or a malformed ``endpoint_url`` - never the raw botocore
+        error (docs/exceptions.md section 1).
         """
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
-            if self._session is not None:
-                return self._session.client(
-                    "s3", endpoint_url=self._endpoint_url, config=self._config
-                )
-            # Import locally so callers that only use SDK-independent modules
-            # do not pay for boto3. `S3` construction itself has no SDK-free
-            # contract (docs/imports.md).
-            import boto3
+            try:
+                if self._session is not None:
+                    return self._session.client(
+                        "s3", endpoint_url=self._endpoint_url, config=self._config
+                    )
+                # Import locally so callers that only use SDK-independent modules
+                # do not pay for boto3. `S3` construction itself has no SDK-free
+                # contract (docs/imports.md).
+                import boto3
 
-            return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+                return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+            except ValueError as exc:
+                # botocore rejects a malformed endpoint_url with a plain
+                # ValueError (not a BotoCoreError), which would leak raw
+                # through s3_errors. A set-but-unusable setting is
+                # InvalidConfigError's definition (docs/exceptions.md).
+                raise InvalidConfigError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).

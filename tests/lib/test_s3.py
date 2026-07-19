@@ -220,6 +220,16 @@ class TestClientSeam:
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
+    def test_malformed_endpoint_maps_to_invalid_config_error(self) -> None:
+        # botocore rejects a malformed endpoint_url with a plain ValueError,
+        # which is not a BotoCoreError and used to leak raw through the
+        # translator - a break of client()'s "never the raw botocore error"
+        # contract. Pin the exact refinement type (rc 255 lane).
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3(endpoint_url="not-a-url").client()
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
 
 class TestResolveSeam:
     """``S3.resolve`` injects ``client()`` into bare ``s3://`` strings and is overridable."""
