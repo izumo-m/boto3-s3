@@ -172,7 +172,9 @@ events - the delete calls are issued directly - so it works on any engine.
 `error` is always a `Boto3S3Error` (the library exception taxonomy) or `None` -
 never a raw exception. A `FAILED` record carries the failure; a `CANCELLED`
 record carries a `CancelledError` whose message names what revoked the item
-(the fatal's text, or the cancel reason); a `WARNED` / `NOTICE` record carries
+(classic: the fatal's text, or the cancel reason; the CRT manager cancels
+without the message, so its records carry awscrt's cancellation wording
+instead); a `WARNED` / `NOTICE` record carries
 the advisory text - a `WARNED` body is bare (the CLI prints
 `warning: {error}`), while a `NOTICE` body already carries its own
 `warning: ` prefix (the CLI prints it verbatim).

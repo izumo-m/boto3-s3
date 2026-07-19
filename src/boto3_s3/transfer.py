@@ -776,10 +776,13 @@ class Transferrer:
         ``__exit__`` - aws's actual path - because s3transfer's public
         ``shutdown()`` forwards its arguments shifted (``(cancel, cancel,
         cancel_msg)``), which would cancel a pending coordinator with the
-        message as the exception *class*; ``__exit__`` also picks aws's
-        exception shape (``FatalError(str(exc))``, Ctrl-C's plain
-        ``CancelledError``) and exists on both engines, so each ``CANCELLED``
-        record names the fatal that revoked it.
+        message as the exception *class*. ``__exit__`` exists on both engines;
+        the classic one cancels with aws's exception shape
+        (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
+        classic ``CANCELLED`` record names the fatal that revoked it, while
+        the CRT manager cancels without the message and its ``CANCELLED``
+        records carry awscrt's cancellation wording instead (still classified
+        via ``AWS_ERROR_S3_CANCELED``).
         """
         if self._manager is None:
             return
