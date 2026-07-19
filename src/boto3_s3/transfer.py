@@ -457,6 +457,11 @@ class _ResponseCapture:
     def __init__(self) -> None:
         self._writes: dict[tuple[str, str], dict[str, Any]] = {}
         self._reads: dict[tuple[str, str], dict[str, Any]] = {}
+        # Only keys admitted by expect() (submitted items) are recorded: a
+        # same-client GetObject issued outside the engine - a content filter
+        # reading a pair the run then rejects - must not grow the read store
+        # for the rest of the run, since no item would ever drain it.
+        self._expected: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
         # Bind once so unregister removes the same objects register added.
         self._stash_handler = self._stash_key
@@ -499,6 +504,8 @@ class _ResponseCapture:
             response.pop("ContentRange", None)
             response.pop("ContentLength", None)
         with self._lock:
+            if bucket_key not in self._expected:
+                return
             # First stored wins: a multipart download issues many ranged GETs for
             # the same key, all carrying the same object-level metadata (an item
             # writes its key once, so the write store sees one terminal response).
@@ -522,6 +529,12 @@ class _ResponseCapture:
         for op in self._READ_OPS:
             events.unregister(f"after-call.s3.{op}", self._record_read_handler)
 
+    def expect(self, bucket: str | None, key: str | None) -> None:
+        """Admit a submitted item's key into the stores (see ``_expected``)."""
+        if bucket is not None and key is not None:
+            with self._lock:
+                self._expected.add((bucket, key))
+
     def pop_write(self, bucket: str | None, key: str | None) -> dict[str, Any] | None:
         return self._pop(self._writes, bucket, key)
 
@@ -534,6 +547,7 @@ class _ResponseCapture:
         if bucket is None or key is None:
             return None
         with self._lock:
+            self._expected.discard((bucket, key))
             return store.pop((bucket, key), None)
 
 
@@ -678,15 +692,19 @@ class Transferrer:
                 # The environment (SDK floor) lacks the capability, not the
                 # caller's arguments: a ConfigurationError.
                 raise ConfigurationError(reason, operation=operation)
-        # The copy-props mode is interpreted once here (a None means
-        # unspecified, like the other options' falsy checks) so a bad value
-        # fails at construction rather than at the first submit.
+        # The copy-props mode is interpreted once here so a bad value fails at
+        # construction rather than at the first submit. None means unspecified;
+        # the check is is-None, not falsy, so a present-but-empty value from an
+        # untyped caller ("") hits the invalid-value error below instead of
+        # silently running with the default.
         # copy_props=ALL gate: annotations need a capable SDK; every other
         # mode degrades silently on an old one (docs/transfer.md section 4).
         self._copy_props = CopyPropsMode.DEFAULT
         self._annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
         if transfer_type is TransferType.COPY:
-            copy_props = self._options.get("copy_props") or CopyPropsMode.DEFAULT
+            copy_props = self._options.get("copy_props")
+            if copy_props is None:
+                copy_props = CopyPropsMode.DEFAULT
             try:
                 self._copy_props = CopyPropsMode(copy_props)
             except ValueError as exc:
@@ -697,9 +715,9 @@ class Transferrer:
                 raise ValidationError(
                     f"Invalid copy_props value: {copy_props!r}", operation=operation
                 ) from exc
-            annotation_copy_mode = (
-                self._options.get("annotation_copy_mode") or AnnotationCopyMode.PRELOAD_MEMORY
-            )
+            annotation_copy_mode = self._options.get("annotation_copy_mode")
+            if annotation_copy_mode is None:
+                annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
             try:
                 self._annotation_copy_mode = AnnotationCopyMode(annotation_copy_mode)
             except ValueError as exc:
@@ -995,7 +1013,14 @@ class Transferrer:
             return None
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
-            guessed = _guess_content_type(item.src_path or "")
+            name = item.src_path or ""
+            if not name and item.src_info is not None:
+                # An open-route item has no local path but its entry does have a
+                # filename: guess from the source key (the destination key for a
+                # single "" source - same basename). A stream item carries no
+                # src_info and stays guess-free (no filename, aws parity).
+                name = item.src_info.key or item.dest_key or ""
+            guessed = _guess_content_type(name)
             if guessed is not None:
                 extra_args["ContentType"] = guessed
         subscribers = self._common_subscribers(item)
@@ -1005,7 +1030,12 @@ class Transferrer:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
         subscribers.append(_ForgetFuture(self._forget_future))
-        return self._get_manager().upload(
+        # Manager first: a stream run builds it (and the capture) at first submit.
+        manager = self._get_manager()
+        if self._capture is not None:
+            # Admit the key: only submitted items' responses are recorded.
+            self._capture.expect(item.dest_bucket, item.dest_key)
+        return manager.upload(
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -1015,14 +1045,6 @@ class Transferrer:
 
     def _submit_download(self, item: TransferItem) -> Any:
         """Map one download and order destination, durability, and completion hooks."""
-        if self._capture is not None:
-            # A same-run content filter may have read this source through the
-            # run's own client (a SyncPair content update_filter via
-            # S3Storage.open(..., "rb")), recording a GetObject for the very key
-            # about to be downloaded. The read store is first-stored-wins, so
-            # drop that entry now - the transfer's own GetObject must be the read
-            # slot, not the filter's (possibly pre-change) response.
-            self._capture.pop_read(item.src_bucket, item.src_key)
         extra_args = requestparams.map_get_object_params(self._options)
         subscribers = self._common_subscribers(item)
         if item.dest_path is not None:
@@ -1045,7 +1067,17 @@ class Transferrer:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, post_success=self._stamp_mtime))
         subscribers.append(_ForgetFuture(self._forget_future))
-        return self._get_manager().download(
+        # Manager first: a stream run builds it (and the capture) at first submit.
+        manager = self._get_manager()
+        if self._capture is not None:
+            # Admit the key only now: a same-run content filter may have read
+            # this source through the run's own client (a SyncPair content
+            # update_filter via S3Storage.open(..., "rb")) before submit, and
+            # that GetObject must neither occupy the first-stored-wins read
+            # slot (the transfer's own GetObject is the item's read) nor sit
+            # in the store forever for a pair the run never submits.
+            self._capture.expect(item.src_bucket, item.src_key)
+        return manager.download(
             bucket=item.src_bucket,
             key=item.src_key,
             fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
@@ -1065,7 +1097,12 @@ class Transferrer:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item))
         subscribers.append(_ForgetFuture(self._forget_future))
-        return self._get_manager().copy(
+        # Manager first: a stream run builds it (and the capture) at first submit.
+        manager = self._get_manager()
+        if self._capture is not None:
+            # Admit the key: only submitted items' responses are recorded.
+            self._capture.expect(item.dest_bucket, item.dest_key)
+        return manager.copy(
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -1154,6 +1191,7 @@ class Transferrer:
             source_client=self._source_client,
             multipart_threshold=self._multipart_threshold,
             head_params=requestparams.map_head_object_params_with_copy_source_sse(self._options),
+            operation=self._operation,
         )
         if mode is CopyPropsMode.METADATA_DIRECTIVE:
             return [metadata, _ReplaceTaggingDirective(), exclude], self._source_client
@@ -1163,6 +1201,7 @@ class Transferrer:
             dest_client=self._client,
             multipart_threshold=self._multipart_threshold,
             options=self._options,
+            operation=self._operation,
         )
         if mode is CopyPropsMode.DEFAULT:
             return [metadata, tags, exclude], self._source_client
@@ -1175,6 +1214,7 @@ class Transferrer:
             mode=self._annotation_copy_mode,
             options=self._options,
             temp_dir=getattr(self._transfer_config, "annotation_temp_dir", None),
+            operation=self._operation,
         )
         return [
             metadata,
@@ -1235,12 +1275,22 @@ class Transferrer:
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
-        return crtsupport.create_crt_transfer_manager(
-            self._client,
-            self._transfer_config,
-            endpoint=self._crt_endpoint,
-            session=self._session,
-        )
+        from boto3.exceptions import InvalidCrtTransferConfigError
+
+        try:
+            return crtsupport.create_crt_transfer_manager(
+                self._client,
+                self._transfer_config,
+                endpoint=self._crt_endpoint,
+                session=self._session,
+            )
+        except InvalidCrtTransferConfigError as exc:
+            # boto3's explicit-'crt' validation (classic-only TransferConfig
+            # options set): a caller-argument problem, kept inside the taxonomy
+            # like the copy_props ValueError above - docs/exceptions.md carves
+            # out exactly one pass-through (MissingDependencyException), and
+            # this is not it.
+            raise ValidationError(str(exc), operation=self._operation) from exc
 
     def _create_classic_manager(self) -> Any:
         """Build the classic s3transfer manager, honoring threaded execution config."""
@@ -1834,6 +1884,7 @@ class _SetAnnotations:
         mode: AnnotationCopyMode,
         options: TransferOptions,
         temp_dir: str | os.PathLike[str] | None,
+        operation: str,
     ) -> None:
         self._item = item
         self._source_client = source_client
@@ -1841,9 +1892,10 @@ class _SetAnnotations:
         self._mode = mode
         self._options = options
         self._temp_dir = temp_dir
+        self._operation = operation
         self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
         self._preloaded_client = _PreloadedAnnotationClient(source_client, self)
-        self._paginating_client = _PaginatingAnnotationClient(source_client)
+        self._paginating_client = _PaginatingAnnotationClient(source_client, operation=operation)
 
     @property
     def source_client(self) -> Any:
@@ -1885,23 +1937,29 @@ class _SetAnnotations:
             list_params["VersionId"] = version_id
             get_params["VersionId"] = version_id
         try:
-            paginator = self._source_client.get_paginator("list_object_annotations")
-            names: list[str] = []
-            for page in paginator.paginate(
-                Bucket=self._item.src_bucket,
-                Key=self._item.src_key,
-                **list_params,
+            # Pre-translate carrying the *source* bucket/key: a raw ClientError
+            # from these source-side reads would be re-tagged with the copy
+            # destination by _record_failure (see delete_s3_source).
+            with s3_errors(
+                operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
             ):
-                for annotation in page.get("Annotations", []):
-                    names.append(annotation["AnnotationName"])
-            for name in names:
-                response = self._source_client.get_object_annotation(
+                paginator = self._source_client.get_paginator("list_object_annotations")
+                names: list[str] = []
+                for page in paginator.paginate(
                     Bucket=self._item.src_bucket,
                     Key=self._item.src_key,
-                    AnnotationName=name,
-                    **get_params,
-                )
-                store.add(name, response["AnnotationPayload"].read())
+                    **list_params,
+                ):
+                    for annotation in page.get("Annotations", []):
+                        names.append(annotation["AnnotationName"])
+                for name in names:
+                    response = self._source_client.get_object_annotation(
+                        Bucket=self._item.src_bucket,
+                        Key=self._item.src_key,
+                        AnnotationName=name,
+                        **get_params,
+                    )
+                    store.add(name, response["AnnotationPayload"].read())
         except BaseException:
             self.close()
             raise
@@ -1997,20 +2055,35 @@ class _PaginatingAnnotationClient:
     the names with a paginator; this adapter restores that by merging every
     page into the single response s3transfer expects. Names are small, so the
     merge does not defeat the mode's point (payload reads stay lazy per-name
-    pass-throughs on the underlying client).
+    pass-throughs on the underlying client). Both intercepted reads
+    pre-translate under the source bucket/key from the call's own params, so a
+    deferred-read failure is attributed to the source like the preload path's
+    (`_record_failure` would otherwise re-tag it with the copy destination).
     """
 
-    def __init__(self, source_client: Any) -> None:
+    def __init__(self, source_client: Any, *, operation: str) -> None:
         self._source_client = source_client
+        self._operation = operation
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._source_client, name)
 
     def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
-        annotations: list[dict[str, Any]] = []
-        for page in self._source_client.get_paginator("list_object_annotations").paginate(**kwargs):
-            annotations.extend(page.get("Annotations", []))
-        return {"Annotations": annotations}
+        with s3_errors(
+            operation=self._operation, bucket=kwargs.get("Bucket"), key=kwargs.get("Key")
+        ):
+            annotations: list[dict[str, Any]] = []
+            for page in self._source_client.get_paginator("list_object_annotations").paginate(
+                **kwargs
+            ):
+                annotations.extend(page.get("Annotations", []))
+            return {"Annotations": annotations}
+
+    def get_object_annotation(self, **kwargs: Any) -> Any:
+        with s3_errors(
+            operation=self._operation, bucket=kwargs.get("Bucket"), key=kwargs.get("Key")
+        ):
+            return self._source_client.get_object_annotation(**kwargs)
 
 
 class _SetMetadataDirectiveProps:
@@ -2048,11 +2121,13 @@ class _SetMetadataDirectiveProps:
         source_client: Any,
         multipart_threshold: int,
         head_params: dict[str, Any],
+        operation: str,
     ) -> None:
         self._item = item
         self._source_client = source_client
         self._multipart_threshold = multipart_threshold
         self._head_params = head_params
+        self._operation = operation
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         extra_args: dict[str, Any] = future.meta.call_args.extra_args
@@ -2070,9 +2145,15 @@ class _SetMetadataDirectiveProps:
     def _head_source(self) -> Mapping[str, Any]:
         if self._item.head is not None:
             return self._item.head
-        return self._source_client.head_object(
-            Bucket=self._item.src_bucket, Key=self._item.src_key, **self._head_params
-        )
+        # Pre-translate carrying the *source* bucket/key: a raw ClientError from
+        # this source-side read would be re-tagged with the copy destination by
+        # _record_failure (see delete_s3_source).
+        with s3_errors(
+            operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
+        ):
+            return self._source_client.head_object(
+                Bucket=self._item.src_bucket, Key=self._item.src_key, **self._head_params
+            )
 
 
 def _allow_inline_mpu_tagging() -> None:
@@ -2141,12 +2222,14 @@ class _SetTags:
         dest_client: Any,
         multipart_threshold: int,
         options: TransferOptions,
+        operation: str,
     ) -> None:
         self._item = item
         self._source_client = source_client
         self._dest_client = dest_client
         self._multipart_threshold = multipart_threshold
         self._options = options
+        self._operation = operation
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         extra_args: dict[str, Any] = future.meta.call_args.extra_args
@@ -2189,11 +2272,17 @@ class _SetTags:
             future.set_exception(exc)
 
     def _get_source_tags(self) -> list[dict[str, str]]:
-        response = self._source_client.get_object_tagging(
-            Bucket=self._item.src_bucket,
-            Key=self._item.src_key,
-            **requestparams.map_get_object_tagging_params(self._options),
-        )
+        # Pre-translate carrying the *source* bucket/key: a raw ClientError from
+        # this source-side read would be re-tagged with the copy destination by
+        # _record_failure (see delete_s3_source).
+        with s3_errors(
+            operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
+        ):
+            response = self._source_client.get_object_tagging(
+                Bucket=self._item.src_bucket,
+                Key=self._item.src_key,
+                **requestparams.map_get_object_tagging_params(self._options),
+            )
         return [{"Key": tag["Key"], "Value": tag["Value"]} for tag in response.get("TagSet", [])]
 
     def _rollback(self, bucket: str, key: str) -> None:

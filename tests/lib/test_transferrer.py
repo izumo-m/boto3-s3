@@ -23,6 +23,7 @@ from botocore.exceptions import ClientError
 
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
+    AccessDeniedError,
     CancelledError,
     ConfigurationError,
     NotFoundError,
@@ -496,6 +497,27 @@ class TestCopy:
         assert create.params["Tagging"] == "team=a%26b"
         assert "PutObjectTagging" not in _ops(calls)
         assert transferrer.succeeded == 1
+
+    def test_multipart_tagging_read_failure_names_the_source(self) -> None:
+        # _SetTags._get_source_tags pre-translates its GetObjectTagging read
+        # carrying the *source* bucket/key; a raw ClientError would otherwise
+        # be re-tagged with the copy destination by _record_failure.
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            _client_error("AccessDenied", 403, "GetObjectTagging"),
+        ]
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=source_responses,
+        )
+        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert calls == []  # the on_queued failure precedes CreateMultipartUpload
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert type(error) is AccessDeniedError
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 
     def test_single_part_copy_excludes_annotations(self) -> None:
         # Every copy-props mode short of ALL sends AnnotationDirective=EXCLUDE
@@ -1710,6 +1732,28 @@ class TestCrtSubscriberCompat:
         _ProvideETag("abc").on_queued(future)  # must not raise
 
 
+class TestResponseCaptureExpectGate:
+    """``transfer._ResponseCapture``: only keys admitted via ``expect()`` record.
+
+    A same-client GetObject issued outside the engine - a content filter
+    reading a pair the run then rejects - must not grow the read store for the
+    rest of the run, since no item would ever drain it.
+    """
+
+    def test_unexpected_key_is_not_stored(self) -> None:
+        from boto3_s3.transfer import _ResponseCapture
+
+        capture = _ResponseCapture()
+        capture.expect("b", "k")
+        parsed = {"ETag": '"e"', "ResponseMetadata": {"HTTPStatusCode": 200}}
+        capture._record_read(parsed, {"boto3_s3_capture_key": ("b", "k")})
+        capture._record_read(parsed, {"boto3_s3_capture_key": ("b", "other")})
+        # The expected key surfaces (transport internals stripped); the
+        # never-expected key stored nothing.
+        assert capture.pop_read("b", "k") == {"ETag": '"e"'}
+        assert capture.pop_read("b", "other") is None
+
+
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (docs/transfer.md):
@@ -1881,7 +1925,7 @@ class TestAnnotationsCopySupport:
 
     def test_copy_props_none_value_means_default(self) -> None:
         # The constructor interprets the mode once; a None copy_props reads
-        # as unspecified (the falsy convention the other options follow),
+        # as unspecified (an is-None check: None only, not any falsy value),
         # not a ValueError - so a permissive caller's dryrun still constructs.
         client = model_only_client(set(), member="AnnotationDirective")
         transferrer = Transferrer(
@@ -1905,6 +1949,33 @@ class TestAnnotationsCopySupport:
                 source_client=client,
                 options=cast(TransferOptions, {"copy_props": "al"}),
             )
+
+    def test_empty_string_copy_props_raises_validation_error(self) -> None:
+        # "" is present but empty (an untyped caller's value): the is-None
+        # unspecified check must not swallow it into DEFAULT - it fails the
+        # enum conversion like any other bad string.
+        client = self._capable_client()
+        with pytest.raises(ValidationError) as excinfo:
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"copy_props": ""}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid copy_props value: ''"
+
+    def test_empty_string_annotation_copy_mode_raises_validation_error(self) -> None:
+        client = self._capable_client()
+        with pytest.raises(ValidationError) as excinfo:
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"annotation_copy_mode": ""}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid annotation_copy_mode value: ''"
 
     @pytest.mark.parametrize("mode", list(AnnotationCopyMode))
     def test_annotation_copy_mode_accepts_every_public_mode(self, mode: AnnotationCopyMode) -> None:
