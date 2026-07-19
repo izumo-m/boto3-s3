@@ -79,7 +79,9 @@ solidified design is added here.
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
-public surfaces - the package root's lazy re-export (`boto3_s3.__all__`) and
+public surfaces (the two-layer export contract of
+[`imports.md`](./imports.md) section 2) - the package root's lazy re-export
+(`boto3_s3.__all__`) and
 the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size

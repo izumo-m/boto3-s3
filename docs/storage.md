@@ -57,7 +57,10 @@ unsupported operation up front, before that backstop is ever reached:
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
   stays unimplemented, since every S3 write rides `s3transfer`.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
-  container one page of `FileInfo` at a time.
+  container one page of `FileInfo` at a time. Callers consume it through the
+  concrete `scan(options, *, cancel_token=None)` wrapper, which flattens the
+  pages and overlaps them with a background prefetch worker; `cancel_token`
+  stops the prefetch producer before its next page pull.
 
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
@@ -108,7 +111,7 @@ unsupported operation up front, before that backstop is ever reached:
   none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
   response.
 
-Three more members come with working defaults a custom backend normally keeps:
+A few more members come with working defaults a custom backend normally keeps:
 
 - **`scan_options_type: ClassVar[type[ScanOptions]]`** — this backend's
   `ScanOptions` type (default `ScanOptions`). Arg-less `scan()` builds it (via
@@ -116,7 +119,11 @@ Three more members come with working defaults a custom backend normally keeps:
   subclass still works with no options. `S3Storage` / `LocalStorage` set
   `S3ScanOptions` / `LocalScanOptions`; **a custom backend that defines its own
   subclass just sets this one class attribute — no method to override** — and one
-  that takes the base `ScanOptions` sets nothing.
+  that takes the base `ScanOptions` sets nothing. A custom subclass must stay a
+  `frozen=True, kw_only=True` dataclass and give **every added field a
+  default**: the high-level operations overlay only the operation-inherent
+  knobs via `dataclasses.replace(storage.default_scan_options(), …)`, and the
+  base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
   the single place a backend seeds the **source-config it holds on the instance**.
   The built-ins override it to inject their constructor knobs
@@ -153,9 +160,23 @@ Three more members come with working defaults a custom backend normally keeps:
   entry's `FileInfo` (keyed by `info.key`; section "Keys" below).
   `use_src_name` follows the S3 convention
   (`dir_op` or a trailing `/` on `as_text()`).
+- **`validate() -> None`** — a public hook for deferred strict validation of
+  the location, a no-op by default. Construction is permissive (a building
+  block); an operation — or the CLI at its parity point — calls this to reject
+  a malformed location loudly before use. `S3Storage` overrides it with the
+  aws-cli-parity checks (unsupported ARN forms, a key with no bucket); a
+  custom backend that can detect a malformed location overrides it likewise.
+  Idempotent.
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
+
+The contract is designed to evolve without breaking a shipped backend: an
+existing method never grows a new parameter. New per-scan context arrives as a
+defaulted field on the `ScanOptions` value objects, and anything else as a new
+method with a non-abstract default (plus a new `StorageCapability` flag when
+it gates an operation) — so a subclass written against today's surface keeps
+working as the interface grows.
 
 ### Keys: `key` vs `compare_key`
 
@@ -177,7 +198,9 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
   custom entries alike.
 - **`compare_key`** is the relative form of the same entry: the
   `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
-  `scan` must stamp it on every entry.
+  `scan` must stamp it on every entry. Omitting the stamp is a contract
+  violation with undefined behavior: a dev (non-`-O`) run trips an `assert`
+  before the transfer, while `-O` strips the check.
 
 ## 3. Capabilities
 
@@ -203,6 +226,11 @@ backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
 at all. The exact per-route gates are in [`sync.md`](./sync.md) /
 [`transfer.md`](./transfer.md).
+
+The gates read the declaration through `supports(needed)` /
+`missing_capabilities(needed)` — the lattice-expanded membership test and its
+companion that names what is absent (for a clear rejection message). An
+embedder can call the same pair for its own up-front check.
 
 ## 4. Example
 

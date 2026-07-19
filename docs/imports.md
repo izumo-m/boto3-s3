@@ -32,6 +32,19 @@ SDK-free.
    begins - including usage-error handling or subcommand help - SDK imports are
    permitted.
 
+Orthogonal to those import-cost guarantees, the **export surface** is
+two-layered: the package root's `__all__` (the lazy re-export, section 3) and
+each module's own `__all__` (the documented submodule surfaces - every module
+defines one). A name outside a module's `__all__` is private even without a
+leading underscore; the stability of a direct submodule import
+(`from boto3_s3.etagcompare import EtagComparison`) is carried by that
+module's `__all__`. The root re-exports symbols, never modules:
+`from boto3_s3 import globsieve` still works, but through the import system's
+submodule fallback, not as part of the root surface. The in-repo CLI is held
+to exactly this contract - the "Library consumption contract" in
+[`cli.md`](./cli.md) section 3, enforced by
+`tests/cli/unit/test_library_surface.py`.
+
 ## 3. Library implementation
 
 - `boto3_s3/__init__.py` is a lazy re-export via **PEP 562** (module

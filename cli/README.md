@@ -103,6 +103,11 @@ pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive complet
 With the autoprompt extra, run `boto3-s3 --cli-auto-prompt` to complete
 arguments interactively as you type.
 
+Installing the package also makes a `boto3_s3_cli` Python package importable,
+but that is an implementation detail with no API guarantee: the supported
+interface is the `boto3-s3` command. For a Python API, use the
+[`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
+
 ## Examples
 
 ```bash

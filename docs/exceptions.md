@@ -72,6 +72,42 @@ class Boto3S3Error(Exception):
   time to prevent a traceback (the decision tree of crt.md section 4), so this
   library exception never passes through the CLI.
 
+### 2.1 The attribute contract (stable vs. display)
+
+What a consumer may rely on across releases is **class identity** (the
+hierarchy above) and the **structured attributes**: `operation` / `bucket` /
+`key` on every `Boto3S3Error`, plus `BatchError`'s counters (`succeeded` /
+`failed` / `warned` / `skipped` and the derived `total`, section 4).
+**Message strings are display only**: they carry aws-cli wording and change
+whenever parity tracking requires, so never parse `str(exc)` - branch on the
+class and read the attributes.
+
+`__cause__` reachability: an error raised for a failed S3 request carries the
+originating botocore `ClientError` on `__cause__` (the `raise ... from`
+boundary conversion of section 1) - the CLI's rc-254 test reads exactly this
+(section 5). `BatchError` is two levels deep: its `__cause__` is the
+**translated** first failure (a `Boto3S3Error`, section 4), never the raw
+backend exception, so a preserved `ClientError` sits at `__cause__.__cause__`.
+Treat that second level as diagnostic rather than guaranteed: not every
+per-item failure path has a backend exception to preserve (a per-key
+`DeleteObjects` `Errors[]` entry is synthesized from the response body,
+section 3, with no exception object behind it).
+
+The context attributes are best-effort, and `operation=None` is a legitimate
+value: it means no subcommand-scoped operation was in scope - client
+construction, and the shared object-listing path that backs every recursive
+scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
+would mislabel the others). A locally-originating error carries a filesystem
+path in `key` (and no `bucket`) when set: the field names the failing entry in
+the backend's own address space, not always an S3 key.
+
+Custom backends: an exception a custom `Storage` raises that is not already a
+`Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as
+a per-item failure (the translators' last-resort clause, section 3), but one
+raised during enumeration (`scan`) or on the fatal path propagates **as-is**.
+The library assumes a well-behaved backend that maps its own errors to this
+taxonomy ([`storage.md`](./storage.md) section 2).
+
 ## 3. backend / local -> category mapping (representative examples)
 
 | Origin | Category |
