@@ -193,7 +193,7 @@ class IOStorage(Storage):
     I/O (both directions, chosen per ``open`` call), with no listing or deletion.
     """
 
-    scheme: ClassVar[str] = "stdio"
+    scheme: ClassVar[str] = "stream"
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
@@ -261,6 +261,8 @@ class StdioStorage(IOStorage):
     stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
     worker can receive an unusable file object.
     """
+
+    scheme: ClassVar[str] = "stdio"
 
     def __init__(self) -> None:
         self._stream = None
