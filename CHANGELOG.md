@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Settled the public API for 1.0: the sync-pair / result identity field is now `compare_key` (delete records join the same key space), `ls` takes `on_entry`, `S3Storage` speaks `uri`, unknown transfer options are rejected eagerly, capabilities became the sole custom-backend contract, and the export tiers shrank.
+- Documented the frozen contracts (exception attributes, the two-tier export surface, the backend SPI evolution policy) and fixed a raw `ValueError` leaking from `client()` on a malformed endpoint.
 - Aligned more behavior with aws-cli: an unset page size sends no `MaxKeys`, small multipart-copy tag sets stay inline on the create call, deferred annotation copies paginate, and CRT requests keep the caller's client configuration.
 - Reused the installed default boto3 session for config reads, masked S3 Express session tokens, refused `--no-overwrite` uploads on too-old s3transfer, and fixed the module-level helpers' reported signatures.
 - A fatal error now cancels accepted transfers like aws-cli instead of draining them; revoked items report the new `CANCELLED` outcome, with the `on_result` contract now documented.
