@@ -59,9 +59,9 @@ Each tool ran as a fresh process 20 times, with a different destination for
 every run and alternating execution order, on one x86-64 WSL2/Linux host with a
 warm filesystem cache:
 
-| Operation | `boto3-s3-cli` 0.4.0 | aws-cli 2.35.18 |
+| Operation | `boto3-s3-cli` 0.6.0 | aws-cli 2.36.1 |
 | --- | ---: | ---: |
-| One-file `sync` (median) | 244 ms | 463 ms |
+| One-file `sync` (median) | 204 ms | 452 ms |
 
 The measurement includes SDK setup, remote listing, and the actual upload.
 
