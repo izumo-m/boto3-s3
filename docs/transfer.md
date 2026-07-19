@@ -474,7 +474,10 @@ dest-existence check for download. We ported the same three faces:
   s3transfer propagates it correctly to Create/Part/Complete. **An explicit
   specification beats pip s3transfer's default injection (`setdefault`)**.
 - `checksum_mode` (download) -> GetObject's `ChecksumMode: ENABLED` (botocore
-  verifies the response's checksum).
+  verifies the response's checksum). What botocore can verify is the single
+  (non-ranged) GET, whose response carries the checksum header; a ranged
+  download gets no per-range checksum from S3, so its end-to-end validation is
+  the known divergence recorded in section 10.
 - The single-source HeadObject (`producers.head_single`, the download / copy point op)
   also `setdefault`s `ChecksumMode: ENABLED` when the client resolves
   `response_checksum_validation` to `when_supported` (the botocore default since
@@ -504,13 +507,40 @@ dest-existence check for download. We ported the same three faces:
   (cli.md section 4 - for symmetry, SigV4 is pinned to pure-Python) is not switched even
   when the CRT engine is in use.
 
-## 10. Known wire divergence (invisible in the result; recorded only)
+## 10. Known divergence (invisible in the result; recorded only)
 
 - When `--checksum-algorithm` is unspecified, the default integrity checksum is
   `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
   injects `CRC64NVME`. Both are valid integrity checks and do not affect the
   transfer result or rc (stated explicitly in the awscli port's adaptation
   rules). When specified explicitly, the two agree.
+- aws-cli's bundled s3transfer fork validates the full-object checksum of a
+  **classic ranged download** (a single-object download at or above the
+  multipart threshold, when the client resolves `response_checksum_validation`
+  to `when_supported` - the default - or `ChecksumMode: ENABLED` is explicit):
+  it computes a CRC per range while the body streams, combines the parts with
+  awscrt's CRC-combine functions, and compares the result against the expected
+  checksum taken from the single-source HeadObject before the temp file is
+  renamed into place; a mismatch is `download failed ... did not match combined
+  checksum` (rc 1) with no file left behind. pip s3transfer (0.19) has no such
+  feature - it exists only in the fork - so our classic ranged download
+  completes without end-to-end validation: corruption that slips past TLS/TCP
+  integrity would land renamed and SUCCEEDED where aws fails. Every
+  surrounding path is divergence-free: the non-ranged download is verified by
+  botocore on both sides (section 9), the CRT engine passes
+  `S3ChecksumConfig(validate_response=True)` on both sides so validation is
+  the CRT client's own, identical by construction (crt.md section 6), and the
+  listing-driven (recursive / sync) download is validated by neither side
+  (ListObjectsV2 returns no checksum value; the combine applies only to the
+  single-source point op, whose HeadObject response `head_single` already
+  fetches with `ChecksumMode: ENABLED` - section 9 - so the expected value is
+  on `S3FileInfo.head` should the validation ever be implemented). The trigger
+  is narrow (an object stored as `ChecksumType=FULL_OBJECT` with a CRC value,
+  at or above the multipart threshold) and the divergence is observable only
+  under actual corruption, which no test lane can produce; adding the
+  validation later is non-breaking (it only turns a corrupted success into a
+  failure), so this is recorded as an accepted deviation until the feature
+  reaches pip s3transfer.
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 

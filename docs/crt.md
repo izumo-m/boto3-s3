@@ -270,5 +270,11 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).
+- **Download checksum validation**: both aws's CRT mode and ours pass
+  `S3ChecksumConfig(validate_response=True)` on every GET, so response
+  validation is the CRT client's own, identical by construction. The classic
+  engine's ranged-download full-object combine validation (a feature of
+  aws-cli's bundled s3transfer fork that pip s3transfer lacks) is the known
+  divergence recorded in transfer.md section 10.
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
   actual verification is only on the e2e (MinIO) lane.

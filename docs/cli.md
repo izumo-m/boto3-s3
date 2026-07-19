@@ -910,3 +910,10 @@ the library. The overall design and the library side (boto3-faithful) are in
   multipart source annotation before creating the destination, matching
   aws-cli, while no new CLI option is exposed. The tempfile/deferred modes are
   library-only until the post-1.0 CLI surface is reconsidered.
+- **Known deviation (classic ranged download)**: aws validates the full-object
+  checksum across the ranges of a classic ranged download (a feature of
+  aws-cli's bundled s3transfer fork that pip s3transfer lacks), so under
+  actual data corruption aws fails (rc 1) where we would report success.
+  Recorded with its exact trigger conditions in transfer.md section 10;
+  non-ranged downloads (botocore) and the CRT engine (the CRT client) validate
+  identically to aws.
