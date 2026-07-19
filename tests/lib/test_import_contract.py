@@ -155,6 +155,19 @@ class TestLazyExports:
             assert getattr(boto3_s3, name) is not None, name
         assert set(boto3_s3._EXPORT_HOMES) | {"globsieve", "__version__"} == set(boto3_s3.__all__)
 
+    def test_every_root_export_is_in_its_home_module_all(self) -> None:
+        # The two-tier surface contract (docs/imports.md): a root export must
+        # also appear in its home module's __all__, so `from boto3_s3.types
+        # import *` and the root agree on what is public. getattr-based
+        # resolution above cannot catch a home-__all__ omission.
+        import importlib
+
+        import boto3_s3
+
+        for name, home in boto3_s3._EXPORT_HOMES.items():
+            module = importlib.import_module(home)
+            assert name in module.__all__, f"{name} missing from {home}.__all__"
+
     def test_resolved_symbols_are_the_real_ones(self) -> None:
         import boto3_s3
         from boto3_s3.s3 import S3

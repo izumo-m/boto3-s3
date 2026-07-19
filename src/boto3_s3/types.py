@@ -535,6 +535,7 @@ def strip_response_metadata(
 
 
 __all__ = [
+    "AnnotationCopyMode",
     "CancelMode",
     "CancelToken",
     "CaseConflictMode",
