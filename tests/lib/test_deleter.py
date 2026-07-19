@@ -219,6 +219,19 @@ class TestBatching:
         deleter.close()
         assert _keys(fake.calls) == [["a"]]
 
+    def test_empty_compare_key_is_preserved(self) -> None:
+        # A legitimately empty compare_key (a folder-marker object equal to
+        # the listing prefix) must not fall back to the full key - only a
+        # None (hand-built entry) does. `or` would swallow it.
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        deleter.submit(S3FileInfo(key="prefix/", compare_key=""))
+        deleter.close()
+        assert [r.compare_key for r in results] == [""]
+        assert results[0].src_info is not None
+        assert results[0].src_info.key == "prefix/"
+
     def test_duplicate_keys_pass_through(self) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []
