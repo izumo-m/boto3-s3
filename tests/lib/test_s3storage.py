@@ -526,6 +526,19 @@ class TestScanErrorMapping:
             list(S3Storage("s3://bucket/prefix/").scan())
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
+    def test_malformed_env_endpoint_maps_to_invalid_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The lazy default build has the same plain-ValueError hole as
+        # S3.client(): botocore rejects a malformed AWS_ENDPOINT_URL with a
+        # ValueError that is not a BotoCoreError. It must surface as the
+        # translated refinement (rc 255 lane), never raw.
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "not-a-url")
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3Storage("s3://bucket/prefix/").get_client()
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
     def test_unresolvable_credentials_stay_plain_configuration_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -639,7 +652,7 @@ class TestConstructor:
         explicit = S3Storage("s3://bucket/some/prefix")
         assert (bare.bucket, bare.key) == (explicit.bucket, explicit.key)
 
-    def test_url_is_canonicalized_with_scheme(self) -> None:
+    def test_uri_is_canonicalized_with_scheme(self) -> None:
         assert S3Storage("bucket/key").uri == "s3://bucket/key"
 
     def test_empty_bucket_is_the_service_root(self) -> None:

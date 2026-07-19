@@ -585,7 +585,8 @@ class S3Storage(Storage):
         default build raises the translated ``Boto3S3Error`` -
         ``ConfigurationError`` for unresolvable credentials / region, its
         ``InvalidConfigError`` refinement for a set-but-unusable
-        ``AWS_PROFILE`` - never the raw botocore error (docs/exceptions.md
+        ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
+        botocore error (docs/exceptions.md
         section 1).
         """
         if self._client is None:
@@ -595,7 +596,14 @@ class S3Storage(Storage):
 
             # operation=None: no subcommand is in scope at build time.
             with s3_errors(operation=None):
-                self._client = boto3.client("s3")
+                try:
+                    self._client = boto3.client("s3")
+                except ValueError as exc:
+                    # A malformed endpoint from the environment
+                    # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
+                    # BotoCoreError - the same hole S3.client() plugs
+                    # (docs/exceptions.md).
+                    raise InvalidConfigError(str(exc)) from exc
         return self._client
 
     def close(self) -> None:
