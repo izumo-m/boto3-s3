@@ -90,7 +90,7 @@ s3.cp("s3://my-bucket/report.csv", "./report.csv")
 s3.ls(
     "s3://my-bucket/site/",
     recursive=True,
-    on_result=lambda info: print(info.key, info.size),
+    on_entry=lambda info: print(info.key, info.size),
 )
 
 # Delete everything under a prefix.
@@ -206,7 +206,7 @@ uploaded = []
 
 def track(r):
     if r.transfer_type is TransferType.UPLOAD and r.outcome is OpOutcome.SUCCEEDED:
-        uploaded.append(r.key)
+        uploaded.append(r.compare_key)
 
 s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 print(f"{len(uploaded)} files uploaded")
@@ -219,7 +219,7 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, on_result, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_result`. The listing page size is the `S3Storage`'s own `page_size` config. |
+| `ls(target="s3://", *, on_entry, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_entry`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
@@ -263,7 +263,7 @@ s3.cp(
 
 An S3-compatible endpoint such as MinIO is just a differently-built client.
 Build the `S3` object with that endpoint to use it for every location, or pass
-`S3Storage(url, client=minio)` when only one side needs it:
+`S3Storage(uri, client=minio)` when only one side needs it:
 
 ```python
 minio = boto3.client(
@@ -274,7 +274,7 @@ minio = boto3.client(
 )
 S3().ls(
     S3Storage("s3://bucket/", client=minio),
-    on_result=lambda info: print(info.key),
+    on_entry=lambda info: print(info.key),
 )
 ```
 
@@ -384,7 +384,7 @@ Batch operations stream item records instead of returning a list:
   and non-raising.
 - `on_progress(TransferProgress)` — byte-level transfer progress
   (`cp` / `mv` / `sync`; `rm` moves no bytes).
-- `S3.ls(..., on_result=...)` — receives each listed `FileInfo`, in listing
+- `S3.ls(..., on_entry=...)` — receives each listed `FileInfo`, in listing
   order on the calling thread.
 - `cancel_token` — a `CancelToken` whose `cancel()` stops new work and drains
   accepted work (`ls` / `cp` / `mv` / `rm` / `sync`). Pass
