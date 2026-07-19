@@ -153,6 +153,77 @@ class TestSyncUpload:
             "p/sub/b.txt",
         ]
 
+    def test_complete_view_lane_filters_see_every_entry_in_one_serial_ordered_stream(
+        self, tmp_path: Path
+    ) -> None:
+        # The contract a journaling sync builds on (s3bak's manifest journal):
+        # with ``enumerate_all_entries`` on the source, every filesystem entry -
+        # the root first (compare key ""), directories with their trailing "/",
+        # no-follow symlink leaves, special files - surfaces to exactly one lane
+        # filter, in one ascending compare-key sequence across all three lanes,
+        # serially on the calling thread, each local entry carrying its
+        # ``stat_result``; and an entry a filter vetoes never reaches the
+        # transfer engine.
+        src = tmp_path / "src"
+        _write(src, "changed.txt", b"xxx", mtime=_NEWER)  # paired -> update lane
+        _write(src, "new.txt", b"x")  # unpaired -> create lane
+        _write(src, "sub/b.txt", b"x")
+        (src / "link").symlink_to(src / "changed.txt")  # lstat leaf, never followed
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(src / "pipe")  # special file: enumerated, vetoed below
+        listing = _listing(("p/changed.txt", 2), ("p/orphan.txt", 2))
+        client, calls = make_recording_client([listing, {}, {}])
+        events: list[tuple[str, str]] = []
+        threads: set[int] = set()
+
+        def create(info: FileInfo) -> bool:
+            assert info.compare_key is not None and info.stat_result is not None
+            threads.add(threading.get_ident())
+            events.append(("create", info.compare_key))
+            return info.compare_key == "new.txt"  # veto everything else
+
+        def update(pair: SyncPair) -> bool:
+            assert pair.src.stat_result is not None
+            threads.add(threading.get_ident())
+            events.append(("update", pair.key))
+            return True
+
+        def delete(info: FileInfo) -> bool:
+            assert info.compare_key is not None
+            threads.add(threading.get_ident())
+            events.append(("delete", info.compare_key))
+            return False  # observed but kept
+
+        S3().sync(
+            LocalStorage(str(src), follow_symlinks=False, enumerate_all_entries=True),
+            S3Storage("s3://bucket/p", client=client),
+            create_filter=create,
+            update_filter=update,
+            delete_filter=delete,
+            transfer_config=_SERIAL,
+        )
+
+        keys = [key for _lane, key in events]
+        assert keys == sorted(keys)  # one ascending stream across all three lanes
+        assert keys[0] == ""  # the root leads
+        expected = {
+            ("create", ""),
+            ("create", "link"),
+            ("create", "new.txt"),
+            ("create", "sub/"),  # the directory record, trailing slash
+            ("create", "sub/b.txt"),
+            ("update", "changed.txt"),
+            ("delete", "orphan.txt"),
+        }
+        if hasattr(os, "mkfifo"):
+            expected.add(("create", "pipe"))
+        assert set(events) == expected and len(events) == len(expected)
+        assert threads == {threading.get_ident()}  # serial, on the calling thread
+        # Only the two accepted copies reached the engine; the vetoed entries
+        # (root, directory, symlink, special file, the kept orphan) did not.
+        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
+        assert [call.params["Key"] for call in calls[1:]] == ["p/changed.txt", "p/new.txt"]
+
     def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
