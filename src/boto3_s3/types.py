@@ -431,14 +431,18 @@ class CancelToken:
     """
 
     def __init__(self) -> None:
-        self._event = threading.Event()
         # RLock, not Lock: cancel() is signal-handler-safe by contract, and a
         # CPython signal handler runs on the main thread - it must be able to
         # re-enter while that same thread holds the lock inside mode/cancel.
         # The monotonic check-then-set stays correct under such re-entry
-        # because every write branch re-reads _mode.
+        # because every write branch re-reads _mode. The cancelled flag is a
+        # plain bool, not a threading.Event: Event.set() takes the Event's own
+        # non-reentrant Condition lock, so a nested signal-handler cancel()
+        # landing inside an outer set() would deadlock the main thread - and
+        # nothing ever wait()s on the flag, so the Event bought nothing.
         self._lock = threading.RLock()
         self._mode: CancelMode | None = None
+        self._cancelled = False
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
         with self._lock:
@@ -446,11 +450,11 @@ class CancelToken:
                 return
             if self._mode is None or mode is CancelMode.IMMEDIATE:
                 self._mode = mode
-                self._event.set()
+                self._cancelled = True
 
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        return self._cancelled
 
     @property
     def mode(self) -> CancelMode | None:
