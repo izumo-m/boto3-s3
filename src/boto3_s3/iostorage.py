@@ -38,15 +38,8 @@ from boto3_s3.exceptions import ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
-    from boto3_s3.types import FileInfo, ScanOptions
-
-_NOT_A_CONTAINER = (
-    "IOStorage wraps a single stream and supports open() only, not scan / delete / "
-    "get_fileinfo (pass a path or an s3:// URI for ls / rm / recursive transfers)."
-)
 
 _READ_CHUNK = 64 * 1024
 
@@ -219,23 +212,6 @@ class IOStorage(Storage):
             )
             return cast("BinaryIO", adapter)
         return cast("BinaryIO", _Uncloseable(stream))
-
-    @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        raise NotImplementedError(_NOT_A_CONTAINER)
-
-    @override
-    def delete(self, info: FileInfo) -> None:
-        raise NotImplementedError(_NOT_A_CONTAINER)
-
-    @override
-    def get_fileinfo(
-        self,
-        key: str = "",
-        *,
-        on_warning: Callable[[str], None] | None = None,
-    ) -> FileInfo | None:
-        raise NotImplementedError(_NOT_A_CONTAINER)
 
     @override
     def as_text(self) -> str:

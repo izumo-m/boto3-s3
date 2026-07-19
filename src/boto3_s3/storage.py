@@ -264,11 +264,10 @@ class Storage(abc.ABC):
                     info.storage = self
                 yield info
 
-    @abc.abstractmethod
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries one natural I/O page at a time - the producer and override seam.
 
-        This is the abstract method every backend implements and the public point
+        This is the method every listing backend implements and the public point
         to override: ``scan`` wraps it with prefetch and flattens it. Override
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
@@ -297,9 +296,16 @@ class Storage(abc.ABC):
         pages), the local walk sorts for aws parity - so they ignore the flag.
         ``key`` itself is the full, ``/``-separated identifier; stamp its relative
         form as ``compare_key`` on every entry this producer yields.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: ``capabilities``
+        is the declarative contract (implement what the declared flags promise,
+        ``SCAN`` here), and the engine's capability gates refuse an unsupported
+        operation before this backstop is reachable.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement scan_pages (StorageCapability.SCAN)"
+        )
+
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         """Open the object at ``key`` as a binary stream.
 
@@ -322,9 +328,16 @@ class Storage(abc.ABC):
         ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
         unimplemented, since every S3 write rides ``s3transfer`` rather than
         ``open``.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: implement the
+        mode(s) the declared ``OPEN_READ`` / ``OPEN_WRITE`` capabilities
+        promise.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement open "
+            "(StorageCapability.OPEN_READ / OPEN_WRITE)"
+        )
+
     def delete(self, info: FileInfo) -> Mapping[str, Any] | None:
         """Delete the entry ``info`` identifies (``rm`` / ``mv`` source / ``sync --delete``).
 
@@ -337,9 +350,14 @@ class Storage(abc.ABC):
         ``OpResult.extra_info["delete"]`` when the operation runs with
         ``capture_response=True`` - or ``None`` when there is none. A local unlink
         returns ``None``; ``S3Storage`` returns its ``DeleteObject`` response.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: implement it
+        when the backend declares ``DELETE``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement delete (StorageCapability.DELETE)"
+        )
+
     def get_fileinfo(
         self,
         key: str = "",
@@ -371,7 +389,14 @@ class Storage(abc.ABC):
         by S3). Whether a symlink is followed is the local backend's own
         construction-time config (``LocalStorage(follow_symlinks=...)``), read from
         the storage - not a parameter here.
+
+        The base implementation raises ``NotImplementedError``: implement it
+        when the backend declares ``GET_FILEINFO``.
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_fileinfo "
+            "(StorageCapability.GET_FILEINFO)"
+        )
 
     @abc.abstractmethod
     def as_text(self) -> str:
