@@ -96,7 +96,7 @@ class LsCommand(Command):
 
         s3.ls(
             storage,
-            on_result=print_result,
+            on_entry=print_result,
             recursive=args.recursive,
             request_payer=args.request_payer,
             bucket_name_prefix=args.bucket_name_prefix,

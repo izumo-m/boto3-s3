@@ -267,7 +267,7 @@ fills it in).
 
 | flag | handling |
 |---|---|
-| `--recursive` | `S3.ls(recursive=True, on_result=...)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
+| `--recursive` | `S3.ls(recursive=True, on_entry=...)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
 | `--page-size N` | `S3Storage(url, page_size=N)` (the listing page size is the storage's own config now, not an `ls` argument). No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254. Charter compliance) |
 | `--request-payer [requester]` | `S3.ls(request_payer="requester")` (ineffective in bucket listing = same as aws) |
 | `--human-readable` | Formats the size in base-2 (CLI side, the library is not involved) |

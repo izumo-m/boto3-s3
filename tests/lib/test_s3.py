@@ -58,13 +58,13 @@ class TestLsRouting:
         with pytest.raises(CancelledError):
             S3().ls(
                 S3Storage("s3://b/p/", client=client),
-                on_result=lambda _info: None,
+                on_entry=lambda _info: None,
                 cancel_token=token,
             )
 
         assert client.calls == []
 
-    def test_cancel_from_on_result_stops_delivery_and_reclaims_prefetch(self) -> None:
+    def test_cancel_from_on_entry_stops_delivery_and_reclaims_prefetch(self) -> None:
         pages = [
             {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
         ]
@@ -77,7 +77,7 @@ class TestLsRouting:
             token.cancel()
 
         with pytest.raises(CancelledError):
-            S3().ls(storage, on_result=stop_after_first, cancel_token=token)
+            S3().ls(storage, on_entry=stop_after_first, cancel_token=token)
 
         assert keys == ["p/0"]
         assert not any(
@@ -117,7 +117,7 @@ class TestLsRouting:
         with pytest.raises(CancelledError):
             S3().ls(
                 S3Storage("s3://b/p/", client=_ControlledClient([])),
-                on_result=cancel_while_page_is_inflight,
+                on_entry=cancel_while_page_is_inflight,
                 cancel_token=token,
             )
 
@@ -125,7 +125,7 @@ class TestLsRouting:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("s3://b/p/", client=client)
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [info.key for info in infos] == ["p/a"]
 
     def test_scheme_optional_storage_delegates_to_scan(self) -> None:
@@ -133,20 +133,20 @@ class TestLsRouting:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("b/p/", client=client)  # no s3:// scheme
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [info.key for info in infos] == ["p/a"]
 
     def test_non_s3_location_raises_eagerly(self) -> None:
         # ls() is a regular method (not a generator): a non-S3 target raises on
         # the call itself, before any iteration.
         with pytest.raises(ValidationError):
-            S3().ls(LocalStorage("/tmp/x"), on_result=lambda _info: None)
+            S3().ls(LocalStorage("/tmp/x"), on_entry=lambda _info: None)
 
     def test_service_root_storage_lists_buckets(self) -> None:
         client = _FakeS3Client([{"Buckets": [{"Name": "alpha", "CreationDate": _MTIME}]}])
         storage = S3Storage("s3://", client=client)
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [(i.key, i.kind) for i in infos] == [("alpha", FileKind.BUCKET)]
 
     def test_bucket_filters_reach_the_scan(self) -> None:
@@ -154,7 +154,7 @@ class TestLsRouting:
         storage = S3Storage("s3://", client=client)
         S3().ls(
             storage,
-            on_result=lambda _info: None,
+            on_entry=lambda _info: None,
             bucket_name_prefix="al",
             bucket_region="us-east-1",
         )
@@ -163,7 +163,7 @@ class TestLsRouting:
 
     def test_key_without_bucket_raises_eagerly(self) -> None:
         with pytest.raises(ValidationError):
-            S3().ls("s3:///key", on_result=lambda _info: None)
+            S3().ls("s3:///key", on_entry=lambda _info: None)
 
 
 class TestClientSeam:

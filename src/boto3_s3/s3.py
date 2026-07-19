@@ -723,7 +723,7 @@ class S3:
         self,
         target: Location = "s3://",
         *,
-        on_result: ListingCallback,
+        on_entry: ListingCallback,
         recursive: bool = False,
         request_payer: str | None = None,
         bucket_name_prefix: str | None = None,
@@ -745,9 +745,9 @@ class S3:
         ``S3Storage``'s own ``page_size`` config (its constructor) - pass a
         configured ``S3Storage`` as ``target`` to tune it. A non-S3 ``Location``
         raises ``ValidationError``. The target is validated eagerly. Entries are
-        delivered in listing order to `on_result` on the calling thread.
+        delivered in listing order to `on_entry` on the calling thread.
 
-        `cancel_token` may be cancelled from `on_result` or another thread.
+        `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
         page request already in progress, reclaims the prefetch worker, and then
         raises `CancelledError`. Both cancellation modes therefore have the
@@ -771,7 +771,7 @@ class S3:
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
-                on_result(info)
+                on_entry(info)
                 if cancel_token is not None and cancel_token.cancelled:
                     break
         finally:
