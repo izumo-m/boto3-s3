@@ -62,7 +62,12 @@ order (see step 3).
      covers the library version the CLI code actually needs — when the CLI uses
      an API added in the library version being released alongside it, the floor
      **must** be that version (`boto3-s3>=X.Y.Z,<X.Y+1.0`). A stale floor
-     resolves an older library from PyPI and crashes at runtime.
+     resolves an older library from PyPI and crashes at runtime. Between
+     releases, `develop` intentionally keeps the last *released* floor (the
+     workspace resolves the library from source, so development never needs
+     an early bump); updating the range is this step, done at release time —
+     a pre-release audit that sees the older floor on `develop` is looking at
+     the intended state, not a pending action.
 2. Merge into `main`, keeping the merge commit as a clear release boundary:
    ```bash
    git switch main && git merge --no-ff develop
