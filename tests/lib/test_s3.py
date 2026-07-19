@@ -166,6 +166,22 @@ class TestLsRouting:
             S3().ls("s3:///key", on_entry=lambda _info: None)
 
 
+class TestUnknownTransferOption:
+    """cp / mv / sync reject a typo'd ``**options`` key eagerly (pre-pipeline).
+
+    Unpack[TransferOptions] covers type-checked callers only; without the
+    runtime check a dry_run (for dryrun) typo would be silently ignored -
+    and on mv still delete the source.
+    """
+
+    @pytest.mark.parametrize("op", ["cp", "mv", "sync"])
+    def test_unknown_key_raises_before_any_work(self, op: str) -> None:
+        method = getattr(S3(), op)
+        with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
+            method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
+        assert type(ei.value) is ValidationError
+
+
 class TestClientSeam:
     """``S3.client`` builds a fresh client from session / endpoint_url / config."""
 

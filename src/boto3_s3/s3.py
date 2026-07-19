@@ -98,6 +98,27 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     return f"{head}/" if sep else ""
 
 
+# Every key TransferOptions accepts (the TypedDict is total=False, so the
+# two frozensets union to the full key set regardless of future totality).
+_TRANSFER_OPTION_KEYS = frozenset(TransferOptions.__required_keys__) | frozenset(
+    TransferOptions.__optional_keys__
+)
+
+
+def _validate_transfer_options(options: TransferOptions, *, operation: str) -> None:
+    """Reject unknown ``**options`` keys eagerly (pre-pipeline `ValidationError`).
+
+    ``Unpack[TransferOptions]`` already enforces the key set for type-checked
+    callers, but an unchecked caller's typo (``dry_run`` for ``dryrun``) would
+    otherwise be silently ignored - and on ``mv`` still delete the source.
+    """
+    unknown = sorted(set(options) - _TRANSFER_OPTION_KEYS)
+    if unknown:
+        raise ValidationError(
+            f"Unknown transfer option(s): {', '.join(unknown)}", operation=operation
+        )
+
+
 def _emit_result(
     on_result: ResultCallback | None,
     *,
@@ -890,6 +911,7 @@ class S3:
         with aws's wording (their pre-pipeline rc 255 shape - no
         ``ClientError`` cause, so the CLI maps it to the general rc).
         """
+        _validate_transfer_options(options, operation="cp")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
@@ -1273,6 +1295,7 @@ class S3:
         ``--validate-same-s3-paths`` machinery; bring your own s3control /
         sts clients) when that risk applies.
         """
+        _validate_transfer_options(options, operation="mv")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
@@ -1424,6 +1447,7 @@ class S3:
         and drains accepted transfers/deletes; immediate mode additionally
         requests best-effort future cancellation.
         """
+        _validate_transfer_options(options, operation="sync")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)

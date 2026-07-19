@@ -463,7 +463,9 @@ class TransferOptions(TypedDict, total=False):
 
     Names are the snake_case form of the corresponding ``aws s3`` options; the
     library translates them to S3 API PascalCase internally. Options that do not
-    apply to a given transfer direction are ignored (aws-cli parity).
+    apply to a given transfer direction are ignored (aws-cli parity). An
+    *unknown* key, by contrast, is rejected eagerly by ``cp`` / ``mv`` /
+    ``sync`` (``ValidationError``): a typo'd option never passes silently.
 
     ``sse_c_key`` is a ``str`` or raw ``bytes``, like botocore's
     ``SSECustomerKey``: ``aws`` passes the CLI string through verbatim (only
