@@ -35,8 +35,11 @@ Subclass `Storage`, set two class attributes, and implement the methods the
 declared capabilities promise. Only `as_text` is abstract; `open` /
 `scan_pages` / `delete` / `get_fileinfo` have base implementations that raise
 `NotImplementedError` naming the missing capability, so a minimal backend
-implements exactly what it declares — the engine's capability gates refuse an
-unsupported operation up front, before that backstop is ever reached:
+implements exactly what it declares. Every declared flag — including one
+*implied* by a stronger flag (section 3's lattice: `SCAN` implies
+`GET_FILEINFO`) — promises its matching method; the engine's gates check
+declarations, not implementations, so they refuse an unsupported operation up
+front only when the declaration is honest:
 
 - **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
   `"s3"` / `"local"` (a display/classification label; result rendering uses

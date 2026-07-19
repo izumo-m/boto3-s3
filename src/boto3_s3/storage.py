@@ -303,9 +303,11 @@ class Storage(abc.ABC):
         form as ``compare_key`` on every entry this producer yields.
 
         The base implementation raises ``NotImplementedError``: ``capabilities``
-        is the declarative contract (implement what the declared flags promise,
-        ``SCAN`` here), and the engine's capability gates refuse an unsupported
-        operation before this backstop is reachable.
+        is the declarative contract - every declared flag, including one
+        *implied* by a stronger flag (``SCAN`` implies ``GET_FILEINFO``),
+        promises its matching method. The engine's gates check declarations,
+        not implementations, so an honest declaration never reaches this
+        backstop.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement scan_pages (StorageCapability.SCAN)"
