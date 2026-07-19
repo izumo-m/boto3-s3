@@ -240,6 +240,12 @@ class TestUpload:
         assert isinstance(transferrer.first_error, NotFoundError)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert str(results[0].error).startswith("An error occurred (NoSuchBucket)")
+        # The attribute contract (exceptions.md section 2.1): an
+        # exception-backed per-item failure links its original ClientError on
+        # the record error's __cause__, matching the raise-from paths.
+        error = results[0].error
+        assert error is not None
+        assert isinstance(error.__cause__, ClientError)
 
     def test_invalid_grants_raise_at_submit_time(self, tmp_path: Path) -> None:
         # aws maps request params per item inside its pipeline, so a bad

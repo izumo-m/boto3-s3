@@ -85,13 +85,17 @@ class and read the attributes.
 `__cause__` reachability: an error raised for a failed S3 request carries the
 originating botocore `ClientError` on `__cause__` (the `raise ... from`
 boundary conversion of section 1) - the CLI's rc-254 test reads exactly this
-(section 5). `BatchError` is two levels deep: its `__cause__` is the
-**translated** first failure (a `Boto3S3Error`, section 4), never the raw
-backend exception, so a preserved `ClientError` sits at `__cause__.__cause__`.
-Treat that second level as diagnostic rather than guaranteed: not every
-per-item failure path has a backend exception to preserve (a per-key
-`DeleteObjects` `Errors[]` entry is synthesized from the response body,
-section 3, with no exception object behind it).
+(section 5). Per-item failure records link the same way: the translation
+stamps the original exception onto the record error's `__cause__` (a
+pass-through `Boto3S3Error` keeps whatever cause it already has). `BatchError`
+is two levels deep: its `__cause__` is the **translated** first failure (a
+`Boto3S3Error`, section 4), never the raw backend exception, so an
+exception-backed failure's original - a `ClientError` where the server was
+reached - sits at `__cause__.__cause__`, and that is a guarantee. The one
+exception-free path is a per-key `DeleteObjects` `Errors[]` entry: it is
+synthesized from the response body (section 3) with no exception object
+behind it, so its `__cause__` is `None` and only the message carries the
+code.
 
 The context attributes are best-effort, and `operation=None` is a legitimate
 value: it means no subcommand-scoped operation was in scope - client

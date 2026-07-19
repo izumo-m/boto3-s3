@@ -547,6 +547,10 @@ class _SyncDeletes:
     def _fail(self, exc: Exception, info: FileInfo) -> Boto3S3Error:
         """Map a synchronous-delete error into the taxonomy and count it."""
         error = translate_boto_error(exc, operation="sync", key=info.key)
+        if error is not exc:
+            # Same cause link as the transfer engine's _record_failure
+            # (exceptions.md section 2.1); a pass-through keeps its own cause.
+            error.__cause__ = exc
         self._local_failed += 1
         if self._local_first_error is None:
             self._local_first_error = error

@@ -1418,6 +1418,12 @@ class Transferrer:
             bucket=item.dest_bucket or item.src_bucket,
             key=item.dest_key or item.src_key,
         )
+        if error is not exc:
+            # Link the original exception the way the raise-from paths
+            # (s3_errors) do, so a record's error carries its ClientError at
+            # __cause__ (exceptions.md section 2.1). A pass-through
+            # Boto3S3Error keeps whatever cause it already has.
+            error.__cause__ = exc
         with self._lock:
             self._failed += 1
             if self._first_error is None:
