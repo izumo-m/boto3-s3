@@ -2079,14 +2079,17 @@ def _allow_inline_mpu_tagging() -> None:
     strip the header and force every small tag set through the post-copy
     PutObjectTagging fallback: a wire divergence, and a failure-timing one
     (aws fails at create and keeps the source where tagging is denied).
-    Removed idempotently; a no-op on older s3transfer that never blacklisted
-    it.
+    Removed EAFP-style: the table is process-shared, so two threads building
+    their first manager concurrently could both pass a membership check and
+    the loser's ``remove`` would raise; catching ``ValueError`` instead also
+    keeps this a no-op on older s3transfer that never blacklisted it.
     """
     from s3transfer.copies import CopySubmissionTask
 
-    blacklist = CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
-    if "Tagging" in blacklist:
-        blacklist.remove("Tagging")
+    try:
+        CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST.remove("Tagging")
+    except ValueError:
+        pass
 
 
 def _mpu_inline_tagging_supported() -> bool:
