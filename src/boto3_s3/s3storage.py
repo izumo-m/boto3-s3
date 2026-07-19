@@ -134,7 +134,7 @@ _S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
 )
 
 
-def _parse_s3_url(url: str) -> tuple[str, str]:
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
     """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
 
     Either part may be empty: a bare ``"s3://"`` is the service root (bucket
@@ -146,7 +146,7 @@ def _parse_s3_url(url: str) -> tuple[str, str]:
     no bucket - are deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
-    rest = url.partition("://")[2]
+    rest = uri.partition("://")[2]
     return S3Storage.split_bucket_key(rest)
 
 
@@ -476,14 +476,14 @@ class S3Storage(Storage):
 
     def __init__(
         self,
-        url: str | os.PathLike[str],
+        uri: str | os.PathLike[str],
         *,
         client: S3Client | None = None,
         page_size: int | None = None,
         fetch_owner: bool = False,
         scan_wait_on_interrupt: bool = True,
     ) -> None:
-        text = os.fspath(url)
+        text = os.fspath(uri)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
         # is optional here for convenience: "bucket/key" reads the same as
         # "s3://bucket/key" (mirrors aws-cli ls/presign/website). S3.resolve stays
@@ -491,8 +491,8 @@ class S3Storage(Storage):
         # still tell bare local paths from S3.
         if not text.startswith(_S3_SCHEME):
             text = f"{_S3_SCHEME}{text}"
-        self._url = text
-        self._bucket, self._key = _parse_s3_url(text)
+        self._uri = text
+        self._bucket, self._key = _parse_s3_uri(text)
         self._client = client
         self._owns_client = client is None
         # How this source is listed (the scan's source-config): the ListObjectsV2
@@ -505,8 +505,8 @@ class S3Storage(Storage):
         self.scan_wait_on_interrupt = scan_wait_on_interrupt
 
     @property
-    def url(self) -> str:
-        return self._url
+    def uri(self) -> str:
+        return self._uri
 
     @property
     def bucket(self) -> str:
@@ -564,7 +564,7 @@ class S3Storage(Storage):
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
         """
-        rest = self._url.partition("://")[2]
+        rest = self._uri.partition("://")[2]
         if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
             raise ValidationError(
                 "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
@@ -574,7 +574,7 @@ class S3Storage(Storage):
                 "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
             )
         if not self._bucket and self._key:
-            raise ValidationError(f"s3:// URL has a key but no bucket: {self._url!r}")
+            raise ValidationError(f"s3:// URL has a key but no bucket: {self._uri!r}")
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.

@@ -640,13 +640,13 @@ class TestConstructor:
         assert (bare.bucket, bare.key) == (explicit.bucket, explicit.key)
 
     def test_url_is_canonicalized_with_scheme(self) -> None:
-        assert S3Storage("bucket/key").url == "s3://bucket/key"
+        assert S3Storage("bucket/key").uri == "s3://bucket/key"
 
     def test_empty_bucket_is_the_service_root(self) -> None:
         for url in ("s3://", ""):
             storage = S3Storage(url)
             assert (storage.bucket, storage.key) == ("", "")
-            assert storage.url == "s3://"
+            assert storage.uri == "s3://"
 
     def test_key_without_bucket_is_rejected(self) -> None:
         # Construction is permissive (non-raising); validate() does the rejection.

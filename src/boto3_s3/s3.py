@@ -6,7 +6,7 @@
 boto3 client lives on the ``S3Storage``; when its client is omitted it falls
 back to ``boto3.client("s3")``. To target a custom endpoint / profile / region
 (e.g. MinIO) or a second account for S3-to-S3, pass an explicit
-``S3Storage(url, client=...)`` instead of a bare string.
+``S3Storage(uri, client=...)`` instead of a bare string.
 """
 
 from __future__ import annotations
@@ -608,7 +608,7 @@ class S3:
     Overriding ``resolve`` reaches the transfer ops only; the S3-only ops bypass
     it (they always read their target as S3), so their endpoint / credentials are
     customized through ``client`` alone. A second account for S3-to-S3, or a
-    per-location client, is expressed by an explicit ``S3Storage(url,
+    per-location client, is expressed by an explicit ``S3Storage(uri,
     client=...)``. Debug-log secret masking is configured via
     `boto3_s3.set_stream_logger`. The instance's own state
     is thread-safe to share, but its clients need care: ``client()`` is not safe
@@ -616,7 +616,7 @@ class S3:
     ``s3transfer``, whose per-transfer setup is not thread-safe on a shared
     client. To run operations in parallel across threads, build one client per
     thread sequentially, up front, then give each thread its own
-    ``S3Storage(url, client=...)`` - never share a client, never build clients
+    ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
     """
 
@@ -649,7 +649,7 @@ class S3:
         connection, hence no ``close()``. Built from ``session`` (or boto3's
         default session) with ``endpoint_url`` / ``config`` applied. Override to
         change credentials, reuse a cached client, or return a test double; reuse
-        one explicitly via ``S3Storage(url, client=s3.client())``. A failed build
+        one explicitly via ``S3Storage(uri, client=s3.client())``. A failed build
         raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
         unresolvable credentials / region, its ``InvalidConfigError``
         refinement for a set-but-unusable ``AWS_PROFILE``, partial
