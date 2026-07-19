@@ -21,6 +21,7 @@ import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.autoprompt import completers as c
+from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.autoprompt.model import ROOT, build_model, subparser_map
 from boto3_s3_cli.autoprompt.parser import CLIParser
 from boto3_s3_cli.autoprompt.prompter import AutoPrompter
@@ -554,6 +555,35 @@ class TestAutoPromptModeResolution:
         err = capsys.readouterr().err
         assert rc == 252
         assert "prompt_toolkit" not in err  # the install hint was NOT shown
+
+
+class TestScopedConfigFileChoice:
+    """``_read_scoped_cli_auto_prompt`` is present-wins on ``AWS_CONFIG_FILE``
+    (botocore's EnvironmentProvider): an *empty* value means "no config file",
+    never a fallback to ``~/.aws/config`` - a scripted run neutralizing the
+    config must not get an interactive prompt from the fallback file."""
+
+    def _seed_fallback_config(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # Point expanduser's ~ at tmp_path and plant cli_auto_prompt = on in
+        # the fallback location.
+        config = tmp_path / ".aws" / "config"
+        config.parent.mkdir()
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+    def test_empty_env_value_disables_the_fallback_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._seed_fallback_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("AWS_CONFIG_FILE", "")
+        assert resolve._read_scoped_cli_auto_prompt("default") is None
+
+    def test_unset_env_reads_the_fallback_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._seed_fallback_config(monkeypatch, tmp_path)
+        monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
+        assert resolve._read_scoped_cli_auto_prompt("default") == "on"
 
 
 class TestPromptToolkitAdapter:

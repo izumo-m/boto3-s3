@@ -95,7 +95,13 @@ def _read_scoped_cli_auto_prompt(profile: str) -> str | None:
     """
     import configparser
 
-    path = os.environ.get("AWS_CONFIG_FILE") or os.path.expanduser("~/.aws/config")
+    # Present-wins like botocore's EnvironmentProvider: AWS_CONFIG_FILE=""
+    # means "no config file" (aws then leaves cli_auto_prompt off), not "fall
+    # back to ~/.aws/config" - a scripted run neutralizing the config must not
+    # get an interactive prompt from the fallback file.
+    path = os.environ.get("AWS_CONFIG_FILE")
+    if path is None:
+        path = os.path.expanduser("~/.aws/config")
     parser = configparser.RawConfigParser()
     try:
         if not parser.read(path):
