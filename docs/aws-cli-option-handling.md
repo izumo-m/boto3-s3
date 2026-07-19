@@ -119,8 +119,10 @@ too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
 covers the free-string transfer options (`--content-type`,
 `--website-redirect`, `--cache-control`, `--content-disposition`,
 `--content-encoding`, `--content-language`, `--expires`, `--source-region`,
-`--sse-kms-key-id`), the string-typed integer options (`--page-size` /
-`--progress-frequency` / `--expected-size` / `--expires-in`, expanded before
+`--sse-kms-key-id`, and `--expected-size` - a plain string in aws's table, so
+a readable `fileb://` is rejected with the bytes 252 while its `int()` runs
+only on the stream route at submit), the string-typed integer options
+(`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
 their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
 after both integer coercions, before its shorthand parse; the shorthand also
 accepts aws's `key@=file://...` operator). The choices-validated options

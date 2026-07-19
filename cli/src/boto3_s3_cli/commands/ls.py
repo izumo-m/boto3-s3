@@ -89,7 +89,10 @@ class LsCommand(Command):
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
             )
-            sys.stdout.write(line + "\n")
+            # uni_write (aws's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not abort the listing mid-way - aws
+            # prints it with replacements and finishes rc 0.
+            output.uni_write(sys.stdout, line + "\n")
             if info.kind is FileKind.FILE:
                 total_objects += 1
                 total_size += info.size or 0
@@ -104,8 +107,11 @@ class LsCommand(Command):
         )
 
         if args.summarize:
-            sys.stdout.write(
-                output.format_summary(total_objects, total_size, human_readable=args.human_readable)
+            output.uni_write(
+                sys.stdout,
+                output.format_summary(
+                    total_objects, total_size, human_readable=args.human_readable
+                ),
             )
 
         # aws-cli parity: exit 1 when a key/prefix was given but nothing matched.

@@ -9,15 +9,18 @@ errors as one ``fatal error:`` line - never 254.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import sys
 from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import FileInfo, S3Storage
+from boto3_s3 import FileInfo, OpOutcome, OpResult, S3Storage, TransferType
 from boto3_s3.globsieve import GlobPattern, PatternKind
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
+from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.harness import CliResult, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -112,6 +115,34 @@ class TestOutputMatrix:
         client = _RaisingPaginatorClient(_client_error("NoSuchBucket", 404))
         result = run_cli_in_process(["rm", "s3://b/", "--recursive", "--quiet"], ctx=_ctx(client))
         assert (result.rc, result.stdout, result.stderr) == (1, "", "")
+
+
+class TestDeletePrinterEncoding:
+    def test_unencodable_key_prints_with_replacements(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The success line goes through uni_write (aws's uni_print): a
+        # non-ASCII key on an ascii-encoding stdout is '?'-replaced instead
+        # of raising UnicodeEncodeError out of the deleter-worker callback
+        # and killing the run.
+        class _AsciiStream(io.StringIO):
+            encoding = "ascii"
+
+            def write(self, text: str) -> int:
+                text.encode("ascii")  # raises UnicodeEncodeError on non-ASCII
+                return super().write(text)
+
+        stream = _AsciiStream()
+        monkeypatch.setattr(sys, "stdout", stream)
+        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer(
+            OpResult(
+                transfer_type=TransferType.DELETE,
+                compare_key="名前.txt",
+                outcome=OpOutcome.SUCCEEDED,
+            )
+        )
+        assert stream.getvalue() == "delete: s3://b/??.txt\n"
 
 
 class TestExitCodeShape:

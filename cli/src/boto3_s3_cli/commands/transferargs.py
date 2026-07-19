@@ -29,6 +29,7 @@ from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
     expand_integer_paramfile,
+    expand_option_paramfile,
     parse_integer_option,
 )
 from boto3_s3_cli.progress import TransferPrinter
@@ -330,7 +331,11 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     page_size, progress_frequency = resolve_paramfile_values(args, operation=operation)
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
-    expand_integer_paramfile(args, "expected_size", operation=operation)
+    # A *string*-typed option in aws (no cli_type_name, unlike --page-size),
+    # so a readable fileb:// is rejected with botocore's bytes 252 at parse -
+    # measured: aws 252 where the integer helper would run int(b'5') and
+    # proceed. The stream route's int() coercion still runs at submit time.
+    expand_option_paramfile(args, "expected_size", operation=operation)
     s3 = ctx.s3(args)
     src, dest = args.paths
     src_type = identify_type(src)

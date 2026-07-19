@@ -253,6 +253,24 @@ class TestPrinterThread:
         printer.finish()  # second finish: no thread left, silently a no-op
         assert capsys.readouterr().out == "upload: s3://b/a.txt to s3://b/copy.txt\n"
 
+    def test_callbacks_after_finish_drop_records_instead_of_enqueueing(self) -> None:
+        # finish() joins and discards the drain thread: a late callback (an
+        # abandoned scan worker whose generator keeps warning after a fatal,
+        # long after the run's records were drained) must drop its record
+        # instead of feeding the dead queue - enough blocking puts at the
+        # bound would deadlock the prefetch join at generator close.
+        printer = TransferPrinter()
+        with printer:
+            pass
+        for _ in range(3):
+            printer.on_result(_result(OpOutcome.WARNED, error=RuntimeError("late warning")))
+            assert printer._queue.qsize() == 0
+        printer.on_progress(_progress("a.txt", 5, 10))
+        assert printer._queue.qsize() == 0
+        # The worker-side counters still count (they never depend on the
+        # printer thread), only the rendering records are dropped.
+        assert printer.warned == 3
+
     def test_dead_stream_stops_rendering_but_not_the_counters(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:

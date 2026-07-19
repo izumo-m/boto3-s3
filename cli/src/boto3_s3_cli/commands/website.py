@@ -42,7 +42,9 @@ class WebsiteCommand(Command):
         # options are all expanded at parse time - before the request is built.
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
+        raw_paths = args.paths
         expand_positional_paramfile(args, "paths", name="paths", operation="website")
+        paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
         # Import the library entry point only when this execution path needs it.
@@ -58,6 +60,15 @@ class WebsiteCommand(Command):
             # The resulting int has no startswith(), so aws exits 255.
             raise AttributeError("'int' object has no attribute 'startswith'")
         path: str = args.paths
+        if paths_expanded:
+            # The file:// half of the same bug: the unwrapped value is the
+            # loaded text, and indexing it takes its FIRST CHARACTER as the
+            # path (measured: a paramfile containing "s3://mybucket" makes aws
+            # PutBucketWebsite on bucket "s"; an empty file is aws's
+            # IndexError, rc 255 through the general handler). Reproducing it
+            # matters beyond the rc: using the full text would perform a write
+            # on a bucket aws never touches.
+            path = path[0]
         if path.startswith("s3://"):
             path = path[len("s3://") :]
         if path.endswith("/"):

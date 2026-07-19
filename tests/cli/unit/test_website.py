@@ -233,3 +233,32 @@ class TestWebsiteParamfileAndQuery:
         )
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
+
+    def test_readable_positional_paramfile_uses_only_its_first_character(
+        self, tmp_path: Any
+    ) -> None:
+        # The file:// half of aws's positional bug: the unwrapped value is the
+        # loaded text and the command indexes it, so only the FIRST character
+        # is the path (measured live: a paramfile containing "s3://mybucket"
+        # makes aws PutBucketWebsite on bucket "s" - it dials /s?website).
+        # Reproducing it matters beyond the rc: using the full text would
+        # write to a bucket aws never touches.
+        ref = tmp_path / "u.txt"
+        ref.write_text("s3://mybucket")
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", f"file://{ref}", "--index-document", "i.html"], ctx=_ctx(client))
+        assert rc == 0
+        assert client.calls == [
+            {"Bucket": "s", "WebsiteConfiguration": {"IndexDocument": {"Suffix": "i.html"}}}
+        ]
+
+    def test_empty_readable_positional_paramfile_is_255(
+        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # An empty paramfile leaves nothing to index: aws's IndexError, rc 255
+        # through the general handler (measured).
+        ref = tmp_path / "empty.txt"
+        ref.write_text("")
+        rc = cli.main(["website", f"file://{ref}"], ctx=Context(client_factory=_unused_factory))
+        assert rc == 255
+        assert "string index out of range" in capsys.readouterr().err

@@ -67,7 +67,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
 from boto3_s3.localstorage import LocalStorage
-from boto3_s3_cli.output import human_readable_size
+from boto3_s3_cli.output import human_readable_size, uni_write
 
 if TYPE_CHECKING:
     from boto3_s3 import OpResult, TransferProgress
@@ -163,6 +163,9 @@ class TransferPrinter:
         # rendering pipeline
         self._queue: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_MAX)
         self._thread: threading.Thread | None = None
+        # Set by finish(): the callbacks then drop records instead of feeding
+        # a queue whose consumer is gone (see finish for the deadlock chain).
+        self._finished = False
         # printer-thread-only state (no lock: one thread owns them)
         self._progress_length = 0
         self._output_dead = False
@@ -190,8 +193,24 @@ class TransferPrinter:
         if thread is None:
             return
         self._thread = None
+        # From here the callbacks drop records instead of enqueueing (guards
+        # in on_result/on_progress): with the drain thread gone, a blocking
+        # put on the bounded queue would never be consumed - and an abandoned
+        # scan worker (its generator awaiting finalization after a fatal) can
+        # keep warning long after the run's records were drained. A worker
+        # wedged in put() at ~10k would then deadlock the prefetch join at
+        # generator close.
+        self._finished = True
         self._queue.put(_SHUTDOWN)
         thread.join()
+        # Discard anything that slipped in around the flag flip, freeing any
+        # producer already blocked on a full queue; later stray puts find a
+        # queue with room and simply go unread.
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
     # -- callbacks (worker threads: count and enqueue, never write) -----------
 
@@ -233,7 +252,8 @@ class TransferPrinter:
         # Enqueue outside the lock: a full queue blocks the worker (the
         # documented back-pressure), and blocking while holding the lock
         # would also stall the other workers' bookkeeping.
-        self._queue.put(snapshot)
+        if not self._finished:
+            self._queue.put(snapshot)
 
     def on_result(self, result: OpResult) -> None:
         """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
@@ -279,7 +299,7 @@ class TransferPrinter:
                         result.dest,
                         str(result.error) if result.error is not None else "",
                     )
-        if record is not None:
+        if record is not None and not self._finished:
             self._queue.put(record)  # outside the lock, like the snapshot
 
     def _prints(self, outcome: OpOutcome) -> bool:
@@ -382,16 +402,9 @@ class TransferPrinter:
             self._output_dead = True
 
     def _uni_write(self, stream: TextIO, text: str) -> None:
-        """aws-cli's ``uni_print``: on a console/codepage that cannot encode the
-        text (a non-ASCII key on a cp932 or ascii stream), re-encode with the
-        stream's encoding and ``errors='replace'`` rather than dropping the
-        line, so one unencodable key never silences the rest of the run."""
-        try:
-            stream.write(text)
-        except UnicodeEncodeError:
-            encoding = getattr(stream, "encoding", None) or "ascii"
-            stream.write(text.encode(encoding, "replace").decode(encoding))
-        stream.flush()
+        """The shared ``uni_print`` port (``output.uni_write``), kept as a
+        method seam for the rendering paths above."""
+        uni_write(stream, text)
 
 
 __all__ = ["TransferPrinter"]

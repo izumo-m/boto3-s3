@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory, globalargs
+from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -63,5 +63,5 @@ class PresignCommand(Command):
         storage = S3Storage(args.path, client=s3.client())
         storage.validate()
         url = s3.presign(storage, expires_in=expires_in)
-        sys.stdout.write(url + "\n")
+        output.uni_write(sys.stdout, url + "\n")
         return 0

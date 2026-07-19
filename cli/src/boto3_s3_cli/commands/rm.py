@@ -57,9 +57,16 @@ class _DeletePrinter:
         if result.outcome is OpOutcome.FAILED:
             sys.stderr.write(output.format_delete_failed(self._bucket, key, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
-            sys.stdout.write(output.format_delete(self._bucket, key, dryrun=True) + "\n")
+            # uni_write (aws's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not raise out of the deleter worker
+            # and kill the run - aws prints it with replacements and finishes.
+            output.uni_write(
+                sys.stdout, output.format_delete(self._bucket, key, dryrun=True) + "\n"
+            )
         elif not self._only_show_errors:
-            sys.stdout.write(output.format_delete(self._bucket, key, dryrun=False) + "\n")
+            output.uni_write(
+                sys.stdout, output.format_delete(self._bucket, key, dryrun=False) + "\n"
+            )
 
 
 class RmCommand(Command):
@@ -97,15 +104,21 @@ class RmCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
+        expand_integer_paramfile(args, "page_size", operation="rm")
+        page_size = parse_integer_option(args.page_size, operation="rm")
+        s3 = ctx.s3(args)
         if isinstance(args.paths, bytes):
             # Intentional aws-cli bug parity: S3TransferCommand decodes a
             # positional fileb:// back through the filesystem encoding before
             # validating and executing it. This is why rm reaches its normal
             # rc-1 operation-error path while ls / website crash at rc 255.
+            # The decode sits at aws's slot - _convert_path_args runs after the
+            # whole option unpack loop and after the client build - so a bad
+            # --page-size paramfile (252) and a bad --profile (255) both beat
+            # an undecodable fileb positional (measured against the pinned aws:
+            # fileb bytes 0xff + missing page-size paramfile is aws 252, and
+            # the decode's UnicodeDecodeError 255 fires only after them).
             args.paths = args.paths.decode(sys.getfilesystemencoding())
-        expand_integer_paramfile(args, "page_size", operation="rm")
-        page_size = parse_integer_option(args.page_size, operation="rm")
-        s3 = ctx.s3(args)
         # Deferred: dispatch is the first point that needs the library's S3
         # entry (whose chain reaches botocore).
         from boto3_s3 import S3Storage

@@ -608,6 +608,38 @@ class TestParseToValidationOrder:
         )
         assert rc == 255
 
+    def test_expected_size_readable_fileb_is_a_param_validation_252(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --expected-size is a string-model option in aws (no cli_type_name),
+        # NOT part of the integer-family expansion: a readable fileb:// is
+        # botocore's bytes rejection at parse time (252), where the integer
+        # helper would run int(b'5') and proceed. Measured.
+        blob = tmp_path / "size.bin"
+        blob.write_bytes(b"5")
+        rc = cli.main(["cp", "-", "s3://b/k", "--expected-size", f"fileb://{blob}"])
+        assert rc == 252
+        assert (
+            "Invalid type for parameter input, value: b'5', "
+            "type: <class 'bytes'>, valid types: <class 'str'>"
+        ) in capsys.readouterr().err
+
+    def test_rm_page_size_paramfile_beats_the_positional_fileb_decode(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rm decodes a readable positional fileb:// back through the
+        # filesystem encoding at aws's slot - after the whole option unpack
+        # loop and the client build - so a bad --page-size paramfile (252)
+        # beats the decode's UnicodeDecodeError (255). Measured.
+        ref = tmp_path / "path.bin"
+        ref.write_bytes(b"\xff\xfe")
+        rc = cli.main(["rm", f"fileb://{ref}", "--page-size", "file:///nonexistent/pp.txt"])
+        assert rc == 252
+        assert (
+            "Error parsing parameter '--page-size': Unable to load paramfile"
+            in capsys.readouterr().err
+        )
+
     def test_ls_endpoint_beats_the_integer_coercion(self) -> None:
         rc = cli.main(["ls", "s3://b", "--page-size", "abc", "--endpoint-url", "badurl"])
         assert rc == 252

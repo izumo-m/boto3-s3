@@ -109,7 +109,7 @@ class RbCommand(Command):
         except Boto3S3Error as exc:
             sys.stderr.write(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1
-        sys.stdout.write(output.format_remove_bucket(storage.bucket) + "\n")
+        output.uni_write(sys.stdout, output.format_remove_bucket(storage.bucket) + "\n")
         return 0
 
     @staticmethod
