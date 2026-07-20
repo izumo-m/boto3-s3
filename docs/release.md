@@ -87,7 +87,17 @@ order (see step 3).
    git tag boto3-s3-cli-vA.B.C
    git push origin boto3-s3-cli-vA.B.C
    ```
-4. Bring `develop` back level with `main` so the two lines stay in sync:
+4. Create the GitHub Release for each pushed tag, using the changelog section
+   released in step 1 as the notes. The library release carries the
+   repository's "Latest" badge; a CLI release never takes it:
+   ```bash
+   gh release create boto3-s3-vX.Y.Z --verify-tag --latest \
+     --title "boto3-s3 X.Y.Z" --notes "<the [X.Y.Z] section of CHANGELOG.md>"
+   # CLI release: notes from cli/CHANGELOG.md
+   gh release create boto3-s3-cli-vA.B.C --verify-tag --latest=false \
+     --title "boto3-s3-cli A.B.C" --notes "<the [A.B.C] section of cli/CHANGELOG.md>"
+   ```
+5. Bring `develop` back level with `main` so the two lines stay in sync:
    ```bash
    git switch develop && git merge --ff-only main && git push origin develop
    ```
