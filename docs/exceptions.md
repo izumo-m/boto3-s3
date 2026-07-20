@@ -125,7 +125,8 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | S3 `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` (5xx / throttle) | `TransportError` |
 | local `PermissionError` (incl. the post-download utime EPERM) | `AccessDeniedError` |
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
-| connection failure / timeout / other `OSError` (I/O, incl. a failed `makedirs`) | `TransportError` |
+| connection failure / timeout; a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
+| an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` / other config-flavored `BotoCoreError` at client construction | `InvalidConfigError` |
@@ -160,7 +161,10 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 *translation* creates a direct base instance in only three places:
 
 - that final widening fallback;
-- `translate_boto_error`'s last clause, for an exception nothing classifies;
+- `translate_boto_error`'s last clause, for an exception no earlier clause
+  claims - notably an `OSError` raised inside s3transfer's task execution,
+  deliberately kept base (not `TransportError`) so aws's message rides
+  through verbatim;
 - the deleter's per-key `Errors[]` translation, whose entries carry a bare code
   with no HTTP status to widen on (an unknown code becomes the base category,
   deleter.md section 3).

@@ -110,7 +110,10 @@ replacing the userinfo with `***`). Non-secret structure (parameter names, the
 credential scope, the proxy host) is preserved.
 
 The only exception is the **AWS Access Key ID**: to allow distinguishing which
-account issued a request, **the last 4 characters are kept** (`***MPLE`).
+account issued a request, **the last 4 characters are kept** (`***MPLE`). The
+tail reveal applies to the `AKIA` / `ASIA`-shaped ids the pattern recognizes; a
+non-AWS-shaped id in the same slot (MinIO's `minioadmin`, say) masks entirely -
+over-masking, with the credential scope still preserved.
 
 ### 4.1 Target patterns
 

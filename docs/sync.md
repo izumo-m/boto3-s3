@@ -152,7 +152,9 @@ s3.sync(src, dest,
 
 ## 4. The default decision (ported from aws-cli, pinned by measurement)
 
-`update_filter=None` is `AwsCliComparison()`, the public form of the internal
+`update_filter=None` is `AwsCliComparison()` (`from boto3_s3.awsclicompare
+import AwsCliComparison` - an opt-in submodule import like the section 8-9
+content strategies), the public form of the internal
 `compare_size_time(pair, size_only, exact_timestamps)` (direction from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal

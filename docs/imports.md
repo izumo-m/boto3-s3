@@ -26,7 +26,9 @@ SDK-free.
 2. Using pure-Python modules (`globsieve` / `types` / `exceptions`) incurs no SDK
    tax.
 3. `boto3-s3 --help` and `boto3-s3 --version` complete without importing any
-   boto3 / botocore / s3transfer module or any command module. Version tokens
+   boto3 / botocore / s3transfer module or any subcommand's command module
+   (the `commands` package's shared `base` infrastructure may load - the
+   contract test carves exactly that out). Version tokens
    for installed SDK distributions come from package metadata. This guarantee
    is deliberately limited to these two top-level exits. Once normal dispatch
    begins - including usage-error handling or subcommand help - SDK imports are

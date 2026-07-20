@@ -33,8 +33,11 @@ solidified design is added here.
   error - beating the invalid-subcommand rejection and a `-h` anywhere in
   argv - and a parse-time `--version` prints and exits 0 even beside an
   invalid subcommand (both measured). A parse-time `-h` / `--help` wins over
-  the resolutions (aws's parser actions fire before its
-  `top-level-args-parsed` event), and aws's
+  the resolutions - an extension slot: aws s3 accepts neither (`aws -h` /
+  `aws s3 ls --help` are the 252 "Unknown options" / missing-command errors,
+  measured on 2.36.1; testing.md files `--help` under the extension options
+  the differential cannot diff), so ours orders it like the `--version`
+  action, which aws does fire parse-time - and aws's
   **help-token rule** applies: an exactly-`help` pre-pass remainder, or an
   exactly-`help` stage-2 remainder after a subcommand, prints the
   corresponding help page at rc 0 (`ls help` shows ls's help rather than
@@ -509,7 +512,7 @@ the raw bytes of a download). Combining `--recursive` is 252 (`Streaming
 currently is only compatible with non-recursive cp commands`); stdout download +
 `--no-overwrite` is also 252 (`--no-overwrite parameter is not supported for
 streaming downloads`). An absent stdin is an in-pipeline fatal (`fatal error:
-stdin is required for this operation, but is not available`, rc 1).
+stdin is required for this operation, but is not available.`, rc 1).
 `--expected-size` (a multipart design hint) is **converted with a bare `int()`
 inside the S3().cp call, but only on the streaming-upload route** (`src == "-"`)
 - the only route aws ever converts it on (`UploadStreamRequestSubmitter`); on
@@ -764,7 +767,7 @@ v2's convention (aws-cli's `awscli/constants.py`).
 
 | code | condition | the name on the aws-cli side |
 |---|---|---|
-| 0 | Success. `--help` / `--version`, and `BrokenPipeError`, are also 0 | - |
+| 0 | Success. `--help` / `--version`, and a `BrokenPipeError` reaching `main`'s handler, are also 0 (in the common `ls \| head` pipeline the interpreter's shutdown flush then fails on the closed pipe and the *process* exits 120 - aws identically, measured) | - |
 | 130 | Ctrl-C (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
@@ -856,7 +859,8 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 ## 7. Import discipline (startup cost)
 
 The top-level `--help` and `--version` exits load no AWS SDK module (boto3 /
-botocore / s3transfer) and no command module. This is the full CLI import
+botocore / s3transfer) and no subcommand's command module (the `commands`
+package's shared `base` infrastructure may load). This is the full CLI import
 contract: after normal dispatch begins, SDK imports are permitted, including on
 usage errors and subcommand help. [`imports.md`](./imports.md) defines the
 contract and `tests/cli/unit/test_import_contract.py` enforces the two exits.

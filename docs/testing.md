@@ -9,7 +9,7 @@ in [`overview.md`](./overview.md) section 3.
 | location | what | mechanism | runs |
 |---|---|---|---|
 | `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes | always |
-| `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
+| `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
 | `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against MinIO / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
@@ -207,8 +207,8 @@ lines out of it.
 additionally record `src_tree` - the local *source* tree after the run,
 captured unconditionally by the mv runners (what the move deleted, or kept
 on dryrun / filter / no-overwrite / failure; bucket-side source survival is
-already pinned by `remaining_keys`). cp goldens predate the field and load
-it as `None` (not compared). The download-mtime expectation is read from
+already pinned by `remaining_keys`). cp goldens carry the field as `null`
+(loaded as `None`, not compared; the loader also tolerates its absence). The download-mtime expectation is read from
 the object *before* the run - a successful move deletes the key the cp
 harness re-reads afterwards. Scenarios reuse `CpScenario` verbatim
 (`tests/utils/mv_scenarios.py`); the `--validate-same-s3-paths` surface has
@@ -421,7 +421,8 @@ and skip on default Linux ones.
 `tests/lib/test_import_contract.py` pins the lazy package root and explicitly
 pure modules. `tests/cli/unit/test_import_contract.py` pins the CLI's two narrow
 guarantees: top-level `--help` and `--version` load no boto3 / botocore /
-s3transfer module or command module. Normal dispatch, usage errors,
+s3transfer module or subcommand's command module (`commands/base.py` is
+carved out as shared infrastructure). Normal dispatch, usage errors,
 subcommand help, and `S3()` construction have no SDK-free contract.
 Module-loading cases run in fresh interpreters (`python -c` subprocesses) so
 imports already made by the test runner cannot mask a regression; a

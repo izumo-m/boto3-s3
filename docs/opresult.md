@@ -199,9 +199,14 @@ Re-reaching the result object (e.g. to HEAD it):
 ```python
 from boto3_s3 import S3Storage
 
-# The backend is not always S3 (`sync --delete` onto a local or custom dest
-# deletes there), so narrow before using the S3-only surface.
-storage, info = r.src_storage, r.src_info  # a delete's removed object
+# The backend is not always S3 (an upload's source is local; `sync --delete`
+# onto a local or custom dest deletes there), so narrow before using the
+# S3-only surface.
+storage, info = r.src_storage, r.src_info  # a download / copy's source object
 if isinstance(storage, S3Storage) and info is not None:
     head = storage.get_client().head_object(Bucket=storage.bucket, Key=info.key)
 ```
+
+Pick a side that still exists when the callback uses it: a delete record's
+`src_info` names the object the run just removed, so a HEAD there can only
+404.
