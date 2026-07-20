@@ -557,6 +557,10 @@ class TestDownloadRoute:
             "An error occurred (404) when calling the HeadObject operation: "
             'Key "no-such" does not exist'
         )
+        # The rewrite replaces the s3_errors translation wholesale, so the
+        # originating ClientError stays on the DIRECT __cause__ - the
+        # exceptions.md section 2.1 reachability guarantee.
+        assert isinstance(excinfo.value.__cause__, ClientError)
 
     def test_bucketless_service_root_source_reaches_head_not_silent_zero(
         self, tmp_path: Path

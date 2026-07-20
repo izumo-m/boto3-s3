@@ -592,13 +592,17 @@ def head_single(
         with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
+        # Chain the originating ClientError directly: this aws-worded error
+        # replaces the s3_errors translation wholesale, and the section 2.1
+        # reachability guarantee (exceptions.md) promises the ClientError on
+        # the *direct* `__cause__` of an error raised for a failed S3 request.
         raise NotFoundError(
             "An error occurred (404) when calling the HeadObject operation: "
             f'Key "{key}" does not exist',
             operation=operation,
             bucket=src_storage.bucket,
             key=key,
-        ) from exc
+        ) from (exc.__cause__ or exc)
     etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
