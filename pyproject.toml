@@ -15,6 +15,11 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
@@ -39,6 +44,7 @@ crt = ["boto3[crt]>=1.28"]
 Homepage = "https://github.com/izumo-m/boto3-s3"
 Repository = "https://github.com/izumo-m/boto3-s3"
 Documentation = "https://github.com/izumo-m/boto3-s3#readme"
+Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 
 [build-system]
