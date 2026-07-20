@@ -173,6 +173,25 @@ class TestExitCodeShape:
         assert result.stderr.startswith("fatal error: ")
         assert "NoSuchBucket" in result.stderr
 
+    def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
+        # aws's shared result machinery converts a Ctrl-C after the operation
+        # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
+        # received` line (measured mid-rm on the pinned 2.36.1), never the
+        # dispatcher backstop's 130, which stays for the pre-pipeline spans.
+        class _InterruptPaginatorClient:
+            def get_paginator(self, _name: Any) -> Any:
+                class _Paginator:
+                    def paginate(self, **_kwargs: Any) -> Any:
+                        raise KeyboardInterrupt
+
+                return _Paginator()
+
+        result = run_cli_in_process(
+            ["rm", "s3://b/p/", "--recursive"], ctx=_ctx(_InterruptPaginatorClient())
+        )
+        assert result.rc == 1
+        assert result.stderr == "cancelled: ctrl-c received\n"
+
     def test_object_lambda_arn_stays_usage_error(self) -> None:
         # S3Storage.validate() ARN rejections must reach main's 252 mapping, not
         # be swallowed into rm's rc-1 fatal path.

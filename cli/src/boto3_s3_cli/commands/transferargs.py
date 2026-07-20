@@ -699,11 +699,13 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     """Run the library call and derive the aws exit code (docs/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
-    ``failed`` lines, anything run-killing as one ``fatal error:`` line -
+    ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
+    received`` line, anything else run-killing as one ``fatal error:`` line -
     *any* exception type, matching aws's ``CommandResultRecorder.__exit__``,
     which converts whatever escapes the pipeline span into an ``ErrorResult``
-    (so e.g. a ``RecursionError`` from a pathologically deep tree is aws's
-    ``fatal error`` rc 1, never the dispatcher's 255). A clean run exits 2
+    (Ctrl-C into a ``CtrlCResult``; so e.g. a ``RecursionError`` from a
+    pathologically deep tree is aws's ``fatal error`` rc 1, never the
+    dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread
     runs for exactly the ``run()`` span - the ``with`` drains it on every
     path, so all queued lines are written (and precede a ``fatal error:``
@@ -714,6 +716,18 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
             run()
     except BatchError:
         # Per-item failure lines were already streamed by the printer.
+        return 1
+    except KeyboardInterrupt:
+        # Ctrl-C inside the pipeline span is a cancelled run, not the
+        # dispatcher's 130: aws's result machinery swallows the interrupt
+        # (`CommandResultRecorder.__exit__`), the shutdown cancels the
+        # accepted transfers, and the printer emits one
+        # `cancelled: ctrl-c received` line at rc 1 (measured mid-sync and
+        # mid-rm, 2.36.1). The per-item CANCELLED records stay silent like
+        # aws's (progress.py `_prints`); the pre-pipeline spans keep the
+        # 130 backstop.
+        if not quiet:
+            sys.stderr.write("cancelled: ctrl-c received\n")
         return 1
     except AssertionError:
         # An internal-invariant violation (a bug) surfaces loudly, like the

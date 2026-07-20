@@ -493,6 +493,49 @@ class TestStreaming:
         assert rc == 1
         assert "fatal error: maximum recursion depth exceeded" in captured.err
 
+    def test_mid_pipeline_ctrl_c_is_rc_1_cancelled_like_aws(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A Ctrl-C inside the pipeline span is aws's cancelled run - rc 1
+        # with one `cancelled: ctrl-c received` line (measured mid-sync on
+        # the pinned 2.36.1), never the dispatcher backstop's 130, which
+        # stays for the pre-pipeline spans (test_exit_codes).
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", interrupt)
+        ctx, _ = _recording_ctx([])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == "cancelled: ctrl-c received\n"
+        assert captured.out == ""
+
+    def test_mid_pipeline_ctrl_c_respects_quiet(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # --quiet suppresses the cancelled line like the fatal-error line
+        # (aws attaches no result printer under --quiet); the rc stays 1.
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", interrupt)
+        ctx, _ = _recording_ctx([])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive", "--quiet"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == ""
+
     def test_expected_size_non_integer_ignored_off_the_stream_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

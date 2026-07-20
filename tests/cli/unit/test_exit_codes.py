@@ -267,6 +267,25 @@ class TestMainExitCodes:
         assert out == "\n"
         assert err == ""
 
+    def test_keyboard_interrupt_before_the_pipeline_stays_130(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        # The cancelled-run conversion (transferargs.finish_transfer, rc 1)
+        # covers only the pipeline span of the transfer family; a Ctrl-C in
+        # client construction is still the dispatcher backstop's 130 with the
+        # bare newline, like aws's InterruptExceptionHandler.
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def factory(_args: Any) -> Any:
+            raise KeyboardInterrupt
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        rc = cli.main(["cp", str(tmp_path / "a.txt"), "s3://bucket/k"], ctx=ctx)
+        out, err = capsys.readouterr()
+        assert rc == 130
+        assert out == "\n"
+        assert err == ""
+
 
 class TestClientCreationExitCodes:
     """Client construction (build_client) runs the real boto3 session, which

@@ -587,7 +587,11 @@ the dir_op half of the same `_validate_path_args`; sync shares it,
 unconditionally) -> the SSE-C pair / `--case-conflict` Express branch (252)
 -> client creation (253) -> `S3().cp(...)`.
 **S3().cp is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
-lines have already been emitted by on_result), any other library exception ->
+lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
+`cancelled: ctrl-c received` line + 1 (aws's result machinery swallows a
+mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.1;
+rm's own pipeline catch converts identically, and the dispatcher's 130
+backstop keeps the pre-pipeline spans), any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
 `--expected-size`, an absent stdin, and case-conflict `error` are also here;
@@ -768,7 +772,7 @@ v2's convention (aws-cli's `awscli/constants.py`).
 | code | condition | the name on the aws-cli side |
 |---|---|---|
 | 0 | Success. `--help` / `--version`, and a `BrokenPipeError` reaching `main`'s handler, are also 0 (in the common `ls \| head` pipeline the interpreter's shutdown flush then fails on the closed pipe and the *process* exits 120 - aws identically, measured) | - |
-| 130 | Ctrl-C (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code) | aws's `InterruptExceptionHandler`, 128+SIGINT |
+| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |

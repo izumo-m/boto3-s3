@@ -92,7 +92,8 @@ class RmCommand(Command):
         Exit-code shape (differs from ``ls``): usage errors - a
         non-``s3://`` path, a rejected ARN form - exit 252 via ``main``, but
         every error after the operation starts is rc 1: per-key failures
-        print ``delete failed:`` lines, anything that kills the run (the
+        print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
+        ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line. Nothing maps to 254 here.
         """
@@ -172,6 +173,15 @@ class RmCommand(Command):
             )
         except BatchError:
             # Per-key failure lines were already streamed by the printer.
+            return 1
+        except KeyboardInterrupt:
+            # Same conversion as the cp/mv/sync span (transferargs.
+            # finish_transfer): aws's shared result machinery makes a
+            # mid-run Ctrl-C a cancelled run - one `cancelled: ctrl-c
+            # received` line, rc 1 (measured mid-rm, 2.36.1) - never the
+            # dispatcher's 130.
+            if not args.quiet:
+                sys.stderr.write("cancelled: ctrl-c received\n")
             return 1
         except Boto3S3Error as exc:
             if not args.quiet:
