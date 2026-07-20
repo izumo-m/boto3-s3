@@ -52,7 +52,6 @@ from typing import Any, BinaryIO, ClassVar, Literal, TypeVar
 from boto3_s3.concurrency import prefetch
 from boto3_s3.types import CancelToken, FileInfo, ScanOptions
 
-
 # Preserves a backend's concrete info type through sieve_pages, so a narrowed
 # scan_pages (list[S3FileInfo] pages) stays narrowed after filtering.
 _InfoT = TypeVar("_InfoT", bound="FileInfo")
