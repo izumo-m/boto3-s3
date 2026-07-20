@@ -570,6 +570,7 @@ class TestScopedConfigFileChoice:
         config.parent.mkdir()
         config.write_text("[default]\ncli_auto_prompt = on\n")
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads this, not HOME
 
     def test_empty_env_value_disables_the_fallback_read(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
