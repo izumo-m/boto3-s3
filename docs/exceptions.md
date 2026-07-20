@@ -70,7 +70,11 @@ class Boto3S3Error(Exception):
   stay boto3-faithful ([`crt.md`](./crt.md) section 3 / section 6). The CLI
   distribution maps this situation to a `ConfigurationError` (rc 253) ahead of
   time to prevent a traceback (the decision tree of crt.md section 4), so this
-  library exception never passes through the CLI.
+  library exception never passes through the CLI. The pass-through is scoped to
+  that engine-selection path: the same exception surfacing inside a translated
+  S3 call - SigV4a signing for an MRAP target without awscrt, say - converts to
+  the plain `ConfigurationError` like the section 3 table's other environment
+  errors.
 
 ### 2.1 The attribute contract (stable vs. display)
 
@@ -123,6 +127,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
 | connection failure / timeout / other `OSError` (I/O, incl. a failed `makedirs`) | `TransportError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
+| `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` / other config-flavored `BotoCoreError` at client construction | `InvalidConfigError` |
 | an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |

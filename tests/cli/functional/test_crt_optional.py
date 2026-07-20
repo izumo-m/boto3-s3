@@ -79,6 +79,18 @@ with mock_aws():
     url = result.stdout.strip()
     assert url.index("X-Amz-Expires=") < url.index("X-Amz-SignedHeaders="), url
 
+    # An MRAP target needs asymmetric SigV4a, which only awscrt implements:
+    # the always-SigV4 pin stands down for MRAP ARNs (clientfactory), so
+    # botocore's MissingDependencyException surfaces and maps to the
+    # crt-absence ConfigurationError (rc 253) instead of a silently
+    # SigV4-mis-signed URL that real AWS would reject.
+    result = run_cli_in_process(
+        ["presign", "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"]
+    )
+    assert result.rc == 253, (result.rc, result.stderr)
+    assert "Missing Dependency" in result.stderr, result.stderr
+    assert "botocore[crt]" in result.stderr, result.stderr
+
 print("OK")
 """
 

@@ -29,6 +29,7 @@ from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     EndpointConnectionError,
+    MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
     ParamValidationError,
@@ -186,7 +187,9 @@ def translate_boto_error(
 
     ``ClientError`` goes through the code/status table; botocore's credential,
     transport, and request-shape errors map to their categories - unresolvable
-    credentials/region to ``ConfigurationError``, a present-but-unusable
+    credentials/region and a missing optional dependency
+    (``MissingDependencyException`` - awscrt absent where SigV4a signing needs
+    it) to ``ConfigurationError``, a present-but-unusable
     profile or partial credentials to its ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. An
@@ -199,6 +202,15 @@ def translate_boto_error(
         return exc
     if isinstance(exc, ClientError):
         return _translate_client_error(exc, operation=operation, bucket=bucket, key=key)
+    if isinstance(exc, MissingDependencyException):
+        # A missing optional dependency (awscrt: the SigV4a signing an MRAP
+        # target needs, the CRT checksum family) is an environment problem,
+        # so it keeps the plain ConfigurationError of the crt-absence family
+        # (the CLI's `[s3] preferred_transfer_client = crt` degradation, rc
+        # 253). The engine-selection path re-raises boto3's exception
+        # unwrapped instead (crtsupport - the documented pass-through); that
+        # exception never crosses this seam.
+        return ConfigurationError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _UNRESOLVED_CONFIG_ERRORS):
         return ConfigurationError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _INVALID_CONFIG_ERRORS):

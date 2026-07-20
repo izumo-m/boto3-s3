@@ -160,8 +160,11 @@ These implement the policy in
      for the profile chain in item 5).
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
      regions that accept SigV2 (us-east-1), but SigV2 does not exist in aws v2's
-     botocore. `Config(signature_version="s3v4")` is set permanently
-     (`--no-sign-request` overrides it with UNSIGNED).
+     botocore. `Config(signature_version="s3v4")` is set for every command whose
+     positionals name no MRAP ARN (`--no-sign-request` overrides it with
+     UNSIGNED). For an MRAP target the pin stands down: an explicit
+     `signature_version` suppresses botocore's auth-scheme resolution, which
+     must pick asymmetric SigV4a there (item 4).
   3. **us-east-1 regional endpoint** - aws v2 resolves us-east-1 as regional
      (`s3.us-east-1.amazonaws.com`). `s3={"us_east_1_regional_endpoint":
      "regional"}` is set permanently.
@@ -175,10 +178,17 @@ These implement the policy in
      same table (an in-place update of `AUTH_TYPE_MAPS`; with awscrt absent it is
      a no-op that just re-sets the defaults). Asymmetric SigV4a (MRAP ARNs and the
      like) is a domain where botocore itself requires awscrt: with the `crt`
-     extra, the CRT signer handles it just as in aws v2; without it, botocore
-     raises `MissingDependencyException` (`Using S3 with an MRAP arn requires an
-     additional dependency. ...`) (as the charter stipulates, parity applies only
-     when awscrt is present - overview.md section 3).
+     extra, the CRT signer handles it just as in aws v2 (measured: an MRAP
+     presign signs `AWS4-ECDSA-P256-SHA256` with `X-Amz-Region-Set=*` on both
+     CLIs - this needs item 2's MRAP stand-down, since the s3v4 pin would
+     otherwise force a symmetric signature real AWS rejects); without it,
+     botocore raises `MissingDependencyException` (`Missing Dependency: This
+     operation requires an additional dependency. Use pip install
+     botocore[crt] ...`), which the library translates to the plain
+     `ConfigurationError` of the crt-absence family - rc 253 like the `[s3]`
+     crt degradation (section 8), a state aws cannot reach (as the charter
+     stipulates, parity applies only when awscrt is present - overview.md
+     section 3).
   5. **profile env precedence** - aws v2 resolves the active profile as
      `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` > `default` (its bundled
      botocore lists the env vars as `['AWS_PROFILE', 'AWS_DEFAULT_PROFILE']`),
@@ -759,7 +769,7 @@ v2's convention (aws-cli's `awscli/constants.py`).
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved, the degradation of `[s3] preferred_transfer_client=crt` x an absent awscrt section 8) | `CONFIGURATION_ERROR_RC` |
+| 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4) | `CONFIGURATION_ERROR_RC` |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 

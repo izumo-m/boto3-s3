@@ -584,6 +584,22 @@ class TestScanErrorMapping:
             with s3_errors(operation="ls"):
                 raise KeyboardInterrupt
 
+    def test_missing_dependency_stays_plain_configuration_error(self) -> None:
+        # A missing optional dependency (awscrt absent where SigV4a signing
+        # needs it - an MRAP presign, say) is the crt-absence family: the
+        # PLAIN ConfigurationError the CLI maps to rc 253, cause preserved.
+        # The engine-selection pass-through (crtsupport) never crosses this
+        # seam and stays unwrapped.
+        from botocore.exceptions import MissingDependencyException
+
+        from boto3_s3.s3storage import s3_errors
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            with s3_errors(operation="presign", bucket="b", key="k"):
+                raise MissingDependencyException(msg="Missing Dependency: install awscrt")
+        assert type(exc_info.value) is ConfigurationError
+        assert isinstance(exc_info.value.__cause__, MissingDependencyException)
+
     def test_object_scan_error_carries_no_fixed_operation(self) -> None:
         # The recursive object listing backs ls, rm, cp, mv, and sync source
         # enumeration alike, so the calling subcommand is unknown here: a scan

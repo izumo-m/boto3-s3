@@ -58,6 +58,19 @@ def has_underlying_s3_path(path: str) -> bool:
     )
 
 
+def is_mrap_path(path: str) -> bool:
+    """Whether *path*'s bucket part is a Multi-Region Access Point ARN.
+
+    Pure string inspection like `has_underlying_s3_path`. An MRAP request
+    must be signed with asymmetric SigV4a (its region set is `*`), which an
+    explicit symmetric `signature_version` in the client config would
+    suppress - callers that pin one (the CLI's always-SigV4 pin) use this to
+    stand down for MRAP targets.
+    """
+    bucket, _key = _split_bucket_key(path)
+    return _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket) is not None
+
+
 def _split_bucket_key(path: str) -> tuple[str, str]:
     """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
 
@@ -168,4 +181,4 @@ class S3PathResolver:
         return s3_errors(operation="mv")
 
 
-__all__ = ["S3PathResolver", "has_underlying_s3_path"]
+__all__ = ["S3PathResolver", "has_underlying_s3_path", "is_mrap_path"]

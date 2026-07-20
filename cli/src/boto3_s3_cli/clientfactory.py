@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
@@ -283,6 +283,27 @@ def _coerce_cli_timeout(value: str) -> int | None:
         raise InvalidValueError(str(exc)) from exc
 
 
+def _includes_mrap_path(args: argparse.Namespace) -> bool:
+    """Whether the command's positional S3 paths include an MRAP ARN bucket.
+
+    Reads the parsed positionals off the namespace - `paths` (a string, or the
+    transfer family's two-item list) and presign's `path`. By the time a
+    command builds its client, paramfile expansion has already replaced
+    `file://` forms; non-string values (the readable-`fileb://` quirk leaves
+    `bytes`) never name an MRAP and are skipped.
+    """
+    from boto3_s3.pathresolver import is_mrap_path
+
+    values: list[object] = []
+    paths: object = getattr(args, "paths", None)
+    if isinstance(paths, (list, tuple)):
+        values.extend(cast("list[object]", paths))
+    else:
+        values.append(paths)
+    values.append(getattr(args, "path", None))
+    return any(isinstance(value, str) and is_mrap_path(value) for value in values)
+
+
 def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
@@ -322,10 +343,18 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # accept it (a default us-east-1 client) and resolves us-east-1
     # to the legacy global endpoint where aws v2 uses the regional one. Pin
     # both so every command - visibly, presign's URLs - matches aws v2.
+    # The pin stands down when the command targets an MRAP ARN: an explicit
+    # signature_version suppresses botocore's auth-scheme resolution, and an
+    # MRAP endpoint must resolve to asymmetric SigV4a (aws v2's bundled
+    # botocore pins only the symmetric families - _pin_python_sigv4_signers -
+    # and leaves SigV4a alive). With awscrt absent, botocore's own
+    # MissingDependencyException then surfaces (-> ConfigurationError, 253)
+    # instead of a silently mis-signed SigV4 request.
     overrides: dict[str, Any] = {
-        "signature_version": "s3v4",
         "s3": {"us_east_1_regional_endpoint": "regional"},
     }
+    if not _includes_mrap_path(args):
+        overrides["signature_version"] = "s3v4"
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED
     # The timeouts arrive as raw strings (see globalargs.add_common_arguments)

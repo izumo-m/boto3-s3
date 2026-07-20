@@ -196,6 +196,61 @@ class TestBuildClient:
         )
         assert url.index("X-Amz-Expires=") < url.index("X-Amz-SignedHeaders=")
 
+    def test_mrap_target_lifts_the_pin_to_sigv4a(self) -> None:
+        # An explicit signature_version suppresses botocore's auth-scheme
+        # resolution, and an MRAP endpoint must resolve to asymmetric SigV4a
+        # (region set `*`) - measured against aws 2.36.1, whose MRAP presign
+        # signs AWS4-ECDSA-P256-SHA256. The s3v4 pin stands down when a
+        # positional names an MRAP ARN; the dev environment's awscrt (always
+        # present, docs/testing.md section 4) then signs SigV4a offline.
+        args = _parse(["--region", "us-east-1"])
+        args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
+        assert "X-Amz-Region-Set=" in url
+
+    def test_transfer_positional_list_lifts_the_pin_too(self) -> None:
+        # The transfer family carries a two-item `paths` list; an MRAP ARN on
+        # either side lifts the pin for the command's client.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./local.txt", "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/k"]
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "k"},
+            ExpiresIn=60,
+        )
+        assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
+
+    def test_plain_paths_keep_the_sigv4_pin(self) -> None:
+        # A plain-bucket positional (and a plain access-point ARN) keeps the
+        # always-SigV4 pin - only the MRAP shape needs SigV4a.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = "s3://plain-bucket/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "plain-bucket", "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_no_sign_request_still_wins_for_mrap(self) -> None:
+        # --no-sign-request overrides to UNSIGNED even for an MRAP target,
+        # exactly as it overrides the s3v4 pin: aws emits the bare URL.
+        args = _parse(["--no-sign-request", "--region", "us-east-1"])
+        args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert url == "https://test.mrap.accesspoint.s3-global.amazonaws.com/key"
+
     def test_no_sign_request_presigns_to_a_bare_url(self) -> None:
         # --no-sign-request must still override to UNSIGNED: aws emits the
         # plain object URL with no query at all.
