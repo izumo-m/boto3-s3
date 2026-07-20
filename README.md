@@ -1,5 +1,10 @@
 # boto3-s3
 
+[![PyPI](https://img.shields.io/pypi/v/boto3-s3)](https://pypi.org/project/boto3-s3/)
+[![Python versions](https://img.shields.io/pypi/pyversions/boto3-s3)](https://pypi.org/project/boto3-s3/)
+[![License](https://img.shields.io/pypi/l/boto3-s3)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
+[![CI](https://github.com/izumo-m/boto3-s3/actions/workflows/ci.yml/badge.svg)](https://github.com/izumo-m/boto3-s3/actions/workflows/ci.yml)
+
 A Python library for running every `aws s3` operation in-process, with an
 `aws s3 sync`-compatible synchronization pipeline at its core. Applications
 that currently shell out to `aws s3 sync` can make the same default
@@ -463,6 +468,9 @@ Bug reports, questions, and ideas are welcome on the
 [issue tracker](https://github.com/izumo-m/boto3-s3/issues). To work on the code,
 [`CONTRIBUTING.md`](https://github.com/izumo-m/boto3-s3/blob/main/CONTRIBUTING.md)
 covers local setup (uv), the test suite, and the coding and commit conventions.
+Report security vulnerabilities privately as described in
+[`SECURITY.md`](https://github.com/izumo-m/boto3-s3/blob/main/SECURITY.md),
+not on the public issue tracker.
 
 ## License
 

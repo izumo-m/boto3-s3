@@ -1,5 +1,9 @@
 # boto3-s3-cli
 
+[![PyPI](https://img.shields.io/pypi/v/boto3-s3-cli)](https://pypi.org/project/boto3-s3-cli/)
+[![Python versions](https://img.shields.io/pypi/pyversions/boto3-s3-cli)](https://pypi.org/project/boto3-s3-cli/)
+[![License](https://img.shields.io/pypi/l/boto3-s3-cli)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
+
 An `aws s3`-compatible command line, built on the
 [`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
 
@@ -171,3 +175,6 @@ Apache-2.0. See
 repository.
 
 Main project (source, issues): <https://github.com/izumo-m/boto3-s3>.
+Report security vulnerabilities privately as described in
+[`SECURITY.md`](https://github.com/izumo-m/boto3-s3/blob/main/SECURITY.md),
+not on the public issue tracker.
