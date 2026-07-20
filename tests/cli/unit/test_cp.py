@@ -738,36 +738,29 @@ class TestSourceScanWiring:
         assert calls[0].operation == "ListObjectsV2"
         assert calls[0].params["MaxKeys"] == 5
 
-    def test_scanning_storages_opt_out_of_the_interrupt_join(
+    def test_the_cli_posture_reaches_the_source_scan(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI, so the storages the CLI builds
-        # for a transfer must not wait for an in-flight page pull on the way
-        # out (aws dies immediately); the library default keeps waiting.
+        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # wait_on_interrupt=False once, and the operation threads it into the
+        # ScanOptions of every scan it starts (here the upload's source walk);
+        # the library default keeps waiting.
         import boto3_s3
 
-        built: list[Any] = []
-
-        class _RecS3(boto3_s3.S3Storage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+        scan_waits: list[bool] = []
 
         class _RecLocal(boto3_s3.LocalStorage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
+                assert options is not None
+                scan_waits.append(options.wait_on_interrupt)
+                return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "S3Storage", _RecS3)
         monkeypatch.setattr(boto3_s3, "LocalStorage", _RecLocal)
         (tmp_path / "f.txt").write_bytes(b"x")
         ctx, _calls = _recording_ctx([{}])
         rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
         assert rc == 0
-        transfer_sides = [s for s in built if s.scan_wait_on_interrupt is False]
-        # Both real transfer sides opt out; plan-only throwaways (path_storage)
-        # keep the library default and never scan.
-        assert len(transfer_sides) == 2
+        assert scan_waits == [False]
 
 
 class TestCaseConflict:

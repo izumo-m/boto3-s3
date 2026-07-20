@@ -493,7 +493,6 @@ class S3Storage(Storage):
         client: S3Client | None = None,
         page_size: int | None = None,
         fetch_owner: bool = False,
-        scan_wait_on_interrupt: bool = True,
     ) -> None:
         text = os.fspath(uri)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
@@ -510,11 +509,9 @@ class S3Storage(Storage):
         # How this source is listed (the scan's source-config): the ListObjectsV2
         # page size and whether each entry's owner is fetched. Seeded into every
         # scan via default_scan_options, so an app tunes the listing once here
-        # rather than passing it through each operation. scan_wait_on_interrupt
-        # is the Ctrl-C exit policy (Storage.scan_wait_on_interrupt).
+        # rather than passing it through each operation.
         self._page_size = page_size
         self._fetch_owner = fetch_owner
-        self.scan_wait_on_interrupt = scan_wait_on_interrupt
 
     @property
     def uri(self) -> str:

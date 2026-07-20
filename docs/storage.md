@@ -124,8 +124,10 @@ A few more members come with working defaults a custom backend normally keeps:
   subclass just sets this one class attribute — no method to override** — and one
   that takes the base `ScanOptions` sets nothing. A custom subclass must stay a
   `frozen=True, kw_only=True` dataclass and give **every added field a
-  default**: the high-level operations overlay only the operation-inherent
-  knobs via `dataclasses.replace(storage.default_scan_options(), …)`, and the
+  default**: the high-level operations overlay only the run-level knobs — the
+  operation-inherent ones plus the application's Ctrl-C posture
+  (`wait_on_interrupt`, from `S3(wait_on_interrupt=…)`) — via
+  `dataclasses.replace(storage.default_scan_options(), …)`, and the
   base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
   the single place a backend seeds the **source-config it holds on the instance**.
@@ -139,17 +141,20 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`scan_wait_on_interrupt: bool`** — the Ctrl-C exit policy of `scan()`'s
-  background page worker. `True` (the default): context exit always waits for
-  a page pull already in flight, so no worker survives the operation — keep it
-  in an app that may catch `KeyboardInterrupt` and continue. `False`: a
-  `KeyboardInterrupt` / `SystemExit` unwind abandons the daemon worker instead
-  of waiting (an in-flight network pull can otherwise hold the exit for a full
-  timeout) — for apps that treat such an interrupt as process-fatal. The
-  built-ins take it as a constructor kwarg; the CLI passes `False` on every
-  scanning storage it builds, matching aws's immediate death on Ctrl-C. Every
-  other exit — exhaustion, an early break, an ordinary exception — always
-  waits (`concurrency.prefetch`).
+- **`ScanOptions.wait_on_interrupt`** (not a `Storage` member) — the Ctrl-C
+  exit policy of `scan()`'s background page worker. `True` (the default): the
+  scan's teardown always waits for a page pull already in flight, so no worker
+  survives the operation — required for an app that may catch
+  `KeyboardInterrupt` and continue. `False`: a `KeyboardInterrupt` unwind
+  abandons the daemon worker instead of waiting (an in-flight network pull can
+  otherwise hold the exit for a full timeout) — only for an app that treats
+  Ctrl-C as process-fatal. The application declares the posture once, on
+  `S3(wait_on_interrupt=…)`; every scan an operation starts receives it
+  through this field, and only a direct `Storage.scan` caller sets it here
+  itself. The CLI's `S3` declares `False`, matching aws's immediate death on
+  Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
+  early break, `SystemExit` (`sys.exit()` requests an orderly termination),
+  an ordinary exception — always waits (`concurrency.prefetch`).
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.

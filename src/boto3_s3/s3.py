@@ -643,6 +643,20 @@ class S3:
     thread sequentially, up front, then give each thread its own
     ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
+
+    ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
+    every operation this instance runs. ``True`` (the default): a
+    ``KeyboardInterrupt`` propagates only after the operation has reclaimed
+    all of its resources (enumeration workers joined), so an app that catches
+    the interrupt can keep calling operations. ``False``: the app treats
+    Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
+    prefetch worker instead of waiting out an in-flight listing page pull
+    (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
+    interrupt itself is always re-raised, never converted or swallowed; and
+    the posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit`` and
+    every other exception always get the full reclamation (``sys.exit()``
+    requests an *orderly* termination). The posture reaches the scans through
+    ``ScanOptions.wait_on_interrupt``.
     """
 
     def __init__(
@@ -652,11 +666,13 @@ class S3:
         endpoint_url: str | None = None,
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
+        wait_on_interrupt: bool = True,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
+        self._wait_on_interrupt = wait_on_interrupt
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -666,6 +682,11 @@ class S3:
     def session(self) -> Session | None:
         """The session that supplies this instance's default clients and AWS config."""
         return self._session
+
+    @property
+    def wait_on_interrupt(self) -> bool:
+        """The Ctrl-C posture declared at construction (see the class docstring)."""
+        return self._wait_on_interrupt
 
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
@@ -789,6 +810,7 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 ),
                 cancel_token=cancel_token,
             )
@@ -1053,6 +1075,7 @@ class S3:
             transferrer=transferrer,
             item_filter=item_filter,
             operation=operation,
+            wait_on_interrupt=self._wait_on_interrupt,
         )
         with transferrer:
             if not dryrun:
@@ -1068,6 +1091,7 @@ class S3:
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             elif plan.paths_type == "s3open":
                 assert src_s3 is not None
@@ -1079,6 +1103,7 @@ class S3:
                     options=options,
                     operation=operation,
                     dryrun=dryrun,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             elif src_s3 is None:
                 items = producers.upload_items(
@@ -1086,6 +1111,7 @@ class S3:
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     item_filter=item_filter,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             else:
                 items = producers.s3_source_items(
@@ -1098,6 +1124,7 @@ class S3:
                     options=options,
                     case_gate=case_gate,
                     operation=operation,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             # Check cancellation *before* pulling the next item, not after: the
             # open routes (_open_upload_item / _open_download_item) open the
@@ -1118,7 +1145,7 @@ class S3:
                         transferrer.dryrun(item)
                     else:
                         transferrer.submit(item)
-            except (KeyboardInterrupt, SystemExit):
+            except KeyboardInterrupt:
                 interrupted = True
                 raise
             finally:
@@ -1126,10 +1153,12 @@ class S3:
                 # Transferrer.__exit__ shuts down and unregisters the capture
                 # handlers - the teardown mirror of prepare()'s
                 # register-before-enumeration ordering, so no listing traffic
-                # emits on the client during the deregistration. A terminal
-                # interrupt skips it: the KI unwind must not wait on an
-                # in-flight page pull (Storage.scan_wait_on_interrupt).
-                if not interrupted:
+                # emits on the client during the deregistration. Under the
+                # process-fatal posture a Ctrl-C unwind skips it: closing
+                # would throw GeneratorExit into the producer, whose prefetch
+                # teardown always joins, and the unwind must not wait on an
+                # in-flight page pull (`S3` docstring, `wait_on_interrupt`).
+                if self._wait_on_interrupt or not interrupted:
                     items.close()
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
@@ -1586,6 +1615,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
+                wait_on_interrupt=self._wait_on_interrupt,
             )
             dest_entries = producers.sync_entries(
                 dest_storage,
@@ -1593,6 +1623,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
+                wait_on_interrupt=self._wait_on_interrupt,
             )
 
             def _close_scans(
@@ -1603,10 +1634,14 @@ class S3:
                 # Close both sides' producers (joining their scan prefetch
                 # workers) before the stack unwinds into Transferrer.__exit__'s
                 # capture deregistration - the teardown mirror of prepare()'s
-                # register-before-enumeration ordering. A terminal interrupt
-                # skips it: the KI unwind must not wait on an in-flight page
-                # pull (Storage.scan_wait_on_interrupt).
-                if exc_type is None or not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+                # register-before-enumeration ordering. Under the process-fatal
+                # posture a Ctrl-C unwind skips it: closing would throw
+                # GeneratorExit into the producers, whose prefetch teardown
+                # always joins, and the unwind must not wait on an in-flight
+                # page pull (`S3` docstring, `wait_on_interrupt`).
+                if self._wait_on_interrupt or not (
+                    exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
+                ):
                     dest_entries.close()
                     src_entries.close()
 
@@ -1754,6 +1789,7 @@ class S3:
             request_payer=request_payer,
             prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),
+            wait_on_interrupt=self._wait_on_interrupt,
         )
 
         if dryrun:

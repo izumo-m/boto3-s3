@@ -198,12 +198,26 @@ class ScanOptions:
     ``filter`` it runs on the enumeration worker, not the calling thread; and
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
+
+    ``wait_on_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
+    default): the scan's teardown always waits for a page pull already in
+    flight, so no enumeration worker survives it - required for an app that
+    may catch ``KeyboardInterrupt`` and keep using the process. ``False``: a
+    ``KeyboardInterrupt`` unwind abandons the daemon prefetch worker instead
+    of waiting (an in-flight network pull can otherwise hold the exit for a
+    full timeout) - only for an app that treats Ctrl-C as process-fatal. It
+    scopes to the interrupt alone: every other exit, ``SystemExit`` included
+    (``sys.exit()`` requests an orderly termination), reclaims fully. The
+    high-level operations overlay it from ``S3(wait_on_interrupt=...)`` - the
+    application declares the posture once there - so it reaches every scan an
+    operation starts; set it here only when calling ``Storage.scan`` directly.
     """
 
     recursive: bool = False
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
+    wait_on_interrupt: bool = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -61,15 +61,16 @@ def prefetch(
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
 
-    ``wait_on_interrupt`` narrows the exit wait for terminal unwinds: when
-    ``False`` and the context is unwinding on a ``KeyboardInterrupt`` /
-    ``SystemExit``, the final join is skipped and the daemon worker is
-    abandoned to die with the process - a page pull already in flight (which
-    can block for a full network timeout) no longer delays the exit, matching
-    ``aws``'s immediate death on Ctrl-C. Only safe when such an interrupt
-    terminates the process: an app that catches the interrupt and continues
-    would leave the worker pulling one more page in the background. Every
-    other exit - normal exhaustion, an early break (``GeneratorExit``), any
+    ``wait_on_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
+    ``False`` and the context is unwinding on a ``KeyboardInterrupt``, the
+    final join is skipped and the daemon worker is abandoned to die with the
+    process - a page pull already in flight (which can block for a full
+    network timeout) no longer delays the exit, matching ``aws``'s immediate
+    death on Ctrl-C. Only safe when the interrupt terminates the process: an
+    app that catches it and continues would leave the worker pulling one more
+    page in the background. Every other exit - normal exhaustion, an early
+    break (``GeneratorExit``), ``SystemExit`` (``sys.exit()`` requests an
+    *orderly* termination, so it reclaims like any exception), any
     ``Exception`` - always joins, keeping the no-surviving-worker contract.
 
     `queue_size` must be positive. `queue.Queue` treats non-positive values as
@@ -133,10 +134,10 @@ def prefetch(
     interrupted = False
     try:
         yield _consume()
-    except (KeyboardInterrupt, SystemExit):
-        # The consumer is unwinding toward process exit; the exit policy below
-        # may abandon the worker instead of waiting. GeneratorExit (an early
-        # break) and ordinary exceptions never take this path.
+    except KeyboardInterrupt:
+        # The consumer is unwinding on Ctrl-C; the exit policy below may
+        # abandon the worker instead of waiting. GeneratorExit (an early
+        # break), SystemExit, and ordinary exceptions never take this path.
         interrupted = True
         raise
     finally:

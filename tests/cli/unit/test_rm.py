@@ -325,22 +325,23 @@ class TestAppendFilterAction:
 
 
 class TestScanInterruptPolicy:
-    def test_rm_storage_opts_out_of_the_interrupt_join(
+    def test_the_cli_posture_reaches_the_listing_scan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the recursive listing must not
-        # wait for an in-flight page pull on the way out (aws dies
-        # immediately); the library default keeps waiting.
+        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # wait_on_interrupt=False once, and rm threads it into its recursive
+        # listing scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
-        built: list[Any] = []
+        scan_waits: list[bool] = []
 
         class _Recording(boto3_s3.S3Storage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
+                assert options is not None
+                scan_waits.append(options.wait_on_interrupt)
+                return super().scan(options, cancel_token=cancel_token)
 
         monkeypatch.setattr(boto3_s3, "S3Storage", _Recording)
         client, _calls = make_recording_client([{}])
         assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=_ctx(client)) == 0
-        assert [s.scan_wait_on_interrupt for s in built] == [False]
+        assert scan_waits == [False]

@@ -70,11 +70,7 @@ class LsCommand(Command):
             target = "s3://"
 
         s3 = ctx.s3(args)
-        # scan_wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so
-        # the listing must not wait for an in-flight page pull on the way out.
-        storage = S3Storage(
-            target, client=s3.client(), page_size=page_size, scan_wait_on_interrupt=False
-        )
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 

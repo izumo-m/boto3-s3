@@ -115,6 +115,7 @@ class TestCustomBackendScanOptions:
             recursive=True,
             on_warning=None,
             item_filter=None,
+            wait_on_interrupt=True,
         )
         assert isinstance(opts, MyScanOptions)  # own type, not a base ScanOptions
         assert opts.recursive is True  # common knob overlaid
@@ -126,6 +127,7 @@ class TestCustomBackendScanOptions:
             recursive=False,
             on_warning=None,
             item_filter=None,
+            wait_on_interrupt=True,
         )
         assert type(base_opts) is ScanOptions
 

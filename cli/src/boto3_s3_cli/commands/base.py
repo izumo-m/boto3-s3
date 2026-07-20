@@ -94,7 +94,9 @@ class Context:
             def client(self) -> S3Client:
                 return client_factory(args)
 
-        return InjectedClientS3()
+        # wait_on_interrupt=False like build_s3: the injected-client seam must
+        # keep the CLI's process-fatal Ctrl-C posture.
+        return InjectedClientS3(wait_on_interrupt=False)
 
     def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
         """Build an additional S3 client from the command's bound session."""

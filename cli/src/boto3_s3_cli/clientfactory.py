@@ -138,7 +138,10 @@ def build_s3(args: argparse.Namespace) -> S3:
         def client(self) -> S3Client:
             return build_client(args, session=session)
 
-    return CliS3(session=session)
+    # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
+    # operation's unwind must not wait for an in-flight listing page pull
+    # (aws dies immediately); the library default keeps waiting.
+    return CliS3(session=session, wait_on_interrupt=False)
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:

@@ -132,10 +132,21 @@ def test_early_break_still_joins_with_wait_on_interrupt_false() -> None:
     assert not _worker_alive()
 
 
+def test_systemexit_still_joins_with_wait_on_interrupt_false() -> None:
+    # The opt-out scopes to KeyboardInterrupt alone. sys.exit() requests an
+    # orderly termination, so a SystemExit unwind reclaims the worker like any
+    # ordinary exception even when wait_on_interrupt is False.
+    with pytest.raises(SystemExit):
+        with prefetch([[1], [2]], wait_on_interrupt=False) as it:
+            assert next(it) == 1
+            raise SystemExit(3)
+    assert not _worker_alive()
+
+
 def test_storage_scan_forwards_the_interrupt_policy() -> None:
-    # Storage.scan wires its storage's scan_wait_on_interrupt into prefetch:
-    # with False, a KeyboardInterrupt unwind of the scan returns without
-    # waiting for the in-flight page pull.
+    # Storage.scan wires ScanOptions.wait_on_interrupt into prefetch: with
+    # False, a KeyboardInterrupt unwind of the scan returns without waiting
+    # for the in-flight page pull.
     from typing import BinaryIO, Literal
 
     from boto3_s3 import Storage
@@ -145,8 +156,6 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
     release = threading.Event()
 
     class _Blocking(Storage):
-        scan_wait_on_interrupt = False
-
         def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
             yield [FileInfo(key="a")]
             pull_started.set()
@@ -166,7 +175,7 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
             return "blocking-stub"
 
     try:
-        scan = _Blocking().scan()
+        scan = _Blocking().scan(ScanOptions(wait_on_interrupt=False))
         assert next(scan).key == "a"
         assert pull_started.wait(5)
         with pytest.raises(KeyboardInterrupt):

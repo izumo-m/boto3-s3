@@ -615,18 +615,14 @@ def resolve_locations(
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # Construction is permissive (non-raising); validate the strict aws-cli
         # forms here so a usage error (rc 252) still precedes the transfer
-        # pipeline. Ctrl-C is process-fatal in the CLI, so scans must not wait
-        # for an in-flight page pull on the way out (aws dies immediately).
-        storage = S3Storage(
-            arg, client=client_for, page_size=page_size, scan_wait_on_interrupt=False
-        )
+        # pipeline. The CLI's process-fatal Ctrl-C posture is not a storage
+        # concern: build_s3 declares it once (S3's wait_on_interrupt).
+        storage = S3Storage(arg, client=client_for, page_size=page_size)
         storage.validate()
         return storage
 
     def _local(path: str) -> LocalStorage:
-        return LocalStorage(
-            path, follow_symlinks=args.follow_symlinks, scan_wait_on_interrupt=False
-        )
+        return LocalStorage(path, follow_symlinks=args.follow_symlinks)
 
     if src_type == "local":
         return _local(src), _s3(dest, client)
