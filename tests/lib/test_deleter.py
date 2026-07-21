@@ -248,6 +248,33 @@ class TestBatching:
 
 
 class TestXmlIncompatibleFallback:
+    @pytest.mark.parametrize(
+        ("char", "compatible"),
+        [
+            ("\t", True),
+            ("\n", True),
+            ("\r", True),
+            ("\x00", False),
+            ("\x1f", False),  # last C0 control below the allowed range
+            ("\x20", True),  # first allowed non-control
+            ("퟿", True),  # last code point before the surrogate block
+            ("\ud800", False),  # first surrogate
+            ("\udfff", False),  # last surrogate
+            ("", True),  # first code point after the surrogate block
+            ("�", True),  # last allowed BMP code point
+            ("￾", False),  # first terminal BMP noncharacter
+            ("￿", False),  # second terminal BMP noncharacter
+            ("\U00010000", True),  # first astral code point
+            ("\U0010ffff", True),  # last code point
+        ],
+    )
+    def test_xml_char_production_boundaries(self, char: str, compatible: bool) -> None:
+        # Pins the predicate exactly at the edges of XML 1.0's Char production,
+        # where an off-by-one in the character class would flip silently.
+        from boto3_s3.deleter import _delete_objects_compatible
+
+        assert _delete_objects_compatible(f"key-{char}-tail") is compatible
+
     def test_only_xml_incompatible_keys_use_delete_object(self) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []

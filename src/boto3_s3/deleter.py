@@ -28,6 +28,7 @@ where an unexpected worker exception re-raises on the caller thread.
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import (
     CancelledError as FutureCancelledError,
 )
@@ -69,6 +70,13 @@ logger = logging.getLogger(__name__)
 S3_DELETE_BATCH = 1000
 
 
+# The complement of XML 1.0's Char production: C0 controls other than
+# TAB/LF/CR, surrogate code points, and the two terminal BMP noncharacters.
+# A compiled class instead of a per-character Python loop: `_flush` runs this
+# over every submitted key.
+_XML_INCOMPATIBLE = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
 def _delete_objects_compatible(key: str) -> bool:
     """Whether *key* can be serialized as XML 1.0 character data.
 
@@ -78,13 +86,7 @@ def _delete_objects_compatible(key: str) -> bool:
     ``DeleteObject`` carries the key in the URL instead and is the same route
     aws-cli uses for every key, so incompatible keys must take that path.
     """
-    return all(
-        char in "\t\n\r"
-        or "\x20" <= char <= "\ud7ff"
-        or "\ue000" <= char <= "\ufffd"
-        or "\U00010000" <= char <= "\U0010ffff"
-        for char in key
-    )
+    return _XML_INCOMPATIBLE.search(key) is None
 
 
 class S3Deleter:
