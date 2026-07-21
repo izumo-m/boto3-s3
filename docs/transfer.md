@@ -13,11 +13,11 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | module | role |
 |---|---|
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
-| `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` / the backends |
+| `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` (its backend knowledge stays narrow: the `LocalStorage` `isinstance` for the fsync barrier, section 11) |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
-| `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds only the CRT tuning fields ([`crt.md`](./crt.md) section 2) |
+| `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning fields and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
 | `pathresolver.py` | A port of aws's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `mv --validate-same-s3-paths` (cli.md section 5.8) |
 | `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / the `MergedPair` pair shapes / `PairFilter` / `compare_size_time` / combinators). The design is in [`sync.md`](./sync.md) |
@@ -39,11 +39,14 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   creation ourselves in order to control subscriber wiring, lazy creation, and
   the IfNoneMatch patch.
 - The public type is `TransferConfig` from `transferconfig.py`
-  (a subclass of boto3's that adds the CRT tuning fields; the defaults are the
-  same as aws-cli - 8 MiB threshold / 8 MiB chunk / concurrency 10). As in
-  boto3, classic maps `use_threads=False` to `NonThreadedExecutor` (a
-  determinization lever for tests; CRT ignores the threading-family knobs - also
-  as in boto3). The overall design of CRT mode is in [`crt.md`](./crt.md).
+  (a subclass of boto3's that adds the CRT tuning fields and
+  `annotation_temp_dir`; the defaults are the same as aws-cli - 8 MiB
+  threshold / 8 MiB chunk / concurrency 10). As in boto3, classic maps
+  `use_threads=False` to `NonThreadedExecutor` (a determinization lever for
+  tests). Classic-only knobs under CRT also follow boto3: auto-selected CRT
+  ignores them, while an explicit `preferred_transfer_client='crt'` rejects
+  them up front (`_validate_crt_transfer_config`). The overall design of CRT
+  mode is in [`crt.md`](./crt.md).
 - **`capture_response=True` forces the classic engine.** The write / read
   response capture ([`opresult.md`](./opresult.md)) rides the botocore client's
   `before-parameter-build` / `after-call` events (the `PutObject` / `CopyObject` /
@@ -52,8 +55,10 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   whenever the flag is set - logged as a `transfer engine: classic forced by
   capture_response` breadcrumb. A `_ResponseCapture` is then registered on the
   client together with the manager build (`prepare()`, below) and removed after
-  the manager shuts down (so no
-  request is in flight during a registration change); its handlers are per-instance
+  the manager shuts down (after a clean drain no request is in flight during
+  the change; an interrupted drain may unregister with stragglers still in
+  flight - accepted, better than leaving the handlers on a longer-lived
+  client); its handlers are per-instance
   bound methods, so register / unregister never disturb the application's or
   another run's handlers on a shared client. Being a library-only flag with no
   `aws s3` equivalent, the forcing has no parity impact.
@@ -62,8 +67,10 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   uses the dest client, download uses the src client, and an s3->s3 copy uses the
   dest client + `manager.copy(source_client=src client)` (a settled fact of the
   connection model).
-- The manager is **built by `prepare()`, before enumeration starts** (the
-  orchestrator calls it once, ahead of pulling the first item). Building the
+- The manager is **built by `prepare()`, before the source enumeration
+  starts** (the orchestrator calls it once, ahead of pulling the first item;
+  the `--case-conflict` destination pre-scan, when that gate is armed, runs
+  even earlier, outside the engine). Building the
   manager mutates the client's event registry (the `request-created.s3`
   handlers, and the capture handlers above), and botocore's events engine has
   no lock - so the mutation must happen-before the scan prefetch worker starts
@@ -75,10 +82,11 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   before reporting `DRYRUN`, matching aws-cli's deferred validation of options
   such as malformed grants. Validation performed only by an actual SDK submit
   remains skipped.
-- **Backpressure is delegated to s3transfer**: the bounded semaphore of
-  `TransferConfig.max_request_queue_size` (default 1000) blocks the submit
-  thread when it is full. This is the same mechanism aws-cli relies on; we keep
-  no in-flight window of our own.
+- **Backpressure is delegated to s3transfer**: the bounded submission executor
+  (`max_submission_queue_size`, default 1000) blocks the submit thread when it
+  is full, and the S3 request executor is separately bounded
+  (`max_request_queue_size`). This is the same mechanism aws-cli relies on; we
+  keep no in-flight window of our own.
 - context manager: on normal completion it drains (waits for submitted
   transfers). On **any exception** - a fatal in mid-enumeration included - it
   shuts down **cancelling**, by delegating to the s3transfer manager's own
@@ -92,15 +100,15 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   that completes reports its real outcome (s3transfer lets the completion
   win), while a revoked one reports one `CANCELLED` record
   ([`opresult.md`](./opresult.md)). Active futures are tracked only until
-  their done subscriber fires, keeping cancellation tracking bounded by
-  concurrency rather than total item count. `KeyboardInterrupt` keeps the
+  their done subscriber fires, keeping cancellation tracking bounded by the
+  manager's outstanding (queued + running) work rather than total item count. `KeyboardInterrupt` keeps the
   manager's direct best-effort cancellation path.
 
 ## 3. Subscriber composition (follows the order of aws-cli `s3handler`)
 
 Because s3transfer resolves callbacks with `getattr` (duck typing), subscribers
-are plain classes that do not inherit `BaseSubscriber` - so as not to pull in
-the SDK at module import time.
+are plain classes that do not inherit `BaseSubscriber` - the base class would
+add nothing the `getattr` protocol uses.
 
 1. `_ProvideSize` / `_ProvideETag` - provide every kind with the size and (if
    present, in quoted form) the etag up front (as in aws-cli). **In s3transfer
@@ -138,12 +146,18 @@ the SDK at module import time.
 8. `_ForgetFuture` (**always last**) - removes the settled top-level future
    from the run's bounded immediate-cancellation set.
 
-Items 3-6 are route-conditional (download / copy / mv only); the always-present
-spine is 1-2 then 7-8 (the numbering is the slot order, not a single chain that
-every transfer runs end to end).
+Items 1-2 are value/callback-conditional (they register only when they have
+something to provide or forward), items 3-6 route-conditional (download / copy
+/ mv only), and the open route / case-conflict gate add unnumbered subscribers
+of their own (`_CloseFileobj`, `_CaseConflictCleanup`) in the same order; the
+always-present pair is 7-8 (the numbering is the slot order, not a single
+chain that every transfer runs end to end).
 
-`on_result` / `on_progress` are **called from s3transfer's worker threads**
-(the same contract as deleter: fast and non-raising).
+`on_result` / `on_progress` fire **from s3transfer's worker threads** for
+submitted transfers (with `use_threads=False`, on the calling thread), and the
+non-submitting records - dry-run / skip / notice and some warnings - are
+emitted inline on the submitting thread. Either way the contract matches the
+deleter's: fast and non-raising.
 
 ## 4. copy-props (a port of aws-cli v2's correction)
 
@@ -350,9 +364,9 @@ dest-existence check for download. We ported the same three faces:
   the multipart blocklist / the COMPLETE list (harmless even if a future
   s3transfer adds native support).
 - **SDK floor gate** (the overview.md section 2 degradation): the write op's S3
-  model must define the `IfNoneMatch` input member (PutObject /
-  CompleteMultipartUpload for uploads, CopyObject for copies), which older
-  botocore lacks - and an **upload** additionally needs s3transfer's
+  model must define the `IfNoneMatch` input member (PutObject for uploads -
+  CompleteMultipartUpload ships in the same botocore generation, so only
+  PutObject is probed - and CopyObject for copies), which older botocore lacks - and an **upload** additionally needs s3transfer's
   create-multipart blocklist (`CREATE_MULTIPART_BLOCKLIST`, s3transfer 0.11):
   older s3transfer hands the full extra_args to CreateMultipartUpload, whose
   model has no `IfNoneMatch`, failing every multipart-threshold upload - a real
@@ -395,7 +409,10 @@ dest-existence check for download. We ported the same three faces:
   transfer engine.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
-  off, a symlink cycle recurses until `RecursionError`, exactly like aws-cli; on
+  off, a symlink cycle descends until the kernel's `ELOOP` / path-length
+  boundary ends it with aws's `File does not exist.` warning battery and the
+  walk skips the directory, exactly like aws-cli (the boundary comes long
+  before any `RecursionError` could); on
   (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
   `(st_dev, st_ino)` and skips a directory that resolves to one of its own
   ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
@@ -442,8 +459,10 @@ dest-existence check for download. We ported the same three faces:
   in `tests/lib/test_localstorage_walk.py`, which pin the warn-not-admit
   behavior without depending on the exact host-dependent depth).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
-  fires when mode != `ignore` = the application condition of aws-cli's
-  `_modify_instructions_for_case_conflicts`): aws builds this with the sync
+  fires when mode != `ignore`; aws-cli's `_modify_instructions_for_case_conflicts`
+  applies on a non-S3-Express source, and its S3 Express branch - reject
+  `skip` / `error`, a standing warning for `warn` - is reproduced by the CLI
+  before the mode reaches the library): aws builds this with the sync
   machinery (reverse-enumerating the dest + comparator), but the observed
   behavior reduces to two sets (confirmed by probing) -
   1. The compare key **exists at the dest in exactly matching case** -> always
@@ -459,9 +478,10 @@ dest-existence check for download. We ported the same three faces:
      `CaseConflictCleanupSubscriber`: a key is added when its download is
      admitted and dropped when that download finishes, so a same-case twin is a
      conflict only while the first is still transferring - which means detection
-     relies on the threaded, non-blocking submit (aws runs this at
-     `max_concurrent_requests = 1`); a fully synchronous executor would finish
-     each download before the next is judged and never see the overlap.
+     relies on the threaded, non-blocking submit; a fully synchronous executor
+     (`use_threads=False`) would finish each download before the next is
+     judged and never see the overlap. aws-cli's detection is racy the same
+     way (its own warn wording concedes the race).
 - **NOTICE** (`OpOutcome.NOTICE`): a display-only record that does not enter the
   counts. aws `uni_print`s the case-conflict message directly to stderr without
   going through the printer (not counted as warned, with no effect on rc, and
@@ -611,7 +631,9 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
 A custom `Storage` (anything that is not an `S3Storage` / `LocalStorage`,
-whatever its `scheme` string says) transfers as one
+whatever its `scheme` string says; the built-in `IOStorage` / `StdioStorage`
+are the degenerate single-entry case of this same seam, with their own stream
+rules - section 6) transfers as one
 side of `cp` / `mv` / `sync`, the other side always S3. `transferplan.plan_transfer`
 classifies the pair by the endpoints' concrete types (the structural match in
 `_paths_type`) into `opens3` (custom source -> S3, an
@@ -633,10 +655,11 @@ and outside aws parity.
   so the caller's own stream is never closed (section 6).
 - **the open key**: `""` is the location itself (a single source / destination),
   a non-empty key an entry beneath it - the same key regime as `delete`. A
-  recursive item's key is its `compare_key`; a single item's is `""`. The
-  destination key derives from `transferplan.dest_for` exactly as for the built-in
-  routes (a `/`-terminated or `dir_op` custom destination adopts the source
-  name).
+  recursive item's key is its `compare_key`; a single *source* opens `""`. The
+  destination key always derives from `transferplan.dest_for` exactly as for
+  the built-in routes: `""` for a single non-directory destination, the
+  adopted source name when the custom destination is `/`-terminated or
+  `dir_op`.
 - **upload shaping**: an `opens3` upload is shaped like a local one - the
   default ContentType guess reads the entry's key (its filename; the
   destination key for a single `""` source), and the >`5 GiB x 10000` oversize
@@ -646,10 +669,14 @@ and outside aws parity.
   through `Storage.scan` and resolves a single source through
   `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
   path <as_text> does not exist.` (`NotFoundError` with no `ClientError` cause,
-  rc 255, like a missing local source); an empty recursive `scan` transfers
-  nothing (rc 0, like an empty S3 prefix). `s3open` enumerates its S3 source exactly like the built-in
-  download (recursive `ListObjectsV2` / single `HeadObject`, folder markers
-  dropped).
+  aws's missing-local-source wording; unlike the local up-front check it
+  surfaces lazily, once the pipeline pulls the item); an empty recursive
+  `scan` transfers nothing (rc 0, like an empty S3 prefix). `s3open`
+  enumerates its S3 source like the built-in download (recursive
+  `ListObjectsV2` / single `HeadObject`, folder markers dropped), with one
+  pinned exception: a keyless non-recursive `s3open` yields nothing without a
+  request, where the built-in single-source path still issues its listing
+  probe (so e.g. an `AccessDenied` stays observable there).
 - **capability gate** (`producers.require_open_capabilities`, before any bytes move):
   the custom side is pre-checked against `Storage.capabilities` and a missing
   contract method is a clear `ValidationError` naming the gap (not a deep

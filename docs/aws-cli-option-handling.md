@@ -108,8 +108,11 @@ path); the library accepts a raw `bytes` key and does no base64 step of its own.
 
 aws-cli registers a global URI paramfile handler on every `aws s3` argument -
 positional and optional alike - so `file://` (text) and `fileb://` (binary)
-load from disk for *any* arg, not just the SSE-C keys, all resolved at parse
-time before the command runs. `boto3-s3-cli` matches this on the positional
+load from disk for any *single-string* arg, not just the SSE-C keys, all
+resolved at parse time before the command runs. (A list-valued argument - the
+`--exclude` / `--include` filter accumulation, `mb`'s two-token `--tags` - is
+not expanded: aws's paramfile hook rewrites only a plain string value, and
+boto3-s3-cli keeps those verbatim too.) `boto3-s3-cli` matches this on the positional
 too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
 `cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
 `file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
@@ -135,8 +138,11 @@ the positional's `paths`/`path` or the option's `--flag` form).
 
 `fileb://` is not a free pass-through wherever it is accepted, though: only
 the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
-loaded *bytes* verbatim (they reach S3 as a `string`-shaped request parameter
-untouched, as above). Every free-string option in the list above still runs a
+loaded *bytes* verbatim into the request (a `string`-shaped request parameter
+untouched, as above). `--grants` also keeps its loaded bytes, but they flow
+into the grant *parsing* rather than a request parameter (as in aws, whose
+paramfile hands its grant handling the same bytes). Every other free-string
+option in the list above still runs a
 `fileb://` value through the same string-typed parameter check aws applies:
 `--content-type fileb://x` loads the bytes and then fails botocore's
 client-side check for a `string`-typed parameter (`Invalid type for
@@ -221,14 +227,17 @@ enforces that `--sse-c` / `--sse-c-key` (and the copy-source pair) are supplied
 together; that pairing check is route-independent and belongs to neither
 case (a) nor case (b).
 
-**Case (b): silently ignored, not rejected.** The remaining direction-specific
-options - `metadata_directive`, `copy_props`, `guess_mime_type`,
-`case_conflict` - are accepted on any route and simply have no effect when the
-route does not use them: either the corresponding S3 request parameter is never
-emitted (`metadata_directive` / `copy_props` are copy-only; `case_conflict` is
-download-only), or the route-specific logic just does not run (`guess_mime_type`
-is an internal flag carried on every route but only consulted to infer
-`ContentType` on the upload path). aws-cli applies the shared transfer arguments
+**Case (b): silently ignored, not rejected.** Every other direction-specific
+option is accepted on any route and simply has no effect when the route does
+not use it. `metadata_directive` / `copy_props` are copy-only and
+`case_conflict` download-only; `guess_mime_type` is an internal flag carried on
+every route but only consulted to infer `ContentType` on the upload path;
+`--expected-size` is consulted only on the streaming upload. The same rule
+covers the write-side request options on a download - `--acl`,
+`--storage-class`, the content headers, `--metadata`, the SSE family,
+`--grants` - because the `GetObject` mapping emits only SSE-C / request-payer /
+checksum-mode: either the corresponding S3 request parameter is never emitted,
+or the route-specific logic just does not run. aws-cli applies the shared transfer arguments
 uniformly and acts only on the route-relevant ones. `boto3-s3` does the same:
 the internal snake->PascalCase translation only emits the parameters that are
 valid for the chosen direction.

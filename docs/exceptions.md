@@ -15,7 +15,7 @@ Related: the entry point to the design as a whole is
   exception** (success = no exception, error = always an exception; no return
   codes or error-report objects).
 - The hierarchy is **`Boto3S3Error` (root) + 6 categories + 2 refining
-  subclasses**. Collapsing everything into a single `botocore`-style
+  subclasses + the `BatchError` aggregate** (section 4). Collapsing everything into a single `botocore`-style
   `ClientError` is **rejected** (because boto3-s3 spans both the local FS and
   S3, it preserves a cross-cutting classification in which "an S3 403 and a
   local `PermissionError` belong to the same category").
@@ -41,8 +41,9 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
-`-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
-                            #   Unrelated to the CancelledError of asyncio / concurrent.futures
++-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
+|                           #   Unrelated to the CancelledError of asyncio / concurrent.futures
+`-- BatchError              # aggregate: a batch operation's failure rollup (counts + first_error; section 4)
 ```
 
 The two **refining subclasses** exist for the CLI's exit-code parity: aws
@@ -61,8 +62,12 @@ class Boto3S3Error(Exception):
                  key: str | None = None) -> None: ...
 ```
 
-- Programming bugs (`TypeError` / `AssertionError`, etc.) are not wrapped and
-  pass through. `KeyboardInterrupt` / `SystemExit` also pass through.
+- Programming bugs (`TypeError` / `AssertionError`, etc.) are not wrapped on
+  the synchronous paths - they pass through. Inside the asynchronous transfer
+  engine every task exception must land in its item's record, so an
+  unclassified one surfaces there wrapped in the base `Boto3S3Error` (the
+  last-resort clause) instead. `KeyboardInterrupt` / `SystemExit` always pass
+  through.
 - **Intentional pass-through exception**: using
   `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent passes
   through the same `botocore.exceptions.MissingDependencyException` as boto3 does.
@@ -129,7 +134,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
-| `ProfileNotFound` / `PartialCredentialsError` / other config-flavored `BotoCoreError` at client construction | `InvalidConfigError` |
+| `ProfileNotFound` / `PartialCredentialsError` (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
 | an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
@@ -262,6 +267,8 @@ Two families override this with their own catch and so do **not** reach
   the documented **rc 255** exception.
 
 `CancelledError` is **not** given a special exit code by the CLI (there is no rc
-130 mapping for it). The CLI's only rc 130 is a `KeyboardInterrupt` / `EOFError`
-raised inside the `--cli-auto-prompt` interactive session, which is outside the
-exit-code charter.
+130 mapping for it). rc 130 comes from `main()`'s `KeyboardInterrupt` backstop -
+a Ctrl-C outside the transfer pipeline's window (inside it, the CLI reports
+aws's `cancelled: ctrl-c received` line and rc 1 - cli.md section 6) - and from
+a `KeyboardInterrupt` / `EOFError` inside the `--cli-auto-prompt` interactive
+session (the latter outside the exit-code charter).

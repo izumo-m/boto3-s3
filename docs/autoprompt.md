@@ -40,10 +40,12 @@ appearing naturally) over matching aws** (next section).
 interactive and never driven from a script, so there is no parity value to
 preserve here - and a completion that is *more* helpful than `aws s3`'s is itself
 a reason to reach for `boto3-s3`. The guiding rule is therefore one-directional:
-**where aws completes, we complete; where aws does not, we still may** when it
-helps the user finish the command. We never complete *less* than aws. This is the
-opposite of the exit-code charter (which demands exact parity) precisely because
-the UI is charter-exempt.
+**where aws completes, we aim to complete too; where aws does not, we still
+may** when it helps the user finish the command. The first half is a goal, not
+an absolute: an aws-only nicety can lag (e.g. aws offers a `{}` autoclose
+candidate for the map-shaped `--metadata`, which we currently do not). This is
+the opposite of the exit-code charter (which demands exact parity) precisely
+because the UI is charter-exempt.
 
 ## 2. Completion policy (usability first)
 
@@ -156,23 +158,27 @@ upholds.
 
 **Lazy import**: `model.py` / `parser.py` / `completers.py` are pure Python.
 Only `prompt.py` imports `prompt_toolkit`, and that import happens only when
-`--cli-auto-prompt` actually fires. The boto3 used for region/profile
-completion (and the botocore / s3transfer chain it pulls in) is likewise
-lazily imported when the completer fires. Top-level `--help` / `--version`
-currently touch neither the `autoprompt` package nor `prompt_toolkit`; this is
-an implementation detail outside the AWS SDK import contract
-([`imports.md`](./imports.md)). Normal dispatch and usage-error paths have no
-SDK import guarantee.
+`--cli-auto-prompt` actually fires. `completers.py` itself defers boto3 to the
+region/profile completers, but in a real prompt session the SDK is loaded
+before the first completion anyway: building the completion model runs
+`cli.build_parser()`, which loads every command module, and the transfer
+commands import the SDK-backed library modules at module top. Top-level
+`--help` / `--version` never touch `prompt_toolkit` (the `autoprompt`
+package's pure mode-resolution module, `autoprompt.resolve`, is imported with
+`cli` itself); this is an implementation detail outside the AWS SDK import
+contract ([`imports.md`](./imports.md)). Normal dispatch and usage-error paths
+have no SDK import guarantee.
 
 The completer order (adopt the first non-None): Region -> Profile -> ModelIndex ->
 FilePath -> Choices. ModelIndex returns None while an option value is being typed
 (when `current_param` is set), so processing passes to the value completer.
 aws's chain is Region -> Profile -> ModelIndex -> FilePath -> **serverside** ->
 **Shorthand** -> **Query**, but in `aws s3` **serverside** (S3 server-side
-completion) and **Query** (`--query` value completion) are no-ops (s3 is a
-customization rather than a modeled operation, so it has no `operation_model`,
-and `--query` / `--output` do not go through response formatting), so they are
-not ported. **Shorthand** is replaced by **Choices** narrowed to choices (section 2:
+completion) and **Query** (`--query` value completion) yield no candidates
+(**serverside** needs a modeled operation, which the s3 customization is not;
+**Query**'s completer does run but chokes on the customization's stand-in
+model, and the prompt adapter swallows the exception), so they are not
+ported. **Shorthand** is replaced by **Choices** narrowed to choices (section 2:
 uniformly complete every option that has choices).
 
 Region / Profile value completion fires on every keystroke, so the resolved list
@@ -180,9 +186,9 @@ is cached for the completer's lifetime (= one prompt session) (recreating
 `boto3.Session()` every time costs ~40ms per keystroke; aws also reuses the
 session).
 
-Display uses prompt_toolkit's standard completion menu. aws's full-screen
-doc-panel app is not reproduced (candidate matching is the contract, UI chrome is
-non-contractual).
+Display uses prompt_toolkit's standard completion menu. aws's multi-pane
+doc-panel application is not reproduced (the candidates are the ported
+substance, the UI chrome is not - neither is a contract, section 1).
 
 ## 5. Activation conditions (mode resolution)
 
@@ -260,9 +266,12 @@ importing):
   missing optional dependency does not break every command.
 - **Present** -> import `prompt.py` and run the prompt.
 
-All rc values are non-contractual (charter section 1). Reference implementation values:
+All rc values are non-contractual (the charter's interactive-UI exemption,
+overview.md section 3; section 1 above). Reference implementation values:
 guidance refusal / mutual exclusion = 252, non-tty / prompt failure = 255, user
-cancel (Ctrl-C/Ctrl-D) = 130. The argv returned by the prompt goes through
+cancel = 130 (Ctrl-C; Ctrl-D reaches it as EOF only on an *empty* buffer -
+prompt_toolkit's default binding, where aws's custom key bindings cancel on
+Ctrl-D unconditionally). The argv returned by the prompt goes through
 normal dispatch, so the subsequent rc follows each subcommand's convention.
 
 ## 7. Context injection and tests

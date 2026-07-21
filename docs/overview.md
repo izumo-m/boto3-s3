@@ -55,21 +55,29 @@ maintaining high functional compatibility (parity).
   behavior, features that depend on a newer S3 model are simply unavailable
   below the SDK version that introduced them - on a par with the awscrt extra
   (transfer.md section 9 / crt.md section 6). Specifically:
-  - `--no-overwrite` (conditional writes / `IfNoneMatch`, GA 2024-11) needs a
-    late-2024 botocore.
-  - `--checksum-algorithm CRC64NVME` needs a botocore that ships that
-    algorithm.
+  - `--no-overwrite` (conditional writes / `IfNoneMatch`, GA 2024-11): uploads
+    need botocore >= 1.35.16 plus s3transfer >= 0.11.0 (its create-multipart
+    blocklist), copies need botocore >= 1.41.0; below those it is rejected up
+    front.
+  - `--checksum-algorithm` accepts the pinned aws-cli's full choice list, but
+    an algorithm the installed botocore does not register is unavailable: the
+    floor registers only `CRC32` / `SHA1` / `SHA256` (plus `CRC32C` with
+    awscrt); `CRC64NVME`, `SHA512` and the `XXHASH` family need a newer
+    botocore (the CRT-backed ones awscrt as well).
   - The bucket-listing filters `ls --bucket-name-prefix` / `--bucket-region`
     need the paginated `ListBuckets` (late 2024 / botocore 1.34.162); below it,
     `ls` still works, falling back to an unpaginated `ListBuckets` where the
     filters are silently inert. Their `Prefix` / `BucketRegion` request
     parameters landed later still (botocore 1.35.42), so on a paginating
     botocore that predates them (1.34.162 through 1.35.41) passing the filters
-    raises a client-side `ParamValidationError` rather than being inert.
+    raises a clean `ValidationError` (botocore's client-side
+    `ParamValidationError`, translated at the API boundary) rather than being
+    inert.
   - The newer CreateBucket parameters `mb` can send - `--tags`'s
     `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
     account-regional namespace bucket selects - fail client-side with a clean
-    `ParamValidationError` on a botocore that predates them.
+    `ValidationError` (botocore's `ParamValidationError` translated at the API
+    boundary) on a botocore that predates them.
   - Without a modern s3transfer, the engine cannot pre-provide the
     copy/download source ETag (`provide_object_etag`, guarded by hasattr):
     `OpResult.extra_info`'s `{"ETag": ...}` is `None` there unless
@@ -84,6 +92,9 @@ maintaining high functional compatibility (parity).
     preloads annotations in memory by default for aws-cli failure-state parity;
     the library also offers temporary-file preload and deferred post-copy
     reads.
+  - S3 Express directory buckets (`--x-s3`) need a botocore that models them
+    (their endpoint rules and `v4-s3express` signing); the floor predates
+    directory buckets, so requests against them fail.
 
   Everything else works at the floor.
 
@@ -99,7 +110,8 @@ maintaining high functional compatibility (parity).
   keep the same name with the same meaning, or an extended form whose
   correspondence remains easy to trace (e.g., the CLI's
   `human_readable_to_int` keeps aws-cli's function name because it is a
-  verbatim port). Renaming such a symbol to something unrelated - or reusing an
+  faithful port - same boundary behavior and failure wording, though the
+  failure is re-raised as the taxonomy's `InvalidConfigError`). Renaming such a symbol to something unrelated - or reusing an
   aws-cli name for a different meaning - obscures the port; a change (including
   a refactoring) that would significantly break this correspondence is
   rejected.
@@ -116,16 +128,19 @@ maintaining high functional compatibility (parity).
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
   are only two exceptions.
   1. Extension options that do not exist in `aws s3` (e.g., the CLI's own
-     `--help` / `-h`, which aws-cli instead exposes as a `help` subcommand,
-     and `--version`, which aws-cli offers only as the top-level
-     `aws --version`, not under `aws s3`)
+     `--help` / `-h`, which aws-cli instead exposes as a `help` subcommand.
+     `--version` is *not* such an exception: aws accepts it under any `aws s3`
+     subcommand through its global argument handling - version line, rc 0 -
+     and the CLI matches that.)
   2. When it depends on a feature that is hard to realize (e.g., the CLI's
      interactive UI)
 
   awscrt-dependent features (the CRT transfer engine, CRT-family checksums,
-  SigV4a signing) are subject to this charter when awscrt is present (a mismatch
-  is a bug). The **CRT transfer engine** (`[s3] preferred_transfer_client`)
-  likewise takes parity against "aws's CRT mode" when awscrt is present (design
+  SigV4a signing) are subject to this charter when the CRT stack is usable -
+  awscrt present and, for the transfer engine, an s3transfer with the CRT
+  surface (>= 0.8; crt.md section 6) - and a mismatch there is a bug. The
+  **CRT transfer engine** (`[s3] preferred_transfer_client`) likewise takes
+  parity against "aws's CRT mode" under the same condition (design
   in [`crt.md`](./crt.md); enforced by the e2e CRT lane). awscrt is not a
   default dependency but an opt-in extra (`crt`); on an installation without it,
   only the relevant features fail - this does not count as a mismatch

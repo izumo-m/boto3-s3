@@ -204,8 +204,8 @@ The content strategies are opt-in submodule imports —
 Because it runs in-process, sync provides **structured results without parsing
 console output**. `on_result` receives terminal item outcomes as the run
 proceeds, plus any additional warning or notice records. Each result carries a
-`transfer_type` (upload / download / copy / delete) and an `outcome` (succeeded /
-failed / warned / skipped / dryrun / notice):
+`transfer_type` (upload / download / copy / move / delete) and an `outcome`
+(succeeded / failed / warned / skipped / dryrun / cancelled / notice):
 
 ```python
 from boto3_s3 import TransferType, OpOutcome
@@ -256,10 +256,13 @@ s3 = S3(session=session)
 s3.cp("./artifact.tar.gz", "s3://prod-bucket/artifacts/")
 ```
 
-`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session(**kwargs)` whose
-clients parse S3 response timestamps at C speed — the difference on a large
-`ls` / `sync` / `rm` is severalfold, and aws-cli has no equivalent. A plain
-`boto3.Session` works identically apart from that speed; a session you pass
+`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session(**kwargs)` — minus
+`botocore_session=`, since the factory builds and owns the botocore session
+the fast parser is installed on — whose clients parse S3 response timestamps
+at C speed. The difference on a large `ls` / `sync` / `rm` is severalfold, and
+aws-cli has no equivalent. A plain `boto3.Session` works identically apart
+from that speed (and the parsed timestamps' `tzinfo` class: `timezone.utc`
+instead of dateutil's `tzutc` — equal values, different type); a session you pass
 is always used as-is (`boto3_s3.fast_parse_timestamp` is exported for wiring
 the parser into a botocore session you manage yourself).
 
@@ -281,6 +284,8 @@ Build the `S3` object with that endpoint to use it for every location, or pass
 `S3Storage(uri, client=minio)` when only one side needs it:
 
 ```python
+import boto3
+
 minio = boto3.client(
     "s3",
     endpoint_url="http://localhost:9000",
@@ -406,7 +411,9 @@ Batch operations stream item records instead of returning a list:
   `mode=CancelMode.IMMEDIATE` to additionally request best-effort cancellation
   of pending and in-flight work. A later immediate request upgrades an earlier
   graceful request; cancellation never downgrades.
-- `dryrun=True` — reports every would-be action without any mutating call.
+- `dryrun=True` — reports every would-be action without any mutating S3 call
+  (like aws, a recursive download / `sync` still pre-creates the local
+  destination directory).
 
 ## Custom backends
 
@@ -431,7 +438,7 @@ dependency pass-throughs are not wrapped.
 | --- | --- |
 | `Boto3S3Error` | Root of the hierarchy. Carries `operation` / `bucket` / `key`. |
 | `ValidationError` | A supplied value, precondition, or path is invalid. |
-| `ConfigurationError` | Credentials / region / profile / endpoint missing or unresolvable. |
+| `ConfigurationError` | Credentials / region missing or unresolvable (an unreachable endpoint is `TransportError`; a present-but-unusable config raises the refining `InvalidConfigError`). |
 | `NotFoundError` | The target does not exist (S3 404, local `FileNotFoundError`). |
 | `AccessDeniedError` | Permission denied (S3 403, local `PermissionError`). |
 | `TransportError` | Network or local I/O failure (connection, timeout, `OSError`). |

@@ -8,7 +8,7 @@ in [`overview.md`](./overview.md) section 3.
 
 | location | what | mechanism | runs |
 |---|---|---|---|
-| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes | always |
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (one moto-backed file, `test_capture_response.py` - the capture rides botocore's real event stream) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
@@ -26,8 +26,11 @@ models are stable at that SDK generation. It needs no Docker because e2e self-sk
 
 One small group needs a **case-insensitive filesystem**: the `--case-conflict`
 `*_with_existing_file` tests (aws-cli's `skip_if_case_sensitive`), where the
-conflict is seen through `os.path.exists`. They take the `case_insensitive_workdir`
-fixture (tests/conftest.py), which resolves a case-insensitive directory or skips:
+conflict is seen through `os.path.exists`. Their `skip` / `warn` / `error`
+variants take the `case_insensitive_workdir`
+fixture (tests/conftest.py), which resolves a case-insensitive directory or
+skips (the `ignore` variants have no conflict handling to observe and run on a
+plain `tmp_path`):
 they run as part of the normal suite on macOS / Windows (the tmp dir is already
 case-insensitive) and self-skip on a case-sensitive Linux host. To run them on
 Linux, set **`BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR`** to a case-insensitive
@@ -37,17 +40,21 @@ case-insensitive), no Docker. Where no such path exists,
 Docker container and points the env var at it (opt-in, like e2e; the default
 `uv run pytest` needs no Docker and self-skips). The "two S3 twins in one listing"
 case-conflict tests instead detect the conflict through the gate's in-flight set
-and run everywhere, but only under a threaded submit (`max_concurrency=1`,
-matching aws's `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
+and need no such directory - though several twin cases skip on Windows, whose
+case-insensitive tmp dir makes the twin-download outcome undefined - but only
+under a threaded submit (`max_concurrency=1`, matching the aws-cli functional
+tests' `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
 each twin before the next is judged (docs/transfer.md section "case-conflict
 gate").
 
 ## 2. Exit-code charter enforcement
 
 The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
-`ours.rc == aws.rc` for **every** scenario, unconditionally - scenario flags
-can relax stdout comparison and golden handling, but by design there is no
-flag to relax the rc comparison. The scenario sets
+`ours.rc == aws.rc` for **every** scenario - scenario flags can relax stdout
+comparison and golden handling, but by design the sole rc carve-out is
+`undefined_on_case_insensitive_dest` (on a case-insensitive destination aws's
+own rc is racy - the warn-mode note in section 1 - so only `ours.rc == 0` is
+asserted there); no other flag can relax the rc comparison. The scenario sets
 (`tests/utils/<cmd>_scenarios.py`) are the charter's detection surface:
 extend them whenever a subcommand or option is added, including error paths
 (nonexistent bucket, out-of-range values). Note the per-command exit-code
@@ -300,15 +307,20 @@ zip's self-contained `dist/` and symlinking
 matching install is reused rather than re-downloaded).
 
 e2e safety contract: at collection time the suite probes that the `aws`
-binary exists and that the bucket is reachable and **empty** (refusing to run
-against a populated bucket); each test cleans up exactly the keys it seeded,
-and the `bucket` fixture asserts emptiness before and after every test.
+binary exists and that the bucket is reachable and **empty** of current
+objects (`list_objects_v2`; a versioned bucket's noncurrent versions / delete
+markers are not probed - the harness buckets are unversioned), refusing to run
+against a populated bucket. Tests restore emptiness with a full-bucket purge
+(`delete_under("")` between the two sides' runs and at the end - safe because
+of that empty-bucket gate), and the `bucket` fixture asserts emptiness before
+and after every test.
 
 **Payload-size budget** (the suite must stay cheap against real AWS): a
 scenario uses the smallest payload that exercises its behavior - byte-scale
 literals almost everywhere; the deliberate exceptions are the multipart
-scenarios at **9 MiB** (just past the 8 MiB threshold; cp/mv/crt, ~7
-scenarios) and `ls`'s 1 MiB human-readable probe. A full run therefore moves
+scenarios at **9 MiB** (just past the 8 MiB threshold; cp/mv/crt, currently
+8 - one a dryrun that materializes the payload without transferring) and
+`ls`'s 1 MiB human-readable probe. A full run therefore moves
 on the order of **a few hundred MiB total** (each scenario seeds and runs
 per CLI side, so a 9 MiB scenario moves up to ~36 MiB), with transient
 storage peaking around ~20 MiB - far under the 1 GiB comfort line. The
@@ -343,23 +355,23 @@ under. The opposite - an install without awscrt - is pinned by
 its checksum registry at import, so the test drives the CLI in a fresh
 subprocess that blocks `awscrt` before botocore loads, asserting the
 documented degradation (transfer.md section 9): plain transfers and presign stay
-rc 0; only the CRT checksum family fails in-pipeline ("Missing Dependency",
-rc 1).
+rc 0 (one exception: an MRAP presign needs SigV4a = awscrt, rc 253); only the
+CRT checksum family fails in-pipeline ("Missing Dependency", rc 1).
 
 The **CRT transfer engine** (crt.md) has its own e2e lane,
 `tests/cli/e2e/test_crt_parity.py`, because the CRT manager bypasses
 botocore's HTTP layer and cannot run on moto - only against a real endpoint.
 Both CLIs run with a temp `AWS_CONFIG_FILE` selecting
 `preferred_transfer_client = crt` (the harness subprocess runners gained an
-`env` overlay for this), and the aws side gets an explicit `--endpoint-url`
+`env` overlay for this), and both sides get an explicit `--endpoint-url`
 (aws's CRT client reads `use_ssl` from the argument only, so an env-only
-endpoint dials TLS to http MinIO and dies - our client derives it from the
-resolved boto3 client and needs no flag). The lane is differential, no
+endpoint dials TLS to http MinIO and dies; ours does not need the flag but
+receives the same one for symmetry). The lane is differential, no
 goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
 `s3handler` has no CRT branch), so the signal is that our CRT mode agrees
 with aws's CRT mode on rc / stdout / bucket state / local tree / download
-mtime across upload, download, mv, and sync (single-part and 9 MiB
-multipart). The same lane covers the missing CRT-configured deletion shapes:
+mtime across upload and download (each single-part and 9 MiB multipart) plus
+mv and sync (small corpora). The same lane covers the missing CRT-configured deletion shapes:
 single/recursive `rm` and upload/download `sync --delete`. Those cases assert
 CLI-observable parity rather than transport identity: boto3-s3 deliberately
 keeps `DeleteObject` / batched `S3Deleter` for the S3-side deletions instead of
@@ -552,6 +564,6 @@ prepends the pinned `aws.exe` to `PATH` when present, mirroring how
 
     cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
 
-The Linux-capture caveat above applies to the e2e golden drift checks of
-cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
+Section 3's capture rule - a Windows run never touches the base (POSIX)
+goldens - applies to the e2e golden drift checks of cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
 never run the Windows and Linux e2e suites concurrently.

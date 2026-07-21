@@ -1,11 +1,13 @@
 # Storage backends
 
-`Storage` is the abstraction every `S3` operation works against: `S3.resolve`
-turns a path/URI argument into a `Storage`, and the operations only ever talk to
-that interface. The built-ins are `S3Storage` (an S3 bucket/key), `LocalStorage`
-(a local path), and the `IOStorage` / `StdioStorage` stream wrappers. A **custom
-subclass** is one more `Storage`, so `cp` / `mv` / `sync` reach it through the
-same code path as the built-ins.
+`Storage` is the abstraction the `S3` operations resolve their sides into:
+`S3.resolve` turns a path/URI argument into a `Storage`. The built-ins are
+`S3Storage` (an S3 bucket/key), `LocalStorage` (a local path), and the
+`IOStorage` / `StdioStorage` stream wrappers. A **custom subclass** is one more
+`Storage`, so `cp` / `mv` / `sync` reach it through the same planning and
+engine path as the built-ins - through this interface alone on the custom
+side, while the built-in routes use their concrete classes' own API (section
+2's `scheme` bullet).
 
 This document is the contract for writing a custom backend. The per-operation
 mechanics live with each engine: the byte-transfer "open route" in
@@ -42,8 +44,9 @@ declarations, not implementations, so they refuse an unsupported operation up
 front only when the declaration is honest:
 
 - **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
-  `"s3"` / `"local"` (a display/classification label; result rendering uses
-  it). Transfer *routing* does not read it: the planner
+  `"s3"` / `"local"` (a declared classification label for embedders; the
+  engine itself never reads it - results render through `as_text()`).
+  Transfer *routing* does not read it either: the planner
   (`transferplan._paths_type`) routes by concrete type — a structural match
   (`isinstance`) against `S3Storage` / `LocalStorage`, subclasses included —
   because the built-in routes reach into those classes' own API
@@ -69,11 +72,13 @@ front only when the declaration is honest:
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
   cannot silently leak excluded entries into `--exclude`/`--include` or, on a
   `sync --delete` destination, into deletion. A backend that filters at its
-  source, or prunes early (e.g. a custom `LocalFileGenerator.finalize_children`
-  calling `options.filter`), applies it in `scan_pages` and declares
+  source applies it in `scan_pages` and declares
   **`scan_pages_filters = True`** to skip the redundant re-filter
-  (`storage.sieve_pages` is the helper). Honor `options.sort` when
-  `SORTABLE_SCAN` is declared.
+  (`storage.sieve_pages` is the helper; a custom
+  `LocalFileGenerator.finalize_children` override prunes by its *own* rules -
+  it never sees `options.filter` - so it does not qualify by itself). Honor
+  `options.sort` when `SORTABLE_SCAN` is declared (byte order for the
+  recursive listing `sync` performs; section 3).
 
   `options` carries the operation-inherent knobs the caller decides per
   invocation (`recursive` / `sort` / `filter` / `on_warning`, and
@@ -84,7 +89,8 @@ front only when the declaration is honest:
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
   `prefix`; `LocalScanOptions` = `follow_symlinks` / `detect_symlink_loops` /
-  `enumerate_all_entries`). A subclass keeps one backend's knobs from leaking
+  `enumerate_all_entries`, plus the internal `storage` back-reference the walk
+  stamps on each entry). A subclass keeps one backend's knobs from leaking
   into another's; the built-ins reject a foreign options type, and a custom
   backend reads its own knobs from its own subclass or from its instance
   state, taking the common base otherwise.
@@ -103,11 +109,14 @@ front only when the declaration is honest:
   download durable before deleting the S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
-  check). `key=""` is the location itself; `None` means "no transferable entry
-  here". Whether a symlink is followed is `LocalStorage`'s own `follow_symlinks`
-  config, read from the storage like every scan (not a parameter here).
-  `enumerate_all_entries` does not apply: this point query retains the
-  transferable-entry contract.
+  check). `key=""` is the location itself; `None` means "no entry to hand the
+  engine" (`LocalStorage`: an absent path, a `follow_symlinks=False` symlink,
+  or a special / unreadable file after the aws-style warn-and-skip - but a
+  directory *is* returned, with no type check, and fails later at `open` the
+  way aws fails). Whether a symlink is followed is `LocalStorage`'s own
+  `follow_symlinks` config, read from the storage like every scan (not a
+  parameter here). `enumerate_all_entries` does not apply: the point query
+  always uses those single-file rules.
 - **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
   `info.key`. Return the backend's delete response (surfaced under
   `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
@@ -204,8 +213,10 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
   For the typical custom backend (`key == compare_key`) the two spaces
   coincide, so `info.storage.open(info.key, "rb")` reads built-in and typical
   custom entries alike.
-- **`compare_key`** is the relative form of the same entry: the
-  `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
+- **`compare_key`** is the relative form of the same entry: the space a
+  relative glob pattern matches (a root-anchored pattern matches the full
+  `key` instead - [`glossary.md`](./glossary.md)) and the axis `sync`
+  merge-joins on.
   `scan` must stamp it on every entry. Omitting the stamp is a contract
   violation with undefined behavior: a dev (non-`-O`) run trips an `assert`
   before the transfer, while `-O` strips the check.
@@ -221,8 +232,8 @@ of deep inside the run:
 | `OPEN_READ` | `open(key, "rb")` | an `opens3` source |
 | `OPEN_WRITE` | `open(key, "wb")` | an `s3open` destination |
 | `GET_FILEINFO` | `get_fileinfo` | a single-entry source / existence check |
-| `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) side |
-| `SORTABLE_SCAN` | byte-ordered `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
+| `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) **source** |
+| `SORTABLE_SCAN` | byte-ordered recursive `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
 | `DELETE` | `delete(info)` | an `mv` source / a `sync --delete` destination |
 
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
@@ -232,8 +243,12 @@ manufacture phantom pairs and, with `--delete`, corrupt the destination.
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
-at all. The exact per-route gates are in [`sync.md`](./sync.md) /
-[`transfer.md`](./transfer.md).
+at all. The byte-order promise is likewise scoped to the recursive listing
+`sync` performs: a non-recursive (delimiter) listing keeps its native shape -
+`S3Storage`'s pages emit a page's common prefixes before its objects, aws
+`ls`'s order. A recursive custom *destination* of `cp` / `mv` needs no `SCAN`
+either - only `sync` lists a destination. The exact per-route gates are in
+[`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
 
 The gates read the declaration through `supports(needed)` /
 `missing_capabilities(needed)` — the lattice-expanded membership test and its

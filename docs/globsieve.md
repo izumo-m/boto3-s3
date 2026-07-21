@@ -41,7 +41,8 @@ m.included("foo.log")  # False
 - `compile(patterns) -> Matcher` - `Matcher.included(compare_key, full_key=None)
   -> bool`. A **relative** pattern matches `compare_key`;
   a **root-anchored** (absolute) pattern matches `full_key` (the entry's full
-  path) - see section 2. Relative-only lists ignore `full_key`.
+  path) - see the "Root-anchored" subsection below. Relative-only lists ignore
+  `full_key`.
 - `GlobFilter()` - the ergonomic front end and the type the operations consume
   as `filter=`. A chainable `FileFilter` (`Callable[[FileInfo], bool]`) that
   accumulates the same rules and matches a `FileInfo` (its `compare_key`, or
@@ -75,11 +76,15 @@ though `ntpath.join` still replaces the root as aws-cli relies on. The `Anchored
 matcher joins each anchored pattern onto the entry's `full_key`
 (`os.path.join(full_key, pattern)`, lending the entry's drive / UNC anchor to a
 driveless-absolute pattern exactly like aws-cli) before fnmatching `full_key`.
-An anchored pattern can never match an S3 entry, by either of two routes: a bare
-`included` call passes `full_key=None` and the anchored item is skipped, while
-`GlobFilter` passes the S3 key as `full_key` but that key carries no drive /
-anchor, so the joined absolute pattern fnmatches nothing. Both track aws-cli (its
-s3 paths carry no anchor). This is what lets the **single**
+A normal S3 key carries no drive / anchor, so an anchored pattern is inert
+against S3 entries by either route: a bare `included` call passes
+`full_key=None` (the anchored item is skipped), and `GlobFilter` passes the S3
+key as `full_key`, where the joined absolute pattern fnmatches nothing -
+tracking aws-cli, whose s3 paths carry no anchor. The one exception is an S3
+key that literally begins with `/`: its full key genuinely is anchored, so an
+anchored pattern matches it (aws-cli, which matches against `bucket/key`,
+would not - the library reads its own anchored-vs-full-key rule honestly
+here). This is what lets the **single**
 `sync` filter prune the two sides per-side: a source-rooted absolute pattern
 matches the local source's full path but not the S3 destination's anchorless key.
 A relative pattern keeps matching `compare_key`, which is symmetric across sides.
@@ -154,7 +159,7 @@ is: for recursive, the target normalized to a `/`-terminated form; for a single
 key, everything through its final `/`; for a bucket-level target, `""`
 (equivalent to the composition of aws's `filters._get_s3_root` plus
 `FileFormat.s3_format`). The
-relative form is what keeps `Exclude("*")`
+relative form is what keeps `GlobPattern.exclude("*")`
 recognized as the catch-all and the section 2 optimizations in effect; the
 bucket name does not affect the decision under either aws's join or the
 relativization, so it is not part of the prefix.
@@ -163,8 +168,8 @@ relativization, so it is not part of the prefix.
   `info.compare_key`, so it sees the same key aws-cli's `--exclude`
   / `--include` match, with the section 2 fast paths intact; an absolute pattern
   it anchors against `info.key` (section 1). For `rm` the source is always s3,
-  whose key has no anchor, so an absolute pattern is inert and only the relative
-  ones bite. The CLI's `compile_filter` (`cli/src/boto3_s3_cli/filters.py`)
+  whose key normally has no anchor, so an absolute pattern is inert (unless a
+  key literally begins with `/` - section 1) and only the relative ones bite. The CLI's `compile_filter` (`cli/src/boto3_s3_cli/filters.py`)
   compiles the patterns in their order of appearance with the operation's two
   bases (aws's `rootdir`s) and delegates to this engine whenever the joined
   matching aws performs is provably the `compare_key` match - see cli.md;
@@ -205,8 +210,8 @@ scan-level mechanism), while the local walk applies the predicate inline. Both
 sides are matched against the single `filter` (one symmetric predicate over
 each side's compare key). A destination entry pruned here
 is invisible to `--delete`, reproducing aws's "files excluded by filters are
-excluded from deletion". The pair-level judgments (`compare` /
-`delete`) are a separate sync-specific layer applied after the
+excluded from deletion". The pair-level lanes (`create_filter` / `update_filter` /
+`delete_filter`) are a separate sync-specific layer applied after the
 merge-join; see sync.md.
 
 cp / mv / sync take the same single `filter` parameter as rm; the two-parameter
@@ -222,8 +227,9 @@ basis of sync's merge-join). The **compare key** a glob filter is matched agains
 (`GlobFilter`, via `FileInfo.compare_key`) is this `/`-form key made relative to
 the local directory or S3 `Prefix` being enumerated
 (`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
-Matching therefore happens in `/`-space, so **a pattern must be `/`-form to
-match**:
+Matching therefore happens in `/`-space; `compile` folds the host separator in
+a pattern to `/` (on Windows `logs\*.txt` matches `logs/app.txt`), so **a
+pattern reaches the match `/`-form either way**:
 
 - **CLI**: patterns are written `/`-form and the CLI's `compile_filter` owns
   full aws-cli fidelity with its own base-joined matching (cli.md), delegating
@@ -234,7 +240,8 @@ match**:
   reproduces this by lower-casing patterns at compile and keys at match
   (`os.name == "nt"`), and stays byte-exact on POSIX.
 - **library**: a `GlobFilter` matches a relative pattern against the `/`-form
-  `compare_key` (so that pattern must be `/`-form too) and an absolute one
+  `compare_key` (written `/`-form or in the host separator - `compile` folds
+  it) and an absolute one
   against `info.key` (the `/`-form **full** key, which differs per side - whereas
   `compare_key` is symmetric, so a relative-path rule should read it). The
   library is byte-exact; host case-folding is the CLI layer's job.

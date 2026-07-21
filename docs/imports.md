@@ -38,20 +38,23 @@ to exactly this contract - the "Library consumption contract" in
   (name -> home module) and are cached into `globals()`; the type checker sees
   the real imports in the `TYPE_CHECKING` block, so consumers' types are
   unaffected. **`__all__`, the `TYPE_CHECKING` imports, and `_EXPORT_HOMES`
-  must agree across all three** (the contract test's all-symbols-resolve case
-  detects any drift). `__version__` likewise resolves on first access via
+  must agree across all three** (the contract test resolves every `__all__`
+  name and parses the `TYPE_CHECKING` block against `_EXPORT_HOMES`, so any
+  drift fails). `__version__` likewise resolves on first access via
   `importlib.metadata`. Trade-off: a missing dependency's `ImportError`
   surfaces at first access rather than at import time.
 - SDK-backed modules import the SDK at module top - `s3.py`, `s3storage.py`
   and `sessions.py` import `boto3` (which itself pulls in s3transfer via its
   `compat` module),
   and `transferconfig.py` (the re-export home for the public `TransferConfig`:
-  boto3's subclass + the CRT fields, crt.md section 2) imports
-  `boto3.s3.transfer`. The bare-import contract holds because the lazy root
+  boto3's subclass plus the CRT fields and `annotation_temp_dir`, crt.md
+  section 2) imports `boto3.s3.transfer`. The bare-import contract holds because the lazy root
   defers those *module* loads, not because the modules defer the SDK -
   touching a root symbol homed in one of them pays the SDK import.
   `crtsupport.py` keeps all of awscrt / `s3transfer.crt` in-function, so the
-  classic path pulls in no CRT dependency.
+  classic path works with awscrt absent (when awscrt *is* installed, botocore
+  itself imports it eagerly - the classic path avoids requiring awscrt, not
+  its import cost).
 - The CLI satisfies the help/version contract with a lazy command table:
   stage 1's parser is built from `cli._COMMAND_TABLE` alone (subcommand ->
   defining module, class, one-line help), and command modules load only after

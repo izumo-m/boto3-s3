@@ -17,7 +17,7 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 ## Why use it
 
 - **Fast startup.** In a representative Linux measurement, syncing a directory
-  that contained one small file was about 1.9x faster than aws-cli v2.
+  that contained one small file was about 2.2x faster than aws-cli v2.
 - **Compact installation.** A default dependency-complete installation was
   about 31.5 MiB, compared with about 268 MiB for the corresponding aws-cli v2
   installation.

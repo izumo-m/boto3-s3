@@ -55,9 +55,9 @@ naturally.
 
 | module | role |
 |---|---|
-| `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds only the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`). A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). |
+| `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4). A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). |
 | `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
-| `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic. Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
+| `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
 | `runtimeconfig.py` (CLI) | A port of `RuntimeConfig` from aws-cli `transferconfig.py` + reading `[s3]` + the decision tree (`resolve_transfer_client`) + building the `TransferConfig` (`build_transfer_config`). |
 
 ## 3. The library layer (boto3-faithful)
@@ -99,7 +99,8 @@ also read as `'auto'`) with the same rules as boto3.
     is handed `params['endpoint_url']` as-is, so a custom endpoint that sits
     under an AWS domain (a VPC interface endpoint, a directly-named FIPS /
     dualstack host) is pinned rather than re-resolved to public S3. With no
-    explicit endpoint (`endpoint=None`, the default and every non-CLI caller),
+    explicit endpoint (`endpoint=None` - the default when neither the CLI's
+    `--endpoint-url` nor `S3(endpoint_url=...)` supplies one),
     `_derive_endpoint` falls back to the host form of `client.meta.endpoint_url`:
     `None` for an AWS-default form (boto3-faithful - botocore re-resolves it per
     request, under the caller's `Config`; see the `config` bullet below), the
@@ -170,9 +171,9 @@ confirmed).
 ### `[s3]` runtime config
 
 A verbatim port of `RuntimeConfig` from aws-cli `transferconfig.py`
-(`runtimeconfig.py`). It reads the profile's `[s3]` via
-`session.get_scoped_config().get("s3", {})` (honoring `AWS_CONFIG_FILE` /
-`--profile` / nested `s3 =` INI), converts sizes (`8MB`), rates (`100MB/s` /
+(`runtimeconfig.py`). It reads the profile's `[s3]` through `S3.aws_config()`
+(`load_scoped_s3_config` pulls the known keys; `AWS_CONFIG_FILE` / `--profile`
+/ the nested `s3 =` INI are honored through that reader), converts sizes (`8MB`), rates (`100MB/s` /
 `800Kb/s`), and bools, resolves the `default` -> `classic` alias, and validates
 invalid values. The wording for invalid values is byte-for-byte, raised as the
 library's `InvalidConfigError` - aws-cli's class of the same name reaches the
@@ -199,9 +200,10 @@ also follows `preferred`).
 
 ### Building the `TransferConfig` (`build_transfer_config`)
 
-It passes **only the keys explicitly set** in `[s3]` to the `TransferConfig` ctor
-(an unset key stays at boto3's `UNSET_DEFAULT` sentinel = "part_size only when
-`multipart_chunksize` is explicit" holds).
+It passes **only the keys explicitly set** in `[s3]` to the `TransferConfig` ctor,
+plus the always-passed, already-resolved `preferred_transfer_client`
+(an unset tuning key stays at boto3's `UNSET_DEFAULT` sentinel = "part_size
+only when `multipart_chunksize` is explicit" holds).
 
 **The config is assembled per engine** (the same as aws-cli's factory
 building the classic `TransferConfig` and the CRT client from separate sets of
@@ -227,7 +229,7 @@ keys).
   (aws is rc 0) (avoiding a charter violation; e2e:
   `test_crt_ignores_classic_only_config`).
 
-cp / mv / sync call `transferargs.resolve_transfer_config(args, ctx,
+cp / mv / sync call `transferargs.resolve_transfer_config(ctx, s3,
 paths_type=...)`. The test-injected `ctx.transfer_config` always takes precedence
 (preserving the existing determinization lever). The reading of `[s3]` is placed
 **after** the usage (252) and source-absent (255) validations (an
@@ -238,7 +240,8 @@ invalid `[s3]` value loses to either).
 The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
 from "excluded because hard to realize" to a target that "**takes parity against
 aws's CRT mode**" (the CRT transfer engine is removed from charter exception 2).
-When awscrt is present, the exit code and output of CRT mode must match those of
+When the CRT stack is usable (awscrt present and s3transfer's CRT surface new
+enough - section 6), the exit code and output of CRT mode must match those of
 aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
