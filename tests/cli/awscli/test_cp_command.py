@@ -1607,6 +1607,8 @@ class TestCopyPropsAllCpCommand:
         assert "GetObjectAnnotation" not in called
         assert "PutObjectAnnotation" not in called
 
+    # aws-cli: none (boto3-s3 addition; the annotation-read failure must precede
+    # any destination write)
     def test_mp_copy_annotation_read_failure_happens_before_destination(
         self, tmp_path: Path
     ) -> None:
