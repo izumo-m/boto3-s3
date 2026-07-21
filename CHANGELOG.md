@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `session()` / `fast_parse_timestamp`: a boto3 `Session` factory whose clients parse response timestamps at C speed, making large listings severalfold faster - `S3(session=boto3_s3.session())` is now the recommended construction.
 - Settled the public API for 1.0: the sync-pair / result identity field is now `compare_key` (delete records join the same key space), `ls` takes `on_entry`, `S3Storage` speaks `uri`, unknown transfer options are rejected eagerly, capabilities became the sole custom-backend contract, and the export tiers shrank.
 - Documented the frozen contracts (exception attributes, the two-tier export surface, the backend SPI evolution policy) and fixed a raw `ValueError` leaking from `client()` on a malformed endpoint.
 - Aligned more behavior with aws-cli: an unset page size sends no `MaxKeys`, small multipart-copy tag sets stay inline on the create call, deferred annotation copies paginate, and CRT requests keep the caller's client configuration.

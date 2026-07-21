@@ -42,8 +42,9 @@ to exactly this contract - the "Library consumption contract" in
   detects any drift). `__version__` likewise resolves on first access via
   `importlib.metadata`. Trade-off: a missing dependency's `ImportError`
   surfaces at first access rather than at import time.
-- SDK-backed modules import the SDK at module top - `s3.py` and `s3storage.py`
-  import `boto3` (which itself pulls in s3transfer via its `compat` module),
+- SDK-backed modules import the SDK at module top - `s3.py`, `s3storage.py`
+  and `sessions.py` import `boto3` (which itself pulls in s3transfer via its
+  `compat` module),
   and `transferconfig.py` (the re-export home for the public `TransferConfig`:
   boto3's subclass + the CRT fields, crt.md section 2) imports
   `boto3.s3.transfer`. The bare-import contract holds because the lazy root

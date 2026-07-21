@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         website,
     )
     from boto3_s3.s3storage import S3Storage
+    from boto3_s3.sessions import fast_parse_timestamp, session
     from boto3_s3.storage import Location, Storage, StorageCapability
     from boto3_s3.transferconfig import TransferConfig
     from boto3_s3.types import (
@@ -149,6 +150,7 @@ __all__ = [
     "all_of",
     "any_of",
     "cp",
+    "fast_parse_timestamp",
     "has_underlying_s3_path",
     "ls",
     "mb",
@@ -157,6 +159,7 @@ __all__ = [
     "rb",
     "rm",
     "rm_filter_root",
+    "session",
     "set_stream_logger",
     "sync",
     "website",
@@ -214,6 +217,8 @@ _EXPORT_HOMES: dict[str, str] = {
     "website": "boto3_s3.s3",
     "rm_filter_root": "boto3_s3.s3",
     "S3Storage": "boto3_s3.s3storage",
+    "fast_parse_timestamp": "boto3_s3.sessions",
+    "session": "boto3_s3.sessions",
     "Location": "boto3_s3.storage",
     "Storage": "boto3_s3.storage",
     "StorageCapability": "boto3_s3.storage",

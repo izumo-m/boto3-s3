@@ -4,9 +4,13 @@
 ``Location`` argument resolves to a ``Storage``: a local path becomes a
 ``LocalStorage`` and an ``"s3://..."`` string becomes an ``S3Storage``. The
 boto3 client lives on the ``S3Storage``; when its client is omitted it falls
-back to ``boto3.client("s3")``. To target a custom endpoint / profile / region
-(e.g. MinIO) or a second account for S3-to-S3, pass an explicit
-``S3Storage(uri, client=...)`` instead of a bare string.
+back to ``boto3.client("s3")``. The recommended construction is
+``S3(session=boto3_s3.session())`` - the tuned session's clients parse
+response timestamps at C speed (`sessions.py`); a zero-config ``S3()``
+deliberately keeps plain ``boto3.client("s3")`` semantics, never consulting
+``boto3.DEFAULT_SESSION`` state to decide anything. To target a custom
+endpoint / profile / region (e.g. MinIO) or a second account for S3-to-S3,
+pass an explicit ``S3Storage(uri, client=...)`` instead of a bare string.
 
 This module is SDK-backed by declaration: it imports boto3 at module top.
 Only the package root's lazy re-export keeps a bare ``import boto3_s3``

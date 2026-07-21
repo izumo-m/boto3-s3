@@ -36,6 +36,23 @@ class TestBuildClient:
         assert s3.client().meta.endpoint_url == "http://localhost:9000"
         assert s3.aws_config().get_str("s3.multipart_threshold") == "17"
 
+    def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
+        # Every CLI-built session registers the library's fast_parse_timestamp
+        # on its response-parser factory before any client exists; listing
+        # timestamps then parse at C speed (tests/lib/test_sessions.py pins
+        # the parser's value-equality with botocore).
+        from boto3_s3 import fast_parse_timestamp
+
+        session = clientfactory.build_session(_parse([]))
+        factory = session._session.get_component(  # pyright: ignore[reportPrivateUsage]
+            "response_parser_factory"
+        )
+        parser = factory.create_parser("rest-xml")
+        assert (
+            parser._timestamp_parser  # pyright: ignore[reportPrivateUsage]
+            is fast_parse_timestamp
+        )
+
     def test_region_and_endpoint_applied(self) -> None:
         args = _parse(["--region", "us-west-2", "--endpoint-url", "http://localhost:9000"])
         client = clientfactory.build_client(args)

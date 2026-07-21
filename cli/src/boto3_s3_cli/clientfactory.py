@@ -115,14 +115,26 @@ def validate_profile(args: argparse.Namespace) -> None:
 
 
 def build_session(args: argparse.Namespace) -> Boto3Session:
-    """Build and validate the one boto3 session owned by a CLI `S3` command."""
+    """Build and validate the one boto3 session owned by a CLI `S3` command.
+
+    The session's clients parse response timestamps through the library's
+    `fast_parse_timestamp` (registered on this CLI-owned session before any
+    client is built) - large listings parse their ``LastModified`` values at
+    C speed where aws-cli walks dateutil's generic parser per object, with
+    byte-identical output.
+    """
     import boto3
     import botocore.session
     from botocore.exceptions import BotoCoreError
 
+    from boto3_s3 import fast_parse_timestamp
+
     try:
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
         botocore_session.get_scoped_config()
+        botocore_session.get_component("response_parser_factory").set_parser_defaults(
+            timestamp_parser=fast_parse_timestamp
+        )
         return boto3.Session(botocore_session=botocore_session)
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
@@ -225,7 +237,14 @@ def build_service_client(
     # instead of escaping as an uncaught traceback (see build_client).
     try:
         if session is None:
+            from boto3_s3 import fast_parse_timestamp
+
             botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            # Same fast timestamp parsing as build_session: every CLI-built
+            # session carries it.
+            botocore_session.get_component("response_parser_factory").set_parser_defaults(
+                timestamp_parser=fast_parse_timestamp
+            )
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
@@ -375,7 +394,14 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
     try:
         if session is None:
+            from boto3_s3 import fast_parse_timestamp
+
             botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            # Same fast timestamp parsing as build_session: every CLI-built
+            # session carries it.
+            botocore_session.get_component("response_parser_factory").set_parser_defaults(
+                timestamp_parser=fast_parse_timestamp
+            )
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]

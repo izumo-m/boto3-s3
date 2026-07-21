@@ -80,9 +80,12 @@ operations require separate, prebuilt clients — see
 [Running operations across threads](#running-operations-across-threads).
 
 ```python
+import boto3_s3
 from boto3_s3 import S3
 
-s3 = S3()
+# boto3_s3.session(): a boto3 Session whose clients parse listing timestamps
+# at C speed. A bare S3() works too, with plain boto3.client("s3") semantics.
+s3 = S3(session=boto3_s3.session())
 
 # Sync a directory tree up to S3, removing remote extras (mirror).
 s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
@@ -245,13 +248,20 @@ For a specific **profile, region, or endpoint**, hand the `S3` object a
 string then inherits it:
 
 ```python
-import boto3
+import boto3_s3
 from boto3_s3 import S3, S3Storage
 
-session = boto3.Session(profile_name="prod", region_name="eu-west-1")
+session = boto3_s3.session(profile_name="prod", region_name="eu-west-1")
 s3 = S3(session=session)
 s3.cp("./artifact.tar.gz", "s3://prod-bucket/artifacts/")
 ```
+
+`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session(**kwargs)` whose
+clients parse S3 response timestamps at C speed — the difference on a large
+`ls` / `sync` / `rm` is severalfold, and aws-cli has no equivalent. A plain
+`boto3.Session` works identically apart from that speed; a session you pass
+is always used as-is (`boto3_s3.fast_parse_timestamp` is exported for wiring
+the parser into a botocore session you manage yourself).
 
 When a single operation needs **more than one client** — a cross-account
 S3-to-S3 copy is the clearest case — the instance default can't express it.
