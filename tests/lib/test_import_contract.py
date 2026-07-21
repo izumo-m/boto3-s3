@@ -5,8 +5,7 @@ The public surface is re-exported lazily (PEP 562 ``__getattr__`` in
 contract that motivates it:
 
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
-  SDK module - ``boto3`` alone drags in ``s3transfer`` via its ``compat``
-  module, so an eager re-export taxes every importer ~120ms (docs/imports.md).
+  SDK module (docs/imports.md section 1).
 
 Module-loading cases run in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -63,7 +62,7 @@ class TestLibraryImportContract:
         )
 
     def test_types_alone_stays_pure(self) -> None:
-        # docs/imports.md item 2-2 names types among the pure modules: the
+        # docs/imports.md section 1 item 2 names types among the pure modules: the
         # record/enum definitions must not drag in the SDK on import.
         _run_fresh(
             """
@@ -74,7 +73,7 @@ class TestLibraryImportContract:
         )
 
     def test_exceptions_alone_stays_pure(self) -> None:
-        # docs/imports.md item 2-2 names exceptions among the pure modules: the
+        # docs/imports.md section 1 item 2 names exceptions among the pure modules: the
         # taxonomy is plain Python and must stay SDK-free on import.
         _run_fresh(
             """

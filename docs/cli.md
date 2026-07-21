@@ -864,8 +864,9 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 ## 7. Import discipline (startup cost)
 
 The top-level `--help` and `--version` exits load no AWS SDK module (boto3 /
-botocore / s3transfer) and no subcommand's command module (the `commands`
-package's shared `base` infrastructure may load). This is the full CLI import
+botocore / s3transfer), no subcommand's command module (the `commands`
+package's shared `base` infrastructure may load), and no library module beyond
+the lazy `boto3_s3` root and its pure `exceptions`. This is the full CLI import
 contract: after normal dispatch begins, SDK imports are permitted, including on
 usage errors and subcommand help. [`imports.md`](./imports.md) defines the
 contract and `tests/cli/unit/test_import_contract.py` enforces the two exits.
