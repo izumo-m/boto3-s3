@@ -174,11 +174,12 @@ class Storage(abc.ABC):
     that forgets to filter cannot silently leak excluded entries into ``--exclude``
     / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
     built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
-    ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that still
-    warns on excluded files, or early in a custom ``LocalFileGenerator``'s
-    ``finalize_children``). A backend that filters at its source, or prunes early by
-    calling ``options.filter`` itself, sets ``True`` to skip the redundant re-filter
-    without re-implementing ``scan``.
+    ``LocalStorage``'s walk applies it late, after the aws-cli vetting that still
+    warns on excluded files - a custom ``LocalFileGenerator``'s
+    ``finalize_children`` prunes earlier but by its own rules, never from
+    ``options.filter``). A backend that filters at its source, or applies
+    ``options.filter`` itself in ``scan_pages``, sets ``True`` to skip the
+    redundant re-filter without re-implementing ``scan``.
     """
 
     scheme: ClassVar[str]

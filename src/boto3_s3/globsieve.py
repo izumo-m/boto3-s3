@@ -267,11 +267,13 @@ class Anchored:
     way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
     the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
     under ``C:\\data`` -> ``C:/data/*``), and the joined form is fnmatched against
-    ``full_key``. A root-anchored pattern never matches an S3 entry, by either of
-    two routes: a bare ``included`` call passes ``full_key=None`` and the anchored
-    item is skipped; ``GlobFilter`` passes the S3 key as ``full_key``, but an S3
-    key carries no drive / anchor, so the joined absolute pattern fnmatches
-    nothing. Both track aws-cli, whose s3 paths carry no anchor.
+    ``full_key``. A normal S3 key carries no drive / anchor, so an anchored
+    pattern is inert against S3 entries by either route: a bare ``included``
+    call passes ``full_key=None`` (the anchored item is skipped);
+    ``GlobFilter`` passes the S3 key as ``full_key``, where the joined absolute
+    pattern fnmatches nothing - tracking aws-cli, whose s3 paths carry no
+    anchor. The exception is a key that literally begins with ``/``: its full
+    key genuinely is anchored, so an anchored pattern matches it.
 
     Items are ``(PatternKind, anchored, payload)``: ``payload`` is the raw
     pattern string when anchored, else a ``SetMatcher`` for ``compare_key``.
