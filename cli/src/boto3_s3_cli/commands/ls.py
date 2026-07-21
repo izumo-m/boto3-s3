@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from boto3_s3 import FileInfo, FileKind, S3Storage
 from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
@@ -53,9 +54,6 @@ class LsCommand(Command):
         page_size = parse_integer_option(args.page_size, operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import FileInfo, FileKind, S3Storage
-
         # Intentional aws-cli bug parity: a readable positional fileb:// is
         # still bytes here. Calling bytes.startswith(str) raises TypeError,
         # which the general handler maps to 255.

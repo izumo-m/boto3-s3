@@ -6,7 +6,7 @@ import argparse
 import os
 
 # Loaded only once cp is determined (stage 2 of the lazy dispatch).
-from boto3_s3 import NotFoundError, StdioStorage, ValidationError
+from boto3_s3 import NotFoundError, S3Storage, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -77,9 +77,6 @@ class CpCommand(Command):
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
-
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
 
         s3 = head.s3
         client = s3.client()

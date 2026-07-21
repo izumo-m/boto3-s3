@@ -356,7 +356,8 @@ class TestScanInterruptPolicy:
                 scan_waits.append(options.wait_on_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "S3Storage", _Recording)
+        # Patch the command module's binding: ls.py imports S3Storage at top.
+        monkeypatch.setattr("boto3_s3_cli.commands.ls.S3Storage", _Recording)
         ctx, _client = _fake_ctx([{"Contents": []}])
         assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
         assert scan_waits == [False]

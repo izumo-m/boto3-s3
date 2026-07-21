@@ -12,6 +12,7 @@ from boto3_s3 import (
     Boto3S3Error,
     OpOutcome,
     OpResult,
+    S3Storage,
     ValidationError,
 )
 from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
@@ -120,10 +121,6 @@ class RmCommand(Command):
             # fileb bytes 0xff + missing page-size paramfile is aws 252, and
             # the decode's UnicodeDecodeError 255 fires only after them).
             args.paths = args.paths.decode(sys.getfilesystemencoding())
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore).
-        from boto3_s3 import S3Storage
-
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.

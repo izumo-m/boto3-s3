@@ -31,6 +31,7 @@ from typing_extensions import Unpack
 
 from boto3_s3 import producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
     Comparator,
     DestOnlyPair,
@@ -78,10 +79,6 @@ if TYPE_CHECKING:
     from botocore.config import Config
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import WebsiteConfigurationTypeDef
-
-    # Local + SDK-free, but kept annotation-only so `aws_config()` stays an
-    # opt-in module load (the reader's botocore touch is deferred into it).
-    from boto3_s3.awsconfig import AwsConfig
 
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
@@ -756,9 +753,6 @@ class S3:
         ``[s3]`` semantics on top of these values (the defaults table, validation,
         the engine decision) is the CLI distribution's job, not the library's.
         """
-        # Load the optional config reader only when a caller asks for it.
-        from boto3_s3.awsconfig import AwsConfig
-
         if self._aws_config is None:
             self._aws_config = AwsConfig.from_session(self._session)
         return self._aws_config

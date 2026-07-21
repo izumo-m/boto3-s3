@@ -20,11 +20,22 @@ from boto3_s3 import (
     CaseConflictMode,
     CopyPropsMode,
     InvalidValueError,
+    LocalStorage,
     S3Storage,
     TransferOptions,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, globalargs, paramfile, shorthand, usage
+from boto3_s3.localstorage import translate_os_error
+from boto3_s3.transfer import conditional_write_unsupported_reason
+from boto3_s3_cli import (
+    clientfactory,
+    filters,
+    globalargs,
+    paramfile,
+    runtimeconfig,
+    shorthand,
+    usage,
+)
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
@@ -37,7 +48,7 @@ from boto3_s3_cli.progress import TransferPrinter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from boto3_s3 import S3, LocalStorage
+    from boto3_s3 import S3
     from boto3_s3_cli.commands.base import Context
 
 # aws-cli choice lists (subcommands.py ACL / STORAGE_CLASS).
@@ -370,8 +381,6 @@ def create_local_dest_dir(dest: str, *, operation: str) -> None:
         try:
             os.makedirs(dest)
         except OSError as exc:
-            from boto3_s3.localstorage import translate_os_error
-
             raise translate_os_error(exc, operation=operation, key=None) from exc
 
 
@@ -438,9 +447,6 @@ def validate_no_overwrite_supported(
     usable on an old botocore (back-compat floor, docs/overview.md section 2)."""
     if not no_overwrite or paths_type not in ("locals3", "s3s3"):
         return
-    # Import only when the installed client's model must be inspected.
-    from boto3_s3.transfer import conditional_write_unsupported_reason
-
     reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")
     if reason is not None:
         raise ValidationError(reason, operation=operation)
@@ -609,8 +615,6 @@ def resolve_locations(
     ``--source-region`` the source side gets its own client in that region with the
     ``--endpoint-url`` override dropped (aws-cli ClientFactory).
     """
-    # Import the storage implementations when locations are resolved.
-    from boto3_s3 import LocalStorage, S3Storage
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # Construction is permissive (non-raising); validate the strict aws-cli
@@ -646,8 +650,6 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     stdin dest key). The real transfer storages (with a client) are built in
     ``resolve_locations``.
     """
-    from boto3_s3 import LocalStorage, S3Storage
-
     return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
 
 
@@ -665,8 +667,6 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     """
     if ctx.transfer_config is not None:
         return ctx.transfer_config
-    from boto3_s3_cli import runtimeconfig
-
     scoped = runtimeconfig.load_scoped_s3_config(s3.aws_config())
     runtime_config = runtimeconfig.RuntimeConfig().build_config(**scoped)
     resolved = runtimeconfig.resolve_transfer_client(runtime_config, paths_type=paths_type)

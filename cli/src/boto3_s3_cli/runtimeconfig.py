@@ -24,13 +24,12 @@ section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from boto3_s3 import ConfigurationError, InvalidConfigError
+from botocore.utils import ensure_boolean
+
+from boto3_s3 import ConfigurationError, InvalidConfigError, TransferConfig, crtsupport
 from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
-
-if TYPE_CHECKING:
-    from boto3_s3 import TransferConfig
 
 logger = logging.getLogger(__name__)
 
@@ -192,9 +191,6 @@ class RuntimeConfig:
                     )
 
     def _convert_booleans(self, runtime_config: dict[str, Any]) -> None:
-        # Import botocore only when converting an actual runtime config.
-        from botocore.utils import ensure_boolean
-
         for attr in self.BOOLEANS:
             value = runtime_config.get(attr)
             if value is not None:
@@ -295,9 +291,6 @@ def resolve_transfer_client(
     if paths_type == "s3s3":
         return "classic"
     preferred = runtime_config["preferred_transfer_client"]  # alias already resolved
-    # Deferred awscrt-touching import: only the transfer path reaches here.
-    from boto3_s3 import crtsupport
-
     if preferred == "crt":
         if not crtsupport.has_minimum_crt_version():
             raise ConfigurationError(
@@ -349,8 +342,6 @@ def build_transfer_config(
     section 4). Under classic every key flows through and the aws-cli
     in-memory chunk caps and download IO queue depth are pinned.
     """
-    from boto3_s3 import TransferConfig
-
     crt = resolved == "crt"
     kwargs: dict[str, Any] = {"preferred_transfer_client": resolved}
     for rc_key, ctor_key in _TRANSFER_CONFIG_CTOR_KEYS.items():

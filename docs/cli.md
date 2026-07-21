@@ -878,11 +878,9 @@ The key implementation points are:
 - The help choices / help text are a static mirror of aws-cli's static
   tables (the same idiom as the `cli.json` mirror of section 4). They are not taken
   dynamically from botocore's models.
-- `runtimeconfig.py`'s top level is also pure Python (the exception classes
-  plus `awsconfig`'s shared size core - itself SDK-free at import). boto3
-  (the scoped config read), awscrt (the decision tree), and `TransferConfig`
-  construction are imported inside functions, paid for only when a transfer
-  path is reached.
+- `runtimeconfig.py` loads only on a transfer path (post-dispatch), so it
+  imports botocore and the library's `TransferConfig` at module top; awscrt
+  stays behind `crtsupport`'s in-function imports.
 - The `autoprompt` package and `prompt_toolkit` are imported only when
   `--cli-auto-prompt` fires (`cli.main`'s resolver only scans the raw argv and
   needs no import). The completion engine proper (`model` / `parser` /

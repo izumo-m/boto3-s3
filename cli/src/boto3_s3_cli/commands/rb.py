@@ -6,7 +6,7 @@ import argparse
 import sys
 
 # These module-level names are needed while configuring the command.
-from boto3_s3 import Boto3S3Error, InvalidValueError, ValidationError
+from boto3_s3 import Boto3S3Error, InvalidValueError, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 from boto3_s3_cli.commands.rm import RmCommand
@@ -49,9 +49,6 @@ class RbCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="rb")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks (config -> 253, other
         # botocore -> 255), then validate the path.

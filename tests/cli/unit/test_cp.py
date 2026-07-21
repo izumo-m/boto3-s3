@@ -755,7 +755,8 @@ class TestSourceScanWiring:
                 scan_waits.append(options.wait_on_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "LocalStorage", _RecLocal)
+        # Patch the binding module: transferargs imports LocalStorage at top.
+        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.LocalStorage", _RecLocal)
         (tmp_path / "f.txt").write_bytes(b"x")
         ctx, _calls = _recording_ctx([{}])
         rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)

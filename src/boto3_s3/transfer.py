@@ -31,8 +31,7 @@ Engine choices (parity-driven):
   semaphore: a full queue blocks the submitting thread, exactly the
   mechanism aws-cli's handler leans on. No extra submission window.
 - Subscribers are plain duck-typed classes (s3transfer resolves callbacks
-  with ``getattr``), keeping this module SDK-free at import time
-  (docs/imports.md).
+  with ``getattr``); no s3transfer base class is subclassed.
 - The copy-props subscriber chain reproduces aws-cli's: a single-part
   CopyObject carries metadata and tags natively (directive defaults), while
   a multipart copy loses them - so metadata is re-injected from a source
@@ -57,10 +56,18 @@ import tempfile
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
-from boto3_s3 import requestparams
+from s3transfer.copies import CopySubmissionTask
+from s3transfer.exceptions import CancelledError as S3TransferCancelledError
+from s3transfer.futures import NonThreadedExecutor
+from s3transfer.manager import TransferConfig as S3TransferConfig
+from s3transfer.manager import TransferManager
+from s3transfer.upload import UploadSubmissionTask
+
+from boto3_s3 import crtsupport, requestparams
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -202,8 +209,6 @@ def _is_cancellation(exc: BaseException) -> bool:
     library's own `CancelledError` is included for symmetry (a subscriber
     re-raising a translated cancellation).
     """
-    from s3transfer.exceptions import CancelledError as S3TransferCancelledError
-
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         return True
     return getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
@@ -223,13 +228,10 @@ def _allow_if_none_match() -> None:
     below); every other table this touches exists across the whole supported
     s3transfer range.
     """
-    from s3transfer import copies, upload
-    from s3transfer.manager import TransferManager
-
     for allowed in (TransferManager.ALLOWED_UPLOAD_ARGS, TransferManager.ALLOWED_COPY_ARGS):
         if "IfNoneMatch" not in allowed:
             allowed.append("IfNoneMatch")
-    upload_cls = upload.UploadSubmissionTask
+    upload_cls = UploadSubmissionTask
     # Back-compat (supported floor s3transfer 0.6.2): UploadSubmissionTask grew
     # CREATE_MULTIPART_BLOCKLIST only in s3transfer 0.11.0. On older s3transfer
     # the create-multipart call is handed the full extra_args (no per-arg
@@ -243,7 +245,7 @@ def _allow_if_none_match() -> None:
         create_blocklist.append("IfNoneMatch")
     if "IfNoneMatch" not in upload_cls.COMPLETE_MULTIPART_ARGS:
         upload_cls.COMPLETE_MULTIPART_ARGS.append("IfNoneMatch")
-    copy_cls = copies.CopySubmissionTask
+    copy_cls = CopySubmissionTask
     if "IfNoneMatch" not in copy_cls.CREATE_MULTIPART_ARGS_BLACKLIST:
         copy_cls.CREATE_MULTIPART_ARGS_BLACKLIST.append("IfNoneMatch")
     if "IfNoneMatch" not in copy_cls.COMPLETE_MULTIPART_ARGS:
@@ -285,19 +287,13 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
     op = "CopyObject" if is_copy else "PutObject"
     members = getattr(client.meta.service_model.operation_model(op).input_shape, "members", {})
     if "IfNoneMatch" not in members:
-        from importlib.metadata import version
-
         minimum = _CONDITIONAL_WRITE_MIN_BOTOCORE["copy" if is_copy else "upload"]
         return (
             f"--no-overwrite requires botocore >= {minimum} for {op} "
             f"(S3 conditional writes); the installed botocore is {version('botocore')}."
         )
     if not is_copy:
-        from s3transfer.upload import UploadSubmissionTask
-
         if getattr(UploadSubmissionTask, "CREATE_MULTIPART_BLOCKLIST", None) is None:
-            from importlib.metadata import version
-
             return (
                 f"--no-overwrite requires s3transfer >= {_CONDITIONAL_WRITE_MIN_S3TRANSFER} "
                 "for uploads (keeping IfNoneMatch off the CreateMultipartUpload call); "
@@ -331,8 +327,6 @@ def _annotation_directive_blacklisted() -> bool:
     is COPY; an older s3transfer would forward the directive to
     CreateMultipartUpload (which has no such member) and fail.
     """
-    from s3transfer.copies import CopySubmissionTask
-
     return "AnnotationDirective" in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
 
 
@@ -346,15 +340,11 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
     versions as a hint. Returns ``None`` when the mode is supported.
     """
     if not _copy_annotations_param_supported(client):
-        from importlib.metadata import version
-
         return (
             f"copy_props=ALL requires botocore >= {_ANNOTATIONS_MIN_BOTOCORE} "
             f"(S3 object annotations); the installed botocore is {version('botocore')}."
         )
     if not _annotation_directive_blacklisted():
-        from importlib.metadata import version
-
         return (
             f"copy_props=ALL requires s3transfer >= {_ANNOTATIONS_MIN_S3TRANSFER} "
             "(annotation carryover on multipart copies); the installed "
@@ -1269,12 +1259,11 @@ class Transferrer:
         preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
         if str(preferred).lower() == "classic":
             return None
-        from boto3_s3 import crtsupport
-
         if not crtsupport.should_use_crt(str(preferred)):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
+        # Deferred: absent on floor boto3 (pre-CRT); reached only on the CRT lane.
         from boto3.exceptions import InvalidCrtTransferConfigError
 
         try:
@@ -1294,9 +1283,6 @@ class Transferrer:
 
     def _create_classic_manager(self) -> Any:
         """Build the classic s3transfer manager, honoring threaded execution config."""
-        from s3transfer.manager import TransferConfig as S3TransferConfig
-        from s3transfer.manager import TransferManager
-
         _allow_if_none_match()
         _allow_inline_mpu_tagging()
         config: Any = self._transfer_config
@@ -1304,8 +1290,6 @@ class Transferrer:
             config = S3TransferConfig()
         executor_cls = None
         if not getattr(config, "use_threads", True):
-            from s3transfer.futures import NonThreadedExecutor
-
             executor_cls = NonThreadedExecutor
         # TransferManager registers handlers on self._client at construction and
         # leaves them there - shutdown() never removes them. Intentional and
@@ -2174,8 +2158,6 @@ def _allow_inline_mpu_tagging() -> None:
     the loser's ``remove`` would raise; catching ``ValueError`` instead also
     keeps this a no-op on older s3transfer that never blacklisted it.
     """
-    from s3transfer.copies import CopySubmissionTask
-
     try:
         CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST.remove("Tagging")
     except ValueError:
@@ -2191,8 +2173,6 @@ def _mpu_inline_tagging_supported() -> bool:
     reshapes the table degrades to the post-copy PutObjectTagging fallback
     instead of silently dropping the header.
     """
-    from s3transfer.copies import CopySubmissionTask
-
     return "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
 
 

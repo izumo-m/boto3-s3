@@ -7,7 +7,7 @@ import sys
 
 # Keep the module-level imports limited to the names used while configuring the
 # command; execution-only storage types are imported in `run()`.
-from boto3_s3 import Boto3S3Error, ValidationError
+from boto3_s3 import Boto3S3Error, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
@@ -46,9 +46,6 @@ class MbCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="mb")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks below (it reaches main's
         # exit-code mapping: config -> 253, other botocore -> 255).

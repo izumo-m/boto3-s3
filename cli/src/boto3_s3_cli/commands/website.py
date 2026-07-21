@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from boto3_s3 import ValidationError
+from boto3_s3 import S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, usage
 from boto3_s3_cli.commands.base import (
     Command,
@@ -47,9 +47,6 @@ class WebsiteCommand(Command):
         paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).

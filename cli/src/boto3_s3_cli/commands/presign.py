@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from boto3_s3 import S3Storage
 from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
@@ -53,9 +54,6 @@ class PresignCommand(Command):
         # --expires-in's argparse default is 3600, so the unset-None branch of
         # parse_integer_option is unreachable here.
         assert expires_in is not None
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; S3Storage takes both forms too.
