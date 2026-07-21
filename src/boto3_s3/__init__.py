@@ -167,8 +167,9 @@ __all__ = [
 
 # Each public name's home module; ``__getattr__`` imports the module and pulls
 # the attribute on first access. Must mirror the ``TYPE_CHECKING`` imports and
-# ``__all__`` (``test_import_contract`` resolves every ``__all__`` entry, so
-# drift fails the suite). ``__version__`` (metadata lookup) is resolved as a
+# ``__all__`` (``test_import_contract`` resolves every ``__all__`` entry and
+# parses the ``TYPE_CHECKING`` block, so drift fails the suite).
+# ``__version__`` (metadata lookup) is resolved as a
 # special case instead. Submodules are not re-exported: ``from boto3_s3
 # import globsieve`` still works through the import system's submodule
 # fallback, but the root ``__all__`` carries symbols only.
