@@ -206,8 +206,18 @@ _SIGNATURE_PROVIDED_RE = re.compile(r"(?P<key><SignatureProvided>)(?P<val>[^<]*)
 # and real URL schemes are short (RFC 3986). Python 3.10 has no atomic groups.
 _PROXY_URL_RE = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)"
-    r"(?P<user>[^/?#\s:@]+)(?::(?P<pass>[^/?#\s@]+))?@"
+    r"(?P<user>[^/?#\s:@]*)(?::(?P<pass>[^/?#\s@]*))?@"
 )
+
+
+def _mask_proxy_userinfo(m: re.Match[str]) -> str:
+    """``mask_proxy_url``'s notation, empty components included (botocore masks
+    ``user:@`` and ``:pass@`` too); a bare ``://@`` carries nothing and is kept."""
+    if not m.group("user") and not m.group("pass"):
+        return m.group(0)
+    masked = MASK + (":" + MASK if m.group("pass") is not None else "")
+    return m.group("scheme") + masked + "@"
+
 
 # Proxy-Authorization header value (defensive: it surfaces only in an
 # ``http.client`` wire dump, which this project does not emit). The quoted form
@@ -223,10 +233,16 @@ _PROXY_AUTH_PLAIN_RE = re.compile(
 
 
 def _reveal_access_key(value: str) -> str:
-    """Mask an Access Key ID, leaving its last ``MASK_REVEAL_LEN`` chars visible."""
-    if len(value) < MASK_MIN_LEN:
-        return MASK
-    return MASK + value[-MASK_REVEAL_LEN:]
+    """Mask an Access Key ID; only an AWS-shaped id keeps its tail visible.
+
+    The ``MASK_REVEAL_LEN`` tail reveal exists to tell AWS accounts apart, so
+    it applies only to a value shaped like an AWS Access Key ID
+    (``_ACCESS_KEY_ID_RE``). Anything else in the same slot - a MinIO
+    ``minioadmin``-style key, say - masks entirely (over-masking by design,
+    docs/masking.md section 4)."""
+    if _ACCESS_KEY_ID_RE.fullmatch(value):
+        return MASK + value[-MASK_REVEAL_LEN:]
+    return MASK
 
 
 def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
@@ -257,10 +273,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
         lambda m: m.group("key") + _reveal_access_key(m.group("val")), text
     )
     text = _ACCESS_KEY_ID_RE.sub(lambda m: _reveal_access_key(m.group(0)), text)
-    text = _PROXY_URL_RE.sub(
-        lambda m: m.group("scheme") + MASK + (":" + MASK if m.group("pass") else "") + "@",
-        text,
-    )
+    text = _PROXY_URL_RE.sub(_mask_proxy_userinfo, text)
     text = _PROXY_AUTH_QUOTED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _PROXY_AUTH_PLAIN_RE.sub(lambda m: m.group("key") + MASK, text)
     for secret in extra_secrets:

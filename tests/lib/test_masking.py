@@ -85,6 +85,18 @@ class TestMaskTextNotation:
         assert ACCESS_KEY_ID not in out
         assert out == "X-Amz-Credential=***MPLE%2F20260613%2Fus-east-1%2Fs3%2Faws4_request"
 
+    def test_non_aws_shaped_credential_masks_entirely(self) -> None:
+        # The tail reveal is scoped to AWS-shaped ids; a foreign key in the
+        # same slot (a MinIO admin key, say) must not leak its tail.
+        out = m.mask_text("Credential=minioadmin1234567890/20260613/us-east-1/s3/aws4_request")
+        assert out == "Credential=***/20260613/us-east-1/s3/aws4_request"
+
+    def test_non_aws_shaped_access_key_id_param_masks_entirely(self) -> None:
+        out = m.mask_text("AWSAccessKeyId=minioadmin1234567890&Expires=60")
+        assert out.startswith("AWSAccessKeyId=***")
+        assert "minioadmin" not in out
+        assert "7890" not in out
+
     def test_session_token_query_form(self) -> None:
         out = m.mask_text(f"https://b/k?X-Amz-Security-Token={SESSION_TOKEN}&X-Amz-Expires=60")
         assert SESSION_TOKEN not in out
@@ -380,6 +392,18 @@ class TestMaskTextProxy:
     def test_proxy_url_userinfo_without_password(self) -> None:
         out = m.mask_text("proxy http://onlyuser@proxy.internal:3128 set")
         assert out == "proxy http://***@proxy.internal:3128 set"
+
+    def test_proxy_url_empty_password_still_masks(self) -> None:
+        # botocore's mask_proxy_url masks the username of ``user:@`` too.
+        out = m.mask_text("proxy https://myuser:@proxy.example.com:8080 set")
+        assert out == "proxy https://***:***@proxy.example.com:8080 set"
+
+    def test_proxy_url_empty_username_still_masks(self) -> None:
+        out = m.mask_text("proxy https://:s3cr3tpw@proxy.example.com set")
+        assert out == "proxy https://***:***@proxy.example.com set"
+
+    def test_bare_userinfo_marker_is_kept(self) -> None:
+        assert m.mask_text("https://@proxy.internal/x") == "https://@proxy.internal/x"
 
     def test_matches_botocore_mask_proxy_url(self) -> None:
         # Parity proof: same notation as the only masking precedent in botocore.
