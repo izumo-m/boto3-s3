@@ -15,15 +15,17 @@ compose="$scriptdir/compose.sh"
 # Exact-name match: the compose project name is pinned in compose.dev.yaml,
 # so this never mistakes another stack's minio (one sharing ports 9000/9001
 # but lacking the boto3-s3-e2e bucket) for ours.
-if [ -n "$(docker container ls --filter "name=^boto3-s3-dev-minio-1$" --quiet)" ]; then
-    exit 0
+if [ -z "$(docker container ls --filter "name=^boto3-s3-dev-minio-1$" --quiet)" ]; then
+    echo 'Starting docker minio'
+    if ! "$compose" up -d; then
+        echo "$0: docker start failed" >&2
+        exit 1
+    fi
 fi
 
-echo 'Starting docker minio'
-if ! "$compose" up -d; then
-    echo "$0: docker start failed" >&2
-    exit 1
-fi
+# Wait for mc-init even when minio was already running: an earlier compose up
+# may have died before the bucket provisioning finished (a completed mc-init
+# makes docker wait return 0 immediately, so the re-check is free).
 
 mc_init_cid=$("$compose" ps -aq mc-init 2>/dev/null)
 if [ -n "$mc_init_cid" ]; then
