@@ -58,17 +58,15 @@ to exactly this contract - the "Library consumption contract" in
   any drift).
 - `__version__` is likewise resolved on first access via `importlib.metadata` (the
   ~20ms deferral target).
-- The `TransferConfig` in `s3.py` is an annotation-only import (`TYPE_CHECKING`).
-  The re-export home for the public `TransferConfig` is `transferconfig.py`
-  (boto3's subclass + the CRT fields, crt.md section 2), which imports
-  `boto3.s3.transfer` at module top. That home module is reachable only through
-  the lazy re-export, so the SDK-no-import contract of a bare `import boto3_s3`
-  is preserved.
+- SDK-backed modules import the SDK at module top - `s3.py` and `s3storage.py`
+  import `boto3`, and `transferconfig.py` (the re-export home
+  for the public `TransferConfig`: boto3's subclass + the CRT fields, crt.md
+  section 2) imports `boto3.s3.transfer`. The bare-import contract holds
+  because the lazy root defers those *module* loads, not because the modules
+  defer the SDK - touching a root symbol homed in one of them pays the SDK
+  import.
   `crtsupport.py` makes all of awscrt / `s3transfer.crt` into in-function imports,
   so the classic path and a bare import pull in no CRT dependency.
-- `s3storage.py` currently defers its default-client boto3 import. This is an
-  implementation detail rather than an interface contract; `S3` and
-  `S3Storage` construction may import the SDK.
 - Trade-off: an `ImportError` for a missing dependency surfaces "at first access"
   rather than "at import time." This is an intentional consequence of the deferral,
   and the contract tests continuously verify that the public surface is resolvable.

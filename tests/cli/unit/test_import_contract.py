@@ -1,8 +1,10 @@
 """Import contract for the two top-level informational exits.
 
-Top-level ``--help`` and ``--version`` complete without importing the AWS SDK
-or a command module. No import guarantee applies to normal dispatch, usage
-errors, or subcommand help.
+Top-level ``--help`` and ``--version`` complete without importing the AWS SDK,
+a command module, or any library module beyond the lazy ``boto3_s3`` root and
+its pure exceptions taxonomy - in particular not the SDK-backed ``boto3_s3.s3``,
+which imports boto3 at module top. No import guarantee applies to normal
+dispatch, usage errors, or subcommand help.
 
 Each case runs ``main()`` in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -37,6 +39,18 @@ _PRELUDE = """
         )
         assert not loaded, loaded
 
+    def assert_no_library_modules():
+        # The lazy boto3_s3 root and the pure exceptions taxonomy are the only
+        # library modules these exits may touch; in particular the SDK-backed
+        # boto3_s3.s3 (which imports boto3 at module top) must not load.
+        allowed = {"boto3_s3", "boto3_s3.exceptions"}
+        loaded = sorted(
+            m
+            for m in sys.modules
+            if m.partition(".")[0] == "boto3_s3" and m not in allowed
+        )
+        assert not loaded, loaded
+
 """
 
 
@@ -62,6 +76,7 @@ class TestCliImportContract:
             assert main(["--help"]) == 0
             assert_no_heavy_imports()
             assert_no_command_modules()
+            assert_no_library_modules()
             """
         )
 
@@ -73,6 +88,7 @@ class TestCliImportContract:
             assert main(["--version"]) == 0
             assert_no_heavy_imports()
             assert_no_command_modules()
+            assert_no_library_modules()
             """
         )
         assert "boto3-s3-cli/" in out

@@ -7,6 +7,10 @@ boto3 client lives on the ``S3Storage``; when its client is omitted it falls
 back to ``boto3.client("s3")``. To target a custom endpoint / profile / region
 (e.g. MinIO) or a second account for S3-to-S3, pass an explicit
 ``S3Storage(uri, client=...)`` instead of a bare string.
+
+This module is SDK-backed by declaration: it imports boto3 at module top.
+Only the package root's lazy re-export keeps a bare ``import boto3_s3``
+SDK-free (docs/imports.md).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from dataclasses import dataclass, replace
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec, TypeVar, cast
 
+import boto3
 from typing_extensions import Unpack
 
 from boto3_s3 import producers, transferplan
@@ -66,8 +71,8 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only: importing it for real would drag boto3 + s3transfer into
-    # every `boto3_s3` import (import contract, docs/imports.md).
+    # Annotation-only names: mypy_boto3_s3 is a stubs-only distribution, and
+    # the rest are used in annotations alone.
     from boto3 import Session
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
@@ -709,11 +714,6 @@ class S3:
                     return self._session.client(
                         "s3", endpoint_url=self._endpoint_url, config=self._config
                     )
-                # Import locally so callers that only use SDK-independent modules
-                # do not pay for boto3. `S3` construction itself has no SDK-free
-                # contract (docs/imports.md).
-                import boto3
-
                 return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
             except ValueError as exc:
                 # botocore rejects a malformed endpoint_url with a plain

@@ -25,6 +25,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
+import boto3
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
@@ -599,10 +600,6 @@ class S3Storage(Storage):
         section 1).
         """
         if self._client is None:
-            # Only the default-client fallback needs boto3. Callers passing a
-            # client never load it here.
-            import boto3
-
             # operation=None: no subcommand is in scope at build time.
             with s3_errors(operation=None):
                 try:
