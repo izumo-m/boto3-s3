@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from boto3_s3_cli.commands.base import Context
+    from tests.utils.recorder import ApiCall
 
 _SUBPROCESS_TIMEOUT = 60.0
 
@@ -65,6 +66,35 @@ def run_cli_in_process(argv: list[str], *, ctx: Context | None = None) -> CliRes
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         rc = cli.main(argv, ctx=ctx)
     return CliResult(rc, out.getvalue(), err.getvalue())
+
+
+def client_ctx(client: Any) -> Context:
+    """A ``Context`` whose client factory hands back ``client`` unconditionally."""
+    from boto3_s3_cli.commands.base import Context
+
+    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
+
+
+def unused_ctx() -> Context:
+    """A ``Context`` for paths that must fail before client construction: the
+    factory fails the test if it is ever called."""
+    from boto3_s3_cli.commands.base import Context
+
+    def _unused_factory(_args: Any) -> Any:
+        raise AssertionError("client factory must not be called")
+
+    return Context(client_factory=_unused_factory)
+
+
+def run_recorded(
+    parsed_responses: list[dict[str, Any] | Exception], argv: list[str]
+) -> tuple[CliResult, list[ApiCall]]:
+    """Run the CLI in-process against a recording client scripted with
+    ``parsed_responses``; returns the outcome and the recorded calls."""
+    from tests.utils.recorder import make_recording_client
+
+    client, calls = make_recording_client(parsed_responses)
+    return run_cli_in_process(argv, ctx=client_ctx(client)), calls
 
 
 def _run_subprocess(

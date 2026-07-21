@@ -12,10 +12,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.fakes3 import client_error
+from tests.utils.harness import client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -28,20 +29,6 @@ class _FakeWebsiteClient:
         if self.error is not None:
             raise self.error
         return {}
-
-
-def _client_error(code: str, status: int) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "message"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        "PutBucketWebsite",
-    )
-
-
-def _ctx(client: Any) -> Context:
-    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
 
 
 def _real_client_ctx() -> Context:
@@ -58,7 +45,7 @@ class TestWebsite:
     def test_index_document_succeeds_silently(self, capsys: pytest.CaptureFixture[str]) -> None:
         client = _FakeWebsiteClient()
         rc = cli.main(
-            ["website", "s3://bucket", "--index-document", "index.html"], ctx=_ctx(client)
+            ["website", "s3://bucket", "--index-document", "index.html"], ctx=client_ctx(client)
         )
         captured = capsys.readouterr()
         assert rc == 0
@@ -73,7 +60,7 @@ class TestWebsite:
     def test_error_document(self) -> None:
         client = _FakeWebsiteClient()
         rc = cli.main(
-            ["website", "s3://bucket", "--error-document", "error.html"], ctx=_ctx(client)
+            ["website", "s3://bucket", "--error-document", "error.html"], ctx=client_ctx(client)
         )
         assert rc == 0
         assert client.calls[0]["WebsiteConfiguration"] == {"ErrorDocument": {"Key": "error.html"}}
@@ -89,7 +76,7 @@ class TestWebsite:
                 "--error-document",
                 "error.html",
             ],
-            ctx=_ctx(client),
+            ctx=client_ctx(client),
         )
         assert rc == 0
         assert client.calls[0]["WebsiteConfiguration"] == {
@@ -100,19 +87,24 @@ class TestWebsite:
     def test_no_options_sends_empty_configuration(self) -> None:
         # aws sends the empty dict; the server, not the client, rejects it.
         client = _FakeWebsiteClient()
-        rc = cli.main(["website", "s3://bucket"], ctx=_ctx(client))
+        rc = cli.main(["website", "s3://bucket"], ctx=client_ctx(client))
         assert rc == 0
         assert client.calls[0]["WebsiteConfiguration"] == {}
 
     def test_bare_bucket_name_accepted(self) -> None:
         client = _FakeWebsiteClient()
-        assert cli.main(["website", "bucket", "--index-document", "i.html"], ctx=_ctx(client)) == 0
+        assert (
+            cli.main(["website", "bucket", "--index-document", "i.html"], ctx=client_ctx(client))
+            == 0
+        )
         assert client.calls[0]["Bucket"] == "bucket"
 
     def test_trailing_slash_stripped(self) -> None:
         client = _FakeWebsiteClient()
         assert (
-            cli.main(["website", "s3://bucket/", "--index-document", "i.html"], ctx=_ctx(client))
+            cli.main(
+                ["website", "s3://bucket/", "--index-document", "i.html"], ctx=client_ctx(client)
+            )
             == 0
         )
         assert client.calls[0]["Bucket"] == "bucket"
@@ -123,7 +115,9 @@ class TestWebsite:
         arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
         client = _FakeWebsiteClient()
         assert (
-            cli.main(["website", f"s3://{arn}", "--index-document", "i.html"], ctx=_ctx(client))
+            cli.main(
+                ["website", f"s3://{arn}", "--index-document", "i.html"], ctx=client_ctx(client)
+            )
             == 0
         )
         assert client.calls[0]["Bucket"] == arn
@@ -135,7 +129,8 @@ class TestWebsiteExitCodeShape:
         # name regex rejects it -> 252; we reject the same shapes ourselves.
         client = _FakeWebsiteClient()
         rc = cli.main(
-            ["website", "s3://bucket/some/key", "--index-document", "i.html"], ctx=_ctx(client)
+            ["website", "s3://bucket/some/key", "--index-document", "i.html"],
+            ctx=client_ctx(client),
         )
         assert rc == 252
         assert "Parameter validation failed" in capsys.readouterr().err
@@ -146,7 +141,9 @@ class TestWebsiteExitCodeShape:
         # leftover slash must not be silently dropped on our side.
         client = _FakeWebsiteClient()
         assert (
-            cli.main(["website", "s3://bucket//", "--index-document", "i.html"], ctx=_ctx(client))
+            cli.main(
+                ["website", "s3://bucket//", "--index-document", "i.html"], ctx=client_ctx(client)
+            )
             == 252
         )
         assert client.calls == []
@@ -168,21 +165,19 @@ class TestWebsiteExitCodeShape:
 
     def test_object_lambda_arn_stays_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
-        rc = cli.main(["website", f"s3://{arn}"], ctx=_ctx(object()))
+        rc = cli.main(["website", f"s3://{arn}"], ctx=client_ctx(object()))
         assert rc == 252
         assert "S3 Object Lambda" in capsys.readouterr().err
 
     def test_no_such_bucket_is_254_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The defining contrast with mb/rb: website has no local catch, so a
         # server rejection keeps its ClientError cause and exits 254.
-        client = _FakeWebsiteClient(error=_client_error("NoSuchBucket", 404))
-        rc = cli.main(["website", "s3://no-such", "--index-document", "i.html"], ctx=_ctx(client))
+        client = _FakeWebsiteClient(error=client_error("NoSuchBucket", 404, "PutBucketWebsite"))
+        rc = cli.main(
+            ["website", "s3://no-such", "--index-document", "i.html"], ctx=client_ctx(client)
+        )
         assert rc == 254
         assert "NoSuchBucket" in capsys.readouterr().err
-
-
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("client factory must not be called")
 
 
 class TestWebsiteParamfileAndQuery:
@@ -195,13 +190,15 @@ class TestWebsiteParamfileAndQuery:
         ref.write_text("home.html")
         client = _FakeWebsiteClient()
         assert (
-            cli.main(["website", "s3://b", "--index-document", f"file://{ref}"], ctx=_ctx(client))
+            cli.main(
+                ["website", "s3://b", "--index-document", f"file://{ref}"], ctx=client_ctx(client)
+            )
             == 0
         )
         assert client.calls[0]["WebsiteConfiguration"] == {"IndexDocument": {"Suffix": "home.html"}}
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["website", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["website", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert (
             "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
@@ -212,7 +209,7 @@ class TestWebsiteParamfileAndQuery:
     ) -> None:
         rc = cli.main(
             ["website", "s3://b", "--index-document", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--index-document'" in capsys.readouterr().err
@@ -222,15 +219,13 @@ class TestWebsiteParamfileAndQuery:
     ) -> None:
         rc = cli.main(
             ["website", "s3://b", "--error-document", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--error-document'" in capsys.readouterr().err
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(
-            ["website", "s3://b", "--query", "]["], ctx=Context(client_factory=_unused_factory)
-        )
+        rc = cli.main(["website", "s3://b", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
 
@@ -246,7 +241,9 @@ class TestWebsiteParamfileAndQuery:
         ref = tmp_path / "u.txt"
         ref.write_text("s3://mybucket")
         client = _FakeWebsiteClient()
-        rc = cli.main(["website", f"file://{ref}", "--index-document", "i.html"], ctx=_ctx(client))
+        rc = cli.main(
+            ["website", f"file://{ref}", "--index-document", "i.html"], ctx=client_ctx(client)
+        )
         assert rc == 0
         assert client.calls == [
             {"Bucket": "s", "WebsiteConfiguration": {"IndexDocument": {"Suffix": "i.html"}}}
@@ -259,6 +256,6 @@ class TestWebsiteParamfileAndQuery:
         # through the general handler (measured).
         ref = tmp_path / "empty.txt"
         ref.write_text("")
-        rc = cli.main(["website", f"file://{ref}"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["website", f"file://{ref}"], ctx=unused_ctx())
         assert rc == 255
         assert "string index out of range" in capsys.readouterr().err

@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
 
 from boto3_s3 import (
     S3,
@@ -27,16 +26,7 @@ from boto3_s3 import (
     S3Storage,
     ValidationError,
 )
-
-
-def _client_error(code: str, operation: str, status: int) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "x"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
+from tests.utils.fakes3 import client_error
 
 
 class _FakeMeta:
@@ -168,7 +158,7 @@ class TestMb:
             S3().mb(123)  # type: ignore[arg-type]
 
     def test_client_error_raises_category_with_cause(self) -> None:
-        error = _client_error("BucketAlreadyOwnedByYou", "CreateBucket", 409)
+        error = client_error("BucketAlreadyOwnedByYou", 409, "CreateBucket")
         client = _FakeBucketClient(create_error=error)
         with pytest.raises(Boto3S3Error) as excinfo:
             S3().mb(S3Storage("s3://bucket", client=client))
@@ -202,14 +192,14 @@ class TestRb:
         assert client.delete_calls == []
 
     def test_no_such_bucket_raises_not_found(self) -> None:
-        error = _client_error("NoSuchBucket", "DeleteBucket", 404)
+        error = client_error("NoSuchBucket", 404, "DeleteBucket")
         client = _FakeBucketClient(delete_error=error)
         with pytest.raises(NotFoundError) as excinfo:
             S3().rb(S3Storage("s3://bucket", client=client))
         assert excinfo.value.__cause__ is error
 
     def test_bucket_not_empty_raises_validation_category(self) -> None:
-        error = _client_error("BucketNotEmpty", "DeleteBucket", 409)
+        error = client_error("BucketNotEmpty", 409, "DeleteBucket")
         client = _FakeBucketClient(delete_error=error)
         with pytest.raises(Boto3S3Error) as excinfo:
             S3().rb(S3Storage("s3://bucket", client=client))

@@ -34,14 +34,7 @@ from boto3_s3 import (
 )
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-
-
-def _client_error(code: str, status: int) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, "ListObjectsV2")
+from tests.utils.fakes3 import client_error
 
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
@@ -51,14 +44,18 @@ def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
 
 class TestExitCodeFor:
     def test_server_side_error_maps_to_254(self) -> None:
-        exc = _with_cause(NotFoundError("no such bucket"), _client_error("NoSuchBucket", 404))
+        exc = _with_cause(
+            NotFoundError("no such bucket"), client_error("NoSuchBucket", 404, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
     def test_client_error_cause_wins_over_validation_category(self) -> None:
         # A server-rejected call (HTTP 400) that the library files under
         # ValidationError still exits 254: aws-cli maps every error that
         # reached the server to CLIENT_ERROR_RC.
-        exc = _with_cause(ValidationError("bad request"), _client_error("InvalidRequest", 400))
+        exc = _with_cause(
+            ValidationError("bad request"), client_error("InvalidRequest", 400, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
     def test_client_side_validation_maps_to_252(self) -> None:
@@ -82,7 +79,9 @@ class TestExitCodeFor:
     def test_client_error_cause_wins_over_refining_subclass(self) -> None:
         # The ClientError-cause branch stays first: an error that reached the
         # server exits 254 regardless of the taxonomy class.
-        exc = _with_cause(InvalidConfigError("rejected"), _client_error("InvalidRequest", 400))
+        exc = _with_cause(
+            InvalidConfigError("rejected"), client_error("InvalidRequest", 400, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
 
@@ -184,7 +183,7 @@ class TestMainExitCodes:
         assert "command" in capsys.readouterr().err
 
     def test_server_error_surfaces_as_254(self, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _RaisingClient(_client_error("NoSuchBucket", 404))
+        client = _RaisingClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         ctx = Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
         err = capsys.readouterr().err
@@ -211,7 +210,7 @@ class TestMainExitCodes:
             # PartialCredentialsError has no dedicated aws handler -> the general
             # 255, NOT 253 (only NoCredentials / NoRegion are 253).
             (PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"), 255),
-            (_client_error("AccessDenied", 403), 254),
+            (client_error("AccessDenied", 403, "ListObjectsV2"), 254),
             (ParamValidationError(report="Invalid bucket name"), 252),
             (RuntimeError("boom"), 255),
         ],

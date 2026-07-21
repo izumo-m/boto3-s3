@@ -87,3 +87,8 @@ def make_recording_client(
 
     client._make_api_call = _canned_api_call
     return client, calls
+
+
+def ops(calls: list[ApiCall]) -> list[str]:
+    """Just the operation names, in call order - what most tests pin."""
+    return [call.operation for call in calls]

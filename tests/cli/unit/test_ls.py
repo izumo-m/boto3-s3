@@ -14,6 +14,7 @@ import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.harness import unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -215,10 +216,6 @@ class TestRecognizedExtraGlobals:
         assert cli.main(["ls", "--cli-binary-format", "bogus", "s3://b/p/"]) == 252
 
 
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("client factory must not be called")
-
-
 class TestParamfileExpansion:
     """aws paramfile-expands the positional and the bucket-listing filters at
     parse time (rc 252 on a bad reference), naming the argument as aws does."""
@@ -232,7 +229,7 @@ class TestParamfileExpansion:
         assert cli.main(["ls", f"file://{ref}"], ctx=ctx) == 1
 
     def test_positional_missing_reference_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["ls", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         err = capsys.readouterr().err
         assert "Error parsing parameter 'paths': Unable to load paramfile" in err
@@ -242,7 +239,7 @@ class TestParamfileExpansion:
     ) -> None:
         rc = cli.main(
             ["ls", "s3://b", "--bucket-name-prefix", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--bucket-name-prefix'" in capsys.readouterr().err
@@ -252,7 +249,7 @@ class TestParamfileExpansion:
     ) -> None:
         rc = cli.main(
             ["ls", "s3://b", "--bucket-region", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
@@ -270,7 +267,7 @@ class TestParamfileExpansion:
     ) -> None:
         # aws expands fileb:// as well as file://, so a missing one is the same
         # load 252 (not the 254/1 of a literal path reaching the client).
-        rc = cli.main(["ls", "fileb:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", "fileb:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert (
             "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
@@ -283,7 +280,7 @@ class TestParamfileExpansion:
         # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
         ref = tmp_path / "u.bin"
         ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", f"fileb://{ref}"], ctx=unused_ctx())
         assert rc == 255
         assert "startswith first arg must be bytes" in capsys.readouterr().err
 
@@ -294,7 +291,7 @@ class TestParamfileExpansion:
         # fileb:// is the load 252, not the bare int() coercion's 255.
         rc = cli.main(
             ["ls", "s3://b", "--page-size", "fileb:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
@@ -317,7 +314,7 @@ class TestParamfileExpansion:
         ref.write_bytes(b"abc")
         rc = cli.main(
             ["ls", "s3://b", "--page-size", f"fileb://{ref}"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 255
         assert "invalid literal for int() with base 10: b'abc'" in capsys.readouterr().err
@@ -328,9 +325,7 @@ class TestQueryValidation:
     every other head check (globalargs.validate_query)."""
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(
-            ["ls", "s3://b", "--query", "]["], ctx=Context(client_factory=_unused_factory)
-        )
+        rc = cli.main(["ls", "s3://b", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
 

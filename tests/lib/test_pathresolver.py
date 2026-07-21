@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
 from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path, is_mrap_path
+from tests.utils.fakes3 import client_error
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
 _OUTPOST_ARN = (
@@ -61,14 +62,6 @@ class _FakeSts:
         if self.error is not None:
             raise self.error
         return {"Account": self.account}
-
-
-def _client_error(code: str, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": 403},
-    }
-    return ClientError(response, operation)
 
 
 class TestHasUnderlyingS3Path:
@@ -192,7 +185,7 @@ class TestResolve:
     def test_client_errors_translate_with_the_cause_kept(self) -> None:
         # The CLI maps a kept ClientError cause to rc 254 - what aws exits
         # when the validation calls themselves fail.
-        sts = _FakeSts(error=_client_error("InvalidClientTokenId", "GetCallerIdentity"))
+        sts = _FakeSts(error=client_error("InvalidClientTokenId", 403, "GetCallerIdentity"))
         resolver = S3PathResolver(s3control_client=_FakeS3Control(), sts_client=sts)
         with pytest.raises(Boto3S3Error) as excinfo:
             resolver.resolve_underlying_s3_paths("s3://my-ap-s3alias/k.txt")

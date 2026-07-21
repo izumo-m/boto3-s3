@@ -21,10 +21,10 @@ from typing import Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.fakes3 import client_error
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -35,14 +35,6 @@ _SYNC = TransferConfig(use_threads=False)
 # tests use a single worker (max_concurrent_requests = 1). _SYNC completes each
 # twin before the next is judged, emptying the set.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
 
 
 def _recording_ctx(
@@ -208,7 +200,7 @@ class TestPipelineErrors:
     def test_single_source_404_is_a_fatal_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        ctx, _ = _recording_ctx([_client_error("404", 404, "HeadObject")])
+        ctx, _ = _recording_ctx([client_error("404", 404, "HeadObject")])
         rc = cli.main(["cp", "s3://b/no-such", str(tmp_path / "x")], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 1
@@ -222,7 +214,7 @@ class TestPipelineErrors:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        ctx, _ = _recording_ctx([_client_error("NoSuchBucket", 404, "PutObject")])
+        ctx, _ = _recording_ctx([client_error("NoSuchBucket", 404, "PutObject")])
         rc = cli.main(["cp", str(src), "s3://missing-b/k"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 1
@@ -595,7 +587,7 @@ class TestNoOverwrite:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        ctx, _ = _recording_ctx([_client_error("PreconditionFailed", 412, "PutObject")])
+        ctx, _ = _recording_ctx([client_error("PreconditionFailed", 412, "PutObject")])
         rc = cli.main(["cp", str(src), "s3://b/k", "--no-overwrite"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 0

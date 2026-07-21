@@ -33,6 +33,7 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.deleter import S3_DELETE_BATCH
+from tests.utils.fakes3 import client_error
 
 
 class _FakeS3Client:
@@ -94,13 +95,7 @@ def _keys(calls: list[dict[str, Any]]) -> list[list[str]]:
 def _client_error(
     code: str = "AccessDenied", status: int = 403, operation: str = "DeleteObjects"
 ) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "boom"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
+    return client_error(code, status, operation, message="boom")
 
 
 def _deleter_worker_alive() -> bool:

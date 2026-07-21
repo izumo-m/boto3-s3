@@ -48,22 +48,11 @@ from boto3_s3.types import (
     TransferType,
 )
 from tests.utils.fakemodel import model_only_client
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.fakes3 import client_error
+from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC_CONFIG = TransferConfig(use_threads=False)
 _MIB = 1024 * 1024
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
 
 
 class _OpenSink(io.BytesIO):
@@ -137,7 +126,7 @@ class TestUpload:
             dest_display="s3://bucket/up/a.bin",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Key"] == "up/a.bin"
         assert (transferrer.succeeded, transferrer.failed) == (1, 0)
@@ -168,7 +157,7 @@ class TestUpload:
             [item],
             [{"UploadId": "upload-id"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPart",
             "UploadPart",
@@ -234,9 +223,9 @@ class TestUpload:
             compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
-            TransferType.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
+            TransferType.UPLOAD, [item], [client_error("NoSuchBucket", 404, "PutObject")]
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert isinstance(transferrer.first_error, NotFoundError)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -312,7 +301,7 @@ class TestDownload:
             TransferType.DOWNLOAD, [item], [self._get_object_response()]
         )
         # Size + etag were both provided, so no HeadObject probe happened.
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
         assert item.mtime is not None
@@ -379,7 +368,7 @@ class TestDownload:
         calls, _, results, _ = _run(
             TransferType.DOWNLOAD, [item], [head, self._get_object_response()]
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"payload"
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
         assert results[0].bytes_transferred == 7
@@ -408,7 +397,7 @@ class TestCopy:
         calls, source_calls, _, transferrer = _run(
             TransferType.COPY, [self._item()], [{}], source_responses=[]
         )
-        assert _ops(calls) == ["CopyObject"]
+        assert ops(calls) == ["CopyObject"]
         assert calls[0].params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert "MetadataDirective" not in calls[0].params
         assert "TaggingDirective" not in calls[0].params
@@ -439,7 +428,7 @@ class TestCopy:
             source_responses=[],
             options=TransferOptions(metadata_directive="REPLACE"),
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPartCopy",
             "UploadPartCopy",
@@ -490,12 +479,12 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         create = calls[0]
         assert create.params["ContentType"] == "text/css"
         assert create.params["Tagging"] == "team=a%26b"
-        assert "PutObjectTagging" not in _ops(calls)
+        assert "PutObjectTagging" not in ops(calls)
         assert transferrer.succeeded == 1
 
     def test_multipart_tagging_read_failure_names_the_source(self) -> None:
@@ -504,7 +493,7 @@ class TestCopy:
         # be re-tagged with the copy destination by _record_failure.
         source_responses: list[dict[str, Any] | Exception] = [
             {},  # HeadObject
-            _client_error("AccessDenied", 403, "GetObjectTagging"),
+            client_error("AccessDenied", 403, "GetObjectTagging"),
         ]
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY,
@@ -512,7 +501,7 @@ class TestCopy:
             [],
             source_responses=source_responses,
         )
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert calls == []  # the on_queued failure precedes CreateMultipartUpload
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
@@ -568,14 +557,14 @@ class TestCopy:
             options=TransferOptions(copy_props=CopyPropsMode.ALL),
         )
         assert "AnnotationDirective" not in calls[0].params
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
             "GetObjectAnnotation",
         ]
         assert source_calls[2].params == {"Bucket": "src-b", "Key": "d/a.bin"}
-        assert _ops(calls)[-1] == "PutObjectAnnotation"
+        assert ops(calls)[-1] == "PutObjectAnnotation"
         assert calls[-1].params == {
             "Bucket": "dest-b",
             "Key": "cp/a.bin",
@@ -623,7 +612,7 @@ class TestCopy:
             ),
         )
 
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
@@ -649,7 +638,7 @@ class TestCopy:
             source_responses=[
                 {},
                 {"TagSet": []},
-                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+                client_error("AccessDenied", 403, "ListObjectAnnotations"),
             ],
             options=TransferOptions(
                 copy_props=CopyPropsMode.ALL,
@@ -657,8 +646,8 @@ class TestCopy:
             ),
         )
 
-        assert _ops(source_calls)[-1] == "ListObjectAnnotations"
-        assert _ops(calls) == [
+        assert ops(source_calls)[-1] == "ListObjectAnnotations"
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPartCopy",
             "UploadPartCopy",
@@ -679,7 +668,7 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {},  # HeadObject
             {"TagSet": []},
-            _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+            client_error("AccessDenied", 403, "ListObjectAnnotations"),
         ]
 
         calls, source_calls, results, transferrer = _run(
@@ -690,7 +679,7 @@ class TestCopy:
             options=TransferOptions(copy_props=CopyPropsMode.ALL),
         )
 
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
@@ -730,7 +719,7 @@ class TestCopy:
             ),
         )
 
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "GetObjectTagging",
             "ListObjectAnnotations",
             "ListObjectAnnotations",
@@ -804,7 +793,7 @@ class TestCopy:
             config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=missing),
         )
 
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert calls == []
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -817,7 +806,7 @@ class TestCopy:
             source_responses=[
                 {"TagSet": []},
                 {"Annotations": [{"AnnotationName": "ann1"}]},
-                _client_error("AccessDenied", 403, "GetObjectAnnotation"),
+                client_error("AccessDenied", 403, "GetObjectAnnotation"),
             ],
             options=TransferOptions(
                 copy_props=CopyPropsMode.ALL,
@@ -850,7 +839,7 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(calls)[-1] == "PutObjectTagging"
+        assert ops(calls)[-1] == "PutObjectTagging"
         assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "k", "Value": big}]}
         assert "Tagging" not in calls[0].params
         assert transferrer.succeeded == 1
@@ -863,7 +852,7 @@ class TestCopy:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "PutObjectTagging"),
             {},  # rollback DeleteObject
         ]
         source_responses: list[dict[str, Any] | Exception] = [
@@ -876,7 +865,7 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -1055,10 +1044,10 @@ class TestNoOverwrite:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("PreconditionFailed", 412, "PutObject")],
+            [client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert transferrer.first_error is None
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
@@ -1075,7 +1064,7 @@ class TestNoOverwrite:
             [{"UploadId": "u"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
             options=TransferOptions(no_overwrite=True),
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPart",
             "UploadPart",
@@ -1135,7 +1124,7 @@ class TestMove:
             compare_key="a.bin", size=7, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert not src.exists()
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -1146,7 +1135,7 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
@@ -1169,8 +1158,8 @@ class TestMove:
         calls, source_calls, _, transferrer = _run(
             TransferType.COPY, [item], [{}], source_responses=[{}], is_move=True
         )
-        assert _ops(calls) == ["CopyObject"]
-        assert _ops(source_calls) == ["DeleteObject"]
+        assert ops(calls) == ["CopyObject"]
+        assert ops(source_calls) == ["DeleteObject"]
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert transferrer.succeeded == 1
 
@@ -1191,10 +1180,10 @@ class TestMove:
             TransferType.COPY,
             [item],
             [{}],
-            source_responses=[_client_error("AccessDenied", 403, "DeleteObject")],
+            source_responses=[client_error("AccessDenied", 403, "DeleteObject")],
             is_move=True,
         )
-        assert _ops(source_calls) == ["DeleteObject"]
+        assert ops(source_calls) == ["DeleteObject"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
         assert error is not None
@@ -1217,10 +1206,10 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD,
             [item],
-            [self._get_object_response(), _client_error("AccessDenied", 403, "DeleteObject")],
+            [self._get_object_response(), client_error("AccessDenied", 403, "DeleteObject")],
             is_move=True,
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         # The bytes are on disk (aws ditto), but the move reports failed.
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
@@ -1257,10 +1246,10 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("NoSuchBucket", 404, "PutObject")],
+            [client_error("NoSuchBucket", 404, "PutObject")],
             is_move=True,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert src.exists()
         assert transferrer.failed == 1
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
@@ -1274,11 +1263,11 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("PreconditionFailed", 412, "PutObject")],
+            [client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
             is_move=True,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert src.exists()
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
@@ -1301,7 +1290,7 @@ class TestMove:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "PutObjectTagging"),
             {},  # rollback DeleteObject (destination side)
         ]
         source_responses: list[dict[str, Any] | Exception] = [
@@ -1311,10 +1300,10 @@ class TestMove:
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         # No source-side delete: the only source calls are the props reads.
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
@@ -1338,8 +1327,8 @@ class TestMove:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
-            _client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
+            client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
         ]
         source_responses: list[dict[str, Any] | Exception] = [
             {},
@@ -1349,9 +1338,9 @@ class TestMove:
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         # The source delete proceeds - the transfer is recorded as a success.
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
         assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert (transferrer.succeeded, transferrer.failed) == (1, 0)
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -1424,7 +1413,7 @@ class TestDownloadMoveFsync:
         )
         # The delete still runs - fsync only precedes it. POSIX fsyncs the file
         # and its parent directory (2); Windows the file alone (1).
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert len(fds) == (2 if os.name == "posix" else 1)
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert transferrer.succeeded == 1
@@ -1447,7 +1436,7 @@ class TestDownloadMoveFsync:
             dest_storage=LocalStorage(tmp_path, fsync=True),
         )
         # The bytes are on disk, but the source survives and the move reports failed.
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -1466,7 +1455,7 @@ class TestDownloadMoveFsync:
             is_move=True,
             dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws parity
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert fds == []
         assert transferrer.succeeded == 1
 
@@ -1505,7 +1494,7 @@ class TestDownloadMoveFsync:
             [self._get_object_response()],
             dest_storage=LocalStorage(tmp_path, fsync=True),
         )
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         assert fds == []
         assert transferrer.succeeded == 1
 
@@ -1553,7 +1542,7 @@ class TestStreams:
             dest_display="s3://bucket/streaming.txt",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "streaming.txt"
         # No path means no mimetypes guess: ContentType stays unset.
         assert "ContentType" not in calls[0].params
@@ -1569,7 +1558,7 @@ class TestStreams:
             dest_key="streaming.txt",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
         # The provided size reaches the future (aws ProvideSizeSubscriber) and
         # SUCCEEDED reports it, unlike the size-less streaming upload above.
@@ -1595,7 +1584,7 @@ class TestStreams:
                 {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
             ],
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"foo\n"
         assert transferrer.succeeded == 1
 

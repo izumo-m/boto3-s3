@@ -7,7 +7,6 @@ wiring can be asserted.
 
 from __future__ import annotations
 
-import datetime as dt
 import io
 import threading
 from typing import Any
@@ -34,9 +33,8 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.storage import sieve_pages
+from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.recorder import ApiCall, make_recording_client
-
-_MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
 
 class _FakePaginator:
@@ -108,7 +106,7 @@ def _obj(
     storage_class: str | None = None,
     owner: str | None = None,
 ) -> dict[str, Any]:
-    obj: dict[str, Any] = {"Key": key, "Size": size, "LastModified": _MTIME}
+    obj: dict[str, Any] = {"Key": key, "Size": size, "LastModified": MTIME}
     if etag is not None:
         obj["ETag"] = etag
     if storage_class is not None:
@@ -146,7 +144,7 @@ class TestScanNonRecursive:
         assert info.key == "prefix/a.txt"
         assert info.compare_key == "a.txt"
         assert info.size == 10
-        assert info.mtime == _MTIME
+        assert info.mtime == MTIME
         assert info.etag == "abc"  # surrounding quotes stripped
         assert info.storage_class == "STANDARD"
         assert info.owner == "me"
@@ -364,20 +362,13 @@ class TestScanFilter:
             list(storage.scan(S3ScanOptions(recursive=True, filter=boom)))
 
 
-def _client_error(code: str, status: int) -> ClientError:
-    return ClientError(
-        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
-        "HeadObject",
-    )
-
-
 class TestGetFileinfo:
     """``S3Storage.get_fileinfo`` - a generic HeadObject: present / 404->None / raise."""
 
     def test_present_returns_fileinfo(self) -> None:
         head = {
             "ContentLength": 7,
-            "LastModified": _MTIME,
+            "LastModified": MTIME,
             "ETag": '"abc"',
             "StorageClass": "STANDARD",
         }
@@ -392,16 +383,20 @@ class TestGetFileinfo:
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
 
     def test_404_returns_none(self) -> None:
-        storage, _ = _storage(url="s3://bucket/missing", head_error=_client_error("404", 404))
+        storage, _ = _storage(
+            url="s3://bucket/missing", head_error=client_error("404", 404, "HeadObject")
+        )
         assert storage.get_fileinfo() is None
 
     def test_other_error_raises(self) -> None:
-        storage, _ = _storage(url="s3://bucket/denied", head_error=_client_error("403", 403))
+        storage, _ = _storage(
+            url="s3://bucket/denied", head_error=client_error("403", 403, "HeadObject")
+        )
         with pytest.raises(AccessDeniedError):
             storage.get_fileinfo()
 
     def test_child_key_joins_under_the_prefix(self) -> None:
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket/prefix/", head_response=head)
         info = storage.get_fileinfo("sub/f.txt")
         assert info is not None
@@ -412,7 +407,7 @@ class TestGetFileinfo:
     def test_child_key_joins_under_a_slashless_prefix(self) -> None:
         # The "/" boundary is inserted even when the prefix lacks one, so a child
         # key is an entry beneath the location (not a bare-concat "prefixsub/...").
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket/prefix", head_response=head)
         info = storage.get_fileinfo("sub/f.txt")
         assert info is not None
@@ -420,7 +415,7 @@ class TestGetFileinfo:
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
 
     def test_child_key_under_a_keyless_location_has_no_leading_slash(self) -> None:
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket", head_response=head)
         info = storage.get_fileinfo("a.txt")
         assert info is not None
@@ -429,7 +424,7 @@ class TestGetFileinfo:
 
 
 def _bucket_entry(name: str) -> dict[str, Any]:
-    return {"Name": name, "CreationDate": _MTIME}
+    return {"Name": name, "CreationDate": MTIME}
 
 
 class TestListBuckets:
@@ -447,7 +442,7 @@ class TestListBuckets:
             ("alpha", FileKind.BUCKET),
             ("beta", FileKind.BUCKET),
         ]
-        assert results[0].mtime == _MTIME  # CreationDate
+        assert results[0].mtime == MTIME  # CreationDate
         assert results[0].size is None
 
     def test_filters_forwarded(self) -> None:
@@ -787,7 +782,7 @@ class TestOpen:
     def test_rb_error_translates_to_taxonomy(self) -> None:
         # A GetObject 404 surfaces as NotFoundError (s3_errors taxonomy), like
         # the rest of the S3 call sites - not a raw botocore ClientError.
-        client, _calls = make_recording_client([_client_error("NoSuchKey", 404)])
+        client, _calls = make_recording_client([client_error("NoSuchKey", 404, "HeadObject")])
         storage = S3Storage("s3://bucket/data", client=client)
         with pytest.raises(NotFoundError):
             storage.open("data/gone.txt", "rb")

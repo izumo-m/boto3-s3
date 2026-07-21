@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import threading
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -40,8 +40,9 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
+from tests.utils.fakes3 import MTIME, get_response, listing
 from tests.utils.host import skip_if_chmod_is_inert
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.recorder import make_recording_client, ops
 
 _SERIAL = TransferConfig(use_threads=False)
 # The case-conflict gate detects a "two S3 twins" conflict via its in-flight set,
@@ -50,28 +51,8 @@ _SERIAL = TransferConfig(use_threads=False)
 # tests do with a single worker (max_concurrent_requests = 1). _SERIAL completes
 # each twin before the next is judged, emptying the set.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
-_MTIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-_OLDER = _MTIME - timedelta(hours=1)
-_NEWER = _MTIME + timedelta(hours=1)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
-
-
-def _listing(*entries: tuple[str, int]) -> dict[str, Any]:
-    return {
-        "Contents": [
-            {"Key": key, "Size": size, "LastModified": _MTIME, "ETag": '"e"'}
-            for key, size in entries
-        ]
-    }
-
-
-def _get_response(body: bytes = b"payload") -> dict[str, Any]:
-    import io
-
-    return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
+_OLDER = MTIME - timedelta(hours=1)
+_NEWER = MTIME + timedelta(hours=1)
 
 
 def _write(root: Path, rel: str, body: bytes, *, mtime: datetime | None = None) -> Path:
@@ -94,10 +75,10 @@ class TestSyncUpload:
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # dest newer -> skip
         _write(src, "stale.txt", b"xx", mtime=_NEWER)  # dest older -> upload
         _write(src, "bigger.txt", b"xxx", mtime=_OLDER)  # size differs -> upload
-        listing = _listing(("p/bigger.txt", 2), ("p/same.txt", 2), ("p/stale.txt", 2))
-        client, calls = make_recording_client([listing, {}, {}, {}])
+        page = listing(("p/bigger.txt", 2), ("p/same.txt", 2), ("p/stale.txt", 2))
+        client, calls = make_recording_client([page, {}, {}, {}])
         S3().sync(str(src), S3Storage("s3://bucket/p", client=client), transfer_config=_SERIAL)
-        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
         assert calls[0].params["Prefix"] == "p/"
         assert [call.params["Key"] for call in calls[1:]] == [
             "p/bigger.txt",
@@ -111,7 +92,7 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "a.txt", b"x")
         (src / "loop").symlink_to(src)  # a directory cycle
-        client, calls = make_recording_client([_listing(), {}])  # empty dest, PutObject a.txt
+        client, calls = make_recording_client([listing(), {}])  # empty dest, PutObject a.txt
         results: list[OpResult] = []
         # The cycle guard is configured on the LocalStorage source now.
         S3().sync(
@@ -120,7 +101,7 @@ class TestSyncUpload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert any(
             r.outcome is OpOutcome.WARNED and "Symbolic link loop detected" in str(r.error)
             for r in results
@@ -131,7 +112,7 @@ class TestSyncUpload:
         _write(src, "a.txt", b"x")
         _write(src, "sub/b.txt", b"x")
         (src / "link.txt").symlink_to(src / "a.txt")  # a symlink leaf
-        client, calls = make_recording_client([_listing(), {}, {}, {}])
+        client, calls = make_recording_client([listing(), {}, {}, {}])
         seen: list[str] = []
 
         def exclude_directories(info: FileInfo) -> bool:
@@ -146,7 +127,7 @@ class TestSyncUpload:
             transfer_config=_SERIAL,
         )
         assert {"", "a.txt", "link.txt", "sub/", "sub/b.txt"} <= set(seen)
-        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "PutObject", "PutObject"]
         assert [call.params["Key"] for call in calls[1:]] == [
             "p/a.txt",
             "p/link.txt",
@@ -171,8 +152,8 @@ class TestSyncUpload:
         (src / "link").symlink_to(src / "changed.txt")  # lstat leaf, never followed
         if hasattr(os, "mkfifo"):
             os.mkfifo(src / "pipe")  # special file: enumerated, vetoed below
-        listing = _listing(("p/changed.txt", 2), ("p/orphan.txt", 2))
-        client, calls = make_recording_client([listing, {}, {}])
+        page = listing(("p/changed.txt", 2), ("p/orphan.txt", 2))
+        client, calls = make_recording_client([page, {}, {}])
         events: list[tuple[str, str]] = []
         threads: set[int] = set()
 
@@ -221,13 +202,13 @@ class TestSyncUpload:
         assert threads == {threading.get_ident()}  # serial, on the calling thread
         # Only the two accepted copies reached the engine; the vetoed entries
         # (root, directory, symlink, special file, the kept orphan) did not.
-        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
         assert [call.params["Key"] for call in calls[1:]] == ["p/changed.txt", "p/new.txt"]
 
     def test_delete_off_ignores_dest_only_entries(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
-        client, calls = make_recording_client([_listing(("p/extra.txt", 2))])
+        client, calls = make_recording_client([listing(("p/extra.txt", 2))])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -235,22 +216,22 @@ class TestSyncUpload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert results == []
 
     def test_delete_batches_dest_only_keys_and_spares_markers(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "keep.txt", b"xx", mtime=_OLDER)
-        listing: dict[str, Any] = {
+        page: dict[str, Any] = {
             "Contents": [
-                {"Key": "p/extra1.txt", "Size": 2, "LastModified": _MTIME, "ETag": '"e"'},
+                {"Key": "p/extra1.txt", "Size": 2, "LastModified": MTIME, "ETag": '"e"'},
                 {"Key": "p/keep.txt", "Size": 2, "LastModified": _NEWER, "ETag": '"e"'},
                 # A folder marker never surfaces on either side: not deleted.
-                {"Key": "p/marker/", "Size": 0, "LastModified": _MTIME, "ETag": '"m"'},
-                {"Key": "p/sub/extra2.txt", "Size": 2, "LastModified": _MTIME, "ETag": '"e"'},
+                {"Key": "p/marker/", "Size": 0, "LastModified": MTIME, "ETag": '"m"'},
+                {"Key": "p/sub/extra2.txt", "Size": 2, "LastModified": MTIME, "ETag": '"e"'},
             ]
         }
-        client, calls = make_recording_client([listing, {}])
+        client, calls = make_recording_client([page, {}])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -260,7 +241,7 @@ class TestSyncUpload:
             on_result=results.append,
             request_payer="requester",
         )
-        assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
+        assert ops(calls) == ["ListObjectsV2", "DeleteObjects"]
         assert calls[0].params["RequestPayer"] == "requester"
         delete_params = calls[1].params
         assert delete_params["RequestPayer"] == "requester"
@@ -276,7 +257,7 @@ class TestSyncUpload:
     def test_delete_result_carries_src_info_and_storage(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
-        client, _ = make_recording_client([_listing(("p/orphan.txt", 2)), {}])
+        client, _ = make_recording_client([listing(("p/orphan.txt", 2)), {}])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -295,7 +276,7 @@ class TestSyncUpload:
     def test_copy_update_result_carries_both_compared_sides(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "a.txt", b"new")  # size 3 != the dest's 2 -> an update upload
-        client, _ = make_recording_client([_listing(("p/a.txt", 2)), {}])
+        client, _ = make_recording_client([listing(("p/a.txt", 2)), {}])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -313,7 +294,7 @@ class TestSyncUpload:
         # destination entry; a new-file record carries dest_info=None.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx")
-        client, _ = make_recording_client([_listing(), {}])
+        client, _ = make_recording_client([listing(), {}])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -331,9 +312,7 @@ class TestSyncUpload:
         # are deleted - the delete lane is rm over the orphans.
         src = tmp_path / "src"
         src.mkdir()
-        client, calls = make_recording_client(
-            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
-        )
+        client, calls = make_recording_client([listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
@@ -348,9 +327,7 @@ class TestSyncUpload:
         # (relative), reusing rm's filter shape on the orphans.
         src = tmp_path / "src"
         src.mkdir()
-        client, calls = make_recording_client(
-            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
-        )
+        client, calls = make_recording_client([listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
@@ -366,9 +343,7 @@ class TestSyncUpload:
         src = tmp_path / "src"
         src.mkdir()
         keep = GlobFilter().exclude("*.log").compile()
-        client, calls = make_recording_client(
-            [_listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}]
-        )
+        client, calls = make_recording_client([listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
@@ -382,7 +357,7 @@ class TestSyncUpload:
     def test_dryrun_lists_but_never_acts(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("p/extra.txt", 2))])
+        client, calls = make_recording_client([listing(("p/extra.txt", 2))])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -392,7 +367,7 @@ class TestSyncUpload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         # Both lanes report in the shared compare-key space: the delete record's
         # compare_key is dest-prefix-relative ("p/extra.txt" stays on src_info.key).
         outcomes = {(r.transfer_type, r.compare_key): r.outcome for r in results}
@@ -404,15 +379,15 @@ class TestSyncUpload:
     def test_update_filter_replaces_the_default_judgment(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # default would skip
-        listing = _listing(("p/same.txt", 2))
-        client, calls = make_recording_client([listing, {}])
+        page = listing(("p/same.txt", 2))
+        client, calls = make_recording_client([page, {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             update_filter=lambda pair: True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
 
     def test_no_overwrite_judges_without_if_none_match(self, tmp_path: Path) -> None:
         # no_overwrite is an orthogonal sync write-guard: the at-both pair is
@@ -421,14 +396,14 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_NEWER)  # differs, but never overwritten
         _write(src, "new.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("p/exists.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/exists.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             no_overwrite=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
         assert "IfNoneMatch" not in calls[1].params
 
@@ -439,7 +414,7 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_OLDER)  # at dest -> guarded
         _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> uploaded
-        client, calls = make_recording_client([_listing(("p/exists.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/exists.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
@@ -447,7 +422,7 @@ class TestSyncUpload:
             no_overwrite=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
     def test_missing_source_directory_raises_not_found(self, tmp_path: Path) -> None:
@@ -466,7 +441,7 @@ class TestSyncUpload:
         # directory root, warns "File does not exist." (trailing separator
         # included) and exits 2 - no hard failure.
         src = _write(tmp_path, "afile.txt", b"xx")
-        client, calls = make_recording_client([_listing()])
+        client, calls = make_recording_client([listing()])
         results: list[OpResult] = []
         S3().sync(
             str(src),
@@ -474,14 +449,14 @@ class TestSyncUpload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
 
     def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         token = CancelToken()
         token.cancel()
         with pytest.raises(CancelledError):
@@ -497,14 +472,14 @@ class TestSyncUpload:
         # an up-to-date one the default would skip.
         src = tmp_path / "src"
         _write(src, "same.txt", b"xx", mtime=_OLDER)  # same size, older -> default would skip
-        client, calls = make_recording_client([_listing(("p/same.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/same.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             update_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
 
     def test_update_filter_false_is_additive_only(self, tmp_path: Path) -> None:
         # update_filter=False never re-copies an existing destination (additive
@@ -512,28 +487,28 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)  # source-only -> copied
         _write(src, "same.txt", b"xx", mtime=_NEWER)  # at dest, differs -> left as-is
-        client, calls = make_recording_client([_listing(("p/same.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/same.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             update_filter=False,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
 
     def test_create_filter_false_skips_new_entries(self, tmp_path: Path) -> None:
         # create_filter=False: a brand-new source file is not copied.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing()])
+        client, calls = make_recording_client([listing()])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             create_filter=False,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
 
     def test_create_filter_narrows_which_new_entries_copy(self, tmp_path: Path) -> None:
         # create_filter as a FileFilter copies only the new entries it keeps,
@@ -541,14 +516,14 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "keep.log", b"xx", mtime=_OLDER)
         _write(src, "skip.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(), {}])
+        client, calls = make_recording_client([listing(), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
             create_filter=GlobFilter().exclude("*").include("*.log").compile(),
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/keep.log"
 
     def test_delete_only_sync_copies_nothing(self, tmp_path: Path) -> None:
@@ -556,7 +531,7 @@ class TestSyncUpload:
         # orphans and copy nothing (neither new nor updated entries).
         src = tmp_path / "src"
         _write(src, "keep.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/extra.txt", 2), ("p/keep.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
@@ -565,7 +540,7 @@ class TestSyncUpload:
             delete_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "DeleteObjects"]
+        assert ops(calls) == ["ListObjectsV2", "DeleteObjects"]
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.txt"]
 
@@ -577,40 +552,40 @@ class TestSyncDownload:
         out = tmp_path / "out"
         _write(out, "old.txt", b"xx", mtime=_OLDER)  # local older -> skip
         _write(out, "touched.txt", b"xx", mtime=_NEWER)  # local newer -> download
-        listing = _listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
-        client, calls = make_recording_client([listing, _get_response(), _get_response()])
+        page = listing(("d/new.txt", 7), ("d/old.txt", 2), ("d/touched.txt", 2))
+        client, calls = make_recording_client([page, get_response(), get_response()])
         S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
-        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
         assert (out / "new.txt").read_bytes() == b"payload"
 
     def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         _write(out, "old.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([_listing(("d/old.txt", 2)), _get_response()])
+        client, calls = make_recording_client([listing(("d/old.txt", 2)), get_response()])
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
             update_filter=AwsCliComparison(exact_timestamps=True),
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
 
     def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         _write(out, "touched.txt", b"xx", mtime=_NEWER)
-        client, calls = make_recording_client([_listing(("d/touched.txt", 2))])
+        client, calls = make_recording_client([listing(("d/touched.txt", 2))])
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
             update_filter=AwsCliComparison(size_only=True),
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
 
     def test_destination_directory_is_created_even_when_empty(self, tmp_path: Path) -> None:
         out = tmp_path / "fresh" / "nested"
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
         assert out.is_dir()
 
@@ -636,7 +611,7 @@ class TestSyncDownload:
         out = tmp_path / "out"
         stale = _write(out, "stale.txt", b"xx")
         nested = _write(out, "sub/stale2.txt", b"xx")
-        client, calls = make_recording_client([_listing()])
+        client, calls = make_recording_client([listing()])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
@@ -645,7 +620,7 @@ class TestSyncDownload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert not stale.exists() and not nested.exists()
         assert {(r.transfer_type, r.outcome) for r in results} == {
             (TransferType.DELETE, OpOutcome.SUCCEEDED)
@@ -655,7 +630,7 @@ class TestSyncDownload:
     def test_dryrun_delete_keeps_local_files(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         stale = _write(out, "stale.txt", b"xx")
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
@@ -673,7 +648,7 @@ class TestSyncDownload:
         out = tmp_path / "out"
         stale = _write(out, "locked/stale.txt", b"xx")
         stale.parent.chmod(0o555)
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         results: list[OpResult] = []
         try:
             with pytest.raises(BatchError) as excinfo:
@@ -691,18 +666,18 @@ class TestSyncDownload:
         assert "[Errno 13]" in str(results[0].error)
 
     def test_glacier_source_warns_and_skips(self, tmp_path: Path) -> None:
-        listing: dict[str, Any] = {
+        page: dict[str, Any] = {
             "Contents": [
                 {
                     "Key": "d/cold.bin",
                     "Size": 2,
-                    "LastModified": _MTIME,
+                    "LastModified": MTIME,
                     "ETag": '"e"',
                     "StorageClass": "GLACIER",
                 }
             ]
         }
-        client, calls = make_recording_client([listing])
+        client, calls = make_recording_client([page])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
@@ -710,7 +685,7 @@ class TestSyncDownload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert "Unable to perform download operations on GLACIER objects" in str(results[0].error)
 
@@ -719,8 +694,8 @@ class TestSyncDownload:
         # admitted, the second hits the submitted-set and SKIP emits the
         # aws-cli notice (uncounted; rc untouched).
         out = tmp_path / "out"
-        listing = _listing(("d/A.txt", 2), ("d/a.txt", 2))
-        client, calls = make_recording_client([listing, _get_response()])
+        page = listing(("d/A.txt", 2), ("d/a.txt", 2))
+        client, calls = make_recording_client([page, get_response()])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
@@ -729,7 +704,7 @@ class TestSyncDownload:
             on_result=results.append,
             **TransferOptions(case_conflict=CaseConflictMode.SKIP),
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
         assert calls[1].params["Key"] == "d/A.txt"
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
         assert len(notices) == 1
@@ -738,16 +713,16 @@ class TestSyncDownload:
 
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
-        src_client, src_calls = make_recording_client([_listing(("s/new.txt", 2))])
-        dest_client, dest_calls = make_recording_client([_listing(("t/extra.txt", 2)), {}, {}])
+        src_client, src_calls = make_recording_client([listing(("s/new.txt", 2))])
+        dest_client, dest_calls = make_recording_client([listing(("t/extra.txt", 2)), {}, {}])
         S3().sync(
             S3Storage("s3://src-b/s", client=src_client),
             S3Storage("s3://dest-b/t", client=dest_client),
             delete_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(src_calls) == ["ListObjectsV2"]
-        assert _ops(dest_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
+        assert ops(src_calls) == ["ListObjectsV2"]
+        assert ops(dest_calls) == ["ListObjectsV2", "CopyObject", "DeleteObjects"]
         copy = dest_calls[1].params
         assert copy["CopySource"] == {"Bucket": "src-b", "Key": "s/new.txt"}
         assert copy["Bucket"] == "dest-b"
@@ -759,14 +734,14 @@ class TestSyncCopy:
         # `aws s3 sync s3://b/p s3://b/p` exits 0 silently - every
         # pair is identical, so the judgment skips all of them (no mv-style
         # onto-itself guard exists for sync).
-        listing = _listing(("p/a.txt", 2))
-        client, calls = make_recording_client([listing, listing])
+        page = listing(("p/a.txt", 2))
+        client, calls = make_recording_client([page, page])
         storage = S3Storage("s3://bucket/p", client=client)
         results: list[OpResult] = []
         S3().sync(
             storage, storage, delete_filter=True, transfer_config=_SERIAL, on_result=results.append
         )
-        assert _ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
         assert results == []
 
 
@@ -788,7 +763,7 @@ class TestParallelFilter:
         # too, not only on the serial loop.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")
-        client, calls = make_recording_client([_listing()])
+        client, calls = make_recording_client([listing()])
         token = CancelToken()
         token.cancel()
         with ThreadPoolExecutor(2) as pool, pytest.raises(CancelledError):
@@ -826,7 +801,7 @@ class TestParallelFilter:
         src = tmp_path / "src"
         _write(src, "a.txt", b"a")
         _write(src, "b.txt", b"b")
-        client, calls = make_recording_client([_listing(), {}, {}])
+        client, calls = make_recording_client([listing(), {}, {}])
         token = CancelToken()
         first_started = threading.Event()
         release_first = threading.Event()
@@ -883,8 +858,8 @@ class TestParallelFilter:
         def decide(pair: SyncPair) -> bool:
             return pair.compare_key in {"a.txt", "c.txt"}  # only update pairs reach here
 
-        listing = _listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
-        client, calls = make_recording_client([listing, {}, {}, {}])
+        page = listing(("p/a.txt", 2), ("p/b.txt", 2), ("p/c.txt", 2))
+        client, calls = make_recording_client([page, {}, {}, {}])
         with ThreadPoolExecutor(4) as pool:
             S3().sync(
                 str(src),
@@ -909,7 +884,7 @@ class TestParallelFilter:
             return info.compare_key == "a.txt"
 
         # empty dest -> both are new; only a.txt is kept, so one PutObject follows.
-        client, calls = make_recording_client([_listing(), {}])
+        client, calls = make_recording_client([listing(), {}])
         with ThreadPoolExecutor(2) as pool:
             S3().sync(
                 str(src),
@@ -933,7 +908,7 @@ class TestParallelFilter:
             threads.add(threading.get_ident())
             return info.key.endswith(".log")
 
-        client, calls = make_recording_client([_listing(("p/x.log", 2), ("p/y.txt", 2)), {}])
+        client, calls = make_recording_client([listing(("p/x.log", 2), ("p/y.txt", 2)), {}])
         with ThreadPoolExecutor(2) as pool:
             S3().sync(
                 str(src),
@@ -961,7 +936,7 @@ class TestParallelFilter:
             seen.append(info.compare_key)
             return False  # copy nothing; the test only pins the call order
 
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         with ThreadPoolExecutor(4) as pool:
             S3().sync(
                 str(src),
@@ -978,8 +953,8 @@ class TestParallelFilter:
         src = tmp_path / "src"
         for name in ("keep.txt", "new.txt"):  # keep.txt updates, new.txt creates
             _write(src, name, b"xx")
-        listing = _listing(("p/keep.txt", 2), ("p/orphan.txt", 2))  # orphan.txt deletes
-        client, calls = make_recording_client([listing, {}, {}, {}])
+        page = listing(("p/keep.txt", 2), ("p/orphan.txt", 2))  # orphan.txt deletes
+        client, calls = make_recording_client([page, {}, {}, {}])
         with ThreadPoolExecutor(4) as pool:
             S3().sync(
                 str(src),
@@ -1003,7 +978,7 @@ class TestParallelFilter:
         def boom(_pair: SyncPair) -> bool:
             raise ValueError("decide blew up")
 
-        client, _calls = make_recording_client([_listing(("p/x.txt", 2))])
+        client, _calls = make_recording_client([listing(("p/x.txt", 2))])
         with ThreadPoolExecutor(2) as pool, pytest.raises(ValueError, match="decide blew up"):
             S3().sync(
                 str(src),
@@ -1016,7 +991,7 @@ class TestParallelFilter:
         src = tmp_path / "src"
         _write(src, "a.txt", b"aa")
         _write(src, "b.txt", b"bb")
-        client, _calls = make_recording_client([_listing(("p/a.txt", 2), ("p/b.txt", 2))])
+        client, _calls = make_recording_client([listing(("p/a.txt", 2), ("p/b.txt", 2))])
         second_started = threading.Event()
         release_second = threading.Event()
         first_raised = threading.Event()

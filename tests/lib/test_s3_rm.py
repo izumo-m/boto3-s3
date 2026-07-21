@@ -36,18 +36,9 @@ from boto3_s3 import (
     ValidationError,
     rm_filter_root,
 )
+from tests.utils.fakes3 import client_error
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
-
-
-def _client_error(code: str, operation: str, status: int = 404) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "x"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
 
 
 class _FakePaginator:
@@ -176,7 +167,9 @@ class TestRmSingleKey:
         assert [(r.compare_key, r.outcome) for r in results] == [("no-such", OpOutcome.DRYRUN)]
 
     def test_failure_emits_failed_and_raises_batch_error(self) -> None:
-        client = _FakeS3Client(delete_object_error=_client_error("NoSuchBucket", "DeleteObject"))
+        client = _FakeS3Client(
+            delete_object_error=client_error("NoSuchBucket", 404, "DeleteObject")
+        )
         results: list[OpResult] = []
         storage = S3Storage("s3://b-no-such/k", client=client)
         with pytest.raises(BatchError) as exc_info:
@@ -318,7 +311,7 @@ class TestRmRecursive:
     def test_listing_failure_propagates_as_category_error(self) -> None:
         # Pre-item failures are "fatal" (aws rc 1): the category error passes
         # through untouched, not wrapped in BatchError.
-        client = _FakeS3Client(list_error=_client_error("NoSuchBucket", "ListObjectsV2"))
+        client = _FakeS3Client(list_error=client_error("NoSuchBucket", 404, "ListObjectsV2"))
         with pytest.raises(NotFoundError):
             _rm("s3://b-no-such/", client, recursive=True)
         assert client.delete_objects_calls == []

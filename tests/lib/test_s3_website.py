@@ -18,19 +18,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError, ParamValidationError
+from botocore.exceptions import ParamValidationError
 
 from boto3_s3 import S3, BatchError, NotFoundError, S3Storage, ValidationError
-
-
-def _client_error(code: str, operation: str, status: int) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "x"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
+from tests.utils.fakes3 import client_error
 
 
 class _FakeWebsiteClient:
@@ -109,7 +100,7 @@ class TestWebsite:
 
 class TestWebsiteErrors:
     def test_no_such_bucket_becomes_not_found(self) -> None:
-        cause = _client_error("NoSuchBucket", "PutBucketWebsite", 404)
+        cause = client_error("NoSuchBucket", 404, "PutBucketWebsite")
         client = _FakeWebsiteClient(error=cause)
         with pytest.raises(NotFoundError) as excinfo:
             S3().website(_storage("s3://no-such", client), index_document="i.html")
