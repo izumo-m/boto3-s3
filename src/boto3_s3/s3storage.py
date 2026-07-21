@@ -30,6 +30,7 @@ from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     EndpointConnectionError,
+    HTTPClientError,
     MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
@@ -77,7 +78,10 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
 # (aws's dedicated rc-253 handlers); the present-but-unusable configuration
 # family below refines to InvalidConfigError (aws's general handler, rc 255) -
-# the same split the CLI's clientfactory applies (docs/exceptions.md section 3).
+# the same split point as the CLI's clientfactory (docs/exceptions.md section
+# 3). Membership differs: the factory's construction-scoped catch maps every
+# other BotoCoreError to InvalidConfigError, while this general translator
+# lists only the known config shapes and keeps anything unlisted at the base.
 _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     NoRegionError,
@@ -86,7 +90,14 @@ _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     PartialCredentialsError,
     ProfileNotFound,
 )
-_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (EndpointConnectionError, BotoConnectionError)
+# Both halves of botocore's transport tree: ConnectionError (endpoint /
+# connect-timeout / proxy) and HTTPClientError (read timeout, a closed
+# connection - "An HTTP Client raised an unhandled exception").
+_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    EndpointConnectionError,
+    BotoConnectionError,
+    HTTPClientError,
+)
 
 # S3 error Code -> exception category, shared by every translation path: the
 # request-level ClientError below and the per-key DeleteObjects ``Errors[]``
