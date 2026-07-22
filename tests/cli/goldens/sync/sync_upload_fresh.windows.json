@@ -6,14 +6,16 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "tree/a.txt",
-    "tree/b.bin",
-    "tree/sub/c.txt",
-    "tree/z.txt"
+    "tree/a.txt:6:b6a98d9c",
+    "tree/b.bin:3:ae4b3280",
+    "tree/sub/c.txt:6:ae9a6306",
+    "tree/z.txt:5:2088d0c4"
   ],
   "scenario": "sync_upload_fresh",
   "src_tree": null,

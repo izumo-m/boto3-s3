@@ -6,13 +6,15 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": [
     "new:14:ebaee762"
   ],
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "d/a.txt"
+    "d/a.txt:14:ebaee762"
   ],
   "scenario": "cp_download_trailing_sep_new_dir",
   "src_tree": null,
