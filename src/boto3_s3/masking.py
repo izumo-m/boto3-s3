@@ -133,6 +133,19 @@ _WEB_IDENTITY_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# MFA one-time code on the AssumeRole / GetSessionToken request (full mask). A
+# profile with ``mfa_serial`` makes botocore prompt for the TOTP and log the
+# STS request_dict at DEBUG ("Making request ... with params: %s") with
+# ``'TokenCode': '123456'`` in the body (and, defensively, the urlencoded
+# ``TokenCode=123456`` query form). The code is single-use and short-lived, but
+# a real-time log collector still captures a live second factor; mask it like
+# the other request secrets. ``SerialNumber`` (the MFA device ARN) is not a
+# secret and is left untouched. Same key/value shape as the web-identity RE.
+_MFA_TOKEN_CODE_RE = re.compile(
+    rf"(?P<key>['\"]?TokenCode['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
+    re.IGNORECASE,
+)
+
 # SSE-C customer key (full mask): the base64 customer key is the symmetric
 # encryption key (a true secret). botocore puts it in the signed request header
 # ``x-amz-server-side-encryption-customer-key`` (and the copy-source variant),
@@ -265,6 +278,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSO_BEARER_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSO_OIDC_BODY_JSON_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _WEB_IDENTITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _MFA_TOKEN_CODE_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)

@@ -354,6 +354,28 @@ class TestMaskTextNotation:
         assert assertion not in out
         assert "'SAMLAssertion': '***'" in out
 
+    def test_mfa_token_code_request_dict_masked(self) -> None:
+        # A profile with mfa_serial makes botocore log the STS request_dict with
+        # the live TOTP in 'TokenCode'; the MFA device ARN in 'SerialNumber' is
+        # not a secret and must stay visible.
+        line = (
+            "Making request for AssumeRole with params: "
+            "{'Action': 'AssumeRole', 'RoleArn': 'arn:aws:iam::111122223333:role/r', "
+            "'TokenCode': '123456', 'SerialNumber': 'arn:aws:iam::111122223333:mfa/alice'}"
+        )
+        out = m.mask_text(line)
+        assert "'TokenCode': '***'" in out
+        assert "123456" not in out
+        assert "'SerialNumber': 'arn:aws:iam::111122223333:mfa/alice'" in out
+
+    def test_mfa_token_code_query_body_masked(self) -> None:
+        # The urlencoded query-protocol body form (defensive coverage).
+        body = "Action=AssumeRole&TokenCode=987654&SerialNumber=arn%3Aaws&Version=2011-06-15"
+        out = m.mask_text(body)
+        assert "TokenCode=***" in out
+        assert "987654" not in out
+        assert "Version=2011-06-15" in out
+
     def test_long_non_url_run_does_not_hang(self) -> None:
         # Guards against ReDoS in the proxy-URL regex: a long contiguous
         # scheme-class run that never reaches "://" must mask in linear time.
