@@ -51,6 +51,18 @@ with `cli/pyproject.toml`, `cli/CHANGELOG.md`, and a `boto3-s3-cli-vX.Y.Z` tag.
 A joint release puts both tags on the same merge commit, but pushes them in
 order (see step 3).
 
+**Before cutting the release, confirm CI is green on `develop`.** The latest
+`ci.yml` run on the branch tip must have finished with every job passing - the
+whole matrix, including `windows-latest` and each Python version. This is a hard
+precondition: a red, cancelled, or still-running job on the tip blocks the
+release; fix it, push, and re-confirm before continuing. The release workflow
+reruns the source-quality gates before building, but only on `ubuntu-latest` and
+only after the tag is pushed, so a platform-specific failure (a Windows-only one,
+say) would surface there only by burning a version tag. Verify up front:
+
+    gh run list --branch develop --limit 1   # the tip run and its overall status
+    gh run view <run-id>                     # per-job breakdown; --log-failed for a failure
+
 1. On `develop`, make a single `chore: release X.Y.Z` commit that bumps:
    - `pyproject.toml` `version` to `X.Y.Z`
    - `uv.lock` (run `uv lock` to refresh)
