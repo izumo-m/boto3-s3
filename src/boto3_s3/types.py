@@ -490,8 +490,12 @@ class TransferOptions(TypedDict, total=False):
     ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
     (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
     ``PreconditionFailed`` becomes a silent skip), and an existence check before
-    downloads. `annotation_copy_mode` affects only multipart S3-to-S3 copies
-    under `copy_props=ALL`; it defaults to `PRELOAD_MEMORY` for aws-cli parity.
+    downloads to a *local* destination - a ``cp`` / ``mv`` download into a
+    custom (open-route) backend has no existence probe and overwrites (the
+    backend owns its key space; ``sync`` still skips destination-present pairs
+    from its listing - docs/transfer.md section 12). `annotation_copy_mode`
+    affects only multipart S3-to-S3 copies under `copy_props=ALL`; it defaults
+    to `PRELOAD_MEMORY` for aws-cli parity.
     """
 
     acl: str
