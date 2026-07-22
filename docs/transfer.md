@@ -676,11 +676,10 @@ and outside aws parity.
   aws's missing-local-source wording; unlike the local up-front check it
   surfaces lazily, once the pipeline pulls the item); an empty recursive
   `scan` transfers nothing (rc 0, like an empty S3 prefix). `s3open`
-  enumerates its S3 source like the built-in download (recursive
-  `ListObjectsV2` / single `HeadObject`, folder markers dropped), with one
-  pinned exception: a keyless non-recursive `s3open` yields nothing without a
-  request, where the built-in single-source path still issues its listing
-  probe (so e.g. an `AccessDenied` stays observable there).
+  enumerates its S3 source exactly like the built-in download (recursive
+  `ListObjectsV2` / single `HeadObject`, folder markers dropped; a keyless
+  non-recursive source issues the same listing-and-match-nothing probe, so
+  e.g. an `AccessDenied` stays observable).
 - **capability gate** (`producers.require_open_capabilities`, before any bytes move):
   the custom side is pre-checked against `Storage.capabilities` and a missing
   contract method is a clear `ValidationError` naming the gap (not a deep

@@ -460,13 +460,17 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_keyless_non_recursive_source_writes_nothing(self) -> None:
-        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches nothing.
+        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches
+        # nothing. The listing is issued like the built-in download route
+        # (test_s3_cp.py pins the same shape) - a denied/failing ListBucket
+        # must stay observable, not be optimized to a silent rc 0.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([])
+        client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(S3Storage("s3://bucket", client=client), dest, on_result=results.append)
-        assert calls == []
+        assert ops(calls) == ["ListObjectsV2"]
+        assert calls[0].params == {"Bucket": "bucket", "Prefix": ""}
         assert results == []
         assert store == {}
 

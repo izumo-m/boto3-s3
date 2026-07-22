@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A missing awscrt where SigV4A signing is required (Multi-Region Access Points) now raises `ConfigurationError` instead of the base error.
 - The Ctrl-C exit posture moved to `S3(wait_on_interrupt=...)` (reaching scans via `ScanOptions`); the per-storage constructor option is gone, and it no longer applies to `SystemExit`.
 - More aws-cli parity: `sync` now rejects S3 Express directory buckets (their listings are unordered, which could mis-pair the merge), and a `mv` download stamps the file mtime before deleting the source; relative local storages also resolve consistently if the process chdir's after construction.
+- CRT transfers now derive their endpoint and TLS settings from the run's actual client - a client with a different endpoint, `verify`, or S3 addressing config falls back to the classic engine instead of riding the first client's settings; custom-backend scans stamp `FileInfo.storage` before filters run, and the open route no longer skips the keyless-source listing probe.
 
 ## [0.7.0] - 2026-07-17
 

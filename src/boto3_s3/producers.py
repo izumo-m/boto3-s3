@@ -834,12 +834,27 @@ def open_download_items(
             wait_on_interrupt=wait_on_interrupt,
         )
     elif src_storage.bucket and not src_storage.key:
-        # Keyless non-recursive source (`cp s3://bucket custom`): aws lists
-        # the bucket and exact-matches nothing -> zero items (the built-in
-        # download path's behavior, without issuing the listing). A bucketless
-        # service root (`cp s3:// custom`) instead falls to head_single, whose
-        # empty Bucket hits botocore's Invalid-bucket ParamValidation like aws.
-        return
+        # Keyless non-recursive source (`cp s3://bucket custom`): mirror the
+        # built-in download path (s3_source_items) - aws lists the bucket and
+        # exact-matches nothing -> zero items, rc 0. The listing is issued,
+        # not skipped, because its failure (notably NoSuchBucket/AccessDenied)
+        # is observable. A bucketless service root (`cp s3:// custom`) instead
+        # falls to head_single, whose empty Bucket hits botocore's
+        # Invalid-bucket ParamValidation like aws.
+        scan_options = replace(
+            src_storage.default_scan_options(),
+            # BucketLister does not send a Delimiter on this aws-cli route,
+            # even though the transfer itself is non-recursive.
+            recursive=True,
+            prefix="",
+            request_payer=options.get("request_payer"),
+            wait_on_interrupt=wait_on_interrupt,
+        )
+        infos = (
+            info
+            for info in src_storage.scan(scan_options)
+            if f"{src_bucket}/{info.key}" == src_bucket
+        )
     else:
         infos = head_single(
             src_storage,
