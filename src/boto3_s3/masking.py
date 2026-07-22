@@ -370,6 +370,15 @@ def set_stream_logger(
     literal those already partially rewrote is not re-matched; shorter values
     are skipped so a stray short
     string cannot blank out swaths of the log).
+
+    Scope (docs/masking.md section 3.3): masking is a property of the handler
+    this attaches - it redacts that handler's output and nothing else. It is
+    not a process-wide guarantee: a handler that other code attached to the
+    same logger formats each record independently and is not reached (Python
+    logging delivers a record to every handler on the chain separately, and a
+    handler-side filter is scoped to its own handler). Obtaining masked debug
+    output is done through this entry point (or the CLI's ``--debug``);
+    handlers installed by other code own their own output.
     """
     if format_string is None:
         format_string = "%(asctime)s %(name)s [%(levelname)s] %(message)s"

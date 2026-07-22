@@ -99,7 +99,32 @@ values back). It also masks any attached exception traceback (`record.exc_text`,
 which the handler's formatter appends from `exc_info`), so a secret embedded in an
 exception message is redacted on that channel too, not only in the message.
 
-### 3.3 The `http.client` wire dump is not handled
+### 3.3 Scope: the handler boto3-s3 attaches
+
+Masking is a property of **the handler boto3-s3 attaches** - the CLI's `--debug`
+stream handler, and the one `set_stream_logger(mask_secrets=True)` installs. It
+redacts everything that handler writes, and nothing else. This is deliberate and
+sufficient under supported usage, because in both cases boto3-s3 owns the debug
+handler on the `boto3` / `botocore` / `s3transfer` loggers, so every
+credential-bearing record it emits is masked.
+
+It is **not** a process-wide guarantee that no handler will ever format a raw
+record. Python logging delivers each record to every handler on the logger chain
+independently, and a handler-side filter only rewrites its own handler's copy. So
+a handler that *other code* attached to those loggers formats the record on its
+own, unmasked - a filter on our handler cannot reach it, and (section 3.2) a
+filter on the logger cannot reach a record that propagated up from a child logger
+either. Redacting such a handler would require installing filters on every
+credential-emitting child logger (`botocore.auth`, `botocore.endpoint`,
+`botocore.parsers`, ...), a set botocore is free to change between versions.
+
+By specification this is out of scope: attaching foreign handlers to boto3 /
+botocore loggers - importing the CLI's internals to do so, or configuring their
+logging around the library - is not a supported way to obtain masked output. Get
+masked debug output the supported way (run the CLI with `--debug`, or call
+`set_stream_logger`); a handler installed by other code owns its own output.
+
+### 3.4 The `http.client` wire dump is not handled
 
 As in section 2, the `http.client` wire dump does not appear under the default
 `--debug`. If a wire-dump output option is added in the future, the monkeypatch-
