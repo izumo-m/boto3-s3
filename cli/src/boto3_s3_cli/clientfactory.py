@@ -326,6 +326,17 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     just a local path string, hiding nothing S3-shaped). Non-string values
     (the readable-`fileb://` quirk leaves
     `bytes`) never name either shape and are skipped.
+
+    presign's `path` is always an S3 reference - the command takes the target
+    with or without the `s3://` scheme (unlike the transfer family, where a
+    scheme-less positional is a local path). So a scheme-less directory-bucket
+    presign (``presign bucket--zone--x-s3/key``) is normalized to the `s3://`
+    form before the check, which `is_s3express_path` requires precisely
+    because a transfer positional could be a local file ending in ``--x-s3``.
+    Without this, the s3v4 pin would stay on and the URL would sign plain
+    SigV4 with no `CreateSession` - unusable against the directory bucket,
+    where aws (resolving the auth scheme off the final Bucket, not the input
+    notation) signs ``sigv4-s3express``.
     """
     from boto3_s3.pathresolver import is_mrap_path, is_s3express_path
 
@@ -335,7 +346,10 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
         values.extend(cast("list[object]", paths))
     else:
         values.append(paths)
-    values.append(getattr(args, "path", None))
+    presign_path = getattr(args, "path", None)
+    if isinstance(presign_path, str) and not presign_path.startswith("s3://"):
+        presign_path = f"s3://{presign_path}"
+    values.append(presign_path)
     return any(
         isinstance(value, str) and (is_mrap_path(value) or is_s3express_path(value))
         for value in values

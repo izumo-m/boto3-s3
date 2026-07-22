@@ -309,6 +309,18 @@ class TestBuildClient:
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
         assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
 
+    def test_s3express_scheme_less_presign_lifts_the_pin(self) -> None:
+        # presign takes its target with or without s3:// (unlike the transfer
+        # family, where scheme-less means local). A scheme-less directory
+        # bucket must still lift the pin so signing dials CreateSession -
+        # otherwise the URL signs plain SigV4 and is unusable. aws resolves the
+        # auth scheme off the final Bucket, so its scheme-less presign works.
+        args = _parse(["--region", "us-east-1"])
+        args.path = "mybkt--use1-az4--x-s3/key"  # no s3:// scheme
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
     def test_local_x_s3_suffix_lookalike_keeps_the_pin(self) -> None:
         # A local path can plausibly end in --x-s3; only the s3:// form names
         # a directory bucket, so the pin stays.
