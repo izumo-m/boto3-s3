@@ -224,8 +224,9 @@ def build_service_client(
     inherits them; fold the same timeouts and the UNSIGNED signature into this
     client's ``Config``.
     """
-    # Deferred like build_client: only a command that actually resolves
-    # access-point paths pays the boto3 import.
+    # Deferred like build_client: only a command that opts into path
+    # resolution (mv's --validate-same-s3-paths, which builds both resolver
+    # clients regardless of the path shapes) pays the boto3 import.
     import boto3
     import botocore.session
     from botocore import UNSIGNED
@@ -238,8 +239,9 @@ def build_service_client(
     else:
         verify = args.ca_bundle
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
-    # a bad --profile); translate them so they reach the exit-code mapping
-    # instead of escaping as an uncaught traceback (see build_client).
+    # a bad --profile); translate them so the credential/region 253 split
+    # survives - untranslated they would fall to the dispatcher's generic
+    # chain (see build_client).
     try:
         if session is None:
             from boto3_s3 import fast_parse_timestamp
@@ -318,9 +320,11 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     `CreateSession` credentials) - the two shapes an explicit
     `signature_version` would mis-sign, so the s3v4 pin stands down for them.
     Reads the parsed positionals off the namespace - `paths` (a string, or the
-    transfer family's two-item list) and presign's `path`. By the time a
-    command builds its client, paramfile expansion has already replaced
-    `file://` forms; non-string values (the readable-`fileb://` quirk leaves
+    transfer family's two-item list) and presign's `path`. The single-path
+    commands' positionals arrive paramfile-expanded by client-build time; the
+    transfer family's `paths` are consumed raw (a `file://` form there is
+    just a local path string, hiding nothing S3-shaped). Non-string values
+    (the readable-`fileb://` quirk leaves
     `bytes`) never name either shape and are skipped.
     """
     from boto3_s3.pathresolver import is_mrap_path, is_s3express_path
@@ -407,8 +411,9 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile, or credential/region resolution failures). Translate them
     # into the library taxonomy so exit_code_for maps them (credential/region ->
-    # ConfigurationError [253], the rest -> InvalidConfigError [255]) instead of
-    # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
+    # ConfigurationError [253], the rest -> InvalidConfigError [255]); left
+    # raw they would fall to the dispatcher's generic chain, losing that
+    # 253/255 split.
     try:
         if session is None:
             from boto3_s3 import fast_parse_timestamp

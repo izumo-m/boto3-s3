@@ -12,8 +12,10 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
 (download). The transfer ``close``s every fileobj ``open`` returns (the open
-route flushes a real backend's writer that way), so each view here absorbs that
-``close`` into a flush: the caller's stream is **never closed** by ``IOStorage``
+route flushes a real backend's writer that way), so each *writer* view here
+absorbs that ``close`` into a flush and each reader view's ``close`` is a
+no-op (nothing to release): the caller's stream is **never closed** by
+``IOStorage``
 (it owns only the thin view / codec adapter).
 
 ``StdioStorage`` is the convenience for the process's stdio: as a source it reads

@@ -7,9 +7,10 @@ sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
 connection / auth values into a boto3 client is ``clientfactory``'s
 job. The presentation globals are accepted and
-ignored (``docs/aws-cli-option-handling.md`` section 2); ``--cli-auto-prompt``
-launches the interactive prompt, resolved from raw argv by the dispatcher
-before parsing (section 3).
+ignored (``docs/aws-cli-option-handling.md`` section 2), except the
+auto-prompt pair: ``--cli-auto-prompt`` launches the interactive prompt and
+``--no-cli-auto-prompt`` forces it off, both resolved from raw argv by the
+dispatcher before parsing (section 3).
 """
 
 from __future__ import annotations
@@ -143,7 +144,8 @@ class _VersionAction(argparse.Action):
 def add_common_arguments(
     parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
 ) -> None:
-    """Register the connection/auth (effective) and presentation (ignored) globals.
+    """Register the connection/auth (effective) and presentation globals
+    (ignored, except the auto-prompt pair the dispatcher reads off raw argv).
 
     Added to BOTH the top-level parser (with real defaults) and each subparser
     (``suppress_defaults=True``). Suppressing the subparser-side defaults stops an

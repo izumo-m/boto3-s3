@@ -35,7 +35,9 @@ class PresignCommand(Command):
         """Print the presigned URL and return an ``aws s3``-style exit code.
 
         Exit-code shape (docs/cli.md section 6): pure client-side
-        computation, so rc 1 and 254 cannot happen - 0 on success, 252 for
+        computation, so rc 1 cannot happen and no S3 request is sent (a
+        deferred credential resolution - an assume-role profile - can still
+        dial STS during signing, whose ClientError maps to 254) - 0 on success, 252 for
         botocore's client-side parameter validation (empty bucket or key,
         surfaced as the library's ValidationError through main), 253 for
         client construction's unresolvable credentials / region (its other

@@ -136,8 +136,10 @@ _S3_SCHEME = "s3://"
 # (aws-cli's awscli/customizations/s3/utils.py). An ARN's resource part
 # may itself contain "/", so these run before the plain first-"/" split; the
 # whole ARN (group "bucket") is what the S3 API takes as ``Bucket``. The
-# *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above) are
-# ``S3Storage.validate``'s concern - the split accepts them whole.
+# *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above)
+# match neither regex and fall to the plain first-"/" split (cut mid-ARN);
+# ``S3Storage.validate`` rejects them before an operation consumes that
+# split.
 _S3_ACCESSPOINT_TO_BUCKET_KEY_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3:[a-z\-0-9]*:[0-9]{12}:accesspoint[:/][^/]+)/?(?P<key>.*)$"
 )
@@ -154,7 +156,10 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    ``S3Storage.split_bucket_key``; aws's splitter likewise rejects nothing).
+    ``S3Storage.split_bucket_key``; aws's own splitter first *blocks* the
+    unsupported ARN forms - ``block_unsupported_resources`` - and otherwise
+    rejects nothing, while ours accepts everything and defers that same
+    rejection to ``validate``).
     The strict checks - the
     unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
     parse-time 252), and a key with
@@ -568,7 +573,9 @@ class S3Storage(Storage):
         scheme-less ``bucket/key`` root falls straight out of the join, and so
         does the keyless-bucket normalization (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``) - only the bare service root ``s3://`` stays empty.
+        root ``bucket/``) - only the bare service root ``s3://`` stays empty (a
+        ``dir_op`` still appends its trailing ``/``, so that root formats as
+        ``"/"``).
         A ``dir_op`` root is ``/``-terminated and takes the source's name;
         otherwise only an explicit trailing ``/`` does.
         """

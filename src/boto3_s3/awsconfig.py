@@ -11,8 +11,10 @@ The parse itself is **delegated to botocore** (``Session.full_config`` /
 location, the nested ``s3 =`` subsection syntax, and the active-profile
 resolution all behave exactly like ``aws`` / ``boto3``. botocore keeps every
 value as a **string** (with one level of subsection nesting), validates nothing,
-and preserves unknown sections and keys - which is precisely the lazy,
-string-first model this reader exposes.
+and preserves unknown sections and keys - and within the selectable
+sections (the profile default, ``services`` / ``sso-session``) that lazy,
+string-first model is what this reader exposes (it adds no selector for
+arbitrary top-level sections).
 
 The shape mirrors ``aws configure get``'s feel - the **profile is the default
 context** and ``services`` / ``sso-session`` are explicit selectors - with two
@@ -34,9 +36,10 @@ Resolution rules:
 - a **present** value that does not convert (``get_size("abc")``), or a key that
   points at a whole subsection instead of a value, raises
   ``InvalidConfigError`` (a config typo is surfaced, not silently defaulted) -
-  except ``get_bool``, which follows botocore's ``ensure_boolean``: any value
-  other than ``"true"`` (case-insensitively) reads as ``False`` and never raises,
-  matching how ``aws`` reads config booleans;
+  except ``get_bool``, which follows botocore's ``ensure_boolean``: any
+  *scalar* other than ``"true"`` (case-insensitively) reads as ``False``
+  without raising, matching how ``aws`` reads config booleans (a key that
+  points at a whole subsection still raises, like every getter);
 - the **active profile** is resolved through botocore's ``get_scoped_config``: a
   ``--profile`` / ``AWS_PROFILE`` that is set but missing surfaces as an
   ``InvalidConfigError`` (botocore's ``ProfileNotFound``, converted at the

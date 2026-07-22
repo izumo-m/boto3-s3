@@ -122,9 +122,10 @@ class RbCommand(Command):
         """Run the inner ``rm --recursive``, mirroring aws's ``RbCommand._force``.
 
         The rm parser fills the rm-only defaults; rb's parsed namespace seeds
-        the parse so the invocation's globals reach the inner run's client
-        factory (aws hands its parsed_globals to a fresh RmCommand the same
-        way). The inner run shares rb's `S3` (`Context.with_s3`) exactly as
+        the parse so the rm-side validations read the invocation's globals
+        (aws hands its parsed_globals to a fresh RmCommand the same way) -
+        the client itself comes from the shared S3 below, built from those
+        same globals. The inner run shares rb's `S3` (`Context.with_s3`) exactly as
         aws's ``RmCommand(self._session)`` shares the one CLI session - a
         second session would resolve credentials again (a
         ``credential_process`` / MFA flow re-prompting, possibly under a

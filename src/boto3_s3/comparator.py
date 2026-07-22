@@ -136,8 +136,10 @@ class ParallelFilter(Generic[_T]):
     predicate does per-entry I/O decides many entries concurrently - a content
     ``update_filter=`` strategy (``EtagComparison`` / ``ChecksumComparison``), or a
     ``create`` / ``delete`` filter that reads bytes / object tags / attributes.
-    The decisions themselves are the same as passing ``decide`` bare, only
-    faster; what changes is ordering: pooled decisions emit their results in
+    For a pure (stateless) predicate the decisions are the same as passing
+    ``decide`` bare, only
+    faster (a stateful one can observe the concurrency); what changes is
+    ordering: pooled decisions emit their results in
     completion order rather than compare-key order (sync.md section 10), and
     parallelizing ``create_filter`` makes the
     ``--case-conflict`` "first key wins" order non-deterministic (a library-only
@@ -176,8 +178,11 @@ def _byte_ordered(
     """Dev-only pass-through that asserts a side ascends by ``compare_key``.
 
     ``Comparator.compare``'s merge-join assumes both sides arrive in UTF-8
-    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str`` order is code-point
-    = byte order). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
+    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str``
+    code-point order equals UTF-8 byte order for Unicode scalar values - a
+    surrogateescaped local name sits outside that equivalence, but both the
+    walk's sort and this guard use the same ``str`` order, so the two stay
+    consistent with each other). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
     order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
     ``--delete`` the deletion of files present on both sides. This trips a loud
     ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call

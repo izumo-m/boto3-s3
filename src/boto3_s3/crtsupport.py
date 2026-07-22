@@ -21,7 +21,9 @@ client (docs/crt.md):
   commercial suffixes) so botocore re-resolves per request exactly like boto3.
   ``use_ssl`` follows the custom endpoint's scheme (aws-cli only honors an
   ``--endpoint-url`` argument here; deriving from the resolved client also
-  covers ``AWS_ENDPOINT_URL_S3``).
+  covers ``AWS_ENDPOINT_URL_S3`` for non-AWS hosts - an env endpoint under
+  an AWS DNS suffix still derives ``None``, the explicit-``--endpoint-url``
+  VPC-endpoint caveat).
 - **verify / unsigned**: the TLS verification setting and ``--no-sign-request``
   are recovered from the client (aws-cli wires them from CLI params; boto3
   ignores both). Reading them rides on private botocore attributes at the

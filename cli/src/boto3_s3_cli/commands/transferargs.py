@@ -3,8 +3,9 @@
 ``aws s3`` declares one ``TRANSFER_ARGS`` list plus per-command extras
 (aws-cli's ``subcommands.py``); this module is that shared list and the
 validation/translation steps the three commands run in the same order.
-This module loads only once its command is determined (stage 2 of the lazy
-dispatch). Top-level imports may therefore reach the AWS SDK.
+This module loads at dispatch once its command is determined (stage 2 of the
+lazy dispatch) - or up front when auto-prompt builds the full command model.
+Top-level imports may therefore reach the AWS SDK.
 """
 
 from __future__ import annotations
@@ -218,7 +219,7 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     text block, then ``--progress-frequency`` and ``--page-size`` (paramfile
     then coercion). Returns the two coerced integers. ``--metadata`` (a map)
     and cp's ``--expected-size`` come later, at their own registration
-    positions (``resolve_metadata_option`` / ``expand_integer_paramfile`` in
+    positions (``resolve_metadata_option`` / ``expand_option_paramfile`` in
     ``classify_paths``). ``build_transfer_options`` consumes the resolved
     values verbatim.
     """
@@ -691,7 +692,10 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
     received`` line, anything else run-killing as one ``fatal error:`` line -
     any exception type except ``AssertionError`` (an internal-invariant bug,
-    re-raised loudly like the dispatcher does), matching aws's
+    re-raised loudly like the dispatcher does) and ``SystemExit`` (an orderly
+    exit request, honored - a deliberate divergence from aws's recorder,
+    which suppresses even that; the taxonomy special-cases only
+    KeyboardInterrupt), matching aws's
     ``CommandResultRecorder.__exit__``,
     which converts whatever escapes the pipeline span into an ``ErrorResult``
     (aws's ``CtrlCResult`` is minted separately - its ``DoneResultSubscriber``

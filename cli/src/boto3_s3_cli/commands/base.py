@@ -268,7 +268,8 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
 
     Not range-validated: aws-cli passes any int through and lets the server
     decide, and the exit-code charter requires matching the resulting codes
-    (0 lists nothing -> rc 1; a negative value is the server's
+    (0 lists nothing - ls's empty listing exits 1, rm and the transfers 0;
+    a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
     family, whose post-start errors are uniformly 1 - docs/cli.md sections
     5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare

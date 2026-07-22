@@ -804,8 +804,10 @@ class _DeferredWriter:
     """Lazy ``Storage.open(key, "wb")``: the backend opens on the first write.
 
     Built when the item is, opened when this item's first downloaded chunk
-    actually arrives (one plain GetObject below the multipart threshold,
-    ranged GETs above it). Exposing only ``write`` routes s3transfer to its
+    actually arrives (under the default checksum validation: one plain
+    GetObject below the multipart threshold, ranged GETs above it; a
+    "when_required" client always opens with a ranged first-chunk probe).
+    Exposing only ``write`` routes s3transfer to its
     non-seekable download path, which writes chunks strictly in order (the
     ordering stdout gets), so a custom destination receives one sequential
     stream and a queued-but-unstarted item holds no open writer. ``close``
@@ -1104,8 +1106,10 @@ def sync_entries(
     shared anchored listing (folder markers dropped). Each side reads its own
     source-config from its storage (a local side's ``follow_symlinks``, an S3
     side's ``page_size`` / ``fetch_owner``) via ``default_scan_options``, so both
-    the source and the destination listing honor the storage each was built with -
-    aws-cli maps the same knobs onto the destination listing too. Both sides'
+    the source and the destination listing honor the storage each was built with.
+    aws-cli likewise threads its listing knobs (page size, symlink policy)
+    onto the destination side; ``fetch_owner`` is ours alone - aws's transfer
+    path fetches no owner. Both sides'
     producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
     it and the pair key is taken from it.
     """

@@ -10,7 +10,9 @@ human-readable sizes (``8MB``), rates (``100MB/s`` / ``800Kb/s``), booleans,
 the ``default`` -> ``classic`` alias, and byte-exact error wording - raising
 the library's ``InvalidConfigError`` (aws-cli's class of the same name)
 where aws-cli's escapes to its general handler (both exit 255, after every
-path/usage validation).
+path/usage validation). One shared leak is kept for parity: a bad number
+under a valid size suffix (``fooMB``) raises ``int()``'s raw ``ValueError``
+on both sides (aws's converter has the same unguarded cast).
 
 ``load_scoped_s3_config`` reads the section the way aws-cli's
 ``_get_runtime_config`` does - the profile's scoped config, so nested
@@ -287,7 +289,8 @@ def resolve_transfer_client(
     aws-cli cannot express - awscrt absent under an explicit ``crt`` (aws
     bundles it) - is the CLI's documented degradation: a configuration error
     in the crt-absence family (253; boto3's ``MissingDependencyException``
-    would otherwise fall to the dispatcher's generic handler, 255).
+    would otherwise surface inside the transfer span as a ``fatal error:``
+    rc 1 - an aws-unreachable shape either way).
     """
     if paths_type == "s3s3":
         return "classic"

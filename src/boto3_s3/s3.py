@@ -760,7 +760,8 @@ class S3:
         This is a building block offered **explicitly**: ``S3``'s own operations
         (``cp`` / ``sync`` / ...) never read the config file on their own, so they
         carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
-        memoized per instance (the file is parsed once). Matching ``aws s3``'s
+        memoized per instance (the file is parsed once in the common case;
+        concurrent first calls may benignly recompute - see ``__init__``). Matching ``aws s3``'s
         ``[s3]`` semantics on top of these values (the defaults table, validation,
         the engine decision) is the CLI distribution's job, not the library's.
         """
@@ -789,10 +790,14 @@ class S3:
         ``ls`` dispatches to `S3Storage.list_buckets` (aws-cli's ``ls``
         splits the bucket listing from the object listing the same way), yielding
         one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
-        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing and
+        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing on
+        a botocore that models them (the back-compat floor's unpaginated
+        fallback cannot send them - `S3Storage.list_buckets`) and
         are meaningless for an object listing; conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
-        aws-cli). The listing page size (object and bucket listings alike) is the
+        aws-cli). The listing page size (object listings, and bucket listings on a
+        paginator-capable botocore - the floor's fallback issues one
+        unpaginated call) is the
         ``S3Storage``'s own ``page_size`` config (its constructor) - pass a
         configured ``S3Storage`` as ``target`` to tune it. A non-S3 ``Location``
         raises ``ValidationError``. The target is validated eagerly. Entries are
@@ -800,7 +805,10 @@ class S3:
 
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
-        page request already in progress, reclaims the prefetch worker, and then
+        page request already in progress, reclaims the prefetch worker (the
+        object listing's machinery; the service-root bucket listing iterates
+        its pages directly, so cancellation there just stops between pages),
+        and then
         raises `CancelledError`. Both cancellation modes therefore have the
         same effect for listing: synchronous S3 page requests cannot be aborted
         safely once started.
@@ -1524,7 +1532,8 @@ class S3:
         use sync command with a directory bucket.``): its unordered
         listings would break the sorted merge-join. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
-        rollup counts (first failure as ``__cause__``). `cancel_token` raises
+        rollup counts (a failure sample as ``__cause__``: the transfer
+        rollup's first, else the delete rollup's). `cancel_token` raises
         `CancelledError` after shutdown: graceful mode stops new pair actions
         and drains accepted transfers/deletes; immediate mode additionally
         requests best-effort future cancellation.

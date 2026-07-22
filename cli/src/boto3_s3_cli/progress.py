@@ -1,7 +1,8 @@
 """The transfer result/progress printer (``aws s3`` ``ResultPrinter`` parity).
 
 ``TransferPrinter`` consumes the library's ``on_result`` / ``on_progress``
-callbacks - fired from s3transfer worker threads for submitted work, inline
+callbacks - fired from the engines' worker threads for submitted work
+(s3transfer's; S3Deleter's for sync deletions), inline
 on the submitting thread for non-submitting records (dryrun / skip /
 notice) - and renders aws-style
 lines:

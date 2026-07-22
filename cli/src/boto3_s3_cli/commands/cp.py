@@ -29,10 +29,11 @@ class CpCommand(Command):
 
         Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
         keep their class, in aws's measured head order - the
-        ``--endpoint-url`` scheme, ``--metadata`` parsing (a readable
+        ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
+        parsing (a readable
         ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), paramfile / blob
-        loads, path types, SSE-C pairing, the checksum/path-format pairing,
+        paramfile quirk), path types, the checksum/path-format pairing,
+        SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
         *download* with ``--no-overwrite``, and the S3
         Express case-conflict rejection are 252; the bare integer

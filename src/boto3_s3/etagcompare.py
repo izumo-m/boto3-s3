@@ -91,7 +91,8 @@ class EtagComparison(ContentComparison):
     of the size+time default, not composed with it.
 
     The multipart part size is fixed at construction (``part_size``) and must
-    equal the ``multipart_chunksize`` the object was uploaded with (see the module
+    reproduce the part boundaries the object was uploaded with - supplying
+    the upload's ``multipart_chunksize`` is the reliable way (see the module
     docstring). Supply it one of three ways:
 
     - ``EtagComparison(s3)`` reads it from that ``s3``'s active profile

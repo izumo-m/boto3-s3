@@ -29,6 +29,8 @@ directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
+(the routing keys on concrete types, not the ``scheme`` string - that is
+display-only)
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
 object into an ``open("wb")`` whose ``close`` flushes it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
@@ -83,7 +85,9 @@ class StorageCapability(Flag):
     Storage kind implements the operation at all - **not** *permission* (whether a
     particular target is writable / reachable right now); a denied write or a
     missing object stays an execution-time error (an S3 ``403``, a local
-    ``EACCES`` / ``ENOENT``), reported per item like aws-cli, never pre-screened.
+    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the one
+    aws-parity pre-screen is the transfer commands' missing-local-source
+    check, which runs before items flow.
 
     The members mirror the methods one-to-one, because support genuinely differs
     per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
@@ -206,8 +210,10 @@ class Storage(abc.ABC):
         / ``detect_symlink_loops``, ``S3Storage``'s ``page_size`` / ``fetch_owner``)
         - overrides this to seed those held values, so every scan reflects the
         storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
-        paths build from this and overlay only the operation-inherent knobs
-        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix``), which
+        paths build from this and overlay only the run-level knobs
+        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix`` /
+        ``request_payer``, plus the application's ``wait_on_interrupt``
+        posture), which
         is what lets an app configure the walk through the storage rather than per
         call.
         """
@@ -385,8 +391,10 @@ class Storage(abc.ABC):
         single source/dest the storage points at), a non-empty ``key`` an entry
         beneath it. The outcomes are uniform across backends:
 
-        - present and transferable -> a ``FileInfo`` whose ``compare_key`` is the
-          entry's basename;
+        - present -> a ``FileInfo`` whose ``compare_key`` is the
+          entry's basename (``kind`` reflects the entry: a local directory
+          target resolves as a DIRECTORY-kind entry that a transfer later
+          fails on, like aws);
         - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)
           -> ``None``, no warning;
         - present but not a transferable regular file (a local special device /

@@ -10,7 +10,9 @@ thread pools spun up; the ``s3transfer`` module itself is imported
 earlier regardless, by ``boto3`` when a client is built) - and bridges
 completions to the library's result model:
 per-item ``OpResult`` records to ``on_result`` (from s3transfer worker
-threads for submitted work; non-submitting records - a directory source
+threads for submitted work - the calling thread itself under
+``use_threads=False``'s NonThreadedExecutor; non-submitting records - a
+directory source
 rejected at submit, dryrun / skip / notice emissions - fire inline on the
 submitting thread. Keep callbacks fast and non-raising either way, the
 ``S3Deleter`` contract),
@@ -43,11 +45,15 @@ Engine choices (parity-driven):
   HeadObject (the cached single-source response when available) and tags via
   GetObjectTagging, inlined under S3's ~2 KiB ``Tagging`` header budget or
   applied by a post-copy PutObjectTagging whose failure rolls back the
-  destination object. S3 object annotations track the mode too: every mode
+  destination object. S3 object annotations track the mode too: wherever the
+  copy-props chain runs on an annotations-capable SDK, every mode
   short of ``all`` sends ``AnnotationDirective=EXCLUDE`` so the copy carries
-  none (aws-cli's default), while ``copy_props=ALL`` carries them - riding
-  s3transfer >= 0.19's native write path on a multipart copy after the
-  selected `AnnotationCopyMode` has staged the source payloads.
+  none (aws-cli's default; an explicit ``metadata_directive`` bypasses the
+  chain, and a pre-annotations SDK sends no directive), while
+  ``copy_props=ALL`` carries them - riding
+  s3transfer >= 0.19's native write path on a multipart copy, the preload
+  `AnnotationCopyMode`s staging the source payloads up front and ``DEFERRED``
+  letting s3transfer read them post-copy.
 """
 
 from __future__ import annotations
@@ -1498,7 +1504,9 @@ class Transferrer:
     def _stamp_mtime(self, item: TransferItem) -> None:
         """Stamp the source LastModified onto the downloaded file.
 
-        Runs on the s3transfer worker after a successful download. Failure
+        Runs where the download's subscribers do - an s3transfer worker, or
+        the calling thread under ``use_threads=False`` - after a successful
+        download. Failure
         does not undo the transfer (the bytes are on disk): it adds a WARNED
         record with aws's wording - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
@@ -1526,7 +1534,13 @@ class Transferrer:
 
 
 class _ProvideSize:
-    """Pre-populate ``TransferFuture.meta.size`` (skips s3transfer's probe)."""
+    """Pre-populate ``TransferFuture.meta.size`` (with the etag: skips the probe).
+
+    Classic download/copy probes are skipped only when size *and* etag are
+    both provided (the default checksum-validation mode); the CRT meta lacks
+    the provide hook, so there the guard is a no-op and the CRT probes
+    itself.
+    """
 
     def __init__(self, size: int) -> None:
         self._size = size
@@ -1539,7 +1553,12 @@ class _ProvideSize:
 
 
 class _ProvideETag:
-    """Pre-populate ``TransferFuture.meta.etag`` (with size: skips the HEAD)."""
+    """Pre-populate ``TransferFuture.meta.etag`` (with size: skips the HEAD).
+
+    Guarded on the meta exposing ``provide_object_etag``: the floor
+    s3transfer and the CRT meta lack it, and the guard then quietly leaves
+    s3transfer's own probe rules in force.
+    """
 
     def __init__(self, etag: str) -> None:
         self._etag = etag

@@ -5,8 +5,8 @@ A pure-function port of aws-cli's ``RequestParamsMapper``
 S3 operation the transfer path performs, each returning a fresh dict of
 PascalCase API parameters built from the snake_case ``TransferOptions``.
 Falsy values are omitted exactly like aws-cli's truthiness gates - including
-their quirks: a truthy SSE-C algorithm carries its dependent key / MD5
-values verbatim even when falsy, as aws does.
+their quirks: a truthy SSE-C algorithm carries its dependent key value
+verbatim even when falsy, as aws does.
 
 Only the operations the transfer path actually calls are ported
 (put/get/copy/head/tagging/delete, plus the annotation pair -

@@ -233,8 +233,9 @@ keys).
   **not passed**. This is to
   match aws-cli ignoring these on the CRT path, and to prevent the case where
   placing `io_chunksize` / `max_bandwidth` on a crt-preferred config gets rejected
-  by boto3's `_validate_crt_transfer_config` and turns into an rc 1 traceback
-  (aws is rc 0) (avoiding a charter violation; e2e:
+  by boto3's `_validate_crt_transfer_config` and fails the run - the library
+  translates the rejection to a `ValidationError`, one `fatal error:` line,
+  rc 1 - where aws is rc 0 (avoiding a charter violation; e2e:
   `test_crt_ignores_classic_only_config`).
 
 cp / mv / sync call `transferargs.resolve_transfer_config(ctx, s3,
