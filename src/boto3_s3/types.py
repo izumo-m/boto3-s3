@@ -456,23 +456,24 @@ class CancelToken:
         # RLock, not Lock: cancel() is signal-handler-safe by contract, and a
         # CPython signal handler runs on the main thread - it must be able to
         # re-enter while that same thread holds the lock inside mode/cancel.
-        # The monotonic check-then-set stays correct under such re-entry
-        # because every write branch re-reads _mode. The cancelled flag is a
-        # plain bool, not a threading.Event: Event.set() takes the Event's own
+        # The state is two monotone flags (each only ever written True), never
+        # a check-then-set: a handler interleaving anywhere - even between an
+        # outer cancel()'s test and store - can only add a True that no
+        # resumed frame un-writes, so an escalation is never lost or
+        # downgraded. The flags are plain bools, not threading.Events:
+        # Event.set() takes the Event's own
         # non-reentrant Condition lock, so a nested signal-handler cancel()
         # landing inside an outer set() would deadlock the main thread - and
-        # nothing ever wait()s on the flag, so the Event bought nothing.
+        # nothing ever wait()s on the flags, so the Event bought nothing.
         self._lock = threading.RLock()
-        self._mode: CancelMode | None = None
+        self._immediate = False
         self._cancelled = False
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
         with self._lock:
-            if self._mode is CancelMode.IMMEDIATE:
-                return
-            if self._mode is None or mode is CancelMode.IMMEDIATE:
-                self._mode = mode
-                self._cancelled = True
+            if mode is CancelMode.IMMEDIATE:
+                self._immediate = True
+            self._cancelled = True
 
     @property
     def cancelled(self) -> bool:
@@ -481,7 +482,9 @@ class CancelToken:
     @property
     def mode(self) -> CancelMode | None:
         with self._lock:
-            return self._mode
+            if not self._cancelled:
+                return None
+            return CancelMode.IMMEDIATE if self._immediate else CancelMode.GRACEFUL
 
 
 class TransferOptions(TypedDict, total=False):
