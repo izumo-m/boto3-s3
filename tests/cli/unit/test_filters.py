@@ -280,6 +280,58 @@ class TestDelegationEquivalence:
             assert fast(local_info) is joined(local_info), ck
 
 
+class TestDelegationFuzz:
+    """Seeded differential mini-fuzz over the delegated fast path.
+
+    Every parameter set ``_needs_joined`` delegates must decide exactly like
+    the joined reference engine (the equivalence proof, exercised mechanically
+    rather than by hand-picked inputs - the hand-picked divergences in
+    ``TestJoinedParity`` were each found only after shipping). A glob-rich
+    alphabet with ``/`` in both patterns and keys covers empty components,
+    trailing slashes, and character classes; 71k cases of the full-size fuzz
+    (three shapes plus the Windows fold) ran divergence-free on 2026-07-22,
+    and this bounded seeded slice keeps the property pinned.
+    """
+
+    _PATTERN_ALPHABET = ("a", "b", "/", "*", "?", "[", "]", "!", ".", "-")
+    _KEY_ALPHABET = ("a", "b", "/", ".", "-")
+
+    def test_fast_path_matches_joined_engine_on_random_inputs(self) -> None:
+        import random
+
+        rng = random.Random(20260722)
+        src = S3Storage("s3://bucket/data")
+        dest = LocalStorage("/destroot")
+        src_base = filters._storage_base(src, True)
+        dest_base = filters._storage_base(dest, True)
+        compared = 0
+        for _ in range(2000):
+            patterns = [
+                (GlobPattern.exclude if rng.random() < 0.6 else GlobPattern.include)(
+                    "".join(rng.choice(self._PATTERN_ALPHABET) for _ in range(rng.randint(1, 6)))
+                )
+                for _ in range(rng.randint(1, 3))
+            ]
+            if filters._needs_joined(
+                patterns, src_base=src_base, dest_base=dest_base, both_s3=False, dir_op=True
+            ):
+                continue
+            compared += 1
+            fast = filters.compile_filter(patterns, src=src, dest=dest, dir_op=True)
+            assert fast is not None
+            joined = filters._JoinedFilter(patterns, (src_base, dest_base), fold=os.name == "nt")
+            for _ in range(20):
+                rel = "".join(rng.choice(self._KEY_ALPHABET) for _ in range(rng.randint(0, 8)))
+                s3_info = FileInfo(key=f"data/{rel}", compare_key=rel, storage=src)
+                local_info = FileInfo(key=f"/destroot/{rel}", compare_key=rel, storage=dest)
+                for info in (s3_info, local_info):
+                    assert fast(info) is joined(info), (
+                        f"patterns={[(p.kind.name, p.pattern) for p in patterns]} "
+                        f"key={info.key!r} compare={rel!r}"
+                    )
+        assert compared > 500  # the delegated fast path was actually exercised
+
+
 class TestStorageBase:
     """The rootdir derivation (aws's _get_s3_root / _get_local_root) off the
     built storages."""

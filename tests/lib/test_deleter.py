@@ -367,6 +367,10 @@ class TestResults:
         assert (deleter.succeeded, deleter.failed) == (3, 0)
         assert deleter.first_error is None
 
+    # Table-driven translator breadth: the per-key route shares one code ->
+    # category table with the request-level path, so codes that in practice
+    # arrive request-level (NoSuchBucket) are exercised synthetically here -
+    # the table is the subject, not the wire realism of each entry.
     @pytest.mark.parametrize(
         ("code", "category"),
         [
@@ -492,7 +496,8 @@ class TestResults:
         # An Errors[] entry without Key, or whose key was never submitted,
         # cannot be attributed; the affected key reads as a success (the
         # Quiet=True synthesis limit), so the deleter warns loudly instead of
-        # crashing the batch or staying silent.
+        # crashing the batch or staying silent. (Synthetic by design: real
+        # DeleteObjects answers only requested keys - this pins the defense.)
         fake = _FakeS3Client(
             script=[
                 {
@@ -570,7 +575,7 @@ class TestCaptureSlots:
                             "DeleteMarker": True,
                             "DeleteMarkerVersionId": "dm1",
                         },
-                        {"Key": "prefix/b.txt", "VersionId": "v2"},
+                        {"Key": "prefix/b.txt"},
                     ],
                     "RequestCharged": "requester",
                 }
@@ -592,7 +597,9 @@ class TestCaptureSlots:
             "VersionId": "dm1",
             "RequestCharged": "requester",
         }
-        assert slots[1] == {"VersionId": "v2", "RequestCharged": "requester"}
+        # A plain unversioned delete answers with just its Key; the slot
+        # carries only the batch-wide RequestCharged.
+        assert slots[1] == {"RequestCharged": "requester"}
         assert all(slot is not None and "Key" not in slot for slot in slots)
 
 

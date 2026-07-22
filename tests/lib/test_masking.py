@@ -17,7 +17,7 @@ SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 SIGNATURE = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 SESSION_TOKEN = "FQoGZXIvYXdzEMPLELONGSESSIONTOKENvalue1234567890abcdefABCDEF+/=="
 # A 44-char base64 SSE-C customer key (raw 32-byte AES-256 key, base64-encoded).
-SSE_C_KEY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"
+SSE_C_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 # Importable module attributes; only SURFACE_NAMES form the documented
 # tier-2 surface (the primitives are internal helpers).
@@ -104,9 +104,10 @@ class TestMaskTextNotation:
         assert "X-Amz-Expires=60" in out
 
     def test_sigv2_security_token_query_form(self) -> None:
-        # Stock botocore's SigV2 signers (its us-east-1 presign downgrade) put
-        # the session token in a bare `SecurityToken` query parameter - no
-        # x-amz- prefix; a listing continuation token must stay visible.
+        # botocore's SigV2 request signer (query-protocol services) puts the
+        # session token in a bare `SecurityToken` parameter - no x-amz-
+        # prefix (the S3 hmacv1 presigner spells it x-amz-security-token,
+        # already covered above); a listing continuation token stays visible.
         out = m.mask_text(
             f"https://b/k?AWSAccessKeyId=AKIA1234567890ABCDEF&SecurityToken={SESSION_TOKEN}"
             "&ContinuationToken=abcdef123456"

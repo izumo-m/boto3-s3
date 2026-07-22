@@ -366,11 +366,13 @@ class TestGetFileinfo:
     """``S3Storage.get_fileinfo`` - a generic HeadObject: present / 404->None / raise."""
 
     def test_present_returns_fileinfo(self) -> None:
+        # A realistic HeadObject: StorageClass is present only for non-STANDARD
+        # classes (the API omits the header for STANDARD objects).
         head = {
             "ContentLength": 7,
             "LastModified": MTIME,
             "ETag": '"abc"',
-            "StorageClass": "STANDARD",
+            "StorageClass": "GLACIER",
         }
         storage, client = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
         info = storage.get_fileinfo()
@@ -782,7 +784,7 @@ class TestOpen:
     def test_rb_error_translates_to_taxonomy(self) -> None:
         # A GetObject 404 surfaces as NotFoundError (s3_errors taxonomy), like
         # the rest of the S3 call sites - not a raw botocore ClientError.
-        client, _calls = make_recording_client([client_error("NoSuchKey", 404, "HeadObject")])
+        client, _calls = make_recording_client([client_error("NoSuchKey", 404, "GetObject")])
         storage = S3Storage("s3://bucket/data", client=client)
         with pytest.raises(NotFoundError):
             storage.open("data/gone.txt", "rb")

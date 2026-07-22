@@ -463,6 +463,21 @@ class TestMvSamePathGuards:
         "s3://other/d/",
     )
 
+    def test_same_path_hand_pinned_matrix(self) -> None:
+        # Independent oracle: the matrix test below proves Storage-level and
+        # string-level agree, but both call the same rule - these hand-written
+        # expectations pin the rule itself against a shared regression.
+        cases = [
+            ("s3://b/k.txt", "s3://b/k.txt", True),  # exact match
+            ("s3://b/k.txt", "s3://b/", True),  # dest + basename(src) == src
+            ("s3://b/k.txt", "s3://b", True),  # keyless dest normalizes to the root
+            ("s3://b/k.txt", "s3://b/d/", False),  # different parent
+            ("s3://b/k.txt", "s3://other/k.txt", False),  # different bucket
+            ("s3://b/d/", "s3://b/d/", True),  # identical prefixes
+        ]
+        for src, dest, expected in cases:
+            assert S3Storage(src).same_path_as(S3Storage(dest)) is expected, (src, dest)
+
     @pytest.mark.parametrize("src", _URIS)
     @pytest.mark.parametrize("dest", _URIS)
     def test_same_path_as_is_equivalent_to_the_string_rule(self, src: str, dest: str) -> None:

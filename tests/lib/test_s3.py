@@ -176,7 +176,14 @@ class TestUnknownTransferOption:
 
     @pytest.mark.parametrize("op", ["cp", "mv", "sync"])
     def test_unknown_key_raises_before_any_work(self, op: str) -> None:
-        method = getattr(S3(), op)
+        # "Before any work" observed directly: resolving either path would
+        # build a client, so an S3 whose client() explodes proves the option
+        # validation really runs first.
+        class NoClientS3(S3):
+            def client(self) -> Any:
+                raise AssertionError("client built before option validation")
+
+        method = getattr(NoClientS3(), op)
         with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
             method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
         assert type(ei.value) is ValidationError

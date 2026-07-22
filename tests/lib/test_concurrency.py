@@ -89,10 +89,13 @@ def _drain_worker(release: threading.Event) -> None:
 
 def test_interrupt_still_joins_by_default() -> None:
     # A KeyboardInterrupt unwind keeps the no-surviving-worker contract unless
-    # the app opted out with wait_on_interrupt=False.
+    # the app opted out with wait_on_interrupt=False. The producer far exceeds
+    # the queue, so the worker is genuinely blocked mid-run - it cannot have
+    # finished naturally, and only the context exit's join reclaims it.
+    pages = ([i] for i in range(100_000))
     with pytest.raises(KeyboardInterrupt):
-        with prefetch([[1], [2]]) as it:
-            assert next(it) == 1
+        with prefetch(pages, queue_size=2) as it:
+            assert next(it) == 0
             raise KeyboardInterrupt
     assert not _worker_alive()
 
@@ -136,9 +139,10 @@ def test_systemexit_still_joins_with_wait_on_interrupt_false() -> None:
     # The opt-out scopes to KeyboardInterrupt alone. sys.exit() requests an
     # orderly termination, so a SystemExit unwind reclaims the worker like any
     # ordinary exception even when wait_on_interrupt is False.
+    pages = ([i] for i in range(100_000))
     with pytest.raises(SystemExit):
-        with prefetch([[1], [2]], wait_on_interrupt=False) as it:
-            assert next(it) == 1
+        with prefetch(pages, queue_size=2, wait_on_interrupt=False) as it:
+            assert next(it) == 0
             raise SystemExit(3)
     assert not _worker_alive()
 

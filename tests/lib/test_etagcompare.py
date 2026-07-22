@@ -6,6 +6,11 @@ upload / download single- and multipart reconstruction at ``part_size``, the
 missing / non-MD5 -> differ rule, and the documented caveats (part-size
 fragility, SSE opaque etag, the empty-object "-0" avoidance).
 
+Canned shapes are deliberately miniature: multipart "-N" ETags on objects far
+below S3's 5 MiB part floor. The reconstruction is arithmetic over sizes and
+digests - the live service's minimums do not change its paths - and small
+objects keep the offline goldens computable by hand.
+
 Multipart ETag expectations are anchored to offline-computed goldens (recipe at
 the bottom of this module) and cross-checked against an independently shaped
 in-test computation (``TestGoldenCrossCheck``), so a bug shared by both copies

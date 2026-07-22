@@ -8,6 +8,14 @@ copy rules (no checksum / unknown algo / ClientError), and the local checksum
 backends (zlib / hashlib / awscrt, and the pure-Python slicing-by-8 fallback with
 its ``pure_max_size`` gate).
 
+Canned attribute shapes are deliberately miniature: part sizes far below S3's
+5 MiB floor, digest strings that are not real base64. The code under test does
+arithmetic and string comparison over the returned values - the live service's
+size and format rules do not change its paths - and miniature shapes keep the
+fixtures readable and the suite fast. (Tests that exercise *malformed* inputs
+- a wrong part count, a truncated listing without its marker - say so in
+their own comments.)
+
 CRC goldens come from ``awscrt`` (the same C implementation S3 uses); tests that
 need them skip when it is absent. The pure-Python CRC is additionally pinned to
 its awscrt-independent canonical check values, so its correctness is verified
