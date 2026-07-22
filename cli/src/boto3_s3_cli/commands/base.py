@@ -121,7 +121,8 @@ class Context:
         return clone
 
     def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
-        """Build an additional S3 client from the command's bound session."""
+        """Build an additional S3 client from the command's bound session
+        (an injected test factory builds from its own wiring instead)."""
         if self._client_factory_injected:
             return self.client_factory(args)
         return build_client(args, session=s3.session)
@@ -134,7 +135,8 @@ class Context:
         *,
         region: str | None = None,
     ) -> Any:
-        """Build a non-S3 client from the command's bound session."""
+        """Build a non-S3 client from the command's bound session
+        (an injected test factory builds from its own wiring instead)."""
         if self._service_client_factory_injected:
             return self.service_client_factory(service, args, region=region)
         return build_service_client(service, args, region=region, session=s3.session)

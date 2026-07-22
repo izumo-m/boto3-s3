@@ -203,7 +203,8 @@ class IOStorage(Storage):
     downloads into the stream, ``cp(IOStorage(buf), "s3://b/k")`` uploads from it.
     ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
     the bytes land (a stream is never a move *source* - it cannot be deleted).
-    A binary stream is used as-is; a text stream - recognized as an
+    A binary stream is used as-is behind a close-suppressing view
+    (`_Uncloseable`); a text stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
     with ``encoding`` (default utf-8). The caller's stream is never closed by

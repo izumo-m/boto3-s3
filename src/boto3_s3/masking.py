@@ -12,7 +12,7 @@ module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
 
 The credential leak under ``--debug`` flows through the Python ``logging``
 system (botocore logs the signed ``AWSPreparedRequest`` - Authorization /
-Signature / X-Amz-Security-Token - and parsed response bodies, and s3transfer
+Signature / X-Amz-Security-Token - and raw response bodies, and s3transfer
 logs each task's kwargs including ``extra_args`` with the raw ``SSECustomerKey``,
 all at DEBUG), so masking lives in a logging filter on the handler, not in an
 ``http.client`` patch (the wire dump only
@@ -163,12 +163,13 @@ _SIGV2_AUTH_HEADER_RE = re.compile(
 )
 
 # STS / metadata-service response-body temporary credentials. botocore logs the
-# parsed response body at DEBUG (``Response body:``), so an AssumeRole /
+# raw response body at DEBUG (``Response body:``), so an AssumeRole /
 # GetSessionToken / web-identity response leaks its ``SecretAccessKey`` and
 # ``SessionToken`` (the temporary secret key + token) in XML or JSON form. The
 # instance/container metadata fetchers emit two more DEBUG shapes of the same
-# secrets: the parsed-credentials *dict repr* (single quotes) when a response
-# misses a required field, and the raw IMDS/ECS JSON body on malformed JSON,
+# secrets: the parsed-credentials *dict repr* (single quotes) on some
+# retrieval-failure paths, and the raw ECS JSON body on malformed JSON
+# (IMDS's invalid-JSON path logs no body),
 # where the session token rides under the key ``Token``. The key/value regex is
 # therefore quote-agnostic and includes ``Token``; the quote anchored directly
 # to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked, and
@@ -346,7 +347,9 @@ def set_stream_logger(
     Extra keyword-only parameters beyond boto3's signature: *stream* (defaults
     to ``sys.stderr``, like ``logging.StreamHandler``), *mask_secrets*, and
     *extra_secrets* (literal values at least ``MASK_MIN_LEN`` characters long,
-    masked wherever they appear; shorter values are skipped so a stray short
+    masked wherever they still appear after the built-in patterns ran - a
+    literal those already partially rewrote is not re-matched; shorter values
+    are skipped so a stray short
     string cannot blank out swaths of the log).
     """
     if format_string is None:

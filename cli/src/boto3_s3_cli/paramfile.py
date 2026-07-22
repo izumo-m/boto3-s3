@@ -1,14 +1,18 @@
 """aws-cli's local paramfile loaders (``file://`` text, ``fileb://`` binary).
 
 The execution half of aws's ``paramfile.py`` (``get_paramfile`` over its
-``LOCAL_PREFIX_MAP``), scoped to the local prefixes ``aws s3`` consumes -
-the http/https fetchers are not ported. Three callers share it: the
+``LOCAL_PREFIX_MAP``) - aws v2 itself carries only the local file forms
+there (its http/https fetchers are gone), so this is the whole surface.
+Three callers share it: the
 transfer-argument resolution (``commands/transferargs.py``: the free-string
 options, ``--metadata``'s pre-parse, the SSE-C blobs), the shorthand
-parser's ``@=`` operator (``shorthand.py``), and the plain-option expansion
-(``commands/base.py``'s ``expand_option_paramfile``: ls / rm ``--page-size``,
-presign ``--expires-in``). Every load failure is a
-``ValidationError`` with aws's wording (rc 252).
+parser's ``@=`` operator (``shorthand.py``), and the plain-option expansions
+(``commands/base.py``'s ``expand_option_paramfile`` and its integer wrapper
+``expand_integer_paramfile``: ls / rm ``--page-size``,
+presign ``--expires-in``). Every file *read* failure is a
+``ValidationError`` with aws's wording (rc 252); a bad
+``AWS_CLI_FILE_ENCODING`` instead raises ``LookupError`` into the general
+handler (255), as in aws.
 """
 
 from __future__ import annotations

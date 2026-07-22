@@ -154,9 +154,12 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    ``S3Storage.split_bucket_key``). The strict aws-cli checks - the
-    unsupported S3 Object Lambda / Outposts *bucket* ARN forms, and a key with
-    no bucket - are deferred to ``S3Storage.validate``, so construction
+    ``S3Storage.split_bucket_key``; aws's splitter likewise rejects nothing).
+    The strict checks - the
+    unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
+    parse-time 252), and a key with
+    no bucket (whose aws handling varies per command - docs/cli.md) - are
+    deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
     rest = uri.partition("://")[2]
@@ -250,7 +253,8 @@ def _page_to_infos(
 ) -> list[S3FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
-    Runs on the prefetch worker thread. Non-recursive listings emit one
+    Runs on the prefetch worker thread under ``Storage.scan`` (a direct
+    ``scan_pages`` consumer drives it on its own thread). Non-recursive listings emit one
     ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
     objects); every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
@@ -362,7 +366,10 @@ class S3Storage(Storage):
     side and pass it in rather than relying on the lazy default.
 
     Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
-    enumerates in native UTF-8 byte order (``ListObjectsV2``), reads an object
+    enumerates in native UTF-8 byte order (``ListObjectsV2``, the recursive
+    form; the non-recursive form re-groups each page's sub-"directories"
+    ahead of its objects, and S3 Express directory buckets return no order
+    at all), reads an object
     (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
     because every S3 write rides ``s3transfer`` (see ``open``).
     ``scan_options_type`` is ``S3ScanOptions`` (arg-less
@@ -577,11 +584,14 @@ class S3Storage(Storage):
 
     @override
     def validate(self) -> None:
-        """Reject the resource forms ``aws s3`` rejects at parse time (rc 252).
+        """Reject the malformed resource forms the strict checks cover.
 
         Deferred from construction (``Storage.validate``): S3 Object Lambda
-        and Outposts *bucket* ARNs (s3api / s3control territory), and a key with
-        no bucket (``"s3:///k"``). The library calls this before an operation and
+        and Outposts *bucket* ARNs (s3api / s3control territory; aws's uniform
+        parse-time 252), and a key with
+        no bucket (``"s3:///k"`` - aws's handling of that form varies per
+        command, so the CLI invokes this only where its command's parity point
+        wants the rejection). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
         """
@@ -643,16 +653,20 @@ class S3Storage(Storage):
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
-        """Yield one ``list[S3FileInfo]`` per ``ListObjectsV2`` page (paginated).
+        """Yield one ``list[S3FileInfo]`` per ``ListObjectsV2`` page (paginated;
+        a page the filter empties entirely is skipped, not yielded empty).
 
         Object listing only - the openable-entity enumeration ``scan`` promises
         (aws-cli's ``_list_all_objects``). ``options.recursive`` omits
         ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
         passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
         ``S3FileInfo`` per sub-"directory" (before the page's objects).
-        ``FileInfo.key`` is the full S3 key (or the prefix for directories), in
-        ListObjectsV2's UTF-8 lexicographic byte order across pages - so a
-        recursive stream is directly merge-joinable (the basis of ``sync``).
+        ``FileInfo.key`` is the full S3 key (or the prefix for directories) -
+        for a recursive listing, in ListObjectsV2's UTF-8 lexicographic byte
+        order across pages, so that stream is directly merge-joinable (the
+        basis of ``sync``; the non-recursive form emits each page's
+        directories ahead of its objects, and S3 Express directory buckets
+        guarantee no order - why ``sync`` rejects them).
         ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
         ``S3FileInfo.owner``. The bare service root (empty bucket) is *not* an
         object container: it is listed with ``list_buckets`` (``S3.ls``

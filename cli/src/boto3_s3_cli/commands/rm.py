@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Keep the module-level imports limited to the names used while configuring the
-# command; execution-only storage types are imported in `run()`.
+# Module-level imports are fine here: rm is loaded at dispatch (stage 2 of
+# the lazy dispatch), after the command is determined.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,
@@ -92,11 +92,15 @@ class RmCommand(Command):
 
         Exit-code shape (differs from ``ls``): usage errors - a
         non-``s3://`` path, a rejected ARN form - exit 252 via ``main``, but
-        every error after the operation starts is rc 1: per-key failures
+        every classified (``Boto3S3Error``) failure after the operation
+        starts is rc 1 (an unclassified exception falls to the dispatcher's
+        handler chain instead - the taxonomy promises classification for the
+        known failures, docs/exceptions.md): per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
-        prints one ``fatal error:`` line. Nothing maps to 254 here.
+        prints one ``fatal error:`` line - all suppressed by ``--quiet``
+        with the exit codes kept. Nothing maps to 254 here.
         """
         # The aws parse-to-validation order (measured, docs/cli.md section 6):
         # the --query compile (252) leads, then the --endpoint-url scheme check

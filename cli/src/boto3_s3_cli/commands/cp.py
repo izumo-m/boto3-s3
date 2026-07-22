@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once cp is determined (stage 2 of the lazy dispatch).
+# Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch) -
+# or up front when auto-prompt builds the full command model.
 from boto3_s3 import NotFoundError, S3Storage, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
@@ -28,19 +29,26 @@ class CpCommand(Command):
 
         Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
         keep their class, in aws's measured head order - the
-        ``--endpoint-url`` scheme, ``--metadata`` parsing, paramfile / blob
+        ``--endpoint-url`` scheme, ``--metadata`` parsing (a readable
+        ``fileb://`` there decodes to 255 instead, the per-command
+        paramfile quirk), paramfile / blob
         loads, path types, SSE-C pairing, the checksum/path-format pairing,
-        streaming with ``--recursive`` or ``--no-overwrite``, and the S3
+        streaming with ``--recursive`` (either side) or a streaming
+        *download* with ``--no-overwrite``, and the S3
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
         source, and the ``--recursive`` destination-directory pre-create
         are 255; client creation (unresolvable credentials/region) is
-        253 - while everything raised by the transfer pipeline is rc 1:
+        253 - while everything raised by the transfer pipeline is rc 1
+        (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
         kills the run (a listing error, the single-source 404, a bad
         ``--grants`` shape, a non-integer ``--expected-size``, a missing
-        stdin) prints one ``fatal error:`` line, and a warnings-only run
-        exits 2. The boundary is the ``S3().cp`` call.
+        stdin) prints one ``fatal error:`` line - all suppressed by
+        ``--quiet`` with the exit codes kept - and a warnings-only run
+        exits 2. The boundary is ``finish_transfer``'s run span: the
+        ``S3().cp`` call plus the ``--expected-size`` integer conversion
+        just ahead of it.
         """
         head = transferargs.classify_paths(args, ctx, operation="cp")
         page_size, progress_frequency = head.page_size, head.progress_frequency

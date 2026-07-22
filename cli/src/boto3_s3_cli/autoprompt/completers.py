@@ -60,8 +60,9 @@ class CompletionResult:
 # auto-prompt uses fuzzy_filter (aws-cli's non-auto-prompt shell completion
 # defaults to a startswith filter, a path this port does not implement).
 ResponseFilter = Callable[[str, "list[CompletionResult]"], "list[CompletionResult]"]
-# A value provider sources region/profile candidates; injecting a fake keeps the
-# unit tests free of botocore and the network.
+# A value provider sources region/profile candidates; injecting a fake keeps
+# candidate sourcing off botocore and the network (the surrounding tests still
+# import botocore transitively through the command model build).
 ValueProvider = Callable[[], Iterable[str]]
 
 
@@ -76,6 +77,9 @@ def fuzzy_filter(prefix: str, completions: list[CompletionResult]) -> list[Compl
 
     ``"rmt"`` becomes ``/r.*?m.*?t/``; each candidate keeps its left-most, then
     shortest match, and results sort by (match length, start, display, name).
+    One guard beyond aws: a missing ``display_text`` sorts as ``""`` where aws
+    sorts the raw ``None`` (which cannot mix with strings), so ties between
+    display and non-display candidates may order differently there.
     """
     if prefix and completions:
         fuzzy_matches: list[_FuzzyMatch] = []

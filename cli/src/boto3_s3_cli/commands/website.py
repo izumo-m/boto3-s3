@@ -34,7 +34,9 @@ class WebsiteCommand(Command):
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
         ClientError-cause mapping; botocore's client-side parameter
-        validation (empty bucket) is 252; client construction is 253.
+        validation (empty bucket) is 252; client construction's unresolvable
+        credentials / region is 253 (its other botocore failures - a bad
+        ``--profile``, partial credentials - are 255).
         """
         # aws's parse-time order (measured, docs/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then

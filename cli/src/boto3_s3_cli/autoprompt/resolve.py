@@ -1,8 +1,10 @@
 """Resolve whether ``--cli-auto-prompt`` fires during the pre-parse step.
 
-The dispatcher consults this before argparse runs - like aws-cli's
-``resolve_auto_prompt_mode`` (aws-cli's ``clidriver.py``) - so the prompt can
-fire even without a subcommand and its env / config chain is honored. Only
+The dispatcher consults this before argparse runs - aws-cli resolves at the
+same stage relative to command dispatch, though after its own
+``FirstPassGlobalArgParser.parse_known_args`` pre-pass (``clidriver.py``) - so
+the prompt can fire even without a subcommand and its env / config chain is
+honored. Only
 ``os.environ`` + ``configparser`` are read, never the SDK or ``prompt_toolkit``.
 The interactive prompt itself (``prompt``) stays a lazy, opt-in import.
 """
@@ -34,7 +36,10 @@ def resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
     """Resolve the auto-prompt mode (``on`` / ``on-partial`` / ``off``).
 
     Mirrors aws-cli's ``resolve_auto_prompt_mode`` (aws-cli's ``clidriver.py``)
-    plus the config chain (``clidriver.py`` ``_construct_cli_auto_prompt_chain``):
+    plus the config chain (``clidriver.py`` ``_construct_cli_auto_prompt_chain``)
+    - except the ``--cli-auto-prompt`` / ``--no-cli-auto-prompt`` mutual
+    exclusion, which aws validates inside its resolver and the dispatcher's
+    pre-pass here checks separately:
     help/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
     ``--cli-auto-prompt`` -> on; else ``AWS_CLI_AUTO_PROMPT`` env -> profile
     ``cli_auto_prompt`` -> ``off``. The value is lowercased and anything other

@@ -57,8 +57,8 @@ _MAX_IN_MEMORY_CHUNKS = 6
 # overrides that same s3transfer default down to 100, which would leave slow
 # disks holding a tenth of aws's readahead. Pinned classic-only, like the chunk
 # caps; the buffered ceiling is max_io_queue_size x io_chunksize (~256 MiB at
-# the default 256 KiB) per concurrent download, reached only when the disk
-# lags the network.
+# the default 256 KiB) across the manager's downloads - one shared io
+# executor serves them all - reached only when the disk lags the network.
 _MAX_IO_QUEUE_SIZE = 1000
 
 # The ``[s3]`` keys the CRT engine actually consumes (aws-cli factory
@@ -67,8 +67,9 @@ _MAX_IO_QUEUE_SIZE = 1000
 # CRT. Forwarding the classic-only knobs onto a crt-preferred ``TransferConfig``
 # is not merely wasteful: boto3's ``_validate_crt_transfer_config`` rejects the
 # ones that live in its ``DEFAULTS`` but outside its CRT allow-list
-# (``io_chunksize`` / ``max_bandwidth``), which would surface as an uncaught
-# error where aws-cli completes the transfer (crt.md section 4).
+# (``io_chunksize`` / ``max_bandwidth``), which would fail the run (the
+# rejection mapped to an exit code at the transfer boundary) where aws-cli
+# completes the transfer (crt.md section 4).
 _CRT_CONSUMED_KEYS = frozenset(
     {
         "multipart_chunksize",
@@ -284,9 +285,9 @@ def resolve_transfer_client(
     the ``[s3] preferred_transfer_client`` decides, with ``auto`` resolved
     against the host (``is_optimized_for_system`` + the process lock). The one
     aws-cli cannot express - awscrt absent under an explicit ``crt`` (aws
-    bundles it) - is the CLI's documented degradation: a configuration error,
-    not a traceback (boto3's ``MissingDependencyException`` would otherwise
-    escape ``main``).
+    bundles it) - is the CLI's documented degradation: a configuration error
+    in the crt-absence family (253; boto3's ``MissingDependencyException``
+    would otherwise fall to the dispatcher's generic handler, 255).
     """
     if paths_type == "s3s3":
         return "classic"
@@ -327,9 +328,11 @@ def build_transfer_config(
 
     Only keys the user actually set in ``[s3]`` (``scoped``) are passed to the
     constructor, carrying the converted values from ``runtime_config``; unset
-    keys keep boto3's ``UNSET_DEFAULT`` sentinel, which is what lets the CRT
+    keys keep the base constructor's own defaults - the ``UNSET_DEFAULT``
+    sentinel on current boto3, which is what lets the CRT
     engine honor aws-cli's "use ``multipart_chunksize`` as the part size only
-    when it was set explicitly" rule. ``preferred_transfer_client`` carries
+    when it was set explicitly" rule (the floor boto3 has neither the
+    sentinel machinery nor a CRT engine to consume it). ``preferred_transfer_client`` carries
     the already-resolved engine (so the library does not re-resolve ``auto``).
 
     The config is engine-specific, exactly like aws-cli (aws-cli factory builds
@@ -350,7 +353,7 @@ def build_transfer_config(
         if crt and rc_key not in _CRT_CONSUMED_KEYS:
             # aws-cli's CRT client never reads this classic-only knob; placing
             # io_chunksize / max_bandwidth here would additionally trip boto3's
-            # _validate_crt_transfer_config (a traceback where aws exits 0).
+            # _validate_crt_transfer_config (a failed run where aws exits 0).
             continue
         kwargs[ctor_key] = runtime_config[rc_key]
     config = TransferConfig(**kwargs)

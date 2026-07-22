@@ -355,7 +355,9 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     The common paths are already translated into `Boto3S3Error` (the library's
     `s3_errors` and the CLI's `build_client`); this is the catch-all so no
     path can crash the CLI with a traceback (rc 1), which the exit-code charter
-    forbids (docs/overview.md section 3).
+    forbids (docs/overview.md section 3) - with one deliberate exception:
+    `AssertionError` (an internal-invariant bug) re-raises loudly instead of
+    being masked as a generic rc.
     """
     # Import locally because only unexpected command failures need these types.
     from botocore.exceptions import (
@@ -382,10 +384,12 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
 
     *ctx* carries the runtime dependencies the command resolves (the S3 client
     factory, the auto-prompt backend); tests inject a ``Context`` built
-    around fakes. Always returns the exit code - argparse's ``SystemExit`` is
+    around fakes. Returns the exit code (an ``AssertionError`` - an internal
+    bug - is the one deliberate escape) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
-    and a Ctrl-C anywhere mirrors aws's ``InterruptExceptionHandler``: a bare
-    newline on stdout and rc 130 (128+SIGINT), never a traceback.
+    and a Ctrl-C mirrors aws's ``InterruptExceptionHandler``: a bare
+    newline on stdout and rc 130 (128+SIGINT), never a traceback (the
+    auto-prompt UI catches its own interrupt and returns 130 directly).
 
     ``--cli-auto-prompt`` is resolved here from the raw argv, before argparse, so
     it works without a subcommand, its mutual exclusion with

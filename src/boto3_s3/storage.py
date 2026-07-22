@@ -297,7 +297,9 @@ class Storage(abc.ABC):
         (``cp`` / ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper
         natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
-        pages), the local walk sorts for aws parity - so they ignore the flag.
+        pages; S3 Express directory buckets are the exception, and ``sync``
+        rejects them for it), the local walk sorts for aws parity - so they
+        ignore the flag.
         ``key`` itself is the full, ``/``-separated identifier; stamp its relative
         form as ``compare_key`` on every entry this producer yields.
 
@@ -438,8 +440,9 @@ class Storage(abc.ABC):
         This default is the ``open``-route rule for a custom backend (aws-cli
         has no counterpart): the root is ``""`` because such a backend
         encapsulates its own location and addresses entries by their
-        relative ``compare_key`` - its ``open`` / ``delete`` receive that key
-        unprefixed. ``use_src_name`` mirrors the S3 rule: a
+        relative ``compare_key`` - its ``open`` receives that key unprefixed,
+        and ``delete`` receives the listing entry itself (a ``FileInfo``)
+        addressed by the entry's own full ``key``. ``use_src_name`` mirrors the S3 rule: a
         ``dir_op`` or an explicit trailing ``/`` on ``as_text`` means the
         destination adopts the source's name.
         """

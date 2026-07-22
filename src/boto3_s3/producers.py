@@ -12,8 +12,9 @@ orchestrator (``boto3_s3.s3``) calls them as ``producers.upload_items(...)``
 and the producer/orchestrator boundary is physical, not just conceptual.
 
 Kept out of ``boto3_s3.transfer`` on purpose: the engine module is
-deliberately blind to ``transferplan`` / the storage backends, while the
-producers need all of them. Like the planner, importing this module currently
+deliberately blind to ``transferplan`` and touches the storage layer only at
+named seams (the ``LocalStorage`` fsync opt-in probe, ``translate_os_error``),
+while the producers need all of them. Like the planner, importing this module currently
 reaches ``botocore.exceptions`` through the backends; that timing is not an
 interface guarantee.
 """
@@ -214,8 +215,9 @@ class CaseConflictGate:
     overwrites); everything else runs the conflict check
     (``CaseConflictSync``): a conflict exists when another file with the
     same lowercased name was already admitted in this run, or the
-    destination path exists (only possible on a case-insensitive
-    filesystem, where a case-variant satisfies ``os.path.exists``). The
+    destination path exists (on a case-insensitive filesystem a
+    case-variant satisfies ``os.path.exists``; an exact-case file that
+    appeared after the membership pre-scan trips it on any filesystem). The
     messages are aws's verbatim, emitted as uncounted NOTICE records (aws
     prints them straight to stderr, bypassing its warned count).
     """
@@ -801,8 +803,9 @@ class _DeferredReader:
 class _DeferredWriter:
     """Lazy ``Storage.open(key, "wb")``: the backend opens on the first write.
 
-    Built when the item is, opened when this item's first ranged chunk
-    actually arrives. Exposing only ``write`` routes s3transfer to its
+    Built when the item is, opened when this item's first downloaded chunk
+    actually arrives (one plain GetObject below the multipart threshold,
+    ranged GETs above it). Exposing only ``write`` routes s3transfer to its
     non-seekable download path, which writes chunks strictly in order (the
     ordering stdout gets), so a custom destination receives one sequential
     stream and a queued-but-unstarted item holds no open writer. ``close``
@@ -874,11 +877,11 @@ def open_upload_item(
         compare_key=compare_key,
         size=info.size,
         mtime=info.mtime,
-        # src_info carries the source listing entry so an mv can delete it via the
-        # backend's Storage.delete(info). info.key addresses the same object open_key
-        # opens: for a recursive item info.key is the compare_key (the open key), for a
-        # single source it is "" (the location). The backend resolves both in its own
-        # key space.
+        # src_info carries the source listing entry so an mv can delete it via
+        # the backend's Storage.delete(info), addressed by the entry's own full
+        # info.key. The open key is separate: the relative compare_key for a
+        # recursive item, "" (the location itself) for a single source; the
+        # backend resolves each in its own key space.
         src_info=info,
         src_fileobj=None if dryrun else _DeferredReader(plan.src, open_key, info.size),
         dest_bucket=dest_bucket,
@@ -1036,7 +1039,9 @@ def cp_case_gate(
     (``default_scan_options``), warns into the transfer rollup, and applies
     the run's ``item_filter``, exactly like a source walk. Each entry's
     stamped ``compare_key`` is the membership key. Scoped to
-    ``s3local`` (a case-insensitive *filesystem* destination); a custom
+    ``s3local`` (a local-filesystem destination - the gate exists for
+    case-insensitive filesystems but runs for every local destination
+    without probing the filesystem's case behavior, matching aws); a custom
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
     """
@@ -1192,6 +1197,6 @@ def sync_transfer_item(
     return item
 
 
-# Package-internal: the shared producer/gate helpers are consumed by s3.py and
-# transfer.py only and carry no documented surface (docs/imports.md).
+# Package-internal: the shared producer/gate helpers are consumed by s3.py
+# only and carry no documented surface (docs/imports.md).
 __all__: list[str] = []

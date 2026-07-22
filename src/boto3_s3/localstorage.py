@@ -48,8 +48,9 @@ once and scanned through its file descriptor, so every per-entry ``stat`` /
 readability probe is ``dir_fd``-relative (``fstatat`` - no kernel path re-walk);
 on Windows those APIs are absent, and the same code path falls back to a
 path-based scan whose ``FindNextFile`` data already supplies the attributes for
-free. The net effect is one ``stat`` per surviving entry (zero for a plain
-directory) plus aws-cli's one readability ``open`` per entry, versus the ~5
+free. The net effect is one ``stat`` per surviving entry (directories
+included - the kind is keyed on that same stat) plus aws-cli's one
+readability ``open`` per entry, versus the ~5
 restats per entry a naive port makes. Every surviving ``LocalFileInfo`` carries
 the stat or lstat used to classify it as ``stat_result``
 and its ``d_type`` symlink flag as
@@ -930,10 +931,12 @@ class LocalFileGenerator:
     def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
         """Warn-and-skip checks on a *path*, aws-cli order and wording (``triggers_warning``).
 
-        Path-based: the root vetting (``should_ignore_file``) and the
-        ``stat_info`` race fallback. The per-entry hot path checks the same
+        Path-based: the root vetting (``should_ignore_file``), a directory
+        whose scandir establishment failed, and the near-symlink-boundary
+        re-vet. The per-entry hot path checks the same
         conditions from the ``DirEntry``'s cached stat in
-        ``should_ignore_entry``.
+        ``should_ignore_entry``; a mid-scan race (``entry_stat_result`` ->
+        ``None``) is warned in ``classify_child`` directly.
         """
         if not os.path.exists(path):
             notify(f"Skipping file {path}. File does not exist.")
@@ -1028,8 +1031,12 @@ def translate_os_error(
     ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
 
-    Shared by every local-filesystem failure path (this backend, the engines'
-    ``makedirs``, the CLI's destination pre-creation). ``message`` overrides
+    Shared by the local-filesystem failure paths that raise into the taxonomy
+    (this backend's single-entry and I/O operations, the engines'
+    ``makedirs``, the CLI's destination pre-creation). The walk's per-entry
+    handling is separate: it warns-and-skips through the vetting battery, and
+    an ``OSError`` its probes cannot attribute re-raises untranslated rather
+    than dropping a directory silently. ``message`` overrides
     ``str(exc)`` when the caller carries aws-cli wording of its own.
     """
     text = str(exc) if message is None else message
@@ -1206,13 +1213,16 @@ class LocalStorage(Storage):
 
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[LocalFileInfo]]:
-        """Yield entries under ``path``, one directory read (``os.scandir``) per page.
+        """Yield entries under ``path``, paged on directory-read boundaries.
 
         Recursive enumeration drives the walker's
         ``list_file_pages`` in aws-cli byte order, whose
-        pages fall on directory boundaries (a directory's sorted files handed off
-        just before the walk descends into its next sub-directory) so a page maps
-        to one scandir - the unit a prefetch consumer overlaps.
+        pages fall on directory boundaries: a directory's sorted files
+        accumulated so far are handed off just before each descent into a
+        sub-directory, so one ``os.scandir`` yields one page per descent
+        boundary (several for a directory with interleaved sub-directories)
+        and a page never spans two directory reads - the unit a prefetch
+        consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
         ``options.enumerate_all_entries`` /
         ``options.on_warning`` / ``options.filter`` are threaded into it - a

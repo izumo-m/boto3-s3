@@ -8,7 +8,8 @@ while the consumer processes the current one.
 
 Backpressure is bounded by a ``queue.Queue``: the worker blocks when the
 queue is full, so a slow consumer throttles a fast producer instead of buffering
-without limit. A worker-side exception surfaces on the consumer's next pull.
+without limit. A worker-side exception surfaces on the consumer's pull once
+the items already queued have drained.
 Cleanup is cooperative -- the worker checks a stop flag between puts. The
 owner must exit the `prefetch` context when it stops consuming; context exit
 drops buffered pages and waits for a page pull already in progress before
@@ -52,8 +53,9 @@ def prefetch(
 
     ``pages`` is an iterable of chunks where pulling the next chunk is slow I/O
     (e.g. an S3 ``ListObjectsV2`` page). The worker overlaps that latency with
-    the consumer's progress, buffering at most ``queue_size`` chunks
-    (~ ``queue_size`` x items-per-chunk in memory).
+    the consumer's progress, buffering at most ``queue_size`` chunks in the
+    queue plus the one it holds in hand while blocked
+    (~ ``(queue_size + 1)`` x items-per-chunk in memory).
 
     Items are flattened from the chunks. A worker-side exception is re-raised on
     the consumer's next pull, after any items already queued. On context exit the

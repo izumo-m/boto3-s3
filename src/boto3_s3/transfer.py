@@ -10,7 +10,10 @@ thread pools spun up; the ``s3transfer`` module itself is imported
 earlier regardless, by ``boto3`` when a client is built) - and bridges
 completions to the library's result model:
 per-item ``OpResult`` records to ``on_result`` (from s3transfer worker
-threads - keep callbacks fast and non-raising, the ``S3Deleter`` contract),
+threads for submitted work; non-submitting records - a directory source
+rejected at submit, dryrun / skip / notice emissions - fire inline on the
+submitting thread. Keep callbacks fast and non-raising either way, the
+``S3Deleter`` contract),
 lock-guarded rollup counters for ``BatchError``, byte progress to
 ``on_progress``.
 
@@ -27,9 +30,11 @@ Engine choices (parity-driven):
   threshold/chunk, 10-way concurrency), and classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
   (the CRT manager ignores the threading knobs, also like boto3).
-- Backpressure is ``TransferConfig.max_request_queue_size``'s bounded
-  semaphore: a full queue blocks the submitting thread, exactly the
-  mechanism aws-cli's handler leans on. No extra submission window.
+- Backpressure is s3transfer's own bounded executors: the submission queue
+  (``max_submission_queue_size``) and the request queue
+  (``max_request_queue_size``) each block the submitting thread when full,
+  exactly the mechanism aws-cli's handler leans on. No additional windowing
+  is layered on top.
 - Subscribers are plain duck-typed classes (s3transfer resolves callbacks
   with ``getattr``); no s3transfer base class is subclassed.
 - The copy-props subscriber chain reproduces aws-cli's: a single-part
@@ -125,9 +130,11 @@ _MAX_TAGGING_HEADER_SIZE = 2 * 1024
 # user_context slot handing an oversized TagSet from on_queued to on_done.
 _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 
-# user_context slot handing mv's source DeleteObject response from _DeleteSource
-# to _Completion for capture_response (extra_info["delete"]); an S3 source delete
-# populates it, a local / custom-backend one returns None and leaves it unset.
+# user_context slot handing mv's source delete response from _DeleteSource
+# to _Completion for capture_response (extra_info["delete"]); an S3 source's
+# DeleteObject response populates it, a local delete returns None and leaves
+# it unset, and a custom backend's own Mapping response is captured the same
+# way as S3's.
 _DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
 
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
@@ -180,11 +187,14 @@ class TransferItem:
     # stream): a readable object replaces src_path on uploads, a writable one
     # replaces dest_path on downloads. Streams get no directory creation and
     # no mtime stamp, and a download without size+etag lets s3transfer probe
-    # the object itself (HeadObject) - exactly the aws stream wire shape.
+    # the object itself - a HeadObject under the default
+    # response_checksum_validation ("when_supported"), the aws stream wire
+    # shape; a "when_required" client takes s3transfer's first-chunk GET
+    # probe instead.
     src_fileobj: Any = None
     dest_fileobj: Any = None
     # A download admitted by the --case-conflict gate carries the callback that
-    # drops its casefolded key from the gate's in-flight set (aws-cli's
+    # drops its lower-cased key from the gate's in-flight set (aws-cli's
     # CaseConflictCleanupSubscriber wiring); _submit_download fires it on the
     # transfer's terminal. None unless the gate admitted this item.
     case_conflict_cleanup: Callable[[], None] | None = None
@@ -420,8 +430,10 @@ class _ResponseCapture:
     stored read wins and the range-specific fields are dropped, leaving the
     object-level metadata. That same first-stored-wins rule would let a
     same-run content filter's source read beat the transfer's own ``GetObject``
-    to the read slot, so ``Transferrer._submit_download`` clears any read
-    already stored for the source key before it queues the download.
+    to the read slot, so ``Transferrer._submit_download`` admits the source
+    key only as it queues the download (``expect``): a read on a key not yet
+    admitted is simply never stored, so the filter's earlier ``GetObject``
+    cannot occupy the slot.
 
     One instance per operation, registered on the transfer client when the
     manager is built - before enumeration starts for a listing-driven run
@@ -1112,10 +1124,12 @@ class Transferrer:
 
     def _common_subscribers(self, item: TransferItem) -> list[Any]:
         """Build the size, ETag, and progress hooks shared by all transfer routes."""
-        # Size and etag are provided for every kind, aws-cli-style: s3transfer
+        # Size and etag are provided for every kind, aws-cli-style: under the
+        # default response_checksum_validation ("when_supported") s3transfer
         # skips its pre-transfer HeadObject probe (downloads AND copies) only
-        # when both are present. S3-sourced items always carry an etag; local
-        # sources have none, and uploads never probe.
+        # when both are present (a "when_required" client skips the HEAD
+        # regardless, probing with a first-chunk GET). S3-sourced items always
+        # carry an etag; local sources have none, and uploads never probe.
         subscribers: list[Any] = []
         if item.size is not None:
             subscribers.append(_ProvideSize(item.size))
@@ -1540,7 +1554,10 @@ class _Progress:
 
     s3transfer reports each chunk as a delta, possibly from several worker
     threads at once for multipart parts; the lock makes accumulate-and-read
-    atomic so consumers see monotonic ``bytes_done``. A zero-byte record is
+    atomic so two workers' snapshots cannot be delivered out of order.
+    ``bytes_done`` can still step backward when s3transfer rewinds a
+    mid-transfer retry with a negative delta - aws-cli's own progress sums
+    those the same way. A zero-byte record is
     emitted at queue time so consumers learn the in-flight set (what feeds
     the ``N file(s) remaining`` display).
     """
@@ -1571,10 +1588,11 @@ class _Progress:
     def on_progress(self, future: Any, bytes_transferred: int, **kwargs: Any) -> None:
         # Fire inside the lock: accumulate-and-deliver must be atomic, else two
         # multipart workers can deliver their snapshots out of order (a later,
-        # larger `done` before an earlier one) and `bytes_done` moves backward -
-        # the monotonicity this class promises. The callback is fast (enqueue /
-        # throttled paint), and the lock is per-item, so this serializes only one
-        # object's part callbacks.
+        # larger `done` before an earlier one) - the ordered delivery this
+        # class promises. (A retry's negative delta still steps `bytes_done`
+        # backward by design; only reordering is prevented.) The callback is
+        # fast (enqueue / throttled paint), and the lock is per-item, so this
+        # serializes only one object's part callbacks.
         with self._lock:
             self._done += bytes_transferred
             self._fire(self._done)
@@ -1764,7 +1782,7 @@ class _CloseFileobj:
 
 
 class _CaseConflictCleanup:
-    """Drop an admitted download's casefolded key from the gate's in-flight set.
+    """Drop an admitted download's lower-cased key from the gate's in-flight set.
 
     aws-cli's ``CaseConflictCleanupSubscriber``: the ``--case-conflict`` gate adds
     a key when it admits a download and this removes it on the transfer's terminal

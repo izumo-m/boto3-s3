@@ -690,9 +690,13 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
     received`` line, anything else run-killing as one ``fatal error:`` line -
-    *any* exception type, matching aws's ``CommandResultRecorder.__exit__``,
+    any exception type except ``AssertionError`` (an internal-invariant bug,
+    re-raised loudly like the dispatcher does), matching aws's
+    ``CommandResultRecorder.__exit__``,
     which converts whatever escapes the pipeline span into an ``ErrorResult``
-    (Ctrl-C into a ``CtrlCResult``; so e.g. a ``RecursionError`` from a
+    (aws's ``CtrlCResult`` is minted separately - its ``DoneResultSubscriber``
+    on a ``CancelledError`` - and our cancelled line renders that same shape;
+    so e.g. a ``RecursionError`` from a
     pathologically deep tree is aws's ``fatal error`` rc 1, never the
     dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread

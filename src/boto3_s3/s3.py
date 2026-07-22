@@ -412,8 +412,11 @@ def _classify_transfer_route(
     Returns ``(transfer_type, client_provider, source_client_provider,
     dest_bucket)``: the providers are the S3 side(s) whose ``get_client()``
     drives s3transfer (``source_client_provider`` only on the s3s3 route) -
-    handed back unresolved so each caller keeps its established effect order
-    (its destination-directory creation runs before any client is built).
+    handed back unresolved so each caller keeps its established effect order:
+    its destination-directory creation runs before ``get_client()`` resolves,
+    which *builds* a client only for a caller-constructed ``S3Storage``
+    without one (a ``resolve()``-made storage already carries a client built
+    at resolve time).
     The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
     pair, because the engine reaches into ``S3Storage``'s client/bucket and
     ``LocalStorage``'s path directly; an open route pairs a capability-checked
@@ -901,8 +904,9 @@ class S3:
         by HeadObject - a
         404 raises ``NotFoundError`` with aws's rewritten ``Key "..." does
         not exist`` message. A keyless non-recursive S3 source matches
-        nothing and transfers nothing (aws lists and discards; same outcome
-        without the requests).
+        nothing and transfers nothing (aws lists and discards; the listing
+        is issued here too, so its failure - NoSuchBucket, a denied
+        ListBucket - stays observable instead of a silent rc 0).
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
@@ -930,8 +934,11 @@ class S3:
         on the non-stream routes, exactly like aws's ``--expected-size`` (which
         only matters for a stdin upload above ~50 GB).
 
-        Results stream to ``on_result`` from worker threads (fast,
-        non-raising callbacks); failures aggregate into ``BatchError`` with
+        Results stream to ``on_result`` from the engine's worker threads for
+        submitted transfers; non-submitting records - dryrun, skips, notices,
+        and some warnings - are emitted inline on the calling thread
+        (docs/opresult.md). Callbacks must be fast and
+        non-raising. Failures aggregate into ``BatchError`` with
         the first failure as ``__cause__``, warnings alone do not raise (the
         CLI derives exit code 2 from its warned count). Failures *before*
         any item work - an unreadable destination, the missing-source check
@@ -1011,9 +1018,11 @@ class S3:
         """
         src_storage.validate()
         dest_storage.validate()
-        # A pre-cancelled token acts before any side effect: the destination
-        # pre-create below, the client builds, and the case-gate's destination
-        # walk (ls / rm poll right after resolution the same way).
+        # A pre-cancelled token acts before this method's side effects: the
+        # destination pre-create below, the case-gate's destination walk, and
+        # any lazily-deferred client build (a caller-made S3Storage without a
+        # client; resolve() above already built clients for string arguments).
+        # ls / rm poll right after resolution the same way.
         _raise_if_cancelled(cancel_token, operation)
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=recursive, operation=operation
@@ -1130,12 +1139,12 @@ class S3:
                     operation=operation,
                     wait_on_interrupt=self._wait_on_interrupt,
                 )
-            # Check cancellation *before* pulling the next item, not after: the
-            # open routes (_open_upload_item / _open_download_item) open the
-            # backend fileobj as the generator yields, so materializing an item we
-            # then discard on cancellation would leak that open fileobj. Pulling
-            # only once the run is still live means a cancelled run never opens an
-            # item it will not submit.
+            # Check cancellation *before* pulling the next item, not after:
+            # pulling only while the run is live keeps a cancelled run from
+            # enumerating and materializing items it will never submit - the
+            # listing stops promptly instead of paging on. (The open routes'
+            # deferred handles never open for an unsubmitted item, so no
+            # resource is at stake; this is about not doing pointless work.)
             interrupted = False
             try:
                 item_iter = iter(items)
@@ -1502,7 +1511,8 @@ class S3:
         a synchronous ``Storage.delete`` for a local one
         (``LocalStorage.delete``, an ``os.remove``) or a custom (open-route)
         one (through the backend's own ``delete``). ``dryrun``
-        reports every would-be transfer and deletion without any API call.
+        reports every would-be transfer and deletion without any mutating
+        API call (both sides' listings still run).
         Local listing warnings (unreadable / vanished / special files,
         invalid timestamps) surface from **both** sides as WARNED records,
         exactly like aws walking both trees.
@@ -1526,8 +1536,10 @@ class S3:
         dest_storage = self.resolve(dest)
         src_storage.validate()
         dest_storage.validate()
-        # A pre-cancelled token acts before any side effect (the destination
-        # pre-create below, the client builds), like cp/mv/ls/rm.
+        # A pre-cancelled token acts before this method's side effects (the
+        # destination pre-create below, any lazily-deferred client build - a
+        # caller-made S3Storage without a client; resolve() above already
+        # built clients for string arguments), like cp/mv/ls/rm.
         _raise_if_cancelled(cancel_token, "sync")
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=True, operation="sync"

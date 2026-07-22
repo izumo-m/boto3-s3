@@ -280,7 +280,8 @@ def _as_file_filter(matcher: Matcher) -> FileFilter:
     relative patterns on ``dir_op`` commands reach it (``_needs_joined`` routes
     anchored patterns and every single-object command to ``_JoinedFilter``),
     and a relative pattern matches the ``info.compare_key``
-    that ``Storage.scan`` stamps on each entry. ``info.key`` is still passed as
+    that the backend's listing stamps on each entry (the ``scan_pages``
+    contract; the base ``Storage.scan`` stamps only ``storage``). ``info.key`` is still passed as
     the ``Matcher`` protocol's ``full_key`` (inert for relative-only matchers).
     ``compare_key`` is always set in a filter context; ``None`` would mean the
     filter was misapplied, so fail loudly.

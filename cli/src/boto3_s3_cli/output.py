@@ -48,7 +48,10 @@ def human_readable_size(size: float) -> str:
     """Format a byte count like aws-cli's ``--human-readable`` (base-2 units).
 
     Accepts a float so the transfer progress display can feed it byte-per-
-    second rates (aws renders both through one helper, ``utils.py``).
+    second rates (aws renders both through one helper, ``utils.py``). One
+    unreachable-range deviation: past EiB aws's suffix loop falls through and
+    returns ``None`` (rendering ``None``); this keeps counting in EiB - a
+    total below 1 EiB (millions of max-size objects) never gets there.
     """
     base = 1024
     value = float(size)

@@ -187,7 +187,9 @@ class ScanOptions:
     transfers / lists / deletes independently). A backend declaring
     ``StorageCapability.SORTABLE_SCAN`` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
-    byte-ordered, the local walk sorts for aws parity), so it costs nothing for
+    byte-ordered - except S3 Express directory buckets, whose unordered
+    listings are why ``sync`` rejects them - and the local walk sorts for aws
+    parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
 
@@ -315,8 +317,9 @@ class OpOutcome(enum.Enum):
 
     ``SKIPPED`` is an informational, non-warning skip (e.g. sync up-to-date,
     a ``no_overwrite`` rejection) and does not affect the exit code.
-    ``DRYRUN`` reports an item a dry run *would* have acted on - no API call
-    was made and the exit code is unaffected. ``NOTICE`` carries display-only
+    ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
+    API call does not occur (enumeration and the single-object HeadObject
+    still run) and the exit code is unaffected. ``NOTICE`` carries display-only
     text on ``error`` (aws prints some advisories - the case-conflict
     messages - straight to stderr without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
@@ -394,9 +397,14 @@ class TransferProgress:
 class OpResult:
     """Per-item completion record passed to the ``on_result`` callback.
 
-    One record per item, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` from a
-    worker thread (keep the callback fast and non-raising). A single type keyed
-    by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
+    A record per event, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` -
+    normally one per item, but a ``NOTICE`` may precede the same item's real
+    outcome and a post-success warning (a failed mtime stamp) adds a WARNED
+    record beside the SUCCEEDED one (transfer.md section 8). Submitted
+    transfers emit from the engine's worker threads; non-submitting records -
+    dryrun, skips, notices - emit inline on the calling thread
+    (docs/opresult.md). Keep the callback fast and non-raising either way.
+    A single type keyed by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
     acted on (a transfer's source, or a delete's removed object); the ``dest_*``
     trio the destination side. The fields, the ``src`` / ``dest`` convention, and
     which operation populates which field are documented in docs/opresult.md.

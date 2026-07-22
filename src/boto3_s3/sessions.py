@@ -12,10 +12,14 @@ botocore session, before any client exists.
 
 The recommended construction is ``S3(session=boto3_s3.session())``. The
 zero-config ``S3()`` deliberately stays plain ``boto3.client("s3")``
-semantics: the process-wide ``boto3.DEFAULT_SESSION`` is never consulted,
-touched, or retrofitted (a parser is fixed into a client at client
-construction), so unrelated boto3 use elsewhere in the process never
-changes boto3-s3's behavior - in either direction.
+semantics: it rides the process-wide ``boto3.DEFAULT_SESSION`` exactly as
+``boto3.client`` itself does (created on demand, shared), and boto3-s3
+never *mutates* that session's parser factory - a mutation would retrofit
+every client the application built from it (each client's endpoint holds
+its session's factory and creates parsers per response), a global side
+effect deliberately not taken. So unrelated boto3 use elsewhere in the
+process never changes boto3-s3's parsing, and boto3-s3 never changes the
+application's - in either direction.
 
 This module is SDK-backed by declaration (docs/imports.md): it imports
 boto3 at module top.
@@ -57,13 +61,17 @@ def session(**kwargs: Any) -> boto3.session.Session:
 
     Configuration semantics are exactly ``boto3.Session(**kwargs)``'s - the
     keyword arguments (``profile_name`` / ``region_name`` / credentials / ...)
-    are forwarded verbatim onto a fresh botocore session, and boto3 applies
+    are forwarded verbatim, except ``botocore_session``: this factory
+    supplies its own fresh botocore session (passing one raises the
+    duplicate-argument ``TypeError``), and boto3 applies
     its usual user-agent branding. The one difference is the response
     parser default, registered before any client is built so every client
-    later created from this session inherits `fast_parse_timestamp`. An
-    already-built session cannot be retrofitted; callers managing their own
-    botocore session can register the same default on its
-    ``response_parser_factory`` component themselves.
+    later created from this session inherits `fast_parse_timestamp`. This
+    library never retrofits a session it does not own; callers managing
+    their own botocore session can register the same default on its
+    ``response_parser_factory`` component themselves (on current botocore
+    that reaches even the session's already-built clients - their endpoints
+    hold the factory and create parsers per response).
     """
     botocore_session = botocore.session.Session()
     botocore_session.get_component("response_parser_factory").set_parser_defaults(

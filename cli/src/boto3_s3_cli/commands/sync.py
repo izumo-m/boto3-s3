@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once sync is determined (stage 2 of the lazy dispatch).
+# Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch) -
+# or up front when auto-prompt builds the full command model.
 from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
@@ -70,7 +71,7 @@ class SyncCommand(Command):
             transferargs.create_local_dest_dir(dest, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
         if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
-            # aws-cli's _validate_not_s3express_bucket_for_sync: directory-bucket
+            # aws-cli's _validate_not_s3_express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
             raise ValidationError(
                 "Cannot use sync command with a directory bucket.", operation="sync"

@@ -6,7 +6,8 @@ import argparse
 import sys
 from typing import TYPE_CHECKING
 
-# These module-level names are needed while configuring the command.
+# Module-level imports are fine here: rb is loaded at dispatch (stage 2 of
+# the lazy dispatch), after the command is determined.
 from boto3_s3 import Boto3S3Error, InvalidValueError, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
@@ -40,8 +41,10 @@ class RbCommand(Command):
         path, a key part, a rejected ARN form - exit 252 via ``main``.
         ``--force`` runs a full ``rm --recursive`` first; a failure there is
         rc 255 (aws raises RuntimeError into the general handler) and the
-        bucket delete is not attempted. Everything after delete_bucket starts
-        is rc 1 with one ``remove_bucket failed:`` line. aws builds the client
+        bucket delete is not attempted. Every classified (``Boto3S3Error``)
+        failure after delete_bucket starts
+        is rc 1 with one ``remove_bucket failed:`` line (an unclassified
+        exception falls to the dispatcher's handler chain instead). aws builds the client
         before validating the path (``S3Command._run_main``), so a
         client-construction failure (bad ``--profile`` / unresolved credentials /
         region) takes precedence over a path usage error - we build it first.
@@ -102,7 +105,8 @@ class RbCommand(Command):
             # aws raises RuntimeError into its general handler, which prints the
             # 'aws: [ERROR]:'-prefixed line; route it as an InvalidValueError so
             # main emits the matching 'boto3-s3: [ERROR]:' prefix -> rc 255
-            # (the inner rm already streamed its own fatal-error line).
+            # (the inner rm already streamed its own failure output: per-key
+            # 'delete failed:' lines, or one fatal-error line).
             raise InvalidValueError(_FORCE_FAILED, operation="rb")
 
         try:

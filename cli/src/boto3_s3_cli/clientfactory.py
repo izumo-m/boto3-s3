@@ -372,7 +372,8 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     else:
         verify = args.ca_bundle  # a path, or None to use the default trust store
 
-    # aws-cli v2's bundled botocore has no SigV2 left at all, while stock
+    # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
+    # signers) left - only the generic query-protocol "v2" - while stock
     # botocore still downgrades *presigned URLs* to SigV2 in regions that
     # accept it (a default us-east-1 client) and resolves us-east-1
     # to the legacy global endpoint where aws v2 uses the regional one. Pin

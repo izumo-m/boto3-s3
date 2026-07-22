@@ -136,8 +136,10 @@ class ParallelFilter(Generic[_T]):
     predicate does per-entry I/O decides many entries concurrently - a content
     ``update_filter=`` strategy (``EtagComparison`` / ``ChecksumComparison``), or a
     ``create`` / ``delete`` filter that reads bytes / object tags / attributes.
-    Passing it is observationally identical to passing ``decide`` bare, only
-    faster - **except** that parallelizing ``create_filter`` makes the
+    The decisions themselves are the same as passing ``decide`` bare, only
+    faster; what changes is ordering: pooled decisions emit their results in
+    completion order rather than compare-key order (sync.md section 10), and
+    parallelizing ``create_filter`` makes the
     ``--case-conflict`` "first key wins" order non-deterministic (a library-only
     knob, so no ``aws s3`` parity is at stake). The result set and the exit are
     otherwise unchanged.
@@ -148,14 +150,15 @@ class ParallelFilter(Generic[_T]):
     lane its own, are the caller's to arrange - but the ``sync`` call itself must
     **not** run as a task on that same pool: the lane blocks its thread waiting
     for decide futures that need a free worker, so a bounded pool driving both
-    deadlocks. The wrapped ``decide`` runs on that
+    can deadlock once no worker is left free. The wrapped ``decide`` runs on that
     pool's threads, so it must be thread-safe;
     ``ChecksumComparison`` and
     ``EtagComparison`` are (read-only over their
     fields; ``ChecksumComparison``'s S3-side clients are built at construction,
     and a botocore client is safe to share for concurrent calls). A
-    ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
-    picklable) - the pool must be thread-based.
+    ``ProcessPoolExecutor`` will not work (the wrapped predicate and the
+    pair's storage-backed entries close over live handles - S3 clients,
+    ``FileInfo.storage`` - that do not pickle) - the pool must be thread-based.
 
     ``_T`` is the wrapped predicate's argument: ``SyncPair`` for a
     ``update_filter`` (a ``PairFilter``), ``FileInfo``

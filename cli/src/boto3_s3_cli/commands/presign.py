@@ -38,7 +38,9 @@ class PresignCommand(Command):
         computation, so rc 1 and 254 cannot happen - 0 on success, 252 for
         botocore's client-side parameter validation (empty bucket or key,
         surfaced as the library's ValidationError through main), 253 for
-        client-construction failures, 255 for a non-integer ``--expires-in``.
+        client construction's unresolvable credentials / region (its other
+        botocore failures - a bad ``--profile``, partial credentials - are
+        255), 255 for a non-integer ``--expires-in``.
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
