@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ctrl-C during a running transfer or delete now exits 1 with aws's `cancelled: ctrl-c received` line (previously 130; outside the run 130 stays).
 - S3 Express directory bucket targets now sign with their session-based scheme like aws (previously the always-SigV4 pin produced invalid signatures, visibly in `presign` URLs).
 - The CRT engine now honors an explicit `--endpoint-url` under an AWS domain (a VPC interface endpoint) instead of re-resolving to public S3.
+- `rb --force` now resolves credentials once, sharing one session between the inner `rm` and the bucket delete like aws (a `credential_process` / MFA flow no longer prompts twice).
 
 ## [0.6.0] - 2026-07-17
 

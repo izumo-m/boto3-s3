@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import TYPE_CHECKING
 
 # These module-level names are needed while configuring the command.
 from boto3_s3 import Boto3S3Error, InvalidValueError, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 from boto3_s3_cli.commands.rm import RmCommand
+
+if TYPE_CHECKING:
+    from boto3_s3 import S3
 
 # aws-cli RbCommand._force raises RuntimeError with this exact sentence when
 # the inner rm fails; it reaches the general handler -> rc 255.
@@ -77,7 +81,7 @@ class RbCommand(Command):
             # aws has no empty-bucket short-circuit: --force still runs the
             # inner rm --recursive first, and its (inevitable) failure aborts
             # at rc 255 before delete_bucket is attempted.
-            if args.force and self._force_rm(target, args, ctx) != 0:
+            if args.force and self._force_rm(target, args, ctx, s3) != 0:
                 raise InvalidValueError(_FORCE_FAILED, operation="rb")
             message = usage.invalid_bucket_name_message()
             sys.stderr.write(output.format_remove_bucket_failed(target, message) + "\n")
@@ -94,7 +98,7 @@ class RbCommand(Command):
                 operation="rb",
             )
 
-        if args.force and self._force_rm(target, args, ctx) != 0:
+        if args.force and self._force_rm(target, args, ctx, s3) != 0:
             # aws raises RuntimeError into its general handler, which prints the
             # 'aws: [ERROR]:'-prefixed line; route it as an InvalidValueError so
             # main emits the matching 'boto3-s3: [ERROR]:' prefix -> rc 255
@@ -110,13 +114,18 @@ class RbCommand(Command):
         return 0
 
     @staticmethod
-    def _force_rm(target: str, args: argparse.Namespace, ctx: Context) -> int:
+    def _force_rm(target: str, args: argparse.Namespace, ctx: Context, s3: S3) -> int:
         """Run the inner ``rm --recursive``, mirroring aws's ``RbCommand._force``.
 
         The rm parser fills the rm-only defaults; rb's parsed namespace seeds
         the parse so the invocation's globals reach the inner run's client
         factory (aws hands its parsed_globals to a fresh RmCommand the same
-        way). Caveat: argparse only applies defaults for dests missing from
+        way). The inner run shares rb's `S3` (`Context.with_s3`) exactly as
+        aws's ``RmCommand(self._session)`` shares the one CLI session - a
+        second session would resolve credentials again (a
+        ``credential_process`` / MFA flow re-prompting, possibly under a
+        different identity than the final ``DeleteBucket``). Caveat: argparse
+        only applies defaults for dests missing from
         the namespace, so an rb option whose dest collided with an rm dest
         would leak through - revisit if rb ever grows such an option.
         """
@@ -125,4 +134,4 @@ class RbCommand(Command):
         rm_args = parser.parse_args(
             [target, "--recursive"], namespace=argparse.Namespace(**vars(args))
         )
-        return RmCommand().run(rm_args, ctx)
+        return RmCommand().run(rm_args, ctx.with_s3(s3))

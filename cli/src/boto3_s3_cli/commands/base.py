@@ -98,6 +98,28 @@ class Context:
         # keep the CLI's process-fatal Ctrl-C posture.
         return InjectedClientS3(wait_on_interrupt=False)
 
+    def with_s3(self, s3: S3) -> Context:
+        """A view of this context whose ``s3`` always returns *s3*.
+
+        ``rb --force``'s session-sharing seam: aws hands its one CLI session
+        to the inner rm (``RmCommand(self._session)``), so the inner run must
+        not build a second session - a ``credential_process`` helper would run
+        twice, an MFA / assume-role flow would prompt twice, and the object
+        deletes could then run under a different identity than the final
+        ``DeleteBucket``. Every other dependency (factories, transfer config,
+        prompter) carries over unchanged.
+        """
+        clone = Context(
+            client_factory=self.client_factory if self._client_factory_injected else None,
+            s3_factory=lambda _args: s3,
+            service_client_factory=(
+                self.service_client_factory if self._service_client_factory_injected else None
+            ),
+            transfer_config=self.transfer_config,
+            auto_prompter=self.auto_prompter,
+        )
+        return clone
+
     def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
         """Build an additional S3 client from the command's bound session."""
         if self._client_factory_injected:

@@ -192,12 +192,16 @@ class TestForce:
         )
         assert calls == []
 
-    def test_force_carries_globals_and_rm_defaults(self) -> None:
-        # Pins the namespace synthesis: the factory runs once for rb and once
-        # for the inner rm; globals reach both, rm defaults come from its own
-        # parser (not from rb's namespace).
+    def test_force_shares_rb_session_and_keeps_rm_defaults(self) -> None:
+        # The inner rm runs on rb's own S3 (Context.with_s3) exactly as aws
+        # hands its one CLI session to RmCommand(self._session): every client
+        # the force flow builds comes from rb's namespace - a second session
+        # would resolve credentials again (credential_process / MFA
+        # re-prompting). The rm-only defaults still come from rm's own parser,
+        # observable on the wire: recursive listing with no MaxKeys (unset
+        # --page-size), no dryrun, then the bucket delete.
         captured: list[Any] = []
-        client, _calls = make_recording_client([{}, {}])
+        client, calls = make_recording_client([{}, {}])
 
         def factory(args: Any) -> Any:
             captured.append(args)
@@ -208,12 +212,11 @@ class TestForce:
             ctx=Context(client_factory=factory),  # pyright: ignore[reportArgumentType]
         )
         assert result.rc == 0
+        # rb's eager build plus the inner rm's build - both served through the
+        # shared S3, so both see rb's namespace (the same object).
         assert len(captured) == 2
-        rb_args, rm_args = captured
-        assert rb_args.region == "ap-northeast-1"
-        assert rm_args.region == "ap-northeast-1"
-        assert not hasattr(rb_args, "recursive")
-        assert rm_args.paths == "s3://b"
-        assert rm_args.recursive is True
-        assert rm_args.dryrun is False
-        assert rm_args.page_size is None  # aws parity: unset sends no MaxKeys
+        assert captured[0] is captured[1]
+        assert captured[0].region == "ap-northeast-1"
+        assert not hasattr(captured[0], "recursive")  # rb's namespace, not rm's
+        assert [c.operation for c in calls] == ["ListObjectsV2", "DeleteBucket"]
+        assert "MaxKeys" not in calls[0].params  # rm's own unset --page-size default
