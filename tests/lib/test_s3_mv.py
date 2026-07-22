@@ -318,6 +318,28 @@ class TestDownloadMove:
         # The bytes still arrived (aws ditto): only the move failed.
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
 
+    def test_delete_failure_still_stamps_the_source_mtime(self, tmp_path: Path) -> None:
+        # aws-cli registers its mtime subscriber ahead of the source delete
+        # (ProvideLastModifiedTimeSubscriber before DeleteSourceObjectSubscriber),
+        # so a failed delete leaves the downloaded file carrying the source
+        # LastModified - a later sync then compares equal instead of
+        # re-downloading. _StampMtime sits in the same slot.
+
+        client, _calls = make_recording_client(
+            [
+                head_response(),
+                get_response(),
+                client_error("AccessDenied", 403, "DeleteObject"),
+            ]
+        )
+        with pytest.raises(BatchError):
+            S3().mv(
+                S3Storage("s3://b/k.txt", client=client),
+                str(tmp_path / "out.txt"),
+                transfer_config=_SYNC,
+            )
+        assert (tmp_path / "out.txt").stat().st_mtime == MTIME.timestamp()
+
 
 class TestCopyMove:
     def test_single_copy_deletes_on_the_source_client(self) -> None:

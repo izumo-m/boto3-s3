@@ -124,16 +124,20 @@ add nothing the `getattr` protocol uses.
 3. download: `_DirectoryCreator` (creates the parent dir; tolerates EEXIST,
    otherwise fails with aws-cli's wording `Could not create directory ...`).
 4. copy: the copy-props chain (section 4).
-5. mv download + `LocalStorage(fsync=True)` only: `_FsyncDest` (section 11) - a
+5. download: `_StampMtime` - stamps the source LastModified onto the downloaded
+   file on success (section 5), registered before the mv deletion pair below
+   (aws-cli's `ProvideLastModifiedTimeSubscriber` slot ahead of the
+   DeleteSource family), so a failed source delete still leaves the mtime
+   stamped.
+6. mv download + `LocalStorage(fsync=True)` only: `_FsyncDest` (section 11) - a
    library-only durability barrier fsyncing the downloaded file (and its parent
    dir on POSIX) just before `_DeleteSource`, so a durability failure flips the
    future and the source is not deleted (off by default = aws parity).
-6. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
+7. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
    before `_Completion` (the same slot where aws-cli places the DeleteSource
    family ahead of the Done recorder).
-7. `_Completion` - bridges the future's result to the rollup
-   (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. On
-   a successful download it post-success stamps the mtime (section 5). Each
+8. `_Completion` - bridges the future's result to the rollup
+   (locked succeeded/failed/warned/skipped + first_error) and to `OpResult`. Each
    record carries the item's listing entries (`src_info` / `dest_info`) and the
    run's side `Storage`s; on success `extra_info` takes `{"ETag": ...}` from
    `future.meta.etag` - the **source object's** ETag, which boto3-s3 provides up
@@ -143,14 +147,14 @@ add nothing the `getattr` protocol uses.
    the PutObject response is discarded), so an upload's `extra_info` is `None`.
    `capture_response` layers the written / read object's own response on top
    ([`opresult.md`](./opresult.md)).
-8. `_ForgetFuture` (**always last**) - removes the settled top-level future
+9. `_ForgetFuture` (**always last**) - removes the settled top-level future
    from the run's bounded immediate-cancellation set.
 
 Items 1-2 are value/callback-conditional (they register only when they have
-something to provide or forward), items 3-6 route-conditional (download / copy
+something to provide or forward), items 3-7 route-conditional (download / copy
 / mv only), and the open route / case-conflict gate add unnumbered subscribers
 of their own (`_CloseFileobj`, `_CaseConflictCleanup`) in the same order; the
-always-present pair is 7-8 (the numbering is the slot order, not a single
+always-present pair is 8-9 (the numbering is the slot order, not a single
 chain that every transfer runs end to end).
 
 `on_result` / `on_progress` fire **from s3transfer's worker threads** for
@@ -599,8 +603,9 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   `_CloseFileobj` on the open route), so `_DeleteSource` skips the delete and the
   S3 copy survives (`move failed`, rc 1). A freshly created intermediate directory
   is not walked back to its own parent (the common case downloads into an existing
-  tree); the mtime stamp stays post-delete, so only the file *contents* are made
-  durable, not the cosmetic mtime. The CLI leaves this off to keep aws parity.
+  tree); the mtime stamp (`_StampMtime`, registered just before `_FsyncDest`)
+  has already run, so the fsync covers the final metadata too. The CLI leaves
+  this off to keep aws parity.
 - Cases where the deletion does not run: dryrun (no submit at all), filter
   exclusion, skip (no-overwrite's 412 / dest already exists, the glacier gate),
   transfer failure, a `LocalStorage(fsync=True)` durability failure (above). For
@@ -620,13 +625,12 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   injected client (the CLI's `--validate-same-s3-paths`; the library API
   deliberately has no such flag - under the connection model, the library does
   not implicitly create the s3control / sts client).
-- **A known local ordering difference**: aws-cli does the download's mtime stamp
-  (a subscriber) -> deletion in that order, whereas we do deletion -> stamp
-  (`_Completion.post_success`). The difference is observable only in the rare
-  case of "a move where the deletion failed, leaving the local mtime unstamped,"
-  and the rc / output / file contents agree. If an exact match becomes necessary,
-  there is room to promote the stamp into an independent subscriber from section 3 and
-  place it before the deletion.
+- **The mtime stamp precedes the deletion**, matching aws-cli's subscriber
+  order (`ProvideLastModifiedTimeSubscriber` before
+  `DeleteSourceObjectSubscriber`): `_StampMtime` is an independent subscriber
+  registered before `_FsyncDest` / `_DeleteSource`, so a move whose deletion
+  fails still leaves the downloaded file carrying the source mtime (a later
+  sync then compares equal instead of re-downloading).
 
 ## 12. open route (custom backends: `opens3` / `s3open`)
 

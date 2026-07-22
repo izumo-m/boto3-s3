@@ -1043,6 +1043,11 @@ class Transferrer:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
         if item.case_conflict_cleanup is not None:
             subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
+        # Before the mv source delete, like aws-cli registering
+        # ProvideLastModifiedTimeSubscriber ahead of DeleteSourceObjectSubscriber:
+        # a failed delete then still leaves the downloaded file carrying the
+        # source mtime (a later sync compares equal instead of re-downloading).
+        subscribers.append(_StampMtime(item, self._stamp_mtime))
         if self._is_move:
             # Durability barrier before the source delete (LocalStorage(fsync=True),
             # a library-only opt-in; off by default = aws parity). Only a real local
@@ -1055,7 +1060,7 @@ class Transferrer:
             ):
                 subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
-        subscribers.append(self._completion(item, post_success=self._stamp_mtime))
+        subscribers.append(self._completion(item))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
@@ -1120,15 +1125,12 @@ class Transferrer:
             )
         return subscribers
 
-    def _completion(
-        self, item: TransferItem, *, post_success: Callable[[TransferItem], None] | None = None
-    ) -> _Completion:
+    def _completion(self, item: TransferItem) -> _Completion:
         """Bind an item's terminal callbacks into one s3transfer subscriber."""
         return _Completion(
             item,
             on_success=self._record_success,
             on_failure=self._record_failure,
-            post_success=post_success,
         )
 
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
@@ -1652,6 +1654,30 @@ class _FsyncDest:
             os.close(dir_fd)
 
 
+class _StampMtime:
+    """Stamp the source LastModified onto a successfully downloaded file.
+
+    aws-cli's ``ProvideLastModifiedTimeSubscriber`` slot: registered *before*
+    ``_DeleteSource``, so on ``mv`` the mtime is already stamped when the
+    source delete runs - a delete failure (``move failed``, the file stays)
+    still leaves the mtime aws-shaped, and the opt-in ``_FsyncDest`` barrier
+    flushes the final metadata. The stamp itself (`Transferrer._stamp_mtime`)
+    never raises - a failure becomes a WARNED record - so this cannot flip
+    the settled future.
+    """
+
+    def __init__(self, item: TransferItem, stamp: Callable[[TransferItem], None]) -> None:
+        self._item = item
+        self._stamp = stamp
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            return
+        self._stamp(self._item)
+
+
 class _DeleteSource:
     """Delete the transfer's source after it succeeds (mv; aws-cli port).
 
@@ -1748,8 +1774,8 @@ class _Completion:
     here is non-blocking - it returns or raises the stored outcome. It is the
     last outcome subscriber, immediately before `_ForgetFuture`, so copy-props'
     post-copy tagging (which may flip the future to an exception) has already
-    settled. The outcome sinks are injected by `Transferrer` at submit time
-    (its rollup recorders, plus the download mtime stamp as `post_success`).
+    settled. The outcome sinks (`Transferrer`'s rollup recorders) are injected
+    at submit time.
     """
 
     def __init__(
@@ -1758,12 +1784,10 @@ class _Completion:
         *,
         on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
-        post_success: Callable[[TransferItem], None] | None = None,
     ) -> None:
         self._item = item
         self._on_success = on_success
         self._on_failure = on_failure
-        self._post_success = post_success
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         try:
@@ -1771,8 +1795,6 @@ class _Completion:
         except Exception as exc:
             self._on_failure(self._item, exc)
             return
-        if self._post_success is not None:
-            self._post_success(self._item)
         # s3transfer resolves the transfer size on the future (a HeadObject
         # probe for an unknown-size download); pass it so _record_success can
         # report real bytes when the item carried no size. meta.etag carries the
