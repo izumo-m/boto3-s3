@@ -185,6 +185,26 @@ class TestScanFilterSafetyNet:
         # info.storage, an on_result callback) can reach it on custom backends.
         assert infos and all(info.storage is backend for info in infos)
 
+    def test_safety_net_stamp_precedes_the_filter(self) -> None:
+        # FileInfo's contract: `storage` is stamped before any filter runs, so
+        # a predicate can reach the producing backend (e.g. a HeadObject for a
+        # tag the listing omits) even on a backend whose scan_pages does not
+        # stamp it.
+        class Unfiltered(_Stub):
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+
+        backend = Unfiltered()
+        seen: list[Storage | None] = []
+
+        def probe(info: FileInfo) -> bool:
+            seen.append(info.storage)
+            return True
+
+        list(backend.scan(ScanOptions(filter=probe)))
+        assert seen and all(storage is backend for storage in seen)
+
 
 class TestAutoBitLayout:
     def test_members_are_successive_powers_of_two(self) -> None:

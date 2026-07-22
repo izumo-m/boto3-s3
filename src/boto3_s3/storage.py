@@ -232,16 +232,32 @@ class Storage(abc.ABC):
         filters at its source or prunes early declares the flag to skip the
         redundant re-filter. Pass ``options`` to control the walk (defaults to
         ``default_scan_options``). To customize the entries, override
-        ``scan_pages``, not this method. Each yielded entry has its
+        ``scan_pages``, not this method. Each entry has its
         ``FileInfo.storage`` set to this backend as a safety net (only when a
-        ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
-        their filters see it too. Used by ``ls`` and the recursive forms of
+        ``scan_pages`` left it ``None``), ahead of the filter - so a predicate
+        always sees the producing backend, per ``FileInfo``'s contract (the
+        built-ins already stamp it during the scan). Used by ``ls`` and the recursive forms of
         ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
         producer before another page pull without changing entries already
         yielded to the consumer.
         """
         opts = options if options is not None else self.default_scan_options()
-        pages = self.scan_pages(opts)
+
+        def stamped() -> Iterator[Sequence[FileInfo]]:
+            # Safety net: stamp the producing backend so a downstream consumer
+            # (an `options.filter` predicate, sync's content compare via
+            # pair.src.storage, an on_result callback) can reach it even when a
+            # custom scan_pages did not set it. Runs ahead of the filter below,
+            # honoring FileInfo's contract that `storage` is stamped before any
+            # filter runs; the built-ins stamp during the scan, so this only
+            # fills a None left by a bespoke backend.
+            for page in self.scan_pages(opts):
+                for info in page:
+                    if info.storage is None:
+                        info.storage = self
+                yield page
+
+        pages = stamped()
         if opts.filter is not None and not self.scan_pages_filters:
             pages = sieve_pages(pages, opts.filter)
         with prefetch(
@@ -250,15 +266,7 @@ class Storage(abc.ABC):
             cancel_token=cancel_token,
             wait_on_interrupt=opts.wait_on_interrupt,
         ) as items:
-            for info in items:
-                # Safety net: stamp the producing backend so a downstream consumer
-                # (sync's content compare via pair.src.storage, an on_result
-                # callback) can reach it even when a custom scan_pages did not set
-                # it. The built-ins stamp it during the scan so their filters
-                # already see it; this only fills a None left by a bespoke backend.
-                if info.storage is None:
-                    info.storage = self
-                yield info
+            yield from items
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries one natural I/O page at a time - the producer and override seam.
