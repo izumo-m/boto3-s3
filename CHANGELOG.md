@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-23
+
 - Added `session()` / `fast_parse_timestamp`: a boto3 `Session` factory whose clients parse response timestamps at C speed, making large listings severalfold faster - `S3(session=boto3_s3.session())` is now the recommended construction.
 - Reshaped the public API: the sync-pair / result identity field is now `compare_key` (delete records join the same key space), `ls` takes `on_entry`, `S3Storage` speaks `uri`, unknown transfer options are rejected eagerly, capabilities became the sole custom-backend contract, and the export tiers shrank.
 - Documented the public contracts (exception attributes, the two-tier export surface, the backend SPI evolution policy) and fixed a raw `ValueError` leaking from `client()` on a malformed endpoint.
@@ -49,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...HEAD
+[0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...boto3-s3-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.6.0...boto3-s3-v0.7.0
 [0.6.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.5.0...boto3-s3-v0.6.0
 [0.5.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.4.0...boto3-s3-v0.5.0
