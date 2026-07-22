@@ -305,16 +305,20 @@ def _coerce_cli_timeout(value: str) -> int | None:
         raise InvalidValueError(str(exc)) from exc
 
 
-def _includes_mrap_path(args: argparse.Namespace) -> bool:
-    """Whether the command's positional S3 paths include an MRAP ARN bucket.
+def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
+    """Whether a positional S3 path needs botocore's endpoint auth-scheme resolution.
 
+    True for an MRAP ARN bucket (must sign asymmetric SigV4a) and for an
+    S3 Express directory bucket (must sign ``sigv4-s3express`` with
+    `CreateSession` credentials) - the two shapes an explicit
+    `signature_version` would mis-sign, so the s3v4 pin stands down for them.
     Reads the parsed positionals off the namespace - `paths` (a string, or the
     transfer family's two-item list) and presign's `path`. By the time a
     command builds its client, paramfile expansion has already replaced
     `file://` forms; non-string values (the readable-`fileb://` quirk leaves
-    `bytes`) never name an MRAP and are skipped.
+    `bytes`) never name either shape and are skipped.
     """
-    from boto3_s3.pathresolver import is_mrap_path
+    from boto3_s3.pathresolver import is_mrap_path, is_s3express_path
 
     values: list[object] = []
     paths: object = getattr(args, "paths", None)
@@ -323,7 +327,10 @@ def _includes_mrap_path(args: argparse.Namespace) -> bool:
     else:
         values.append(paths)
     values.append(getattr(args, "path", None))
-    return any(isinstance(value, str) and is_mrap_path(value) for value in values)
+    return any(
+        isinstance(value, str) and (is_mrap_path(value) or is_s3express_path(value))
+        for value in values
+    )
 
 
 def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
@@ -365,17 +372,21 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # accept it (a default us-east-1 client) and resolves us-east-1
     # to the legacy global endpoint where aws v2 uses the regional one. Pin
     # both so every command - visibly, presign's URLs - matches aws v2.
-    # The pin stands down when the command targets an MRAP ARN: an explicit
-    # signature_version suppresses botocore's auth-scheme resolution, and an
-    # MRAP endpoint must resolve to asymmetric SigV4a (aws v2's bundled
-    # botocore pins only the symmetric families - _pin_python_sigv4_signers -
-    # and leaves SigV4a alive). With awscrt absent, botocore's own
-    # MissingDependencyException then surfaces (-> ConfigurationError, 253)
-    # instead of a silently mis-signed SigV4 request.
+    # The pin stands down when the command targets an MRAP ARN or an S3
+    # Express directory bucket: an explicit signature_version suppresses
+    # botocore's auth-scheme resolution, and those endpoints must resolve to
+    # asymmetric SigV4a / ``sigv4-s3express`` (with `CreateSession`
+    # credentials) respectively - a pinned s3v4 matches both scheme names up
+    # to the first dash and silently signs a plain SigV4 request instead.
+    # aws v2's bundled botocore pins only the symmetric families
+    # (_pin_python_sigv4_signers) and leaves both resolutions alive. With
+    # awscrt absent, an MRAP target surfaces botocore's own
+    # MissingDependencyException (-> ConfigurationError, 253) instead of a
+    # silently mis-signed SigV4 request.
     overrides: dict[str, Any] = {
         "s3": {"us_east_1_regional_endpoint": "regional"},
     }
-    if not _includes_mrap_path(args):
+    if not _includes_endpoint_auth_path(args):
         overrides["signature_version"] = "s3v4"
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED

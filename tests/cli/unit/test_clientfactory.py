@@ -255,6 +255,53 @@ class TestBuildClient:
         )
         assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
 
+    def test_s3express_target_lifts_the_pin(self) -> None:
+        # A directory bucket must resolve to sigv4-s3express with CreateSession
+        # credentials; an explicit signature_version suppresses that resolution
+        # (s3v4 matches the scheme name up to the first dash) and signs a plain
+        # SigV4 request instead - measured: a pinned express presign scopes
+        # `.../s3/aws4_request` where the unpinned flow dials CreateSession,
+        # like aws v2's bundled botocore. Signing needs that live CreateSession
+        # call, so assert on the exact input botocore's per-request scheme
+        # selection keys on: the requested auth scheme is unset, leaving the
+        # endpoint's `sigv4-s3express` alive. (`meta.config.signature_version`
+        # cannot serve here - botocore backfills it with the *resolved*
+        # version, `s3v4` for S3 with or without the pin.)
+        args = _parse(["--region", "us-east-1"])
+        args.path = "s3://mybkt--use1-az4--x-s3/key"
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_s3express_transfer_positional_lifts_the_pin_too(self) -> None:
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./local.txt", "s3://mybkt--use1-az4--x-s3/k"]
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_local_x_s3_suffix_lookalike_keeps_the_pin(self) -> None:
+        # A local path can plausibly end in --x-s3; only the s3:// form names
+        # a directory bucket, so the pin stays.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./backup--x-s3", "s3://plain-bucket/key"]
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+
+    def test_no_sign_request_still_wins_for_s3express(self) -> None:
+        # --no-sign-request overrides to UNSIGNED even for a directory bucket,
+        # exactly as it overrides the s3v4 pin: the bare zonal-endpoint URL.
+        args = _parse(["--no-sign-request", "--region", "us-east-1"])
+        args.path = "s3://mybkt--use1-az4--x-s3/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "mybkt--use1-az4--x-s3", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert url == "https://mybkt--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com/key"
+
     def test_no_sign_request_still_wins_for_mrap(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for an MRAP target,
         # exactly as it overrides the s3v4 pin: aws emits the bare URL.

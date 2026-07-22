@@ -71,6 +71,25 @@ def is_mrap_path(path: str) -> bool:
     return _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket) is not None
 
 
+def is_s3express_path(path: str) -> bool:
+    """Whether an ``s3://`` path names an S3 Express directory bucket
+    (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix).
+
+    Pure string inspection like `is_mrap_path`, with one extra gate: the
+    ``s3://`` scheme is required, because callers feed raw positionals that
+    may be local paths and a local name can plausibly end in ``--x-s3``
+    (an MRAP ARN shape cannot). A directory-bucket request must be signed
+    ``sigv4-s3express`` with `CreateSession` credentials, which an explicit
+    `signature_version` in the client config would suppress - callers that
+    pin one (the CLI's always-SigV4 pin) use this to stand down, like
+    `is_mrap_path` for SigV4a.
+    """
+    if not path.startswith("s3://"):
+        return False
+    bucket, _key = _split_bucket_key(path)
+    return bucket.endswith("--x-s3")
+
+
 def _split_bucket_key(path: str) -> tuple[str, str]:
     """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
 
@@ -181,4 +200,4 @@ class S3PathResolver:
         return s3_errors(operation="mv")
 
 
-__all__ = ["S3PathResolver", "has_underlying_s3_path", "is_mrap_path"]
+__all__ = ["S3PathResolver", "has_underlying_s3_path", "is_mrap_path", "is_s3express_path"]

@@ -15,7 +15,12 @@ import pytest
 from botocore.exceptions import ClientError
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
-from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path, is_mrap_path
+from boto3_s3.pathresolver import (
+    S3PathResolver,
+    has_underlying_s3_path,
+    is_mrap_path,
+    is_s3express_path,
+)
 from tests.utils.fakes3 import client_error
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
@@ -96,6 +101,20 @@ class TestIsMrapPath:
         # and the stream sentinel must fall out quietly.
         assert not is_mrap_path("./local/file.txt")
         assert not is_mrap_path("-")
+
+
+class TestIsS3ExpressPath:
+    def test_only_the_scheme_qualified_suffix_matches(self) -> None:
+        # The sigv4-s3express stand-down (the CLI's clientfactory) keys on the
+        # bucket suffix, but only under the s3:// scheme: raw positionals may
+        # be local paths, and a local name can plausibly end in --x-s3.
+        assert is_s3express_path("s3://mybkt--use1-az4--x-s3/k.txt")
+        assert is_s3express_path("s3://mybkt--use1-az4--x-s3")
+        assert not is_s3express_path("s3://plain-bucket/k.txt")
+        assert not is_s3express_path("s3://plain-bucket/inner--x-s3")  # key, not bucket
+        assert not is_s3express_path("./backup--x-s3")
+        assert not is_s3express_path("backup--x-s3")
+        assert not is_s3express_path("-")
 
 
 class TestResolve:

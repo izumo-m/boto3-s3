@@ -26,6 +26,7 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.localstorage import translate_os_error
+from boto3_s3.pathresolver import is_s3express_path
 from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     clientfactory,
@@ -450,14 +451,6 @@ def validate_no_overwrite_supported(
     reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")
     if reason is not None:
         raise ValidationError(reason, operation=operation)
-
-
-def is_s3express_path(path: str) -> bool:
-    """Whether an ``s3://`` path names an S3 Express directory bucket
-    (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix)."""
-    if not path.startswith("s3://"):
-        return False
-    return S3Storage.split_bucket_key(path[len("s3://") :])[0].endswith("--x-s3")
 
 
 def resolve_case_conflict(

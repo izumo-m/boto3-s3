@@ -91,7 +91,8 @@ the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
-`pathresolver`'s MRAP probe `is_mrap_path`). What the in-repo CLI needs, an external
+`pathresolver`'s pin stand-down probes `is_mrap_path` /
+`is_s3express_path`). What the in-repo CLI needs, an external
 compatible-tool author needs too (overview.md's mission), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
 by `tests/cli/unit/test_library_surface.py`, which walks every `boto3_s3`
@@ -170,10 +171,13 @@ These implement the policy in
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
      regions that accept SigV2 (us-east-1), but SigV2 does not exist in aws v2's
      botocore. `Config(signature_version="s3v4")` is set for every command whose
-     positionals name no MRAP ARN (`--no-sign-request` overrides it with
-     UNSIGNED). For an MRAP target the pin stands down: an explicit
-     `signature_version` suppresses botocore's auth-scheme resolution, which
-     must pick asymmetric SigV4a there (item 4).
+     positionals name no MRAP ARN and no S3 Express directory bucket
+     (`--no-sign-request` overrides it with UNSIGNED). For those two targets
+     the pin stands down: an explicit `signature_version` suppresses botocore's
+     auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP
+     (item 4) and `sigv4-s3express` (with `CreateSession` credentials) for a
+     directory bucket - a pinned `s3v4` matches either scheme name up to the
+     first dash and would silently sign a plain SigV4 request instead.
   3. **us-east-1 regional endpoint** - aws v2 resolves us-east-1 as regional
      (`s3.us-east-1.amazonaws.com`). `s3={"us_east_1_regional_endpoint":
      "regional"}` is set permanently.
