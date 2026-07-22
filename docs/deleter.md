@@ -126,7 +126,12 @@ versioned bucket) cannot be mapped back to submission order.
   that is observationally equivalent for ordinary keys: deleting a nonexistent
   key is treated as "success" on both sides (`DeleteObject` returns 204 for a
   missing key, and `DeleteObjects` likewise reports no error), and per-key
-  success and failure are preserved. A key containing XML 1.0-forbidden controls, surrogate code points,
+  success and failure are preserved. The equivalence bounds the *success* path:
+  when the producing listing/comparison dies mid-run (both sides exit nonzero),
+  the partial S3 state differs - aws has already issued a per-key delete for
+  everything enumerated, while the body exception here abandons the unsent
+  buffer (up to `batch_size - 1` entries; `close(flush=False)`, consistent
+  with the fatal-cancel contract in [`opresult.md`](./opresult.md)). A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys.
