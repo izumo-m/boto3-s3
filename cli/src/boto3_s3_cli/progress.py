@@ -1,7 +1,9 @@
 """The transfer result/progress printer (``aws s3`` ``ResultPrinter`` parity).
 
 ``TransferPrinter`` consumes the library's ``on_result`` / ``on_progress``
-callbacks - fired from s3transfer worker threads - and renders aws-style
+callbacks - fired from s3transfer worker threads for submitted work, inline
+on the submitting thread for non-submitting records (dryrun / skip /
+notice) - and renders aws-style
 lines:
 
 - results (stdout): ``upload: ./a.txt to s3://b/k`` with the ``(dryrun)``
@@ -24,7 +26,9 @@ Rendering is decoupled from the transfer workers, aws-cli's results-pipeline
 shape (its ``ResultProcessor`` thread): the worker-side callbacks only update
 the counters (always exact, independent of rendering) and
 enqueue a slim record; one dedicated printer thread drains the queue and does
-every ``write``/``flush``, so console I/O never blocks a worker. Because a
+every ``write``/``flush``, so console I/O never blocks a worker while the
+queue has room (the bounded-queue paragraph below is the deliberate
+exception). Because a
 single thread renders in queue order, line ordering and the ``\\r`` padding
 protocol are exactly the single-threaded behavior. Use the printer as a
 context manager around the run: ``__exit__`` drains and joins the thread, so
@@ -40,7 +44,10 @@ records behind (e.g. ``sync`` piped into a stopped pager) back-pressures the
 transfer instead (documented in docs/aws-cli-option-handling.md section 6).
 
 Suppression matrix (rm's ``_DeletePrinter`` precedent): ``--quiet``
-builds no output at all - failures included - while the ``warned`` counter
+builds no output at all - failures included, with one aws-matching
+exception: the case-conflict NOTICE advisories still print (aws writes
+them straight to stderr, bypassing its printers; docs/cli.md) - while the
+``warned`` counter
 still feeds the exit code (rc 2; a failure's rc 1 comes from the library's
 ``BatchError``, so ``failed`` is observational only, kept exact all the
 same); ``--only-show-errors`` drops successes
@@ -212,7 +219,7 @@ class TransferPrinter:
             except queue.Empty:
                 break
 
-    # -- callbacks (worker threads: count and enqueue, never write) -----------
+    # -- callbacks (worker / submitting threads: count and enqueue, never write) --
 
     def on_progress(self, progress: TransferProgress) -> None:
         """Update thread-safe byte/file totals and enqueue a throttled meter snapshot."""
@@ -268,6 +275,14 @@ class TransferPrinter:
                 if result.outcome in (OpOutcome.SUCCEEDED, OpOutcome.FAILED, OpOutcome.CANCELLED):
                     self._finished_files += 1
                     inflight = self._inflight.pop(result.compare_key, None)
+                    if inflight is None:
+                        # A record that never emitted progress - sync's deletes
+                        # ride on_result alone, with no queue-time signal -
+                        # joins the expected total at its terminal, so the
+                        # meter's `remaining` stays non-negative and the file
+                        # total counts deletes like aws's (which counts them
+                        # via its queued results).
+                        self._expected_files += 1
                     if result.outcome is not OpOutcome.SUCCEEDED and inflight is not None:
                         # aws adds a failed file's untransferred remainder to the
                         # meter (results.py bytes_failed_to_transfer) so the byte

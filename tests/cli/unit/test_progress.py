@@ -209,6 +209,23 @@ class TestCarriageReturnProtocol:
             printer.on_result(_result(OpOutcome.SKIPPED, key="never-queued"))
         assert printer._skipped_files == 0
 
+    def test_delete_results_do_not_underflow_remaining(self) -> None:
+        # sync's deletes ride on_result alone (no queue-time progress signal),
+        # so each terminal joins the expected total as it finishes - the
+        # meter's "remaining" stays non-negative and the file total counts
+        # deletes, as aws's queued delete results do.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("c", 0, 10))  # one real, queued transfer
+            for key in ("d1", "d2", "d3"):
+                printer.on_result(
+                    _result(OpOutcome.SUCCEEDED, transfer_type=TransferType.DELETE, key=key)
+                )
+            expected = printer._expected_files
+            finished = printer._finished_files
+            skipped = printer._skipped_files
+        assert expected == 4  # the transfer plus the three deletes
+        assert expected - finished - skipped == 1  # only the transfer remains
+
     def test_multiline_progress_uses_newlines(self, capsys: pytest.CaptureFixture[str]) -> None:
         with TransferPrinter(multiline=True) as printer:
             printer.on_progress(_progress("a.txt", 0, 1024))
