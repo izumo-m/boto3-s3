@@ -42,12 +42,16 @@ def fast_parse_timestamp(value: Any) -> datetime:
     through `datetime.fromisoformat` (~100x faster than the dateutil walk
     botocore falls back to); everything else - RFC 822 header dates, epoch
     numbers, a lowercase ``z`` suffix - falls through to botocore's own
-    `parse_timestamp` untouched. For every input both paths accept the
+    `parse_timestamp` untouched. The fast path requires a ``-`` in the
+    string: a digit-only string like ``"20200101"`` is an epoch-seconds
+    value to botocore, while Python 3.11+'s `fromisoformat` would read it
+    as a basic-format date - the guard keeps such inputs on botocore's
+    interpretation on every Python. For every input both paths accept the
     returned value is equal; only the tzinfo class differs
     (`datetime.timezone.utc` instead of dateutil's ``tzutc``), which
     compares, subtracts, and formats identically.
     """
-    if isinstance(value, str):
+    if isinstance(value, str) and "-" in value:
         text = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
             return datetime.fromisoformat(text)

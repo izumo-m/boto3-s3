@@ -85,10 +85,14 @@ _AWS_ACCESS_KEY_ID_PARAM_RE = re.compile(
 # the S3 Express (directory bucket) auth flow - the CreateSession-minted
 # session token botocore signs every zonal request with (its response-body twin
 # is already covered by the ``<SessionToken>`` / ``'SessionToken':`` patterns
-# below).
+# below). The bare ``SecurityToken`` form is stock botocore's SigV2 query
+# parameter (its us-east-1 presign downgrade and other legacy signers put the
+# session token there, no ``x-amz-`` prefix); the word boundary keeps
+# ``XSecurityToken``-style superstrings unmatched, and the quote-or-separator
+# anchor keeps XML ``<SessionToken>`` to its own pattern.
 _TOKEN_VALUE = r"[^\s'\"&,\\}]+"
 _SECURITY_TOKEN_RE = re.compile(
-    rf"(?P<key>x-amz-(?:security|s3session)-token['\"]?\s*[:=]\s*(?:b?['\"])?)"
+    rf"(?P<key>(?:x-amz-(?:security|s3session)-token|\bSecurityToken)['\"]?\s*[:=]\s*(?:b?['\"])?)"
     rf"(?P<val>{_TOKEN_VALUE})",
     re.IGNORECASE,
 )

@@ -69,6 +69,13 @@ class TestFastParseTimestamp:
     def test_non_iso_forms_delegate_to_botocore(self, value: Any) -> None:
         assert fast_parse_timestamp(value) == parse_timestamp(value)
 
+    def test_digit_only_strings_stay_on_botocore_epoch_semantics(self) -> None:
+        # "20200101" is epoch seconds to botocore, but Python 3.11+'s
+        # fromisoformat would read it as the basic-format date 2020-01-01;
+        # the fast path's requires-a-dash guard keeps such inputs on
+        # botocore's interpretation on every Python version.
+        assert fast_parse_timestamp("20200101") == parse_timestamp("20200101")
+
     def test_invalid_input_raises_like_botocore(self) -> None:
         with pytest.raises(ValueError):
             parse_timestamp("not a timestamp")

@@ -393,8 +393,10 @@ class LocalFileGenerator:
         directory's files can only surface once its ``os.scandir`` has been read in
         full and sorted (the byte-order sort appends ``os.sep`` to directory names,
         so ``foo.txt`` precedes ``foo/bar``), and they are handed off just before
-        the next descent's scandir. That aligns each page with one directory read,
-        so a consumer - e.g. ``Storage.scan``'s prefetch worker - overlaps the next
+        the next descent's scandir. So a page never spans two directory reads
+        (one scandir hands off a page per descent boundary - several for a
+        directory with interleaved sub-directories), and a consumer -
+        e.g. ``Storage.scan``'s prefetch worker - overlaps the next
         read on a network-mounted path, the reason the walk is paged at all. The
         pages concatenate to ``list_files``'s flat stream. The ``root`` parameter
         is the absolute directory path with a trailing ``os.sep``; each
@@ -1201,7 +1203,8 @@ class LocalStorage(Storage):
         ``follow_symlinks`` / ``detect_symlink_loops`` /
         ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
-        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto this.
+        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``, plus
+        the application's ``wait_on_interrupt`` posture) onto this.
         The single-path ``get_fileinfo`` does not build these options - it reads
         ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """
@@ -1412,6 +1415,9 @@ class LocalStorage(Storage):
             mtime = _EPOCH
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
+            # A directory target carries its real kind (the FileInfo contract;
+            # the transfer routes still hand it through to fail like aws).
+            kind=FileKind.DIRECTORY if stat_module.S_ISDIR(st.st_mode) else FileKind.FILE,
             size=size,
             mtime=mtime,
             stat_result=st,
@@ -1481,7 +1487,9 @@ class LocalStorage(Storage):
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see ``open``).
         Whether a symlink is followed is the storage's own ``follow_symlinks``
-        config (constructor), like every scan this backend makes.
+        config (constructor), like every scan built from
+        ``default_scan_options`` (a caller-supplied ``LocalScanOptions``
+        carries its own settings instead).
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)

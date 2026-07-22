@@ -103,6 +103,18 @@ class TestMaskTextNotation:
         assert "X-Amz-Security-Token=***" in out
         assert "X-Amz-Expires=60" in out
 
+    def test_sigv2_security_token_query_form(self) -> None:
+        # Stock botocore's SigV2 signers (its us-east-1 presign downgrade) put
+        # the session token in a bare `SecurityToken` query parameter - no
+        # x-amz- prefix; a listing continuation token must stay visible.
+        out = m.mask_text(
+            f"https://b/k?AWSAccessKeyId=AKIA1234567890ABCDEF&SecurityToken={SESSION_TOKEN}"
+            "&ContinuationToken=abcdef123456"
+        )
+        assert SESSION_TOKEN not in out
+        assert "SecurityToken=***" in out
+        assert "ContinuationToken=abcdef123456" in out
+
     def test_sso_bearer_token_dict_repr_header(self) -> None:
         # botocore's `sso GetRoleCredentials` request carries the bearer token
         # in the x-amz-sso_bearer_token header, logged at DEBUG - the secret
