@@ -68,6 +68,34 @@ class _Uncloseable:
             flush()
 
 
+class _WriteOnly:
+    """Write-only binary view of process stdout (aws-cli's ``StdoutBytesWriter``).
+
+    Exposing only ``write`` forces s3transfer's non-seekable download path,
+    which orders ranged chunks before writing them out. A redirected stdout
+    can report ``seekable()`` (a regular file) while ``>>`` opened it
+    ``O_APPEND``, where every write lands at the end regardless of the seeked
+    position - a seek-based parallel download would then interleave chunks in
+    completion order. aws always streams stdout sequentially, so this view
+    does too. ``close`` flushes and leaves the process stream open
+    (``_Uncloseable``'s contract).
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+
+    def write(self, data: Any) -> int:
+        return self._raw.write(data)
+
+    def flush(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush is not None:
+            flush()
+
+    def close(self) -> None:
+        self.flush()
+
+
 class _NonSeekable:
     """Read-only binary view that hides ``seek`` (aws-cli's ``NonSeekableStream``).
 
@@ -231,7 +259,10 @@ class StdioStorage(IOStorage):
     """The process's stdio as a ``Storage``: ``sys.stdin`` to read, ``sys.stdout`` to write.
 
     A source ``open("rb")`` reads ``sys.stdin.buffer`` (forced non-seekable); a
-    destination ``open("wb")`` writes ``sys.stdout.buffer``. The stream is chosen
+    destination ``open("wb")`` writes ``sys.stdout.buffer`` through a
+    write-only view (`_WriteOnly`, aws's ``StdoutBytesWriter``), so a
+    download always streams sequentially even when stdout is redirected to
+    a seekable file. The stream is chosen
     by ``mode`` at ``open`` time, so a single instance serves either direction and
     picks up a redirected ``sys.stdin`` / ``sys.stdout``. If the selected process
     stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
@@ -262,7 +293,7 @@ class StdioStorage(IOStorage):
                 "stdout is required for this operation, but is not available.",
                 operation="cp",
             )
-        return cast("BinaryIO", _Uncloseable(getattr(stdout, "buffer", stdout)))
+        return cast("BinaryIO", _WriteOnly(getattr(stdout, "buffer", stdout)))
 
 
 __all__ = ["IOStorage", "StdioStorage"]

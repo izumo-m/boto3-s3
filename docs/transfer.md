@@ -340,7 +340,12 @@ The caller's stream is never closed by `IOStorage`.
 - **download**: provides neither size nor etag -> s3transfer self-probes with
   HeadObject before GetObject (exactly aws's stream wire shape). Directory
   creation and the mtime stamp are not performed (section 5 is for path destinations
-  only).
+  only). `StdioStorage`'s stdout writer is a **write-only** view (aws's
+  `StdoutBytesWriter`), so s3transfer always takes its non-seekable path and
+  writes ranged chunks in order - a redirected stdout can report seekable
+  while `>>` opened it `O_APPEND`, where seek-based parallel writes would
+  interleave. An `IOStorage` (caller-supplied stream) keeps the stream's own
+  seekability: the caller chose the object, so its protocol governs.
 - The display renders the stream side as `-` (`src_display` / `dest_display`).
   The `BatchError` on failure is `1 of 1 transfers failed`.
 

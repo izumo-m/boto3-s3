@@ -135,6 +135,20 @@ class TestStdioStorage:
         assert stdout.buffer.getvalue() == b"hi"
         assert not stdout.buffer.closed
 
+    def test_write_view_is_write_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws-cli's StdoutBytesWriter shape: exposing only write forces
+        # s3transfer's non-seekable download path, which orders ranged chunks
+        # before writing. A redirected stdout can report seekable (a regular
+        # file) while `>>` opened it O_APPEND - every write then lands at the
+        # end regardless of the seeked position, so a seek-based parallel
+        # download would interleave chunks in completion order.
+        stdout = _Stdio()
+        assert stdout.buffer.seekable()  # the hazard: the raw stream IS seekable
+        monkeypatch.setattr("sys.stdout", stdout)
+        writer = StdioStorage().open("k", "wb")
+        assert not hasattr(writer, "seek")
+        assert not hasattr(writer, "seekable")
+
     def test_read_picks_stdin_buffer_forced_non_seekable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
