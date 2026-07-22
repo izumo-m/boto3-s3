@@ -16,7 +16,8 @@ checksum is one S3 already stores), works against objects any tool uploaded with
 a checksum, is exact for multipart objects (the part sizes come back from
 GetObjectAttributes, so there is no part-size to guess), and works for SSE
 objects (a checksum is independent of encryption, unlike an ETag). The cost is
-one ``GetObjectAttributes`` round-trip per object compared.
+one ``GetObjectAttributes`` round-trip per object compared (plus continuation
+pages only when a many-part COMPOSITE ``ObjectParts`` listing truncates).
 
 This is a standalone, opt-in building block: it lives in its own module, is
 imported by submodule path (``from boto3_s3.checksumcompare import
@@ -29,8 +30,10 @@ It is a replacement ``update_filter=`` strategy, not composed with the default:
 ``S3.sync(update_filter=ChecksumComparison(s3, src, dest))`` decides every update pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
-down by the default), at the price of a GetObjectAttributes + local hash on
-every both-sides pair (the size pre-check still skips differing sizes for free).
+down by the default), at the price of a GetObjectAttributes + readable-side
+hash on every upload / download pair - an s3-to-s3 pair instead costs one
+GetObjectAttributes per side and reads no bytes (the size pre-check still
+skips differing sizes for free).
 
 Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` (hashlib) are
 always available. ``crc32c`` / ``crc64nvme`` use ``awscrt`` when it is installed
@@ -94,8 +97,10 @@ _LITTLE = sys.byteorder == "little"
 class ChecksumComparison(ContentComparison):
     """A native-checksum content ``PairFilter`` (``True`` = copy).
 
-    Copies a pair when the destination's
-    stored S3 checksum does not match the source's content. It judges
+    Copies a pair when the S3 side's stored checksum does not match the
+    readable side's content - upload: the destination's checksum against the
+    source's bytes; download: the source's checksum against the destination's
+    bytes; s3-to-s3: the two stored checksums against each other. It judges
     ``SyncPair``s - both sides present by construction (a new, source-only entry
     is ``create_filter``'s lane). An upload / download reads
     the remote
@@ -187,15 +192,26 @@ class ChecksumComparison(ContentComparison):
         key = readable.compare_key
         if storage is None or key is None:
             return True  # cannot open the readable side -> treat as differing (copy)
-        with storage.open(key, "rb") as fh:
-            if remote_checksum.part_sizes is not None:
-                # None = the readable side outruns the parts sum (an appended
-                # tail): definitely different content, whatever the digests say.
-                readable_value = _composite_b64(
-                    fh, remote_checksum.algorithm, remote_checksum.part_sizes
-                )
-            else:
-                readable_value = _whole_b64(fh, remote_checksum.algorithm)
+        try:
+            with storage.open(key, "rb") as fh:
+                if remote_checksum.part_sizes is not None:
+                    # None = the readable side outruns the parts sum (an appended
+                    # tail): definitely different content, whatever the digests say.
+                    readable_value = _composite_b64(
+                        fh, remote_checksum.algorithm, remote_checksum.part_sizes
+                    )
+                else:
+                    readable_value = _whole_b64(fh, remote_checksum.algorithm)
+        except OSError as exc:
+            # LocalStorage.open translates its own open failure, but a fault
+            # *mid-read* (or on close) is a raw OSError from the stream; keep
+            # the module's promise that a local read failure surfaces as a
+            # taxonomy error. A custom backend's own exceptions pass through
+            # as that backend's error, unchanged. (Deferred import: this
+            # module stays SDK-free at import time.)
+            from boto3_s3.localstorage import translate_os_error
+
+            raise translate_os_error(exc, operation="sync", key=key) from exc
         return readable_value != remote_checksum.value
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
@@ -321,7 +337,9 @@ def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) ->
 
     ``crc32`` / ``sha1`` / ``sha256`` always. ``crc32c`` / ``crc64nvme`` always
     with ``awscrt``; without it the bundled pure-Python path can, but
-    ``pure_max_size`` may cap it (a larger object reads as indeterminate -> copy).
+    ``pure_max_size`` may cap it (a larger - or unknown-size - object reads as
+    indeterminate -> copy; the cap is a hard bound on the slow fallback, so a
+    size it cannot check counts as above it).
     Any other (future) algorithm is uncomputable.
     """
     if algorithm in ("crc32", "sha1", "sha256"):
@@ -330,7 +348,7 @@ def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) ->
         return False
     if _crc_has_awscrt(algorithm):
         return True
-    return pure_max_size is None or size is None or size <= pure_max_size
+    return pure_max_size is None or (size is not None and size <= pure_max_size)
 
 
 # -- local checksum computation ------------------------------------------------

@@ -654,6 +654,17 @@ class TestHelperUnits:
     def test_can_compute_unknown_algorithm(self) -> None:
         assert _can_compute("xxhash64", None, None) is False
 
+    def test_can_compute_unknown_size_counts_as_above_the_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The cap is a hard bound on the slow pure-Python fallback: a size it
+        # cannot check (a custom backend's listing without sizes) reads as
+        # above it - indeterminate -> copy - never an unbounded hash. Without
+        # a cap, unknown sizes still compute.
+        monkeypatch.setattr("boto3_s3.checksumcompare._crc_has_awscrt", lambda _algo: False)
+        assert _can_compute("crc64nvme", None, pure_max_size=1024) is False
+        assert _can_compute("crc64nvme", None, pure_max_size=None) is True
+
 
 class TestPureCrcCanonical:
     """awscrt-independent: the CRC check value for the standard string."""

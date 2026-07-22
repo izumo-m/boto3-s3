@@ -350,7 +350,8 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   extra elsewhere (crt.md section 6): without it these still work, just slowly.
   Because that fallback is slow, **`pure_max_size`** caps it: above the cap, with
   no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
-  rather than being hashed. `None` (default) never caps.
+  rather than being hashed (an unknown size counts as above the cap - the
+  bound is hard). `None` (default) never caps.
 - **Endpoint injection.** `ChecksumComparison(s3, src, dest)` resolves the S3 side(s)
   for their client + bucket from the same `src` / `dest` passed to `sync`
   (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a

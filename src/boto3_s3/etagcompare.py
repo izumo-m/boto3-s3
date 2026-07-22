@@ -3,7 +3,8 @@
 ``S3.sync``'s update copy decision is a ``PairFilter`` (``True``
 copies the source). The default ``update_filter=None`` decides by size + last-modified,
 aws-cli style; ``EtagComparison`` decides by **content**,
-comparing S3's ETag against the ETag the source would carry:
+comparing S3's ETag against the ETag the readable (non-S3) side's bytes
+would carry:
 
 - an s3-to-s3 (COPY) pair compares the two listings' ETags directly - both are
   already known, so no bytes are read;
@@ -25,10 +26,12 @@ compute path, so ``import boto3_s3.etagcompare`` stays SDK-free.
 
 Two caveats are inherent to ETag comparison and are the caller's to manage:
 
-- **the part size must match the upload.** The strategy holds a single
-  ``part_size`` fixed at construction, so an object uploaded with a non-default
-  ``multipart_chunksize`` is recognized only when the same value is supplied;
-  otherwise every multipart object reads as differing and is re-copied (the same
+- **the part size must reproduce the upload's part boundaries.** The strategy
+  holds a single ``part_size`` fixed at construction, so a multipart object
+  uploaded with a non-default ``multipart_chunksize`` is recognized only when
+  the supplied value yields the same effective boundaries (supplying the same
+  chunksize is the reliable way; a single-part object compares regardless of
+  the setting); otherwise it reads as differing and is re-copied (the same
   constraint rclone documents for its chunk size). ``EtagComparison(s3)`` is the
   convenience for the common case - it reads ``part_size`` from that ``s3``'s
   profile - but the value is still fixed at construction, not this sync's live
@@ -37,8 +40,10 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   so a requested ``part_size`` below 5 MiB is clamped up.
 - **the object must be unencrypted or SSE-S3.** SSE-KMS / SSE-C / DSSE objects
   carry an opaque, non-MD5 ETag that cannot be reconstructed, and a listing does
-  not reveal an object's encryption - so against such a bucket this strategy
-  treats every object as differing and re-copies it each run. Use the default
+  not reveal an object's encryption - so an upload / download against such a
+  bucket treats every object as differing and re-copies it each run (an
+  s3-to-s3 pair compares the opaque strings directly, so identical strings -
+  rare, since re-encryption changes them - do skip). Use the default
   ``update_filter=None`` there instead.
 
 The copy decision runs on whatever thread drives the ``update_filter`` lane -
@@ -71,12 +76,16 @@ DEFAULT_PART_SIZE = 8 * 1024 * 1024
 class EtagComparison(ContentComparison):
     """A content-comparison ``PairFilter`` (``True`` = copy).
 
-    Copies a pair when the destination's S3
-    ETag does not match the source's content. It judges ``SyncPair``s - both
+    Copies a pair when the S3 side's ETag does not match the readable side's
+    content - upload: the destination's ETag against the source's bytes;
+    download: the source's ETag against the destination's bytes. It judges
+    ``SyncPair``s - both
     sides present by construction (a new, source-only entry is ``create_filter``'s
     lane): an s3-to-s3 pair compares the listings' ETags
-    directly; an upload / download reconstructs the readable (non-S3) side's
-    single- or multipart ETag (at ``part_size``) and compares. A missing / non-MD5
+    directly (as strings, whatever their form); an upload / download
+    reconstructs the readable (non-S3) side's
+    single- or multipart ETag (at ``part_size``) and compares - there, a
+    missing / non-MD5
     ETag is treated as differing (copy), so it never skips on an indeterminate
     comparison. It is a replacement ``update_filter=`` strategy - selected instead
     of the size+time default, not composed with it.
@@ -143,15 +152,25 @@ class EtagComparison(ContentComparison):
         key = readable.compare_key
         if storage is None or key is None:
             return True  # cannot open the readable side -> treat as differing (copy)
-        if "-" in remote_etag:
-            if readable.size is None:
-                return True  # need the size to reconstruct the multipart part split
-            chunk = _effective_part_size(self.part_size, readable.size)
-            with storage.open(key, "rb") as fh:
-                computed = _multipart_etag_at(fh, chunk_size=chunk)
-        else:
-            with storage.open(key, "rb") as fh:
-                computed = _file_md5_hex(fh)
+        try:
+            if "-" in remote_etag:
+                if readable.size is None:
+                    return True  # need the size to reconstruct the multipart part split
+                chunk = _effective_part_size(self.part_size, readable.size)
+                with storage.open(key, "rb") as fh:
+                    computed = _multipart_etag_at(fh, chunk_size=chunk)
+            else:
+                with storage.open(key, "rb") as fh:
+                    computed = _file_md5_hex(fh)
+        except OSError as exc:
+            # LocalStorage.open translates its own open failure; a fault
+            # *mid-read* (or on close) is a raw OSError from the stream. Keep
+            # the promise that a local read failure surfaces as a taxonomy
+            # error; a custom backend's own exceptions pass through unchanged.
+            # (Deferred import: this module stays SDK-free at import time.)
+            from boto3_s3.localstorage import translate_os_error
+
+            raise translate_os_error(exc, operation="sync", key=key) from exc
         return remote_etag != computed
 
 
@@ -169,7 +188,8 @@ def _file_md5_hex(fh: BinaryIO) -> str:
     """Single-part S3 ETag: the streamed hex MD5 of the whole stream.
 
     Reads ``fh`` (the readable side's open ``Storage.open`` stream) to end;
-    ``OSError`` from a read propagates (the caller ran the listing earlier).
+    ``OSError`` from a read propagates to the caller, which translates it
+    into the taxonomy.
     """
     hasher = hashlib.md5()
     for block in iter(lambda: fh.read(READ_CHUNK), b""):

@@ -22,8 +22,9 @@ knobs aws-cli keeps in its `[s3]` runtime config plus annotation staging:
 
 The extras are plain attributes (not part of the base `DEFAULTS` sentinel
 machinery) and default to `None`. The CRT tuning fields are ignored by the
-classic engine; `annotation_temp_dir` is read by the classic multipart-copy
-path only under `PRELOAD_TEMPFILE`. A plain
+classic engine; `annotation_temp_dir` is consulted by the classic
+multipart-copy path whenever `copy_props=ALL` staging is set up, but used
+(as the tempfile location) only under `PRELOAD_TEMPFILE`. A plain
 `boto3.s3.transfer.TransferConfig` remains accepted everywhere a config is
 taken - readers fall back to `None` for the extra fields.
 """
@@ -100,7 +101,11 @@ class TransferConfig(Boto3TransferConfig):
             )
             if value is not None
         }
-        if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
+        if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT and preferred_transfer_client is not None:
+            # Same only-when-set rule as the loop above: an omitted value lets
+            # the base ctor supply its own default ("auto" / its UNSET
+            # sentinel), so reading config.preferred_transfer_client sees the
+            # base's semantics, not a None the base never chose.
             base_kwargs["preferred_transfer_client"] = preferred_transfer_client
         super().__init__(**base_kwargs)  # pyright: ignore[reportArgumentType]
         if not _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:

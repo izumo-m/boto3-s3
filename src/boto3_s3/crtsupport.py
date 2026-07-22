@@ -109,7 +109,9 @@ class _CrtS3Client:
         self.endpoint_url = endpoint_url
         self.cred_wrapper = cred_wrapper  # None = unsigned client
         self.verify = verify  # _derive_verify's form: None / False / CA path
-        self.s3_config = s3_config  # the client Config's `s3` dict (or None)
+        # _serializer_config_shape's tuple: the Config facets the shared
+        # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags).
+        self.s3_config = s3_config
 
 
 def has_minimum_crt_version() -> bool:
@@ -251,6 +253,16 @@ def create_crt_transfer_manager(
     the ``Transferrer``); the CRT request serializer is built from it rather
     than a fresh one - see ``_botocore_session`` for why that matters.
     """
+    if config is None:
+        # CRTTransferManager itself accepts config=None but dereferences it at
+        # the first transfer (its args creator reads config.multipart_chunksize),
+        # and boto3 always hands the manager a real TransferConfig - so a
+        # zero-config caller reaching the CRT lane gets the same defaults the
+        # classic lane builds for itself. Deferred import: this module stays
+        # free of boto3 at import time.
+        from boto3_s3.transferconfig import TransferConfig
+
+        config = TransferConfig()
     crt_s3_client = _get_crt_s3_client(client, config, endpoint, session)
     if not _is_compatible_request(client, crt_s3_client, endpoint):
         return None
@@ -373,7 +385,24 @@ def _initialize(
         endpoint_url,
         cred_wrapper,
         create_kwargs["verify"],
-        getattr(client.meta.config, "s3", None),
+        _serializer_config_shape(client),
+    )
+
+
+def _serializer_config_shape(client: S3Client) -> tuple[Any, Any, Any]:
+    """The client-Config facets the shared serializer / CRT client bake in.
+
+    The ``s3`` dict (addressing style, accelerate/dualstack, us-east-1
+    regional form) plus the top-level fips / dualstack endpoint flags, which
+    shape URL resolution outside the ``s3`` dict. Compared by
+    `_is_compatible_request` so a later client with different URL-shaping
+    settings falls back to classic instead of riding the first client's.
+    """
+    config: Any = client.meta.config
+    return (
+        getattr(config, "s3", None),
+        getattr(config, "use_fips_endpoint", None),
+        getattr(config, "use_dualstack_endpoint", None),
     )
 
 
@@ -381,12 +410,13 @@ def _is_compatible_request(
     client: S3Client, crt_s3_client: _CrtS3Client | None, endpoint: str | None
 ) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
-    TLS-``verify`` / ``Config.s3``-shape pins.
+    TLS-``verify`` / Config-shape pins.
 
     The last two go beyond boto3's own check (region + credentials): the
     singleton CRT client holds the first client's ``verify`` and the shared
-    serializer its ``Config`` (addressing style, dualstack/accelerate,
-    us-east-1 regional form), so a later client differing in either would
+    serializer its ``Config`` (`_serializer_config_shape`: the ``s3`` dict
+    plus the fips / dualstack endpoint flags), so a later client differing in
+    either would
     silently transfer under the first one's TLS and URL-shaping settings.
     Incompatible means classic for that run, never a wrong-config CRT
     transfer.
@@ -399,7 +429,7 @@ def _is_compatible_request(
         return False
     if _derive_verify(client) != crt_s3_client.verify:
         return False
-    if getattr(client.meta.config, "s3", None) != crt_s3_client.s3_config:
+    if _serializer_config_shape(client) != crt_s3_client.s3_config:
         return False
     if _is_unsigned(client):
         return crt_s3_client.cred_wrapper is None
