@@ -128,7 +128,12 @@ _GLOB_MAGIC = ("*", "?", "[")
 
 
 def _needs_joined(
-    patterns: Sequence[GlobPattern], *, src_base: str, dest_base: str, both_s3: bool
+    patterns: Sequence[GlobPattern],
+    *,
+    src_base: str,
+    dest_base: str,
+    both_s3: bool,
+    dir_op: bool,
 ) -> bool:
     """Whether only the joined matching reproduces aws-cli for this command.
 
@@ -140,6 +145,13 @@ def _needs_joined(
     fire spuriously without changing behavior, only speed - so the conditions
     err toward firing:
 
+    - a single-object command (``dir_op`` false): the parent-derived base plus
+      the entry's basename ``compare_key`` does not always reconstruct the full
+      path - an empty component right before the basename (``s3://b/a//x``)
+      collapses in the join, so ``--exclude '?x'`` matched aws's ``b/a/?x``
+      against ``b/a//x`` (``?`` crosses the ``/``; measured on aws 2.36.1)
+      while the basename form saw only ``x``. The listing is a single entry,
+      so the joined engine costs nothing here;
     - a base contains a glob metacharacter: the base part of the joined pattern
       then matches glob-wise, not literally (``[1]`` in the operation path is a
       character class, and an unclosed ``[`` can even form one with pattern
@@ -153,6 +165,8 @@ def _needs_joined(
       can match them across sides (equal bases - rm's ``dest = src`` - are fine:
       the two joined forms coincide).
     """
+    if not dir_op:
+        return True
     if any(c in base for base in (src_base, dest_base) for c in _GLOB_MAGIC):
         return True
     for p in patterns:
@@ -246,6 +260,7 @@ def compile_filter(
         src_base=src_base,
         dest_base=dest_base,
         both_s3=isinstance(src, S3Storage) and isinstance(dest, S3Storage),
+        dir_op=dir_op,
     ):
         return _JoinedFilter(patterns, (src_base, dest_base), fold)
     # On Windows aws-cli's fnmatch normcases both the pattern and the key, so the
@@ -262,8 +277,9 @@ def _as_file_filter(matcher: Matcher) -> FileFilter:
     """Wrap a compiled globsieve matcher as the ``FileFilter`` the operations consume.
 
     The delegation target of ``compile_filter``'s equivalence fast path: only
-    relative patterns reach it (``_needs_joined`` routes anchored ones to
-    ``_JoinedFilter``), and a relative pattern matches the ``info.compare_key``
+    relative patterns on ``dir_op`` commands reach it (``_needs_joined`` routes
+    anchored patterns and every single-object command to ``_JoinedFilter``),
+    and a relative pattern matches the ``info.compare_key``
     that ``Storage.scan`` stamps on each entry. ``info.key`` is still passed as
     the ``Matcher`` protocol's ``full_key`` (inert for relative-only matchers).
     ``compare_key`` is always set in a filter context; ``None`` would mean the

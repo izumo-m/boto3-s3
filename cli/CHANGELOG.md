@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Matched aws-cli's deeper classic-download IO queue (1000 buffered chunks where boto3 defaults to 100).
 - Matched aws-cli's error attribution when a global option fails to parse: it now beats an invalid subcommand and `-h`, and `--version` beats both.
 - A fatal error mid-run now stops the queued transfers like aws-cli (previously they all completed before the fatal exit).
-- Matched aws-cli's `--exclude`/`--include` evaluation exactly: patterns are joined onto both sides' paths, so glob characters in the operation path and nested s3-to-s3 paths now filter like aws.
+- Matched aws-cli's `--exclude`/`--include` evaluation exactly: patterns are joined onto both sides' paths, so glob characters in the operation path, nested s3-to-s3 paths, and single-object keys with unusual shapes (doubled slashes) now filter like aws.
 - More aws-cli parity on option edge cases (`--metadata` shorthand csv quirks, `--expected-size` typing, website/rm paramfile forms), and console output now survives unencodable keys like aws.
 - Multi-Region Access Point targets now sign with SigV4A like aws (with the `crt` extra; without it they fail with a clear configuration error instead of an invalid signature).
 - Ctrl-C during a running transfer or delete now exits 1 with aws's `cancelled: ctrl-c received` line (previously 130; outside the run 130 stays).

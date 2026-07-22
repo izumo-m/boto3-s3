@@ -138,6 +138,30 @@ class TestJoinedParity:
         assert keep(crossed) is False
         assert keep(plain) is True
 
+    def test_single_object_empty_component_matches_like_aws(self) -> None:
+        # rm s3://b/a//x --exclude '?x' (measured on aws 2.36.1, offline
+        # dryrun): aws joins 'b/a/?x' and fnmatches the full path 'b/a//x',
+        # where '?' crosses the second '/', so the object is excluded. The
+        # basename compare_key 'x' cannot express that - the parent-derived
+        # base plus basename reconstructs 'b/a/x' - hence every single-object
+        # command routes to the joined engine.
+        target = S3Storage("s3://b/a//x")
+        keep = filters.compile_filter(
+            [GlobPattern.exclude("?x")], src=target, dest=target, dir_op=False
+        )
+        assert keep is not None
+        assert keep(FileInfo(key="a//x", compare_key="x", storage=target)) is False
+
+    def test_single_object_plain_key_is_not_excluded(self) -> None:
+        # The complement (same aws probe): rm s3://b/a/x --exclude '?x' still
+        # deletes - the joined 'b/a/?x' needs two characters after 'b/a/'.
+        target = S3Storage("s3://b/a/x")
+        keep = filters.compile_filter(
+            [GlobPattern.exclude("?x")], src=target, dest=target, dir_op=False
+        )
+        assert keep is not None
+        assert keep(FileInfo(key="a/x", compare_key="x", storage=target)) is True
+
 
 class TestNeedsJoined:
     """The equivalence proof conditions (the delegation gate)."""
@@ -147,16 +171,35 @@ class TestNeedsJoined:
     def test_plain_bases_delegate(self) -> None:
         assert (
             filters._needs_joined(
-                self._RELATIVE, src_base="/src", dest_base="bucket/data", both_s3=False
+                self._RELATIVE, src_base="/src", dest_base="bucket/data", both_s3=False, dir_op=True
             )
             is False
+        )
+
+    def test_single_object_command_needs_joined(self) -> None:
+        # dir_op False: base + basename compare_key does not always
+        # reconstruct the full path (an empty component before the basename
+        # collapses in the join), and the listing is one entry anyway.
+        assert (
+            filters._needs_joined(
+                self._RELATIVE,
+                src_base="bucket/data",
+                dest_base="bucket/data",
+                both_s3=True,
+                dir_op=False,
+            )
+            is True
         )
 
     def test_equal_s3_bases_delegate(self) -> None:
         # rm: dest = src; the two joined forms coincide.
         assert (
             filters._needs_joined(
-                self._RELATIVE, src_base="bucket/data", dest_base="bucket/data", both_s3=True
+                self._RELATIVE,
+                src_base="bucket/data",
+                dest_base="bucket/data",
+                both_s3=True,
+                dir_op=True,
             )
             is False
         )
@@ -165,7 +208,7 @@ class TestNeedsJoined:
     def test_glob_metacharacter_in_a_base(self, base: str) -> None:
         assert (
             filters._needs_joined(
-                self._RELATIVE, src_base=base, dest_base="bucket/plain", both_s3=True
+                self._RELATIVE, src_base=base, dest_base="bucket/plain", both_s3=True, dir_op=True
             )
             is True
         )
@@ -173,7 +216,11 @@ class TestNeedsJoined:
     def test_absolute_pattern(self) -> None:
         assert (
             filters._needs_joined(
-                [GlobPattern.exclude("/data/*")], src_base="/src", dest_base="b/d", both_s3=False
+                [GlobPattern.exclude("/data/*")],
+                src_base="/src",
+                dest_base="b/d",
+                both_s3=False,
+                dir_op=True,
             )
             is True
         )
@@ -181,7 +228,11 @@ class TestNeedsJoined:
     def test_nested_s3_bases(self) -> None:
         assert (
             filters._needs_joined(
-                self._RELATIVE, src_base="b/data", dest_base="b/data/backup", both_s3=True
+                self._RELATIVE,
+                src_base="b/data",
+                dest_base="b/data/backup",
+                both_s3=True,
+                dir_op=True,
             )
             is True
         )
@@ -190,7 +241,7 @@ class TestNeedsJoined:
         # 'b/data' vs 'b/data2': not nested once '/'-terminated.
         assert (
             filters._needs_joined(
-                self._RELATIVE, src_base="b/data", dest_base="b/data2", both_s3=True
+                self._RELATIVE, src_base="b/data", dest_base="b/data2", both_s3=True, dir_op=True
             )
             is False
         )
@@ -212,7 +263,9 @@ class TestDelegationEquivalence:
         src_base = filters._storage_base(src, True)
         dest_base = filters._storage_base(dest, True)
         assert (
-            filters._needs_joined(patterns, src_base=src_base, dest_base=dest_base, both_s3=False)
+            filters._needs_joined(
+                patterns, src_base=src_base, dest_base=dest_base, both_s3=False, dir_op=True
+            )
             is False
         )
         fast = filters.compile_filter(patterns, src=src, dest=dest, dir_op=True)
