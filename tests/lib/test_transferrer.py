@@ -48,7 +48,7 @@ from boto3_s3.types import (
     TransferType,
 )
 from tests.utils.fakemodel import model_only_client
-from tests.utils.fakes3 import client_error
+from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC_CONFIG = TransferConfig(use_threads=False)
@@ -143,7 +143,9 @@ class TestUpload:
         item = TransferItem(
             compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
-        _, _, results, _ = _run(TransferType.UPLOAD, [item], [{}])
+        # A realistic PutObject response carries an ETag; extra_info must stay
+        # None anyway (the response is discarded, not mined for the ETag).
+        _, _, results, _ = _run(TransferType.UPLOAD, [item], [{"ETag": '"abc123"'}])
         assert results[0].extra_info is None
 
     def test_multipart_upload_sequence(self, tmp_path: Path) -> None:
@@ -546,7 +548,7 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {},  # HeadObject
             {"TagSet": []},
-            {"Annotations": [{"AnnotationName": "ann1"}]},
+            {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
             {"AnnotationPayload": io.BytesIO(b"payload")},
         ]
         calls, source_calls, _, transferrer = _run(
@@ -593,10 +595,10 @@ class TestCopy:
             {},  # HeadObject
             {"TagSet": []},
             {
-                "Annotations": [{"AnnotationName": "ann1"}],
+                "Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}],
                 "NextContinuationToken": "next",
             },
-            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"Annotations": [{"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7}]},
             {"AnnotationPayload": io.BytesIO(b"one")},
             {"AnnotationPayload": io.BytesIO(b"two")},
         ]
@@ -633,7 +635,10 @@ class TestCopy:
                 {"CopyPartResult": {"ETag": '"p1"'}},
                 {"CopyPartResult": {"ETag": '"p2"'}},
                 {"ETag": '"dest-etag"'},
-                {},  # native-path failure cleanup AbortMultipartUpload
+                # The real wire outcome: the upload id was already completed,
+                # so s3transfer's cleanup abort gets NoSuchUpload (404) - and
+                # must swallow it without disturbing the recorded failure.
+                client_error("NoSuchUpload", 404, "AbortMultipartUpload"),
             ],
             source_responses=[
                 {},
@@ -700,10 +705,10 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {"TagSet": []},
             {
-                "Annotations": [{"AnnotationName": "ann1"}],
+                "Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}],
                 "NextContinuationToken": "next",
             },
-            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"Annotations": [{"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7}]},
             {"AnnotationPayload": io.BytesIO(b"one")},
             {"AnnotationPayload": io.BytesIO(b"two")},
         ]
@@ -756,8 +761,8 @@ class TestCopy:
                 {"TagSet": []},
                 {
                     "Annotations": [
-                        {"AnnotationName": "ann1"},
-                        {"AnnotationName": "ann2"},
+                        {"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7},
+                        {"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7},
                     ]
                 },
                 {"AnnotationPayload": io.BytesIO(b"first")},
@@ -805,7 +810,7 @@ class TestCopy:
             [],
             source_responses=[
                 {"TagSet": []},
-                {"Annotations": [{"AnnotationName": "ann1"}]},
+                {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
                 client_error("AccessDenied", 403, "GetObjectAnnotation"),
             ],
             options=TransferOptions(
@@ -1097,6 +1102,10 @@ class TestNoOverwrite:
             options=TransferOptions(no_overwrite=True, metadata_directive="REPLACE"),
         )
         assert "IfNoneMatch" not in calls[0].params
+        # The conditional write rides only the completing call: neither part
+        # copy may carry it (aws puts IfNoneMatch on CompleteMultipartUpload).
+        assert "IfNoneMatch" not in calls[1].params
+        assert "IfNoneMatch" not in calls[2].params
         assert calls[3].params["IfNoneMatch"] == "*"
 
 
@@ -1139,7 +1148,7 @@ class TestMove:
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
-        # The mtime stamp still lands (after the delete in our ordering).
+        # The mtime stamp lands (registered before the delete, aws's order).
         assert item.mtime is not None
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
@@ -1560,8 +1569,10 @@ class TestStreams:
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
         assert ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
-        # The provided size reaches the future (aws ProvideSizeSubscriber) and
-        # SUCCEEDED reports it, unlike the size-less streaming upload above.
+        # SUCCEEDED reports the item's size, unlike the size-less streaming
+        # upload above. (This asserts the record, not _ProvideSize's delivery:
+        # the probe-skip that delivery buys is pinned by the cp download tests'
+        # call sequences - GetObject with no HeadObject when size+etag ride.)
         assert results[0].bytes_transferred == 4
 
     def test_stream_download_probes_then_writes(self) -> None:

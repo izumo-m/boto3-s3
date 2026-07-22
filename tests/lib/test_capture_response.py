@@ -80,7 +80,7 @@ class TestWriteSlot:
         write = cast("dict[str, Any]", out[0].extra_info)["write"]
         # CompleteMultipartUpload shape (Bucket/Key/Location) - not an UploadPart
         # or PutObject response; the intermediate multipart calls are not observed.
-        assert {"Bucket", "Key", "ETag"} <= set(write)
+        assert {"Bucket", "Key", "ETag", "Location"} <= set(write)
         assert cast("dict[str, Any]", out[0].extra_info)["ETag"] == write["ETag"]
 
     def test_copy_captures_copyobject_and_unwraps_etag(
@@ -175,8 +175,8 @@ class TestBackwardCompatWhenOff:
         S3().cp(f"s3://{BUCKET}/a.txt", f"s3://{BUCKET}/b.txt", on_result=cb)
         info = out[0].extra_info
         assert info is not None
-        assert "write" not in info
-        assert "ETag" in info
+        # ETag only - no response slot of any kind may ride without the flag.
+        assert set(info) == {"ETag"}
 
 
 class TestClientHygiene:
@@ -361,9 +361,8 @@ class TestMvDeleteSlot:
         S3().mv(f"s3://{BUCKET}/a.txt", f"s3://{BUCKET}/b.txt", on_result=cb)
         info = out[0].extra_info
         assert info is not None
-        assert "write" not in info
-        assert "delete" not in info
-        assert "ETag" in info
+        # ETag only - neither the write, delete, nor any other slot rides.
+        assert set(info) == {"ETag"}
 
 
 class TestRmDeleteSlot:
@@ -378,9 +377,14 @@ class TestRmDeleteSlot:
         assert len(out) == 3
         for r in out:
             info = cast("dict[str, Any]", r.extra_info)
-            # the batch DeleteObjects entry, reconstructed to a DeleteObject shape
+            # the batch DeleteObjects entry, reconstructed to a DeleteObject
+            # shape: no raw Key, the marker id renamed to VersionId (never the
+            # batch wire form's DeleteMarkerVersionId).
             assert "delete" in info
             assert info["delete"].get("DeleteMarker") is True
+            assert "Key" not in info["delete"]
+            assert "DeleteMarkerVersionId" not in info["delete"]
+            assert "VersionId" in info["delete"]
 
     def test_rm_single_key_blind_carries_delete_slot(self, s3_client: Any) -> None:
         s3_client.put_bucket_versioning(
@@ -446,8 +450,9 @@ class TestReadSlot:
         )
         info = cast("dict[str, Any]", out[0].extra_info)
         assert "read" in info
-        # the range-specific fields of a partial GET are dropped
+        # both range-specific fields of a partial GET are dropped
         assert "ContentRange" not in info["read"]
+        assert "ContentLength" not in info["read"]
         assert info["read"]["ETag"] == _etag(big)
 
     def test_download_without_flag_keeps_etag_only(self, s3_client: Any, tmp_path: Path) -> None:
@@ -456,8 +461,8 @@ class TestReadSlot:
         S3().cp(f"s3://{BUCKET}/a.txt", str(tmp_path / "a.txt"), on_result=cb)
         info = out[0].extra_info
         assert info is not None
-        assert "read" not in info
-        assert "ETag" in info
+        # ETag only - the read slot (or anything else) may not ride.
+        assert set(info) == {"ETag"}
 
     def test_filter_source_read_never_wins_the_read_slot(
         self, s3_client: Any, tmp_path: Path
@@ -517,14 +522,27 @@ class TestSyncDelete:
         info = cast("dict[str, Any]", out[0].extra_info)
         assert "delete" in info  # the batched DeleteObjects entry, reconstructed
         assert info["delete"].get("DeleteMarker") is True
+        # DeleteObject-shaped: no raw Key, the marker id under VersionId.
+        assert "Key" not in info["delete"]
+        assert "DeleteMarkerVersionId" not in info["delete"]
+        assert "VersionId" in info["delete"]
 
 
 def test_capture_response_forces_classic_engine(
-    s3_client: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    s3_client: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # capture rides the botocore client events the CRT data plane bypasses, so a
     # capture upload skips the CRT manager and takes the classic engine - logged
     # as a breadcrumb on the --debug channel next to "transfer engine: ...".
+    from boto3_s3 import crtsupport
+
+    def crt_must_not_be_asked(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("capture_response must never reach the CRT manager build")
+
+    monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", crt_must_not_be_asked)
     src = tmp_path / "a.txt"
     src.write_bytes(b"hi")
     with caplog.at_level(logging.DEBUG, logger="boto3_s3.transfer"):

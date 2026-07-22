@@ -125,6 +125,7 @@ class TestComparatorPairing:
         stream = Comparator(_KIND).compare(src, dest)
         assert next(stream).compare_key == "a"
         assert next(src, None) is not None, "source stream was drained eagerly"
+        assert next(dest, None) is not None, "destination stream was drained eagerly"
 
 
 def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: bool) -> bool:
@@ -147,8 +148,14 @@ class TestComparatorOrderGuard:
             _pairs(_entries("a", "b"), _entries("c", "a"))
 
     def test_ordered_streams_pass_untouched(self) -> None:
-        # No false positive: correctly byte-ordered sides pair normally.
-        assert len(_pairs(_entries("a", "b", "c"), _entries("a", "c"))) == 3
+        # No false positive: correctly byte-ordered sides pair normally -
+        # every key, in order, as its correct pair shape.
+        pairs = _pairs(_entries("a", "b", "c"), _entries("a", "c"))
+        assert [(p.compare_key, type(p)) for p in pairs] == [
+            ("a", SyncPair),
+            ("b", SrcOnlyPair),
+            ("c", SyncPair),
+        ]
 
 
 class TestCompareSizeTime:
@@ -163,9 +170,15 @@ class TestCompareSizeTime:
 
     def test_size_difference_copies_regardless_of_time(self) -> None:
         src = _info(size=10)
-        dest = _info(size=11, mtime=_TIME + timedelta(days=1))
-        assert _both(TransferType.UPLOAD, src, dest) is True
-        assert _both(TransferType.DOWNLOAD, src, dest) is True
+        # A newer dest makes the upload time rule alone say skip - passing
+        # proves the size difference decided. The download direction needs the
+        # opposite anchor: an *older* dest makes its time rule alone say skip
+        # (same-size pairs download only when the local side is newer), so
+        # both directions are isolated on size.
+        newer_dest = _info(size=11, mtime=_TIME + timedelta(days=1))
+        older_dest = _info(size=11, mtime=_TIME - timedelta(days=1))
+        assert _both(TransferType.UPLOAD, src, newer_dest) is True
+        assert _both(TransferType.DOWNLOAD, src, older_dest) is True
 
     def test_upload_skips_when_dest_is_newer_or_equal(self) -> None:
         # aws-cli's compare_time upload/copy: delta = dest - src >= 0 -> skip.

@@ -396,16 +396,26 @@ class TestSyncUpload:
         src = tmp_path / "src"
         _write(src, "exists.txt", b"xxx", mtime=_NEWER)  # differs, but never overwritten
         _write(src, "new.txt", b"xx", mtime=_OLDER)
+        judged: list[str] = []
+
+        def spying_strategy(pair: SyncPair) -> bool:
+            judged.append(pair.compare_key)
+            return True
+
         client, calls = make_recording_client([listing(("p/exists.txt", 2)), {}])
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
+            update_filter=spying_strategy,
             no_overwrite=True,
             transfer_config=_SERIAL,
         )
         assert ops(calls) == ["ListObjectsV2", "PutObject"]
         assert calls[1].params["Key"] == "p/new.txt"
         assert "IfNoneMatch" not in calls[1].params
+        # The guard excluded the at-both pair before any strategy ran - the
+        # ordering claim, observed directly rather than via the final calls.
+        assert judged == []
 
     def test_no_overwrite_guards_any_compare_strategy(self, tmp_path: Path) -> None:
         # The write-guard runs on the update lane: even update_filter=True never
@@ -467,18 +477,33 @@ class TestSyncUpload:
         assert calls == []
 
     def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:
+        # Cancelled mid-run by the first decision, not pre-cancelled: the loop
+        # must stop before pulling the next pair, so exactly one upload lands
+        # and the second file never transfers - pinning the between-pairs poll
+        # rather than only the preflight check.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")
-        client, _calls = make_recording_client([listing()])
+        _write(src, "b.txt", b"xx")
         token = CancelToken()
-        token.cancel()
+        first_decision: list[str] = []
+
+        def cancel_after_first(info: FileInfo) -> bool:
+            if first_decision:
+                token.cancel()
+            first_decision.append(str(info.compare_key))
+            return True
+
+        client, calls = make_recording_client([listing(), {}])
         with pytest.raises(CancelledError):
             S3().sync(
                 str(src),
                 S3Storage("s3://bucket/p", client=client),
+                create_filter=cancel_after_first,
                 transfer_config=_SERIAL,
                 cancel_token=token,
             )
+        assert [call.operation for call in calls] == ["ListObjectsV2", "PutObject"]
+        assert calls[1].params["Key"] == "p/a.txt"
 
     def test_update_filter_true_recopies_every_update(self, tmp_path: Path) -> None:
         # update_filter=True forces every update (both-sides) pair through, even
@@ -573,16 +598,22 @@ class TestSyncDownload:
         assert (out / "new.txt").read_bytes() == b"payload"
 
     def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
+        # Both skew directions: local-older is the discriminating case (the
+        # default skips it), local-newer pins that exact_timestamps still
+        # downloads where a broken any-skew rule could regress to one side.
         out = tmp_path / "out"
         _write(out, "old.txt", b"xx", mtime=_OLDER)
-        client, calls = make_recording_client([listing(("d/old.txt", 2)), get_response()])
+        _write(out, "touched.txt", b"xx", mtime=_NEWER)
+        page = listing(("d/old.txt", 2), ("d/touched.txt", 2))
+        client, calls = make_recording_client([page, get_response(), get_response()])
         S3().sync(
             S3Storage("s3://bucket/d", client=client),
             str(out),
             update_filter=AwsCliComparison(exact_timestamps=True),
             transfer_config=_SERIAL,
         )
-        assert ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert [call.params["Key"] for call in calls[1:]] == ["d/old.txt", "d/touched.txt"]
 
     def test_size_only_ignores_time_differences(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
