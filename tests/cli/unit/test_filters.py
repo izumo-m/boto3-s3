@@ -304,6 +304,14 @@ class TestDelegationFuzz:
         dest = LocalStorage("/destroot")
         src_base = filters._storage_base(src, True)
         dest_base = filters._storage_base(dest, True)
+        # A local entry's stamped key is its absolute path with os.sep folded to
+        # "/" (LocalFileInfo, localstorage.py), so it is drive-prefixed on
+        # Windows, where _storage_base abspath'd "/destroot" to e.g.
+        # "C:/destroot". Build the oracle's key off that same base so the joined
+        # engine sees the full path the fast path's compare_key implies; a
+        # hard-coded "/destroot/..." carries no drive and silently defeats the
+        # dest-side join on Windows (the fast path stays right via compare_key).
+        dest_key_base = dest_base.replace(os.sep, "/")
         compared = 0
         for _ in range(2000):
             patterns = [
@@ -323,7 +331,7 @@ class TestDelegationFuzz:
             for _ in range(20):
                 rel = "".join(rng.choice(self._KEY_ALPHABET) for _ in range(rng.randint(0, 8)))
                 s3_info = FileInfo(key=f"data/{rel}", compare_key=rel, storage=src)
-                local_info = FileInfo(key=f"/destroot/{rel}", compare_key=rel, storage=dest)
+                local_info = FileInfo(key=f"{dest_key_base}/{rel}", compare_key=rel, storage=dest)
                 for info in (s3_info, local_info):
                     assert fast(info) is joined(info), (
                         f"patterns={[(p.kind.name, p.pattern) for p in patterns]} "
