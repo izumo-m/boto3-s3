@@ -66,6 +66,31 @@ class TestSyncOpens3Upload:
         keys = [entry["Key"] for entry in calls[2].params["Delete"]["Objects"]]
         assert keys == ["dest/orphan.txt"]
 
+    def test_custom_listing_is_requested_sorted(self) -> None:
+        # docs/sync.md: the merge-join depends on byte order, so the custom
+        # side's scan_pages must receive ScanOptions(sort=True) - declaring
+        # SORTABLE_SCAN alone (the gate) is not the same as being asked to
+        # sort this scan.
+        class _OptionsRecordingMem(_MemStorage):
+            def __init__(self, store: dict[str, bytes], *, location: str = "mem://data/") -> None:
+                super().__init__(store, location=location)
+                self.scan_options: list[Any] = []
+
+            def scan_pages(self, options: Any) -> Any:
+                self.scan_options.append(options)
+                return super().scan_pages(options)
+
+        src = _OptionsRecordingMem({"a.txt": b"x"}, location="mem://data/")
+        client, calls = make_recording_client([listing(), {}])
+        S3().sync(
+            src,
+            S3Storage("s3://b/dest/", client=client),
+            update_filter=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert [options.sort for options in src.scan_options] == [True]
+
     def test_unsorted_source_is_rejected(self) -> None:
         # No SORTABLE_SCAN -> the merge-join cannot trust the order, so reject up
         # front (an unsorted --delete sync could otherwise corrupt the dest).
@@ -98,6 +123,25 @@ class TestSyncS3openDownload:
         )
         assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
+
+    def test_no_overwrite_skips_existing_pairs(self) -> None:
+        # docs/transfer.md: sync + no_overwrite on a custom destination skips
+        # any key that already exists there (the pair never reaches the
+        # comparator), and only the genuinely new key transfers.
+        store = {"a.txt": b"old"}
+        dest = _MemStorage(store, location="mem://data/")
+        client, calls = make_recording_client(
+            [listing(("src/a.txt", 3), ("src/b.txt", 3)), get_response(b"BBB")]
+        )
+        S3().sync(
+            S3Storage("s3://b/src/", client=client),
+            dest,
+            update_filter=True,
+            no_overwrite=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert store == {"a.txt": b"old", "b.txt": b"BBB"}
 
     def test_delete_removes_orphan_custom_keys(self) -> None:
         # The destination is custom, so orphans are removed through its own

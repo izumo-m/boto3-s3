@@ -339,10 +339,14 @@ class TestDownload:
         outcomes = [result.outcome for result in results]
         assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
         warned = results[0]
-        assert "but was unable to update the last modified time." in str(warned.error)
-        assert str(warned.error).startswith(f"Skipping file {item.dest_path}.")
-        # EPERM gets aws's re-wording (aws-cli set_file_utime).
-        assert "attempting to modify the utime of the file failed" in str(warned.error)
+        # aws's full fixed wording, the destination path twice, then the
+        # EPERM re-wording from aws-cli's set_file_utime.
+        assert str(warned.error) == (
+            f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
+            "but was unable to update the last modified time. "
+            "The file was downloaded, but attempting to modify the utime of the file "
+            "failed. Is the file owned by another user?"
+        )
 
     def test_download_request_params(self, tmp_path: Path) -> None:
         item = self._item(tmp_path)

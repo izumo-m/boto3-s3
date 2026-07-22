@@ -20,6 +20,8 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from boto3_s3 import (
     AccessDeniedError,
     Boto3S3Error,
+    CancelMode,
+    CancelToken,
     ConfigurationError,
     LocalStorage,
     NotFoundError,
@@ -230,6 +232,26 @@ class TestBatching:
         assert results[0].src_info is not None
         assert results[0].src_info.key == "prefix/"
 
+    def test_immediate_cancel_delivers_the_started_batch_and_drops_the_rest(self) -> None:
+        # docs/deleter.md: IMMEDIATE cannot claw back a batch the worker
+        # already started - all of its results are delivered - while work not
+        # yet dispatched is abandoned without records.
+        fake = _FakeS3Client()
+        fake.gate = threading.Event()
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, cancel_token=token)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))  # batch 1 dispatched, held in flight on the gate
+        assert fake.entered.wait(timeout=5.0)
+        deleter.submit(_info("c"))  # buffered; must never be dispatched
+        token.cancel(mode=CancelMode.IMMEDIATE)
+        fake.gate.set()
+        deleter.close()
+        assert _keys(fake.calls) == [["a", "b"]]
+        assert [r.compare_key for r in results] == ["a", "b"]
+        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
+
     def test_duplicate_keys_pass_through(self) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []
@@ -240,6 +262,30 @@ class TestBatching:
         assert _keys(fake.calls) == [["k", "k"]]
         assert [r.compare_key for r in results] == ["k", "k"]
         assert deleter.succeeded == 2
+
+    def test_duplicate_keys_share_one_capture_slot_last_entry_wins(self) -> None:
+        # docs/deleter.md: capture keys the response entries by object key, so
+        # duplicate submissions share a single slot and the batch response's
+        # last entry for that key is what both records carry.
+        fake = _FakeS3Client(
+            [
+                {
+                    "Deleted": [
+                        {"Key": "k", "VersionId": "v1"},
+                        {"Key": "k", "VersionId": "v2"},
+                    ]
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, capture_response=True)
+        deleter.submit(_info("k"))
+        deleter.submit(_info("k"))
+        deleter.close()
+        assert [r.compare_key for r in results] == ["k", "k"]
+        assert results[0].extra_info == results[1].extra_info
+        first = results[0].extra_info
+        assert first is not None and first["delete"] == {"VersionId": "v2"}
 
 
 class TestXmlIncompatibleFallback:

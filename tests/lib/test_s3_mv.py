@@ -21,7 +21,7 @@ from boto3_s3.exceptions import BatchError, ValidationError
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.types import OpOutcome, OpResult, TransferType
+from boto3_s3.types import OpOutcome, OpResult, TransferProgress, TransferType
 from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
 from tests.utils.recorder import make_recording_client, ops
 
@@ -208,8 +208,44 @@ class TestUploadMove:
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
         assert results[0].transfer_type is TransferType.MOVE
 
+    def test_recursive_upload_move_keeps_the_emptied_source_directories(
+        self, tmp_path: Path
+    ) -> None:
+        # aws removes only the moved files, never the directories they leave
+        # empty behind (docs/transfer.md) - a recursive local mv is not rmdir.
+        src_root = tmp_path / "tree"
+        sub = src_root / "sub"
+        sub.mkdir(parents=True)
+        (src_root / "a.txt").write_bytes(b"a")
+        (sub / "b.txt").write_bytes(b"b")
+        client, calls = make_recording_client([{}, {}])
+        S3().mv(
+            str(src_root),
+            S3Storage("s3://b/t/", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["PutObject", "PutObject"]
+        assert not (src_root / "a.txt").exists()
+        assert not (sub / "b.txt").exists()
+        assert sub.is_dir() and src_root.is_dir()
+
 
 class TestDownloadMove:
+    def test_progress_reports_the_move_kind(self, tmp_path: Path) -> None:
+        # docs/transfer.md: every reporting channel relabels to MOVE -
+        # results/warnings/dryrun are pinned elsewhere; this pins progress.
+        client, _ = make_recording_client([head_response(), get_response(), {}])
+        progress: list[TransferProgress] = []
+        S3().mv(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.txt"),
+            transfer_config=_SYNC,
+            on_progress=progress.append,
+        )
+        assert progress  # bytes actually moved through the callback
+        assert all(record.transfer_type is TransferType.MOVE for record in progress)
+
     def test_single_download_deletes_the_source_object(self, tmp_path: Path) -> None:
 
         client, calls = make_recording_client([head_response(), get_response(), {}])
@@ -315,7 +351,9 @@ class TestDownloadMove:
         assert ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        # The bytes still arrived (aws ditto): only the move failed.
+        # The bytes still arrived (aws ditto): only the move failed - and a
+        # non-SUCCEEDED result reports zero bytes regardless (docs/opresult.md).
+        assert results[0].bytes_transferred == 0
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
 
     def test_delete_failure_still_stamps_the_source_mtime(self, tmp_path: Path) -> None:

@@ -555,7 +555,13 @@ class TestScanErrorMapping:
 
     @pytest.mark.parametrize(
         ("status", "category"),
-        [(500, TransportError), (None, Boto3S3Error)],
+        [
+            (403, AccessDeniedError),
+            (404, NotFoundError),
+            (400, ValidationError),
+            (500, TransportError),
+            (None, Boto3S3Error),
+        ],
     )
     def test_unknown_code_widens_on_http_status(
         self, status: int | None, category: type[Boto3S3Error]

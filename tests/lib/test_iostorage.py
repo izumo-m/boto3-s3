@@ -11,10 +11,15 @@ import io
 import tempfile
 
 import pytest
+from boto3.s3.transfer import TransferConfig
 
 from boto3_s3.exceptions import ValidationError
 from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.s3 import S3
+from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, ScanOptions
+from tests.utils.fakes3 import get_response, head_response
+from tests.utils.recorder import make_recording_client
 
 
 class TestBinaryPassthrough:
@@ -100,6 +105,23 @@ class TestTextAdapter:
         writer.close()
         assert not sink.closed
         assert sink.getvalue() == "ab"
+
+
+class TestCallerStreamPosition:
+    def test_download_leaves_the_stream_unrewound_at_the_write_end(self) -> None:
+        # docs/storage.md: the caller's stream is neither closed nor rewound -
+        # after a download it sits at the end of the written bytes, so the
+        # caller can keep appending (or must seek(0) themselves to read back).
+        buf = io.BytesIO()
+        client, _ = make_recording_client([head_response(), get_response()])
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            IOStorage(buf),
+            transfer_config=TransferConfig(use_threads=False),
+        )
+        assert not buf.closed
+        assert buf.tell() == len(b"payload")
+        assert buf.getvalue() == b"payload"
 
 
 class TestUnsupportedContainerOps:
