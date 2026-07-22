@@ -970,12 +970,12 @@ class Transferrer:
                 future = self._submit_copy(item)
             self._track_future(future)
         except BaseException:
-            # The producer may have opened the item's stream before handing it
-            # over (the open routes / _cp_stream). A submit that raises before
-            # the manager accepted the work - the grants ValidationError from
-            # param mapping, a manager-build failure - means _CloseFileobj
-            # never runs, so release the handle here (best-effort; mirrors
-            # _CloseFileobj, which also closes on a failed transfer).
+            # The item may carry a stream handle - _cp_stream's already-open
+            # fileobj, or the open route's deferred reader/writer. A submit
+            # that raises before the manager accepted the work - the grants
+            # ValidationError from param mapping, a manager-build failure -
+            # means _CloseFileobj never runs, so release here (best-effort;
+            # mirrors _CloseFileobj's failure branch, discard-preferring).
             self._close_item_fileobjs(item)
             raise
 
@@ -984,8 +984,12 @@ class Transferrer:
         for fileobj in (item.src_fileobj, item.dest_fileobj):
             if fileobj is None:
                 continue
+            # Prefer discard (the open route's deferred handles): a submit
+            # that failed before the manager accepted the work must not
+            # commit an empty object on the backend by opening at close.
+            release = getattr(fileobj, "discard", None)
             try:
-                fileobj.close()
+                release() if release is not None else fileobj.close()
             except Exception:
                 logger.debug("closing a fileobj after a submit error failed", exc_info=True)
 
@@ -1733,8 +1737,11 @@ class _CloseFileobj:
     ``_Completion`` so a writer's ``close`` (flush) failure flips the settled
     future to a failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
     then sees the failure and skips its delete). A transfer that already failed
-    still closes - to release the resource - but never lets a close error
-    overwrite the original failure.
+    still releases the resource, preferring the fileobj's ``discard`` when it
+    has one (the open route's deferred handles: close only what was opened,
+    so a failed or cancelled item leaves the backend untouched instead of
+    committing an empty object) - and never lets a release error overwrite
+    the original failure.
     """
 
     def __init__(self, fileobj: Any) -> None:
@@ -1744,8 +1751,9 @@ class _CloseFileobj:
         try:
             future.result()
         except Exception:
+            release = getattr(self._fileobj, "discard", None)
             try:
-                self._fileobj.close()
+                release() if release is not None else self._fileobj.close()
             except Exception:
                 pass
             return

@@ -703,9 +703,24 @@ and outside aws parity.
   which a custom backend (owning its key space, with no existence probe wired)
   does not run. In `sync` it *does* work - sync lists the destination, so a
   destination-present pair is skipped without any probe.
-- **dryrun**: enumerates and reports `DRYRUN` but does **not** call `open` on the
-  custom side - opening a `"wb"` writer is itself a side effect, so a dry run
-  leaves the backend untouched.
+- **`open` is deferred to first byte movement**: the item builders hand the
+  engine lazy handles (`producers._DeferredReader` / `_DeferredWriter`), and
+  the backend's `Storage.open` runs when s3transfer first reads / writes that
+  entry - never at enumeration/queue time, where an eagerly opened handle per
+  queued item crossed `RLIMIT_NOFILE` around a thousand entries. The handles
+  expose only `read` / `write`, which routes s3transfer to its non-seekable
+  paths: the source is consumed sequentially on the bounded submission stage
+  (`max_in_memory_upload_chunks` backpressure), the destination receives
+  ranged chunks strictly in order (the ordering stdout gets). Consequences:
+  an open/read/write failure is that item's **per-item** failure (the
+  capability gate's documented contract - runtime errors never abort the
+  run up front); an item that fails or is cancelled before its first write
+  leaves the backend **untouched** (the failure-path close prefers the
+  handle's `discard`); a successful zero-byte download still materializes
+  the empty object (`close` commits, opening if nothing was written).
+- **dryrun**: enumerates and reports `DRYRUN` but never builds the lazy
+  handles at all - opening a `"wb"` writer is itself a side effect, so a dry
+  run leaves the backend untouched.
 - **mv** (section 11): every upload deletes its source through that source's own
   `Storage.delete(info)` after each successful upload - the source listing entry
   rides on `TransferItem.src_info` (its `info.key` locates the object), and

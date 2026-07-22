@@ -322,10 +322,14 @@ class Storage(abc.ABC):
         pre-allocate or choose its write strategy up front. This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path a custom backend
-        (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
-        non-built-in side of an open-route transfer (``opens3`` / ``s3open``,
-        transfer.md section 12), handing the returned fileobj to ``s3transfer``
-        and ``close``-ing it when done - a ``"wb"`` ``close`` flushes buffered
+        (and a stream wrapper) transfers through. ``cp`` / ``mv`` / ``sync``
+        call it for the non-built-in side of an open-route transfer
+        (``opens3`` / ``s3open``, transfer.md section 12) **lazily, when the
+        engine first moves that entry's bytes** - not when the entry is
+        enumerated and queued - so an entry whose transfer never starts
+        (failed, cancelled, dry run) is never opened. The returned fileobj is
+        read sequentially / written strictly in order, and ``close``-d when
+        the transfer settles - a ``"wb"`` ``close`` flushes buffered
         writes like any file object (whether the backend persists per write or
         defers to the flush - write-through vs write-back - is its own choice).
         ``LocalStorage`` and the stream Storages (``IOStorage`` /

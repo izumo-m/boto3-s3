@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - More aws-cli parity: `sync` now rejects S3 Express directory buckets (their listings are unordered, which could mis-pair the merge), and a `mv` download stamps the file mtime before deleting the source; relative local storages also resolve consistently if the process chdir's after construction.
 - CRT transfers now derive their endpoint and TLS settings from the run's actual client - a client with a different endpoint, `verify`, or S3 addressing config falls back to the classic engine instead of riding the first client's settings; custom-backend scans stamp `FileInfo.storage` before filters run, and the open route no longer skips the keyless-source listing probe.
 - Streaming downloads to stdout now always write in order like aws (a stdout redirected with `>>` opens O_APPEND, where seek-based parallel writes could interleave chunks).
+- Custom-backend (open-route) transfers now call `Storage.open` when an entry's bytes first move, not when it is queued: large recursive runs no longer exhaust file handles, failed or cancelled entries leave the backend untouched, and destinations receive one strictly ordered write stream.
 
 ## [0.7.0] - 2026-07-17
 

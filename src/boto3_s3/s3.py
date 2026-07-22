@@ -1236,8 +1236,13 @@ class S3:
                 compare_key=storage.key,
                 size=expected_size,
                 # dryrun reports the item without submitting it, so skip the open -
-                # matching the open routes (_open_upload_item / _open_download_item)
-                # and keeping a side-effecting custom IOStorage untouched on a dry run.
+                # like the open routes (open_upload_item / open_download_item),
+                # keeping a side-effecting stream untouched on a dry run. A live
+                # run opens eagerly here, unlike those routes' deferred handles:
+                # a stream storage wraps an already-open in-hand stream (no
+                # resource is acquired), it is a single item (nothing queues
+                # up), and StdioStorage's missing-stdio ValidationError keeps
+                # its documented in-pipeline slot.
                 src_fileobj=None if dryrun else src_storage.open(storage.key, "rb"),
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,

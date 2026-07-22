@@ -43,6 +43,7 @@ from boto3_s3.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
+    from typing import BinaryIO
 
 
 def walk_source_scan_options(
@@ -758,6 +759,91 @@ def open_upload_items(
         )
 
 
+class _DeferredReader:
+    """Lazy ``Storage.open(key, "rb")``: the backend opens on the first read.
+
+    Built when the item is, opened when s3transfer actually starts consuming
+    this item's bytes. Exposing only ``read`` routes s3transfer to its
+    non-seekable upload path, which reads the source sequentially on the
+    bounded submission stage (`max_in_memory_upload_chunks` supplies the
+    backpressure), so a recursive run over a custom backend holds open
+    handles only for the items being read (~submission concurrency) - not
+    one per queued item, which crossed ``RLIMIT_NOFILE`` around a thousand
+    queued entries. An open/read failure surfaces inside the transfer task
+    as that item's per-item failure (the capability gate's documented
+    contract: runtime errors stay per-item). ``close`` is idempotent and
+    closes only what was opened - an item that never read (failed, cancelled)
+    leaves the backend untouched; after ``close``, ``read`` returns ``b""``.
+    """
+
+    def __init__(self, storage: Storage, key: str, size: int | None) -> None:
+        self._storage = storage
+        self._key = key
+        self._size = size
+        self._fileobj: BinaryIO | None = None
+        self._closed = False
+
+    def read(self, amt: int | None = None) -> bytes:
+        if self._closed:
+            return b""
+        if self._fileobj is None:
+            self._fileobj = self._storage.open(self._key, "rb", size=self._size)
+        return self._fileobj.read() if amt is None else self._fileobj.read(amt)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._fileobj is not None:
+            self._fileobj.close()
+
+
+class _DeferredWriter:
+    """Lazy ``Storage.open(key, "wb")``: the backend opens on the first write.
+
+    Built when the item is, opened when this item's first ranged chunk
+    actually arrives. Exposing only ``write`` routes s3transfer to its
+    non-seekable download path, which writes chunks strictly in order (the
+    ordering stdout gets), so a custom destination receives one sequential
+    stream and a queued-but-unstarted item holds no open writer. ``close``
+    commits: a successful download that wrote nothing (a zero-byte object)
+    still materializes the empty object by opening on close. ``discard`` -
+    preferred by the failure-path close (`_CloseFileobj` / the submit-error
+    cleanup) - closes only what was opened, so an item that failed or was
+    cancelled before its first write leaves the backend untouched.
+    """
+
+    def __init__(self, storage: Storage, key: str, size: int | None) -> None:
+        self._storage = storage
+        self._key = key
+        self._size = size
+        self._fileobj: BinaryIO | None = None
+        self._closed = False
+
+    def _ensure_open(self) -> BinaryIO:
+        if self._fileobj is None:
+            self._fileobj = self._storage.open(self._key, "wb", size=self._size)
+        return self._fileobj
+
+    def write(self, data: bytes) -> int:
+        if self._closed:
+            raise ValueError("write to a closed deferred writer")
+        return self._ensure_open().write(data)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._ensure_open().close()
+
+    def discard(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._fileobj is not None:
+            self._fileobj.close()
+
+
 def open_upload_item(
     plan: transferplan.TransferPlan,
     info: FileInfo,
@@ -768,8 +854,9 @@ def open_upload_item(
 ) -> TransferItem:
     """One upload item reading the custom source through ``Storage.open``.
 
-    ``dryrun`` skips the ``open`` (the item is only reported, never
-    submitted), so a dry run never reads from the backend.
+    ``dryrun`` builds no reader at all; a live run hands the engine a
+    `_DeferredReader`, so the backend opens only when the transfer actually
+    starts reading - never at queue time.
     """
     compare_key = _compare_key(info)
     open_key = compare_key if plan.dir_op else ""
@@ -793,7 +880,7 @@ def open_upload_item(
         # single source it is "" (the location). The backend resolves both in its own
         # key space.
         src_info=info,
-        src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
+        src_fileobj=None if dryrun else _DeferredReader(plan.src, open_key, info.size),
         dest_bucket=dest_bucket,
         dest_key=dest[len(dest_bucket) + 1 :],
         src_display=open_side_display(plan.src, open_key),
@@ -892,8 +979,10 @@ def open_download_item(
     """One download item writing the custom destination through ``Storage.open``,
     or ``None`` once the glacier gate consumed it.
 
-    ``dryrun`` skips the destination ``open`` (the item is only reported,
-    never submitted), so a dry run never opens the backend for writing.
+    ``dryrun`` builds no writer at all; a live run hands the engine a
+    `_DeferredWriter`, so the backend opens only when the item's first chunk
+    actually arrives - never at queue time, and never for an item that fails
+    before its first write.
     """
     compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
@@ -917,7 +1006,7 @@ def open_download_item(
         src_bucket=src_bucket,
         src_key=info.key,
         src_info=info,
-        dest_fileobj=None if dryrun else plan.dest.open(open_key, "wb", size=info.size),
+        dest_fileobj=None if dryrun else _DeferredWriter(plan.dest, open_key, info.size),
         src_display=src_display,
         dest_display=open_side_display(plan.dest, open_key),
     )
