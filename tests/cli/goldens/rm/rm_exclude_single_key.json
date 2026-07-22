@@ -7,14 +7,16 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "data-sibling.txt",
-    "data/a.txt",
-    "data/b.txt",
-    "data/sub/inner.txt"
+    "data-sibling.txt:5:eaf16bc0",
+    "data/a.txt:3:cd2eb083",
+    "data/b.txt:100:09ecb6eb",
+    "data/sub/inner.txt:10:fc11d6f2"
   ],
   "scenario": "rm_exclude_single_key",
   "src_tree": null,

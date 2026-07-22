@@ -6,11 +6,13 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "stream.txt"
+    "stream.txt:21:2af07c0e"
   ],
   "scenario": "cp_stream_upload",
   "src_tree": null,

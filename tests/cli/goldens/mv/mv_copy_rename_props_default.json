@@ -6,6 +6,7 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": {
     "ContentType": "text/css",
     "Metadata": {
@@ -13,9 +14,10 @@
     }
   },
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "moved/renamed.css"
+    "moved/renamed.css:12:5d110fd8"
   ],
   "scenario": "mv_copy_rename_props_default",
   "src_tree": [],

@@ -5,13 +5,15 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "keep/x.txt",
-    "m1/",
-    "m2/sub/"
+    "keep/x.txt:4:2481a63c",
+    "m1/:0:e3b0c442",
+    "m2/sub/:0:e3b0c442"
   ],
   "scenario": "rm_prefix_no_marker",
   "src_tree": null,

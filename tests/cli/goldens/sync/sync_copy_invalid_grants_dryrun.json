@@ -9,11 +9,13 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 1,
   "remaining_keys": [
-    "cs/a.txt"
+    "cs/a.txt:6:b6a98d9c"
   ],
   "scenario": "sync_copy_invalid_grants_dryrun",
   "src_tree": null,

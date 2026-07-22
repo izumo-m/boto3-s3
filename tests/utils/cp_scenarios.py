@@ -113,6 +113,9 @@ class CpScenario(BaseScenario):
     # Golden-record HeadObject fields of one probe key.
     head_key: str | None = None
     head_fields: tuple[str, ...] = ()
+    # Golden-record whether any progress line was printed (the observable
+    # effect of --no-progress / --quiet on a piped stdout).
+    compare_progress: bool = False
     # Live per-side assertion: downloaded file mtime == object LastModified.
     mtime_key: tuple[str, str] | None = None  # (s3 key, workdir-relative path)
     # Deterministic local-vs-remote ordering for sync's time judgments:
@@ -217,16 +220,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_quiet",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--quiet"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # --quiet prints no progress...
+        stderr_exact_empty=True,  # ...and nothing on stderr on success
     ),
     CpScenario(
         name="cp_upload_only_show_errors",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--only-show-errors"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # a clean run emits no progress under this printer
     ),
     CpScenario(
         name="cp_upload_no_progress",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--no-progress"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # the point of the flag: no Completed lines
     ),
     CpScenario(
         name="cp_upload_content_type",
@@ -249,8 +256,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType",),
     ),
     CpScenario(
-        # No head probe: the server-side default content type for an untyped
-        # PUT is endpoint-specific (MinIO vs moto vs AWS).
+        # The .json guess is suppressed, so the object takes the server-side
+        # default for an untyped PUT. That default is endpoint-specific in
+        # general, but moto and MinIO both answer binary/octet-stream, so the
+        # probe both catches a resurrected guess (application/json) and stays
+        # portable across the golden's capture (MinIO) and replay (moto).
         name="cp_upload_no_guess_mime",
         argv=(
             "cp",
@@ -258,6 +268,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
             f"s3://{BUCKET_TOKEN}/up/data.json",
             "--no-guess-mime-type",
         ),
+        head_key="up/data.json",
+        head_fields=("ContentType",),
         local_src=_SRC_JSON,
     ),
     CpScenario(
@@ -757,6 +769,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "SHA256",
         ),
         local_src=_SRC_SINGLE,
+        # The stored checksum is a deterministic function of the bytes, so
+        # moto and MinIO agree - probe it to prove the algorithm reached the
+        # PUT (rc/stdout alone never observed the checksum).
+        head_key="up/key.txt",
+        head_fields=("ChecksumSHA256",),
     ),
     CpScenario(
         name="cp_checksum_crc32c",

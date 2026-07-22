@@ -32,6 +32,12 @@ class MbScenario(BaseScenario):
 
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
+    # True => golden-record the bucket's tag set after the run. Neither moto
+    # nor MinIO honors CreateBucketConfiguration.Tags, so this observes an
+    # empty set on both test endpoints: it is an aws-vs-ours no-divergence
+    # check (our --tags extension must not tag where aws leaves it empty),
+    # not a validation of tag application - that needs a live-AWS run.
+    capture_tags: bool = False
 
 
 SCENARIOS: tuple[MbScenario, ...] = (
@@ -72,5 +78,13 @@ SCENARIOS: tuple[MbScenario, ...] = (
     # aws mb silently drops the key part (split_s3_bucket_key keeps the
     # bucket); the end state pins that the bucket exists with no objects.
     MbScenario("mb_key_dropped", ("mb", f"s3://{BUCKET_TOKEN}/some/key")),
-    MbScenario("mb_tags", ("mb", f"s3://{BUCKET_TOKEN}", "--tags", "Key1", "Value1")),
+    # boto3-s3 extension (aws s3 mb has no --tags): the tags ride
+    # CreateBucketConfiguration.Tags. The end-state tag set is [] on moto and
+    # MinIO (neither honors that field), so this pins no-divergence from aws,
+    # not the tag semantics (see capture_tags).
+    MbScenario(
+        "mb_tags",
+        ("mb", f"s3://{BUCKET_TOKEN}", "--tags", "Key1", "Value1"),
+        capture_tags=True,
+    ),
 )

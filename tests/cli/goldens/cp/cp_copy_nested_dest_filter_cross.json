@@ -9,13 +9,15 @@
   ],
   "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "d/backup/x1.txt",
-    "d/backup/y.txt",
-    "d/y.txt"
+    "d/backup/x1.txt:18:13c5a67c",
+    "d/backup/y.txt:8:3d9f5afc",
+    "d/y.txt:8:3d9f5afc"
   ],
   "scenario": "cp_copy_nested_dest_filter_cross",
   "src_tree": null,
