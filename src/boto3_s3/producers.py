@@ -379,13 +379,14 @@ def s3_source_items(
             options=options,
             wait_on_interrupt=wait_on_interrupt,
         )
-    elif src_storage.bucket and not src_storage.key:
+    elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
         # bucket and exact-matches nothing -> zero items, rc 0. Preserve the
         # listing because its failure (notably AccessDenied) is observable.
-        # A bucketless service root (`cp s3://`) is NOT this case: it falls to
-        # head_single, whose empty Bucket hits botocore's Invalid-bucket
-        # ParamValidation like aws.
+        # A bucketless service root (`cp s3://`) takes this branch too: aws
+        # reaches ListObjectsV2, whose empty Bucket dies at botocore's
+        # client-side Invalid-bucket validation (measured, --debug: the
+        # failure fires at before-parameter-build.s3.ListObjectsV2).
         scan_options = replace(
             src_storage.default_scan_options(),
             # BucketLister does not send a Delimiter on this aws-cli route,
@@ -925,14 +926,14 @@ def open_download_items(
             options=options,
             wait_on_interrupt=wait_on_interrupt,
         )
-    elif src_storage.bucket and not src_storage.key:
+    elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket custom`): mirror the
         # built-in download path (s3_source_items) - aws lists the bucket and
         # exact-matches nothing -> zero items, rc 0. The listing is issued,
         # not skipped, because its failure (notably NoSuchBucket/AccessDenied)
-        # is observable. A bucketless service root (`cp s3:// custom`) instead
-        # falls to head_single, whose empty Bucket hits botocore's
-        # Invalid-bucket ParamValidation like aws.
+        # is observable. A bucketless service root (`cp s3:// custom`) takes
+        # this branch too: ListObjectsV2's empty Bucket dies at botocore's
+        # client-side Invalid-bucket validation, aws's measured shape.
         scan_options = replace(
             src_storage.default_scan_options(),
             # BucketLister does not send a Delimiter on this aws-cli route,

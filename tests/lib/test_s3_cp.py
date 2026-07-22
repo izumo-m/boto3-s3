@@ -561,18 +561,20 @@ class TestDownloadRoute:
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
 
-    def test_bucketless_service_root_source_reaches_head_not_silent_zero(
+    def test_bucketless_service_root_source_reaches_the_listing_not_silent_zero(
         self, tmp_path: Path
     ) -> None:
-        # A bare `s3://` (service root) as a non-recursive source must NOT take the
-        # keyless-bucket `cp s3://bucket .` zero-item short-circuit: it reaches
-        # HeadObject with Bucket="", which botocore rejects (Invalid bucket name)
-        # like `aws s3 cp s3://` (rc 1), not a silent rc-0 no-op.
+        # A bare `s3://` (service root) as a non-recursive source rides the
+        # keyless listing branch like any keyless source: aws reaches
+        # ListObjectsV2, whose Bucket="" dies at botocore's client-side
+        # Invalid-bucket validation (measured with --debug on the pinned aws:
+        # the failure fires at before-parameter-build.s3.ListObjectsV2) - the
+        # same fatal rc 1, never a silent rc-0 no-op.
         err = ParamValidationError(report='Invalid bucket name ""')
         client, calls = make_recording_client([err])
         with pytest.raises(ValidationError, match="Invalid bucket name"):
             S3().cp(S3Storage("s3://", client=client), str(tmp_path / "x"), transfer_config=_SYNC)
-        assert ops(calls) == ["HeadObject"]  # attempted, not short-circuited to zero
+        assert ops(calls) == ["ListObjectsV2"]  # attempted, not short-circuited to zero
         assert calls[0].params["Bucket"] == ""
 
     def test_dryrun_heads_but_never_gets(self, tmp_path: Path) -> None:
