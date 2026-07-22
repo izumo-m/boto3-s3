@@ -13,7 +13,9 @@ deviation that is observably equivalent for ordinary keys (a nonexistent key
 deletes "successfully" either way, and per-key success/failure is preserved via
 ``Quiet=True`` plus the response ``Errors[]``). Keys that cannot be represented
 in the DeleteObjects XML 1.0 body fall back to per-key ``DeleteObject``, matching
-aws-cli instead of failing their whole batch.
+aws-cli instead of failing their whole batch (control characters ride that
+route fine; an unpaired surrogate cannot be carried by the HTTP layer on
+either route - reachability of such keys is unverified, docs/deleter.md).
 User-facing lines such as ``delete: s3://...`` are the CLI layer's job, fed by
 ``on_result``; the library only emits ``logging`` diagnostics.
 
@@ -72,8 +74,8 @@ S3_DELETE_BATCH = 1000
 
 # The complement of XML 1.0's Char production: C0 controls other than
 # TAB/LF/CR, surrogate code points, and the two terminal BMP noncharacters.
-# A compiled class instead of a per-character Python loop: `_flush` runs this
-# over every submitted key.
+# A compiled class instead of a per-character Python loop: `_run_batch` runs
+# this over every submitted key.
 _XML_INCOMPATIBLE = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
@@ -105,15 +107,17 @@ class S3Deleter:
 
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
     submitted entry, in submission order within a batch (entries abandoned by
-    ``close(flush=False)`` or by an error-path close get no result); rollup
+    ``close(flush=False)``, by an error-path close, or by a close under a
+    cancelled token get no result); rollup
     ``succeeded`` / ``failed`` / ``first_error`` are approximate while running
     and final after ``close``. The deleter never raises ``BatchError``
     itself - the caller builds one from the rollup (``first_error`` is the
     ``__cause__`` sample).
 
-    The worker thread is non-daemon, so an unclosed deleter keeps the
-    interpreter alive until the in-flight batch finishes - use the context
-    manager. Use a recursive scan: a non-recursive scan also yields
+    The worker thread inherits daemon-ness from its creator (Python's
+    ``ThreadPoolExecutor``), so from a normal non-daemon thread an unclosed
+    deleter keeps the interpreter alive until the in-flight batch finishes -
+    use the context manager. Use a recursive scan: a non-recursive scan also yields
     DIRECTORY (``CommonPrefixes``) entries, which are not object keys::
 
         with S3Deleter(storage, on_result=cb) as deleter:
@@ -211,14 +215,15 @@ class S3Deleter:
         self.close(flush=exc_type is None)
 
     def close(self, *, flush: bool = True) -> None:
-        """Flush (unless ``flush=False``), wait for in-flight work, shut down.
+        """Flush (unless ``flush=False`` or the token is cancelled), wait for
+        in-flight work, shut down.
 
         Idempotent. Afterwards the rollup counters are final and ``submit`` /
         ``flush`` raise ``ValidationError``. An unexpected worker exception (or
         one raised by ``on_result``) re-raises here; the deleter still ends up
         closed and the worker shut down either way, and any entries left in the
-        buffer by that re-raise (or by ``flush=False``) are abandoned without
-        results.
+        buffer by that re-raise, by ``flush=False``, or by a cancelled token
+        are abandoned without results.
         """
         if self._closed:
             return
@@ -294,7 +299,14 @@ class S3Deleter:
             except FutureTimeoutError:
                 continue
             except FutureCancelledError:
-                return
+                # Ours only when the future itself was cancelled (the
+                # immediate-mode cancel() above beat the executor to it). A
+                # CancelledError *raised by* a ran batch - an on_result
+                # callback misusing the type - is a worker exception and must
+                # honor the re-raise contract, not be mistaken for our cancel.
+                if pending.cancelled():
+                    return
+                raise
             return
 
     def _cancelled(self) -> bool:
@@ -397,6 +409,13 @@ class S3Deleter:
             if key is None:
                 continue
             slot: dict[str, Any] = {k: v for k, v in entry.items() if k != "Key"}
+            # DeleteObjects reports a created delete marker's id under
+            # DeleteMarkerVersionId; a single DeleteObject reports the same id
+            # as VersionId. Rename so the slot really is DeleteObject-shaped
+            # (we never delete by VersionId, so the slot cannot already have one).
+            marker_version = slot.pop("DeleteMarkerVersionId", None)
+            if marker_version is not None:
+                slot.setdefault("VersionId", marker_version)
             if charged:
                 slot["RequestCharged"] = charged
             slots[key] = slot
@@ -419,8 +438,10 @@ class S3Deleter:
         failures: dict[str, Boto3S3Error] = {}
         for err in entries:
             key = err.get("Key")
+            # "Unknown" fallbacks mirror botocore's ClientError rendering, so a
+            # synthesized per-key message reads like a real DeleteObject failure.
             code = err.get("Code", "Unknown")
-            message = err.get("Message", "no message")
+            message = err.get("Message", "Unknown")
             if key is None or key not in submitted:
                 logger.warning(
                     "unattributable DeleteObjects error for s3://%s: key=%r %s (%s)",

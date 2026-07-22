@@ -407,8 +407,10 @@ class TestResults:
         deleter.close()
         error = results[0].error
         assert type(error) is Boto3S3Error
+        # Both fallbacks are botocore's ClientError defaults, so the synthetic
+        # per-key string reads exactly like a real DeleteObject failure.
         assert str(error) == (
-            "An error occurred (Unknown) when calling the DeleteObjects operation: no message"
+            "An error occurred (Unknown) when calling the DeleteObjects operation: Unknown"
         )
 
     def test_mixed_batch_keeps_submission_order(self) -> None:
@@ -583,9 +585,11 @@ class TestCaptureSlots:
         # without that the per-key slots below could not be reconstructed.
         assert fake.calls[0]["Delete"]["Quiet"] is False
         slots = [(r.extra_info or {}).get("delete") for r in results]
+        # The marker's id lands in VersionId, as a single DeleteObject reports
+        # it (DeleteObjects' DeleteMarkerVersionId is the batch wire form).
         assert slots[0] == {
             "DeleteMarker": True,
-            "DeleteMarkerVersionId": "dm1",
+            "VersionId": "dm1",
             "RequestCharged": "requester",
         }
         assert slots[1] == {"VersionId": "v2", "RequestCharged": "requester"}

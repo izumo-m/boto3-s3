@@ -160,8 +160,10 @@ present:
   its range-specific fields (`ContentRange` / `ContentLength`) are dropped, so the
   slot reads like a whole-object response. `"ETag"` is promoted from it.
 - **`extra_info["delete"]`** - the removed object's `DeleteObject`-shaped
-  response (`VersionId` / `DeleteMarker` / `DeleteMarkerVersionId` /
-  `RequestCharged`, whichever apply), whenever the backend produces one: an `mv`'s
+  response (`VersionId` / `DeleteMarker` /
+  `RequestCharged`, whichever apply; the batched wire form's
+  `DeleteMarkerVersionId` is renamed to `VersionId`, as a single
+  `DeleteObject` reports it), whenever the backend produces one: an `mv`'s
   S3 source removal, and each object `rm` / `sync --delete` removes from S3. A
   custom backend's slot is whatever `Mapping` its `Storage.delete` returns,
   surfaced as-is minus a `ResponseMetadata` key - only the built-in S3 paths
