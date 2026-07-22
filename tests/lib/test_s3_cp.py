@@ -82,6 +82,26 @@ class TestUploadRoute:
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_relative_source_survives_a_chdir_after_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A relative LocalStorage binds its cwd at construction (`abspath`);
+        # the up-front existence check must test that same anchor - the one
+        # the plan and the walk use - not the raw relative path against
+        # whatever the process chdir'd to since.
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        (workdir / "a.txt").write_bytes(b"x" * 7)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(workdir)
+        src = LocalStorage("a.txt")
+        monkeypatch.chdir(elsewhere)
+        client, calls = make_recording_client([{}])
+        S3().cp(src, S3Storage("s3://bucket/up/", client=client), transfer_config=_SYNC)
+        assert ops(calls) == ["PutObject"]
+        assert calls[0].params["Key"] == "up/a.txt"
+
     def test_oversize_upload_warns_but_still_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

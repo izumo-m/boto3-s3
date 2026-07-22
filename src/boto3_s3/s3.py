@@ -394,7 +394,11 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
     (Their bare RuntimeError -> rc 255; ``NotFoundError`` without a
     ``ClientError`` cause maps the same.)
     """
-    if not os.path.exists(storage.path):
+    # Test the construction-time abspath (the anchor scan / the plan use) so
+    # the check agrees with the walk even if the process chdir'd since the
+    # storage was built; the message keeps the raw form, like aws echoing the
+    # user-typed path.
+    if not os.path.exists(storage.abspath):
         raise NotFoundError(
             f"The user-provided path {storage.path} does not exist.", operation=operation
         )
@@ -1019,8 +1023,10 @@ class S3:
             plan, operation=operation
         )
         # aws-cli's _validate_path_args only creates the dest dir when it does
-        # not already exist; check the raw user path (plan.dest_root carries a
-        # trailing os.sep, so exists() is False for an existing *file*). An
+        # not already exist; check the sep-less construction-time abspath
+        # (plan.dest_root carries a trailing os.sep, so exists() on it is
+        # False for an existing *file*; the same anchor keeps the check
+        # consistent with the plan if the process chdir'd since). An
         # existing-file dest then skips makedirs and fails per item like aws
         # (rc 1) instead of crashing up front; an empty listing transfers
         # nothing and exits 0. (sync's guard differs: unconditional, bare
@@ -1028,7 +1034,7 @@ class S3:
         if (
             recursive
             and isinstance(dest_storage, LocalStorage)
-            and not os.path.exists(dest_storage.path)
+            and not os.path.exists(dest_storage.abspath)
         ):
             try:
                 os.makedirs(plan.dest_root, exist_ok=True)
@@ -1527,9 +1533,9 @@ class S3:
         # exists() test (not exist_ok=True) is deliberate: a destination that
         # exists as a *file* passes here and fails per item instead
         # ([Errno 20], rc 1). (cp's guard differs: recursive-gated, exist_ok.)
-        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.path):
+        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.abspath):
             try:
-                os.makedirs(dest_storage.path)
+                os.makedirs(dest_storage.abspath)
             except OSError as exc:
                 raise translate_os_error(exc, operation="sync", key=None) from exc
         client = client_provider.get_client()

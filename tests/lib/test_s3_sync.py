@@ -589,6 +589,24 @@ class TestSyncDownload:
         S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
         assert out.is_dir()
 
+    def test_relative_destination_survives_a_chdir_after_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The dest-dir creation resolves through the construction-time anchor
+        # (`abspath`), so the directory appears where the plan will write -
+        # not under whatever cwd the process chdir'd to since.
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(workdir)
+        dest = LocalStorage("out")
+        monkeypatch.chdir(elsewhere)
+        client, _calls = make_recording_client([listing()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), dest, transfer_config=_SERIAL)
+        assert (workdir / "out").is_dir()
+        assert not (elsewhere / "out").exists()
+
     def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:
         # The pre-cancel check acts before any side effect - here the
         # destination pre-create above: a cancelled run must not leave a

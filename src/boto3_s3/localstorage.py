@@ -1133,6 +1133,17 @@ class LocalStorage(Storage):
         return self._path
 
     @property
+    def abspath(self) -> str:
+        """The construction-time absolute form of `path`.
+
+        The anchor every scan, `get_fileinfo`, and transfer plan resolves
+        against (see `__init__`); existence checks and directory creation in
+        the operations use it too, so a relative `path` keeps meaning the same
+        directory even if the process chdir's after construction.
+        """
+        return self._abspath
+
+    @property
     def fsync(self) -> bool:
         """Whether a ``mv`` download into this destination fsyncs before deleting the source.
 
