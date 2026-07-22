@@ -83,8 +83,14 @@ class _CrtS3Client:
     """The held CRT client plus the identity it was created for.
 
     Mirrors boto3's ``CRTS3Client``: the CRT client can only sign for one
-    region/credentials (and, in our wiring, one endpoint and signing mode),
-    so the tuple is pinned to reject incompatible later clients.
+    region/credentials (and, in our wiring, one endpoint, signing mode, TLS
+    ``verify`` setting, and serializer-relevant ``Config.s3`` shape), so the
+    tuple is pinned to reject incompatible later clients. ``verify`` and
+    ``s3_config`` are baked into the CRT client / the shared request
+    serializer at creation and cannot be swapped per request, so a later
+    client differing in either must fall back to classic - silently reusing
+    the first client's ``verify`` would flip TLS verification behind the
+    caller's back.
     """
 
     def __init__(
@@ -94,12 +100,16 @@ class _CrtS3Client:
         region: str,
         endpoint_url: str | None,
         cred_wrapper: Any | None,
+        verify: Any,
+        s3_config: Any,
     ) -> None:
         self.crt_client = crt_client
         self.process_lock = process_lock
         self.region = region
         self.endpoint_url = endpoint_url
         self.cred_wrapper = cred_wrapper  # None = unsigned client
+        self.verify = verify  # _derive_verify's form: None / False / CA path
+        self.s3_config = s3_config  # the client Config's `s3` dict (or None)
 
 
 def has_minimum_crt_version() -> bool:
@@ -226,7 +236,8 @@ def create_crt_transfer_manager(
 
     ``None`` means the boto3-faithful fallbacks fired: the cross-process lock
     is held elsewhere, or the process singleton was created for a different
-    region / credentials / endpoint / signing mode.
+    region / credentials / endpoint / signing mode / TLS ``verify`` /
+    ``Config.s3`` shape.
 
     ``endpoint`` is the caller's explicit endpoint (the CLI threads its
     ``--endpoint-url`` here, matching aws-cli, which passes it to the CRT
@@ -355,18 +366,40 @@ def _initialize(
         create_kwargs["crt_credentials_provider"] = cred_wrapper.to_crt_credentials_provider()
     _add_fio_options(create_kwargs, config, create_s3_crt_client)
     crt_client = create_s3_crt_client(**create_kwargs)
-    return serializer, _CrtS3Client(crt_client, lock, region, endpoint_url, cred_wrapper)
+    return serializer, _CrtS3Client(
+        crt_client,
+        lock,
+        region,
+        endpoint_url,
+        cred_wrapper,
+        create_kwargs["verify"],
+        getattr(client.meta.config, "s3", None),
+    )
 
 
 def _is_compatible_request(
     client: S3Client, crt_s3_client: _CrtS3Client | None, endpoint: str | None
 ) -> bool:
-    """boto3's ``is_crt_compatible_request`` plus the endpoint/signing pins."""
+    """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
+    TLS-``verify`` / ``Config.s3``-shape pins.
+
+    The last two go beyond boto3's own check (region + credentials): the
+    singleton CRT client holds the first client's ``verify`` and the shared
+    serializer its ``Config`` (addressing style, dualstack/accelerate,
+    us-east-1 regional form), so a later client differing in either would
+    silently transfer under the first one's TLS and URL-shaping settings.
+    Incompatible means classic for that run, never a wrong-config CRT
+    transfer.
+    """
     if crt_s3_client is None:
         return False
     if client.meta.region_name != crt_s3_client.region:
         return False
     if _resolve_endpoint(client, endpoint) != crt_s3_client.endpoint_url:
+        return False
+    if _derive_verify(client) != crt_s3_client.verify:
+        return False
+    if getattr(client.meta.config, "s3", None) != crt_s3_client.s3_config:
         return False
     if _is_unsigned(client):
         return crt_s3_client.cred_wrapper is None

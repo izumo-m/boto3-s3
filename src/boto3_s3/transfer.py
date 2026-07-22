@@ -1265,6 +1265,17 @@ class Transferrer:
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
+        # The explicit endpoint pin belongs to the client built from it: the
+        # run's client is the route-selected one (an S3Storage may carry its
+        # own), and pinning the S3-level endpoint onto a storage-supplied
+        # client would dial one endpoint with another's credentials and
+        # region (the classic lane just uses that client). botocore stores
+        # an explicit endpoint_url verbatim on meta, so equality identifies
+        # a client this S3 built; any other client falls back to the
+        # host heuristic on its *own* endpoint (`_derive_endpoint`).
+        endpoint = self._crt_endpoint
+        if endpoint is not None and self._client.meta.endpoint_url != endpoint:
+            endpoint = None
         # Deferred: absent on floor boto3 (pre-CRT); reached only on the CRT lane.
         from boto3.exceptions import InvalidCrtTransferConfigError
 
@@ -1272,7 +1283,7 @@ class Transferrer:
             return crtsupport.create_crt_transfer_manager(
                 self._client,
                 self._transfer_config,
-                endpoint=self._crt_endpoint,
+                endpoint=endpoint,
                 session=self._session,
             )
         except InvalidCrtTransferConfigError as exc:

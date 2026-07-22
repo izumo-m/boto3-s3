@@ -1637,7 +1637,9 @@ class TestEngineSelection:
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
-        client, _ = make_recording_client([])
+        # The run's client was built with the explicit endpoint (the CLI flow,
+        # and S3.resolve() with S3(endpoint_url=...)), so the pin applies.
+        client, _ = make_recording_client([], endpoint_url=vpce)
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
@@ -1646,6 +1648,35 @@ class TestEngineSelection:
         )
         transferrer._get_manager()
         assert seen == [vpce]
+
+    def test_crt_endpoint_is_dropped_for_a_storage_supplied_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The explicit endpoint pin belongs to the client built from it. A
+        # storage-supplied client with its own endpoint must not be pinned to
+        # the S3-level one - the CRT would dial one endpoint with another's
+        # credentials (the classic lane just uses the client) - so the manager
+        # falls back to the host heuristic on the client's own endpoint.
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+
+        def fake_create(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
+            seen.append(endpoint)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])  # default AWS endpoint, not the S3-level one
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            crt_endpoint="https://endpoint-a.example.com",
+        )
+        transferrer._get_manager()
+        assert seen == [None]
 
     def test_session_is_threaded_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport

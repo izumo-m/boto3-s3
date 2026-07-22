@@ -82,9 +82,12 @@ also read as `'auto'`) with the same rules as boto3.
   singleton): lazily creates the process-singleton CRT client + serializer. If
   the lock is held by another process, it returns `None` = classic fallback. A
   later client that falls outside the compatibility check (same region + same
-  frozen credentials, **+ our extension: same endpoint, same signing mode**
-  [signed/unsigned]) also drops to classic (the same shape as boto3's
-  region/credentials-mismatch fallback). On an explicit `'crt'` it also ports
+  frozen credentials, **+ our extensions: same endpoint, same signing mode**
+  [signed/unsigned]**, same TLS `verify`, same `Config.s3` shape** - the CRT
+  client bakes in the first client's `verify` and the shared serializer its
+  `Config`, so a differing later client must not silently ride those) also
+  drops to classic (the same shape as boto3's region/credentials-mismatch
+  fallback). On an explicit `'crt'` it also ports
   boto3's `_validate_crt_transfer_config` (which rejects an explicit setting of a
   CRT-unsupported option).
 - **Deriving the connection parameters (a documented improvement over boto3)**:
@@ -98,7 +101,12 @@ also read as `'auto'`) with the same rules as boto3.
     and that value is honored verbatim - matching aws-cli, whose CRT serializer
     is handed `params['endpoint_url']` as-is, so a custom endpoint that sits
     under an AWS domain (a VPC interface endpoint, a directly-named FIPS /
-    dualstack host) is pinned rather than re-resolved to public S3. With no
+    dualstack host) is pinned rather than re-resolved to public S3. The pin
+    applies only when the run's client was built with that endpoint
+    (`client.meta.endpoint_url` equality, checked at the `Transferrer` seam):
+    a storage-supplied client with its own endpoint falls back to the host
+    heuristic on *its* endpoint instead of being dialed at the S3-level one
+    with the wrong credentials. With no
     explicit endpoint (`endpoint=None` - the default when neither the CLI's
     `--endpoint-url` nor `S3(endpoint_url=...)` supplies one),
     `_derive_endpoint` falls back to the host form of `client.meta.endpoint_url`:
