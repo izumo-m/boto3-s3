@@ -5,7 +5,7 @@ This document is the established design for boto3-s3's equivalent of
 behavior see [`cli.md`](./cli.md) section 5.9, for the transfer engine see
 [`transfer.md`](./transfer.md), for the delete batch see
 [`deleter.md`](./deleter.md), and for the test structure see
-[`testing.md`](./testing.md). Behavior matches aws 2.35.18, cross-checked
+[`testing.md`](./testing.md). Behavior matches the pinned aws-cli, cross-checked
 against MinIO and the aws-cli source.
 
 ## 1. Two-layer pipeline
@@ -37,9 +37,11 @@ dest listing -- filter (visibility) --+        |
   it prunes **per-side** - the same per-side roots aws gets from joining the
   pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching only
   the source leaves the destination visible, so `--delete` still removes it).
-  The same one filter expresses both because `globsieve.Anchored` routes a
-  relative pattern to `compare_key` and an absolute one to the full key (one is
-  symmetric, the other per-side automatically); see globsieve.md. Folder markers
+  A library `GlobFilter` expresses both in one filter because
+  `globsieve.Anchored` routes a relative pattern to `compare_key` and an
+  absolute one to the full key (one is symmetric, the other per-side
+  automatically; see globsieve.md); the CLI reaches the same per-side outcome
+  through its own base-joined filter, aws's actual mechanism (cli.md). Folder markers
   (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
   produces them - either way sync neither transfers nor deletes markers. The
   implementation is `ScanOptions.filter` on both sides (the S3 listing prunes
@@ -96,11 +98,12 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
 
 - The pair types (`MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair`, what
   `Comparator.compare` yields) tell by type which sides hold the key:
-  `SrcOnlyPair(key, transfer_type, src)` = new (the `create_filter` lane),
-  `DestOnlyPair(key, transfer_type, dest)` = orphan (the `delete_filter` lane),
-  `SyncPair(key, transfer_type, src, dest)` = update (the `update_filter` lane) -
+  `SrcOnlyPair(compare_key, transfer_type, src)` = new (the `create_filter` lane),
+  `DestOnlyPair(compare_key, transfer_type, dest)` = orphan (the `delete_filter` lane),
+  `SyncPair(compare_key, transfer_type, src, dest)` = update (the `update_filter` lane) -
+  field shapes (the dataclasses are `kw_only`, so construction is by keyword);
   the one-sided shapes have **no attribute at all** for their missing side. In
-  each, `key` is the relative compare key (`/`-separated) and `transfer_type` is
+  each, `compare_key` is the entry's relative compare key (`/`-separated) and `transfer_type` is
   the sync's direction, stamped on every pair so a filter applies the
   direction-asymmetric rules without being told the route. The three shapes map
   one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->
@@ -150,8 +153,10 @@ s3.sync(src, dest,
 
 ## 4. The default decision (ported from aws-cli, pinned by measurement)
 
-`update_filter=None` is `AwsCliComparison()`, the public form of the internal
-`compare_size_time(pair, size_only, exact_timestamps)` (direction from
+`update_filter=None` is `AwsCliComparison()` (`from boto3_s3.awsclicompare
+import AwsCliComparison` - an opt-in submodule import like the section 8-9
+content strategies), the public form of the internal
+`compare_size_time(pair, *, size_only=False, exact_timestamps=False)` (direction from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
 write-guard the sync loop applies first (section 3). A key missing at the
@@ -215,6 +220,14 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   straight through, then each item fails with `[Errno 20]` and gives rc 1.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
+- An S3 Express directory bucket (`--x-s3`) on either side is rejected with
+  aws-cli's `Cannot use sync command with a directory bucket.`
+  (`ValidationError`), after the s3local dest-dir creation above, before any
+  client build or listing: directory buckets drop `ListObjectsV2`'s
+  lexicographic guarantee, so the merge-join could pair keys wrongly and
+  `delete_filter` could remove keys present on both sides. The CLI rejects the
+  same paths at its own validation stage (rc 252); the library guard is the
+  backstop for direct callers.
 - opens3 / s3open (a custom backend on one side, the other always S3 - the open
   route, transfer.md section 12): the custom side must declare `SORTABLE_SCAN`
   (the merge-join needs both listings byte-ordered) plus the route's I/O
@@ -251,10 +264,12 @@ s3.sync(src, dest, update_filter=EtagComparison())            # 8 MiB default pa
 s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   # explicit part size
 ```
 
-- **s3->s3** compares the two listings' ETags directly (no bytes read);
-  **upload / download** reconstructs the local file's single- or multipart
-  S3-style ETag and compares. A missing /
-  non-MD5 ETag is treated as differing (never skip on an indeterminate compare).
+- **s3->s3** compares the two listings' ETags verbatim (no bytes read): equal
+  strings - opaque non-MD5 values included - read as same, a missing ETag as
+  differing. **upload / download** reconstructs the local file's single- or
+  multipart S3-style ETag and compares; there a missing or non-MD5 remote ETag
+  can never match the MD5-based reconstruction, so it reads as differing
+  (never skip on an indeterminate compare).
 - **`part_size`** is the multipart chunk size, fixed at construction.
   `EtagComparison(s3)` reads it from that `s3`'s active profile
   (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read tied to the
@@ -268,9 +283,10 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   any ETag work. On s3->s3 this guards against an MD5/ETag collision (equal ETag
   != equal content); on upload / download it also skips the local read + hash.
   `check_size=False` restores pure-ETag semantics.
-- **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag, so
-  against such a bucket every object reads as differing - use the default
-  `update_filter=None` there instead. The upload / download hash runs on sync's
+- **Caveats.** SSE-KMS / SSE-C / DSSE objects carry an opaque, non-MD5 ETag: on
+  upload / download every such object reads as differing, and on s3->s3 only a
+  pair carrying the *same* opaque value (e.g. a replicated object) reads as
+  equal - use the default `update_filter=None` against such buckets instead. The upload / download hash runs on sync's
   calling thread unless the strategy is wrapped in `ParallelFilter` (section 10).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
@@ -282,7 +298,9 @@ algorithm over the local file. It needs **no write side** (the checksum is one
 S3 already stores), works on objects any tool uploaded with a checksum, is
 **exact for multipart** objects (the part boundaries come back in `ObjectParts`,
 so nothing is guessed), and works for **SSE** objects (a checksum is independent
-of encryption). The cost is one `GetObjectAttributes` round-trip per object.
+of encryption). The cost is one `GetObjectAttributes` round-trip per object
+consulted - the S3 side on upload / download, each side on s3->s3 - plus
+follow-up pages when a `COMPOSITE` object's `ObjectParts` listing is truncated.
 Like `EtagComparison` it is a standalone, opt-in building block - imported by submodule
 path, not part of the package root re-export:
 
@@ -302,8 +320,10 @@ mtime already skips. Content comparison can then add copies but never prevent
 the mtime-driven ones, which defeats the reason to compare by content (mtime is
 exactly what content comparison must not trust). `update_filter=ChecksumComparison(...)`
 instead decides every both-sides pair by content; the only shortcut is the
-`check_size` size pre-check (a differing size copies for free). The cost is one
-`GetObjectAttributes` (plus the local hash) per both-sides pair; wrap the
+`check_size` size pre-check (a differing size copies for free). The cost per
+both-sides pair is one `GetObjectAttributes` plus the local hash on upload /
+download, and two `GetObjectAttributes` (one per side, no bytes read) on
+s3->s3; wrap the
 strategy in `ParallelFilter` (section 10) to run those concurrently.
 
 - **upload / download** reads the remote object's checksum and recomputes it over
@@ -315,9 +335,12 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
   algorithm across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
   checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
-  `GetObjectAttributes` error (a 404, a denied `s3:GetObjectAttributes`, an SSE-C
-  object that needs a key) is treated as differing - the strategy never skips on
-  an indeterminate compare.
+  `GetObjectAttributes` **`ClientError`** (a 404, a denied
+  `s3:GetObjectAttributes`, an SSE-C object that needs a key) is treated as
+  differing - the strategy never skips on an indeterminate compare. A
+  `BotoCoreError` (no credentials, an unreachable endpoint, a timeout) is not
+  per-object: it aborts the sync, translated to the library taxonomy
+  (silently "copy everything" would mask a broken environment).
 - **`check_size`** (default on) treats a known size mismatch as differing before
   any call or hash - a shortcut, and for s3->s3 a guard against a CRC collision.
 - **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` (hashlib) are
@@ -327,7 +350,8 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   extra elsewhere (crt.md section 6): without it these still work, just slowly.
   Because that fallback is slow, **`pure_max_size`** caps it: above the cap, with
   no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
-  rather than being hashed. `None` (default) never caps.
+  rather than being hashed (an unknown size counts as above the cap - the
+  bound is hard). `None` (default) never caps.
 - **Endpoint injection.** `ChecksumComparison(s3, src, dest)` resolves the S3 side(s)
   for their client + bucket from the same `src` / `dest` passed to `sync`
   (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
@@ -377,15 +401,19 @@ botocore client is safe to share for concurrent calls).
   **delete** lane its `delete_filter` - each on its own executor when wrapped. A
   lane left unwrapped decides inline on the calling thread in compare-key order.
 - **Ordering.** Pooled decisions are consumed in completion order, so survivors
-  submit out of compare-key order - already true of every sync (s3transfer moves
-  bytes on its own pool; `on_result` fires unordered). The one visible
-  consequence is `create_filter`: parallelizing it makes the `--case-conflict`
-  gate's "first key wins" non-deterministic (which case-variant survives a
-  case-insensitive local destination, and which warns), because the gate's
-  in-flight set is order-sensitive (aws-cli's `CaseConflictSync` in the
-  not-at-dest slot). The **update** lane never touches the gate, and **delete**
-  orphans have no order to lose (their output interleaving is already
-  non-deterministic, section 5). Exit parity is otherwise unaffected.
+  submit out of compare-key order. For real transfers and the S3 batch deletes
+  that changes nothing observable (s3transfer moves bytes on its own pool, the
+  deleter batches on its worker; `on_result` fires unordered either way, and
+  delete/transfer lines already interleave non-deterministically, section 5).
+  Results emitted inline on the deciding thread do follow it, though: dry-run
+  records, and the synchronous local / custom-destination orphan deletes,
+  arrive in compare-key order from a serial lane but in completion order from
+  a pooled one. The other visible consequence is `create_filter`:
+  parallelizing it makes the `--case-conflict` gate's "first key wins"
+  non-deterministic (which case-variant survives a case-insensitive local
+  destination, and which warns), because the gate's in-flight set is
+  order-sensitive (aws-cli's `CaseConflictSync` in the not-at-dest slot). The
+  **update** lane never touches the gate. Exit parity is unaffected.
 - **Back-pressure.** `sync` submits each pooled decision as a `Future` and keeps a
   bounded number outstanding (the distinct executors' worker counts, summed), so a
   huge listing is never materialized into futures all at once - a pool's own

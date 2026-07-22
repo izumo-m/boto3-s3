@@ -58,13 +58,13 @@ class TestLsRouting:
         with pytest.raises(CancelledError):
             S3().ls(
                 S3Storage("s3://b/p/", client=client),
-                on_result=lambda _info: None,
+                on_entry=lambda _info: None,
                 cancel_token=token,
             )
 
         assert client.calls == []
 
-    def test_cancel_from_on_result_stops_delivery_and_reclaims_prefetch(self) -> None:
+    def test_cancel_from_on_entry_stops_delivery_and_reclaims_prefetch(self) -> None:
         pages = [
             {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
         ]
@@ -77,7 +77,7 @@ class TestLsRouting:
             token.cancel()
 
         with pytest.raises(CancelledError):
-            S3().ls(storage, on_result=stop_after_first, cancel_token=token)
+            S3().ls(storage, on_entry=stop_after_first, cancel_token=token)
 
         assert keys == ["p/0"]
         assert not any(
@@ -117,7 +117,7 @@ class TestLsRouting:
         with pytest.raises(CancelledError):
             S3().ls(
                 S3Storage("s3://b/p/", client=_ControlledClient([])),
-                on_result=cancel_while_page_is_inflight,
+                on_entry=cancel_while_page_is_inflight,
                 cancel_token=token,
             )
 
@@ -125,7 +125,7 @@ class TestLsRouting:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("s3://b/p/", client=client)
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [info.key for info in infos] == ["p/a"]
 
     def test_scheme_optional_storage_delegates_to_scan(self) -> None:
@@ -133,20 +133,20 @@ class TestLsRouting:
         client = _FakeS3Client([{"Contents": [{"Key": "p/a", "Size": 1, "LastModified": _MTIME}]}])
         storage = S3Storage("b/p/", client=client)  # no s3:// scheme
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [info.key for info in infos] == ["p/a"]
 
     def test_non_s3_location_raises_eagerly(self) -> None:
         # ls() is a regular method (not a generator): a non-S3 target raises on
         # the call itself, before any iteration.
         with pytest.raises(ValidationError):
-            S3().ls(LocalStorage("/tmp/x"), on_result=lambda _info: None)
+            S3().ls(LocalStorage("/tmp/x"), on_entry=lambda _info: None)
 
     def test_service_root_storage_lists_buckets(self) -> None:
         client = _FakeS3Client([{"Buckets": [{"Name": "alpha", "CreationDate": _MTIME}]}])
         storage = S3Storage("s3://", client=client)
         infos: list[Any] = []
-        S3().ls(storage, on_result=infos.append)
+        S3().ls(storage, on_entry=infos.append)
         assert [(i.key, i.kind) for i in infos] == [("alpha", FileKind.BUCKET)]
 
     def test_bucket_filters_reach_the_scan(self) -> None:
@@ -154,7 +154,7 @@ class TestLsRouting:
         storage = S3Storage("s3://", client=client)
         S3().ls(
             storage,
-            on_result=lambda _info: None,
+            on_entry=lambda _info: None,
             bucket_name_prefix="al",
             bucket_region="us-east-1",
         )
@@ -163,7 +163,30 @@ class TestLsRouting:
 
     def test_key_without_bucket_raises_eagerly(self) -> None:
         with pytest.raises(ValidationError):
-            S3().ls("s3:///key", on_result=lambda _info: None)
+            S3().ls("s3:///key", on_entry=lambda _info: None)
+
+
+class TestUnknownTransferOption:
+    """cp / mv / sync reject a typo'd ``**options`` key eagerly (pre-pipeline).
+
+    Unpack[TransferOptions] covers type-checked callers only; without the
+    runtime check a dry_run (for dryrun) typo would be silently ignored -
+    and on mv still delete the source.
+    """
+
+    @pytest.mark.parametrize("op", ["cp", "mv", "sync"])
+    def test_unknown_key_raises_before_any_work(self, op: str) -> None:
+        # "Before any work" observed directly: resolving either path would
+        # build a client, so an S3 whose client() explodes proves the option
+        # validation really runs first.
+        class NoClientS3(S3):
+            def client(self) -> Any:
+                raise AssertionError("client built before option validation")
+
+        method = getattr(NoClientS3(), op)
+        with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
+            method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
+        assert type(ei.value) is ValidationError
 
 
 class TestClientSeam:
@@ -219,6 +242,16 @@ class TestClientSeam:
             S3(session=cast("Any", _BrokenSession())).client()
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    def test_malformed_endpoint_maps_to_invalid_config_error(self) -> None:
+        # botocore rejects a malformed endpoint_url with a plain ValueError,
+        # which is not a BotoCoreError and used to leak raw through the
+        # translator - a break of client()'s "never the raw botocore error"
+        # contract. Pin the exact refinement type (rc 255 lane).
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3(endpoint_url="not-a-url").client()
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 class TestResolveSeam:
@@ -312,3 +345,26 @@ class TestTransferConfigDefault:
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
         assert _captured_transfer_config["transfer_config"] is call_tc
+
+
+class TestModuleLevelConvenienceSignatures:
+    """The module-level wrappers introspect as their method minus ``self``
+    (docs/s3.md): ``functools.wraps`` alone would expose the method's
+    signature *with* ``self`` through ``__wrapped__``."""
+
+    def test_signature_strips_self(self) -> None:
+        import inspect
+
+        import boto3_s3
+
+        for name in ("cp", "ls", "mv", "rm", "mb", "rb", "presign", "sync", "website"):
+            signature = inspect.signature(getattr(boto3_s3, name))
+            assert "self" not in signature.parameters, name
+
+    def test_signature_binds_positionally_like_the_method(self) -> None:
+        import inspect
+
+        import boto3_s3
+
+        bound = inspect.signature(boto3_s3.cp).bind("local.txt", "s3://bucket/key")
+        assert bound.args == ("local.txt", "s3://bucket/key")

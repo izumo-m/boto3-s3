@@ -11,12 +11,14 @@ itself and then delete it. Resolving first lets a caller compare the real
 Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
 region/verify/profile wiring of your choice - aws builds the s3control
-client in the path's region and the sts client without one); only
-``has_underlying_s3_path`` is callable without any client. aws-cli's
+client in the path's region and the sts client without one); the pure
+string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
+``is_s3express_path`` - are callable without any client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
-This module stays SDK-free at import time (docs/imports.md): botocore is
-touched only when a resolution actually calls a client.
+This module stays SDK-free at import time (docs/imports.md): the first path
+*split* lazily pulls in ``s3storage`` (and with it ``botocore.exceptions``),
+and a client is touched only when a resolution actually calls one.
 """
 
 from __future__ import annotations
@@ -58,6 +60,38 @@ def has_underlying_s3_path(path: str) -> bool:
     )
 
 
+def is_mrap_path(path: str) -> bool:
+    """Whether *path*'s bucket part is a Multi-Region Access Point ARN.
+
+    Pure string inspection like `has_underlying_s3_path`. An MRAP request
+    must be signed with asymmetric SigV4a (its region set is `*`), which an
+    explicit symmetric `signature_version` in the client config would
+    suppress - callers that pin one (the CLI's always-SigV4 pin) use this to
+    stand down for MRAP targets.
+    """
+    bucket, _key = _split_bucket_key(path)
+    return _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket) is not None
+
+
+def is_s3express_path(path: str) -> bool:
+    """Whether an ``s3://`` path names an S3 Express directory bucket
+    (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix).
+
+    Pure string inspection like `is_mrap_path`, with one extra gate: the
+    ``s3://`` scheme is required, because callers feed raw positionals that
+    may be local paths and a local name can plausibly end in ``--x-s3``
+    (an MRAP ARN shape cannot). A directory-bucket request must be signed
+    ``sigv4-s3express`` with `CreateSession` credentials, which an explicit
+    `signature_version` in the client config would suppress - callers that
+    pin one (the CLI's always-SigV4 pin) use this to stand down, like
+    `is_mrap_path` for SigV4a.
+    """
+    if not path.startswith("s3://"):
+        return False
+    bucket, _key = _split_bucket_key(path)
+    return bucket.endswith("--x-s3")
+
+
 def _split_bucket_key(path: str) -> tuple[str, str]:
     """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
 
@@ -79,7 +113,7 @@ class S3PathResolver:
     bucket name resolves to itself without any API call.
     """
 
-    def __init__(self, s3control_client: Any, sts_client: Any) -> None:
+    def __init__(self, *, s3control_client: Any, sts_client: Any) -> None:
         self._s3control_client = s3control_client
         self._sts_client = sts_client
 
@@ -160,12 +194,13 @@ class S3PathResolver:
         aws lets the raw ClientError escape to its generic 254 handler
         (a failing GetCallerIdentity exits 254); the
         library shape for that is a translated ``Boto3S3Error`` with
-        the ClientError as its cause. Deferred import: resolving a plain
-        bucket path must not load botocore.
+        the ClientError as its cause. Deferred import: keeps this module
+        SDK-free at import time (the path split already lazily loads
+        ``s3storage`` the same way, so by resolution time it is warm).
         """
         from boto3_s3.s3storage import s3_errors
 
         return s3_errors(operation="mv")
 
 
-__all__ = ["S3PathResolver", "has_underlying_s3_path"]
+__all__ = ["S3PathResolver", "has_underlying_s3_path", "is_mrap_path", "is_s3express_path"]

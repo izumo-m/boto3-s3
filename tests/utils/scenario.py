@@ -37,6 +37,10 @@ class BaseScenario:
     diff_only: bool = False
     expected_stderr_tokens_ours: tuple[str, ...] = ()
     expected_stderr_tokens_aws: tuple[str, ...] = ()
+    # True => stderr must be exactly empty on BOTH sides (a --quiet contract:
+    # token lists cannot express "nothing at all", an empty tuple asserts
+    # nothing).
+    stderr_exact_empty: bool = False
 
 
 def resolve_argv(scenario: BaseScenario, bucket: str) -> list[str]:

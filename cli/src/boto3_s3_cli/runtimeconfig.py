@@ -10,7 +10,9 @@ human-readable sizes (``8MB``), rates (``100MB/s`` / ``800Kb/s``), booleans,
 the ``default`` -> ``classic`` alias, and byte-exact error wording - raising
 the library's ``InvalidConfigError`` (aws-cli's class of the same name)
 where aws-cli's escapes to its general handler (both exit 255, after every
-path/usage validation).
+path/usage validation). One shared leak is kept for parity: a bad number
+under a valid size suffix (``fooMB``) raises ``int()``'s raw ``ValueError``
+on both sides (aws's converter has the same unguarded cast).
 
 ``load_scoped_s3_config`` reads the section the way aws-cli's
 ``_get_runtime_config`` does - the profile's scoped config, so nested
@@ -24,13 +26,12 @@ section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from boto3_s3 import ConfigurationError, InvalidConfigError
+from botocore.utils import ensure_boolean
+
+from boto3_s3 import ConfigurationError, InvalidConfigError, TransferConfig, crtsupport
 from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
-
-if TYPE_CHECKING:
-    from boto3_s3 import TransferConfig
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,25 @@ _TRANSFER_CONFIG_CTOR_KEYS = {
 # aws-cli's TransferManagerFactory pins this on every classic manager.
 _MAX_IN_MEMORY_CHUNKS = 6
 
+# aws-cli's bundled s3transfer defaults the classic download IO queue
+# (``max_io_queue_size``, the disk-writer's buffered-chunk cap) to 1000, and no
+# ``[s3]`` key maps to it, so aws always runs at 1000. boto3's TransferConfig
+# overrides that same s3transfer default down to 100, which would leave slow
+# disks holding a tenth of aws's readahead. Pinned classic-only, like the chunk
+# caps; the buffered ceiling is max_io_queue_size x io_chunksize (~256 MiB at
+# the default 256 KiB) across the manager's downloads - one shared io
+# executor serves them all - reached only when the disk lags the network.
+_MAX_IO_QUEUE_SIZE = 1000
+
 # The ``[s3]`` keys the CRT engine actually consumes (aws-cli factory
 # ``_create_crt_client``: the part size, the throughput target and the file-I/O
 # options). Every other key is classic-only - aws-cli silently ignores it under
 # CRT. Forwarding the classic-only knobs onto a crt-preferred ``TransferConfig``
 # is not merely wasteful: boto3's ``_validate_crt_transfer_config`` rejects the
 # ones that live in its ``DEFAULTS`` but outside its CRT allow-list
-# (``io_chunksize`` / ``max_bandwidth``), which would surface as an uncaught
-# error where aws-cli completes the transfer (crt.md section 4).
+# (``io_chunksize`` / ``max_bandwidth``), which would fail the run (the
+# rejection mapped to an exit code at the transfer boundary) where aws-cli
+# completes the transfer (crt.md section 4).
 _CRT_CONSUMED_KEYS = frozenset(
     {
         "multipart_chunksize",
@@ -182,9 +194,6 @@ class RuntimeConfig:
                     )
 
     def _convert_booleans(self, runtime_config: dict[str, Any]) -> None:
-        # Import botocore only when converting an actual runtime config.
-        from botocore.utils import ensure_boolean
-
         for attr in self.BOOLEANS:
             value = runtime_config.get(attr)
             if value is not None:
@@ -278,16 +287,14 @@ def resolve_transfer_client(
     the ``[s3] preferred_transfer_client`` decides, with ``auto`` resolved
     against the host (``is_optimized_for_system`` + the process lock). The one
     aws-cli cannot express - awscrt absent under an explicit ``crt`` (aws
-    bundles it) - is the CLI's documented degradation: a configuration error,
-    not a traceback (boto3's ``MissingDependencyException`` would otherwise
-    escape ``main``).
+    bundles it) - is the CLI's documented degradation: a configuration error
+    in the crt-absence family (253; boto3's ``MissingDependencyException``
+    would otherwise surface inside the transfer span as a ``fatal error:``
+    rc 1 - an aws-unreachable shape either way).
     """
     if paths_type == "s3s3":
         return "classic"
     preferred = runtime_config["preferred_transfer_client"]  # alias already resolved
-    # Deferred awscrt-touching import: only the transfer path reaches here.
-    from boto3_s3 import crtsupport
-
     if preferred == "crt":
         if not crtsupport.has_minimum_crt_version():
             raise ConfigurationError(
@@ -324,22 +331,23 @@ def build_transfer_config(
 
     Only keys the user actually set in ``[s3]`` (``scoped``) are passed to the
     constructor, carrying the converted values from ``runtime_config``; unset
-    keys keep boto3's ``UNSET_DEFAULT`` sentinel, which is what lets the CRT
+    keys keep the base constructor's own defaults - the ``UNSET_DEFAULT``
+    sentinel on current boto3, which is what lets the CRT
     engine honor aws-cli's "use ``multipart_chunksize`` as the part size only
-    when it was set explicitly" rule. ``preferred_transfer_client`` carries
+    when it was set explicitly" rule (the floor boto3 has neither the
+    sentinel machinery nor a CRT engine to consume it). ``preferred_transfer_client`` carries
     the already-resolved engine (so the library does not re-resolve ``auto``).
 
     The config is engine-specific, exactly like aws-cli (aws-cli factory builds
     the classic ``TransferConfig`` and the CRT client from separate key sets).
     Under CRT only the keys the CRT client consumes (``_CRT_CONSUMED_KEYS``)
-    are forwarded, and the classic-only tuning (the request queue size and the
-    in-memory chunk caps) is omitted - both because the CRT manager ignores it
-    and because forwarding ``io_chunksize`` / ``max_bandwidth`` would trip
-    boto3's CRT config validation (crt.md section 4). Under classic every key flows
-    through and the aws-cli in-memory chunk caps are pinned.
+    are forwarded, and the classic-only tuning (the request queue size, the
+    in-memory chunk caps and the download IO queue depth) is omitted - both
+    because the CRT manager ignores it and because forwarding ``io_chunksize``
+    / ``max_bandwidth`` would trip boto3's CRT config validation (crt.md
+    section 4). Under classic every key flows through and the aws-cli
+    in-memory chunk caps and download IO queue depth are pinned.
     """
-    from boto3_s3 import TransferConfig
-
     crt = resolved == "crt"
     kwargs: dict[str, Any] = {"preferred_transfer_client": resolved}
     for rc_key, ctor_key in _TRANSFER_CONFIG_CTOR_KEYS.items():
@@ -348,17 +356,20 @@ def build_transfer_config(
         if crt and rc_key not in _CRT_CONSUMED_KEYS:
             # aws-cli's CRT client never reads this classic-only knob; placing
             # io_chunksize / max_bandwidth here would additionally trip boto3's
-            # _validate_crt_transfer_config (a traceback where aws exits 0).
+            # _validate_crt_transfer_config (a failed run where aws exits 0).
             continue
         kwargs[ctor_key] = runtime_config[rc_key]
     config = TransferConfig(**kwargs)
     if not crt:
         # Classic-only tuning aws-cli applies solely to its classic
         # TransferManager (aws-cli factory): the request queue size boto3's
-        # constructor does not expose (s3transfer's max_request_queue_size)
-        # and the in-memory chunk caps. The CRT manager ignores both.
+        # constructor does not expose (s3transfer's max_request_queue_size),
+        # the in-memory chunk caps, and the download IO queue depth boto3
+        # dials down from the s3transfer default aws runs at. The CRT manager
+        # ignores them all.
         if "max_queue_size" in scoped:
             config.max_request_queue_size = runtime_config["max_queue_size"]
         config.max_in_memory_upload_chunks = _MAX_IN_MEMORY_CHUNKS
         config.max_in_memory_download_chunks = _MAX_IN_MEMORY_CHUNKS
+        config.max_io_queue_size = _MAX_IO_QUEUE_SIZE
     return config

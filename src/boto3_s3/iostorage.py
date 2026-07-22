@@ -12,8 +12,10 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
 (download). The transfer ``close``s every fileobj ``open`` returns (the open
-route flushes a real backend's writer that way), so each view here absorbs that
-``close`` into a flush: the caller's stream is **never closed** by ``IOStorage``
+route flushes a real backend's writer that way), so each *writer* view here
+absorbs that ``close`` into a flush and each reader view's ``close`` is a
+no-op (nothing to release): the caller's stream is **never closed** by
+``IOStorage``
 (it owns only the thin view / codec adapter).
 
 ``StdioStorage`` is the convenience for the process's stdio: as a source it reads
@@ -38,15 +40,8 @@ from boto3_s3.exceptions import ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
-    from boto3_s3.types import FileInfo, ScanOptions
-
-_NOT_A_CONTAINER = (
-    "IOStorage wraps a single stream and supports open() only, not scan / delete / "
-    "get_fileinfo (pass a path or an s3:// URI for ls / rm / recursive transfers)."
-)
 
 _READ_CHUNK = 64 * 1024
 
@@ -73,6 +68,34 @@ class _Uncloseable:
         flush = getattr(self._raw, "flush", None)
         if flush is not None:
             flush()
+
+
+class _WriteOnly:
+    """Write-only binary view of process stdout (aws-cli's ``StdoutBytesWriter``).
+
+    Exposing only ``write`` forces s3transfer's non-seekable download path,
+    which orders ranged chunks before writing them out. A redirected stdout
+    can report ``seekable()`` (a regular file) while ``>>`` opened it
+    ``O_APPEND``, where every write lands at the end regardless of the seeked
+    position - a seek-based parallel download would then interleave chunks in
+    completion order. aws always streams stdout sequentially, so this view
+    does too. ``close`` flushes and leaves the process stream open
+    (``_Uncloseable``'s contract).
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+
+    def write(self, data: Any) -> int:
+        return self._raw.write(data)
+
+    def flush(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush is not None:
+            flush()
+
+    def close(self) -> None:
+        self.flush()
 
 
 class _NonSeekable:
@@ -182,7 +205,8 @@ class IOStorage(Storage):
     downloads into the stream, ``cp(IOStorage(buf), "s3://b/k")`` uploads from it.
     ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
     the bytes land (a stream is never a move *source* - it cannot be deleted).
-    A binary stream is used as-is; a text stream - recognized as an
+    A binary stream is used as-is behind a close-suppressing view
+    (`_Uncloseable`); a text stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
     with ``encoding`` (default utf-8). The caller's stream is never closed by
@@ -193,7 +217,7 @@ class IOStorage(Storage):
     I/O (both directions, chosen per ``open`` call), with no listing or deletion.
     """
 
-    scheme: ClassVar[str] = "stdio"
+    scheme: ClassVar[str] = "stream"
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
@@ -221,23 +245,6 @@ class IOStorage(Storage):
         return cast("BinaryIO", _Uncloseable(stream))
 
     @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        raise NotImplementedError(_NOT_A_CONTAINER)
-
-    @override
-    def delete(self, info: FileInfo) -> None:
-        raise NotImplementedError(_NOT_A_CONTAINER)
-
-    @override
-    def get_fileinfo(
-        self,
-        key: str = "",
-        *,
-        on_warning: Callable[[str], None] | None = None,
-    ) -> FileInfo | None:
-        raise NotImplementedError(_NOT_A_CONTAINER)
-
-    @override
     def as_text(self) -> str:
         """Return the stdio token ``"-"`` (``Storage.as_text``, display-only).
 
@@ -255,12 +262,17 @@ class StdioStorage(IOStorage):
     """The process's stdio as a ``Storage``: ``sys.stdin`` to read, ``sys.stdout`` to write.
 
     A source ``open("rb")`` reads ``sys.stdin.buffer`` (forced non-seekable); a
-    destination ``open("wb")`` writes ``sys.stdout.buffer``. The stream is chosen
+    destination ``open("wb")`` writes ``sys.stdout.buffer`` through a
+    write-only view (`_WriteOnly`, aws's ``StdoutBytesWriter``), so a
+    download always streams sequentially even when stdout is redirected to
+    a seekable file. The stream is chosen
     by ``mode`` at ``open`` time, so a single instance serves either direction and
     picks up a redirected ``sys.stdin`` / ``sys.stdout``. If the selected process
     stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
     worker can receive an unusable file object.
     """
+
+    scheme: ClassVar[str] = "stdio"
 
     def __init__(self) -> None:
         self._stream = None
@@ -284,7 +296,7 @@ class StdioStorage(IOStorage):
                 "stdout is required for this operation, but is not available.",
                 operation="cp",
             )
-        return cast("BinaryIO", _Uncloseable(getattr(stdout, "buffer", stdout)))
+        return cast("BinaryIO", _WriteOnly(getattr(stdout, "buffer", stdout)))
 
 
 __all__ = ["IOStorage", "StdioStorage"]

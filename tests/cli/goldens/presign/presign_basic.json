@@ -3,11 +3,16 @@
     "presign",
     "s3://<BUCKET>/presign/basic.txt"
   ],
-  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
+  "head_fields": null,
+  "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": null,
   "scenario": "presign_basic",
+  "src_tree": null,
   "stdout_lines": [
     "<ENDPOINT>/<BUCKET>/presign/basic.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<ACCESS_KEY>/<DATE>/<REGION>/s3/aws4_request&X-Amz-Date=<AMZ_DATE>&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=<SIGNATURE>"
   ]

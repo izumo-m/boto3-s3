@@ -21,6 +21,7 @@ from tests.utils.golden import assert_matches_golden, load_golden
 from tests.utils.harness import (
     assert_stderr_tokens,
     capture_local_tree,
+    had_progress_lines,
     head_object_fields,
     normalize_cp_stdout,
     remaining_keys,
@@ -64,10 +65,15 @@ def test_mv_matches_golden(
         remaining_keys=remaining_keys(moto_s3, FUNCTIONAL_BUCKET),
         local_tree=capture_local_tree(str(tmp_path / "dest")) if scenario.capture_tree else None,
         head_fields=head_fields,
+        progress=(had_progress_lines(result.stdout) if scenario.compare_progress else None),
         src_tree=capture_local_tree(str(tmp_path / "src")),
     )
     assert_stderr_tokens(
-        scenario.expected_stderr_tokens_ours, result.stderr, side="ours", scenario=scenario.name
+        scenario.expected_stderr_tokens_ours,
+        result.stderr,
+        side="ours",
+        scenario=scenario.name,
+        require_empty=scenario.stderr_exact_empty,
     )
     if expected_mtime is not None and scenario.mtime_key is not None:
         stamped = os.stat(tmp_path / scenario.mtime_key[1]).st_mtime
@@ -98,7 +104,7 @@ class TestMvGlacierOnMoto:
         # The wording stays route-shaped ("download"), not "move".
         assert "Unable to perform download operations" in result.stderr
         assert not (tmp_path / "out.bin").exists()
-        assert self._remaining(moto_s3) == ["cold/x.bin"]
+        assert self._remaining(moto_s3) == ["cold/x.bin:6:?"]  # GLACIER body unreadable
 
     def test_force_glacier_transfer_fails_without_deleting(
         self, moto_s3: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -113,7 +119,7 @@ class TestMvGlacierOnMoto:
         assert result.rc == 1
         assert "move failed" in result.stderr
         assert "InvalidObjectState" in result.stderr
-        assert self._remaining(moto_s3) == ["cold/x.bin"]
+        assert self._remaining(moto_s3) == ["cold/x.bin:6:?"]  # GLACIER body unreadable
 
     def test_restored_object_moves_without_force(
         self, moto_s3: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -137,6 +143,6 @@ class TestMvGlacierOnMoto:
             ["mv", f"s3://{FUNCTIONAL_BUCKET}/cold/x.bin", "out.bin", "--ignore-glacier-warnings"]
         )
         assert result.rc == 0
-        assert result.stderr == ""
+        assert (result.stdout, result.stderr) == ("", "")  # a silent skip is silent on both
         assert not (tmp_path / "out.bin").exists()
-        assert self._remaining(moto_s3) == ["cold/x.bin"]
+        assert self._remaining(moto_s3) == ["cold/x.bin:6:?"]  # GLACIER body unreadable

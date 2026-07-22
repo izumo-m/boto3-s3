@@ -16,7 +16,7 @@
 """Port of aws-cli's functional rm tests to ``boto3-s3 rm``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_rm_command.py``
-(aws-cli 2.35.18). Test names, canned responses, and expected stdout/rc are
+(aws-cli 2.36.1). Test names, canned responses, and expected stdout/rc are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
@@ -39,8 +39,6 @@ Adaptation rules (on top of the ls port's - see
   ``DeleteObjects`` calls (accepted wire-level deviation, docs/deleter.md section 4),
   so the expectation becomes one ``DeleteObjects`` carrying the key with
   ``Quiet: True``. ``RequestPayer`` must still appear on both operations.
-- ``MaxKeys: 1000`` appears in recorded ListObjectsV2 params (boto3-s3 sends
-  its explicit page-size default where aws-cli sends nothing).
 - The aws-cli ``TestRmWithCRTClient`` class (2 tests) cannot use the botocore
   recording client because the aws-cli CRT data plane bypasses it. The single
   and recursive delete shapes are covered by the e2e CRT parity lane instead.
@@ -123,15 +121,13 @@ class TestRmCommand:
         )
         assert result.rc == 0
         # aws-cli expectation adapted: one batched DeleteObjects instead of a
-        # per-key DeleteObject (module docstring); MaxKeys is our explicit
-        # page-size default.
+        # per-key DeleteObject (module docstring).
         assert [(c.operation, c.params) for c in calls] == [
             (
                 "ListObjectsV2",
                 {
                     "Bucket": "mybucket",
                     "Prefix": "",
-                    "MaxKeys": 1000,
                     "RequestPayer": "requester",
                 },
             ),

@@ -1,11 +1,13 @@
 # Storage backends
 
-`Storage` is the abstraction every `S3` operation works against: `S3.resolve`
-turns a path/URI argument into a `Storage`, and the operations only ever talk to
-that interface. The built-ins are `S3Storage` (an S3 bucket/key), `LocalStorage`
-(a local path), and the `IOStorage` / `StdioStorage` stream wrappers. A **custom
-subclass** is one more `Storage`, so `cp` / `mv` / `sync` reach it through the
-same code path as the built-ins.
+`Storage` is the abstraction the `S3` operations resolve their sides into:
+`S3.resolve` turns a path/URI argument into a `Storage`. The built-ins are
+`S3Storage` (an S3 bucket/key), `LocalStorage` (a local path), and the
+`IOStorage` / `StdioStorage` stream wrappers. A **custom subclass** is one more
+`Storage`, so `cp` / `mv` / `sync` reach it through the same planning and
+engine path as the built-ins - through this interface alone on the custom
+side, while the built-in routes use their concrete classes' own API (section
+2's `scheme` bullet).
 
 This document is the contract for writing a custom backend. The per-operation
 mechanics live with each engine: the byte-transfer "open route" in
@@ -32,11 +34,19 @@ stream is a degenerate single-entry backend.)
 ## 2. The contract
 
 Subclass `Storage`, set two class attributes, and implement the methods the
-declared capabilities promise:
+declared capabilities promise. Only `as_text` is abstract; `open` /
+`scan_pages` / `delete` / `get_fileinfo` have base implementations that raise
+`NotImplementedError` naming the missing capability, so a minimal backend
+implements exactly what it declares. Every declared flag — including one
+*implied* by a stronger flag (section 3's lattice: `SCAN` implies
+`GET_FILEINFO`) — promises its matching method; the engine's gates check
+declarations, not implementations, so they refuse an unsupported operation up
+front only when the declaration is honest:
 
 - **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
-  `"s3"` / `"local"` (a display/classification label; result rendering uses
-  it). Transfer *routing* does not read it: the planner
+  `"s3"` / `"local"` (a declared classification label for embedders; the
+  engine itself never reads it - results render through `as_text()`).
+  Transfer *routing* does not read it either: the planner
   (`transferplan._paths_type`) routes by concrete type — a structural match
   (`isinstance`) against `S3Storage` / `LocalStorage`, subclasses included —
   because the built-in routes reach into those classes' own API
@@ -53,17 +63,22 @@ declared capabilities promise:
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
   stays unimplemented, since every S3 write rides `s3transfer`.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
-  container one page of `FileInfo` at a time.
+  container one page of `FileInfo` at a time. Callers consume it through the
+  concrete `scan(options, *, cancel_token=None)` wrapper, which flattens the
+  pages and overlaps them with a background prefetch worker; `cancel_token`
+  stops the prefetch producer before its next page pull.
 
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
   cannot silently leak excluded entries into `--exclude`/`--include` or, on a
   `sync --delete` destination, into deletion. A backend that filters at its
-  source, or prunes early (e.g. a custom `LocalFileGenerator.finalize_children`
-  calling `options.filter`), applies it in `scan_pages` and declares
+  source applies it in `scan_pages` and declares
   **`scan_pages_filters = True`** to skip the redundant re-filter
-  (`storage.sieve_pages` is the helper). Honor `options.sort` when
-  `SORTABLE_SCAN` is declared.
+  (`storage.sieve_pages` is the helper; a custom
+  `LocalFileGenerator.finalize_children` override prunes by its *own* rules -
+  it never sees `options.filter` - so it does not qualify by itself). Honor
+  `options.sort` when `SORTABLE_SCAN` is declared (byte order for the
+  recursive listing `sync` performs; section 3).
 
   `options` carries the operation-inherent knobs the caller decides per
   invocation (`recursive` / `sort` / `filter` / `on_warning`, and
@@ -74,7 +89,8 @@ declared capabilities promise:
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
   `prefix`; `LocalScanOptions` = `follow_symlinks` / `detect_symlink_loops` /
-  `enumerate_all_entries`). A subclass keeps one backend's knobs from leaking
+  `enumerate_all_entries`, plus the internal `storage` back-reference the walk
+  stamps on each entry). A subclass keeps one backend's knobs from leaking
   into another's; the built-ins reject a foreign options type, and a custom
   backend reads its own knobs from its own subclass or from its instance
   state, taking the common base otherwise.
@@ -93,18 +109,21 @@ declared capabilities promise:
   download durable before deleting the S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
-  check). `key=""` is the location itself; `None` means "no transferable entry
-  here". Whether a symlink is followed is `LocalStorage`'s own `follow_symlinks`
-  config, read from the storage like every scan (not a parameter here).
-  `enumerate_all_entries` does not apply: this point query retains the
-  transferable-entry contract.
+  check). `key=""` is the location itself; `None` means "no entry to hand the
+  engine" (`LocalStorage`: an absent path, a `follow_symlinks=False` symlink,
+  or a special / unreadable file after the aws-style warn-and-skip - but a
+  directory *is* returned, with no type check, and fails later at `open` the
+  way aws fails). Whether a symlink is followed is `LocalStorage`'s own
+  `follow_symlinks` config, read from the storage like every scan (not a
+  parameter here). `enumerate_all_entries` does not apply: the point query
+  always uses those single-file rules.
 - **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
   `info.key`. Return the backend's delete response (surfaced under
   `OpResult.extra_info["delete"]` for `capture_response`) or `None` when there is
   none — a local unlink returns `None`, `S3Storage` returns its `DeleteObject`
   response.
 
-Three more members come with working defaults a custom backend normally keeps:
+A few more members come with working defaults a custom backend normally keeps:
 
 - **`scan_options_type: ClassVar[type[ScanOptions]]`** — this backend's
   `ScanOptions` type (default `ScanOptions`). Arg-less `scan()` builds it (via
@@ -112,7 +131,13 @@ Three more members come with working defaults a custom backend normally keeps:
   subclass still works with no options. `S3Storage` / `LocalStorage` set
   `S3ScanOptions` / `LocalScanOptions`; **a custom backend that defines its own
   subclass just sets this one class attribute — no method to override** — and one
-  that takes the base `ScanOptions` sets nothing.
+  that takes the base `ScanOptions` sets nothing. A custom subclass must stay a
+  `frozen=True, kw_only=True` dataclass and give **every added field a
+  default**: the high-level operations overlay only the run-level knobs — the
+  operation-inherent ones plus the application's Ctrl-C posture
+  (`wait_on_interrupt`, from `S3(wait_on_interrupt=…)`) — via
+  `dataclasses.replace(storage.default_scan_options(), …)`, and the
+  base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
   the single place a backend seeds the **source-config it holds on the instance**.
   The built-ins override it to inject their constructor knobs
@@ -125,17 +150,20 @@ Three more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`scan_wait_on_interrupt: bool`** — the Ctrl-C exit policy of `scan()`'s
-  background page worker. `True` (the default): context exit always waits for
-  a page pull already in flight, so no worker survives the operation — keep it
-  in an app that may catch `KeyboardInterrupt` and continue. `False`: a
-  `KeyboardInterrupt` / `SystemExit` unwind abandons the daemon worker instead
-  of waiting (an in-flight network pull can otherwise hold the exit for a full
-  timeout) — for apps that treat such an interrupt as process-fatal. The
-  built-ins take it as a constructor kwarg; the CLI passes `False` on every
-  scanning storage it builds, matching aws's immediate death on Ctrl-C. Every
-  other exit — exhaustion, an early break, an ordinary exception — always
-  waits (`concurrency.prefetch`).
+- **`ScanOptions.wait_on_interrupt`** (not a `Storage` member) — the Ctrl-C
+  exit policy of `scan()`'s background page worker. `True` (the default): the
+  scan's teardown always waits for a page pull already in flight, so no worker
+  survives the operation — required for an app that may catch
+  `KeyboardInterrupt` and continue. `False`: a `KeyboardInterrupt` unwind
+  abandons the daemon worker instead of waiting (an in-flight network pull can
+  otherwise hold the exit for a full timeout) — only for an app that treats
+  Ctrl-C as process-fatal. The application declares the posture once, on
+  `S3(wait_on_interrupt=…)`; every scan an operation starts receives it
+  through this field, and only a direct `Storage.scan` caller sets it here
+  itself. The CLI's `S3` declares `False`, matching aws's immediate death on
+  Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
+  early break, `SystemExit` (`sys.exit()` requests an orderly termination),
+  an ordinary exception — always waits (`concurrency.prefetch`).
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
@@ -149,9 +177,23 @@ Three more members come with working defaults a custom backend normally keeps:
   entry's `FileInfo` (keyed by `info.key`; section "Keys" below).
   `use_src_name` follows the S3 convention
   (`dir_op` or a trailing `/` on `as_text()`).
+- **`validate() -> None`** — a public hook for deferred strict validation of
+  the location, a no-op by default. Construction is permissive (a building
+  block); an operation — or the CLI at its parity point — calls this to reject
+  a malformed location loudly before use. `S3Storage` overrides it with the
+  aws-cli-parity checks (unsupported ARN forms, a key with no bucket); a
+  custom backend that can detect a malformed location overrides it likewise.
+  Idempotent.
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
+
+The contract is designed to evolve without breaking a shipped backend: an
+existing method never grows a new parameter. New per-scan context arrives as a
+defaulted field on the `ScanOptions` value objects, and anything else as a new
+method with a non-abstract default (plus a new `StorageCapability` flag when
+it gates an operation) — so a subclass written against today's surface keeps
+working as the interface grows.
 
 ### Keys: `key` vs `compare_key`
 
@@ -171,9 +213,13 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
   For the typical custom backend (`key == compare_key`) the two spaces
   coincide, so `info.storage.open(info.key, "rb")` reads built-in and typical
   custom entries alike.
-- **`compare_key`** is the relative form of the same entry: the
-  `--include` / `--exclude` matching space and the axis `sync` merge-joins on.
-  `scan` must stamp it on every entry.
+- **`compare_key`** is the relative form of the same entry: the space a
+  relative glob pattern matches (a root-anchored pattern matches the full
+  `key` instead - [`glossary.md`](./glossary.md)) and the axis `sync`
+  merge-joins on.
+  `scan` must stamp it on every entry. Omitting the stamp is a contract
+  violation with undefined behavior: a dev (non-`-O`) run trips an `assert`
+  before the transfer, while `-O` strips the check.
 
 ## 3. Capabilities
 
@@ -186,8 +232,8 @@ of deep inside the run:
 | `OPEN_READ` | `open(key, "rb")` | an `opens3` source |
 | `OPEN_WRITE` | `open(key, "wb")` | an `s3open` destination |
 | `GET_FILEINFO` | `get_fileinfo` | a single-entry source / existence check |
-| `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) side |
-| `SORTABLE_SCAN` | byte-ordered `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
+| `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) **source** |
+| `SORTABLE_SCAN` | byte-ordered recursive `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
 | `DELETE` | `delete(info)` | an `mv` source / a `sync --delete` destination |
 
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
@@ -197,8 +243,17 @@ manufacture phantom pairs and, with `--delete`, corrupt the destination.
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
-at all. The exact per-route gates are in [`sync.md`](./sync.md) /
-[`transfer.md`](./transfer.md).
+at all. The byte-order promise is likewise scoped to the recursive listing
+`sync` performs: a non-recursive (delimiter) listing keeps its native shape -
+`S3Storage`'s pages emit a page's common prefixes before its objects, aws
+`ls`'s order. A recursive custom *destination* of `cp` / `mv` needs no `SCAN`
+either - only `sync` lists a destination. The exact per-route gates are in
+[`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
+
+The gates read the declaration through `supports(needed)` /
+`missing_capabilities(needed)` — the lattice-expanded membership test and its
+companion that names what is absent (for a clear rejection message). An
+embedder can call the same pair for its own up-front check.
 
 ## 4. Example
 

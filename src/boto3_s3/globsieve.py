@@ -28,9 +28,11 @@ partitioned by shape (literal, suffix, prefix, general fnmatch): a
 uniform set uses that shape's dedicated ``SetMatcher``, and a mixed
 set is folded into a ``CompositeSet`` that ORs one matcher per shape.
 
-A relative pattern is matched against the entry's relative ``compare_key``
-(``fnmatch`` is greedy across ``/``, so it matches anywhere
-in the key the way aws-cli's root-joined form does). A root-anchored
+A relative pattern is matched against the whole of the entry's relative
+``compare_key`` (``fnmatch`` anchors both ends; its ``*`` spans ``/``, which
+is what lets the match cover everything after the root the way aws-cli's
+root-joined form does - the CLI layer delegates here only where that
+equivalence is provable, ``boto3_s3_cli.filters._needs_joined``). A root-anchored
 (absolute) pattern - ``--exclude /data/secret/*`` - is matched against the
 entry's ``full_key`` instead, anchored with ``os.path.join`` exactly like
 aws-cli joins each pattern onto the source / destination root; this is what
@@ -124,7 +126,8 @@ def is_anchored(pattern: str) -> bool:
     aws-cli joins every pattern onto the operation root with ``os.path.join``,
     which *drops* the root for an absolute right-hand side - so an absolute
     pattern is matched against the entry's full path, a relative one effectively
-    against its relative tail. ``compile`` mirrors that split: anchored
+    against its relative tail (exactly, whenever the joined root is consumed
+    literally - the delegation condition the CLI checks). ``compile`` mirrors that split: anchored
     patterns go to ``Anchored`` (matched against ``full_key``), the rest
     keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
     POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
@@ -267,11 +270,17 @@ class Anchored:
     way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
     the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
     under ``C:\\data`` -> ``C:/data/*``), and the joined form is fnmatched against
-    ``full_key``. A root-anchored pattern never matches an S3 entry, by either of
-    two routes: a bare ``included`` call passes ``full_key=None`` and the anchored
-    item is skipped; ``GlobFilter`` passes the S3 key as ``full_key``, but an S3
-    key carries no drive / anchor, so the joined absolute pattern fnmatches
-    nothing. Both track aws-cli, whose s3 paths carry no anchor.
+    ``full_key``. A normal S3 key carries no drive / anchor, so an anchored
+    pattern is inert against S3 entries by either route: a bare ``included``
+    call passes ``full_key=None`` (the anchored item is skipped);
+    ``GlobFilter`` passes the S3 key as ``full_key``, where the joined absolute
+    pattern fnmatches nothing - tracking aws-cli, whose s3 paths carry no
+    anchor. The exception is a key that literally begins with ``/``: its full
+    key genuinely is anchored, so an anchored pattern matches it. On Windows
+    a key shaped like a drive path (``C:/...``) is a second, inherent
+    exception: ``ntpath.join`` lends its drive exactly as it would a real
+    local path's - the matcher sees only key strings, so a drive-shaped S3
+    key is indistinguishable from a local anchor at this level.
 
     Items are ``(PatternKind, anchored, payload)``: ``payload`` is the raw
     pattern string when anchored, else a ``SetMatcher`` for ``compare_key``.
@@ -339,7 +348,8 @@ class UnionRegex:
 
     Patterns are translated to regex via ``fnmatch.translate`` and
     combined with alternation. ``fnmatch``'s ``*`` is greedy across
-    ``/``, so general patterns match anywhere in the key.
+    ``/`` (the whole key must still match - the translation anchors
+    both ends).
     """
 
     def __init__(self, patterns: Iterable[str]) -> None:
@@ -426,7 +436,8 @@ def compile(patterns: Iterable[GlobPattern]) -> Matcher:
     Within each set, the uniformly-shaped patterns are further
     specialized: literal-only sets use ``LiteralSet``, all-``*X``
     sets use ``SuffixSet``, all-``X*`` sets use ``PrefixSet``,
-    and mixed shapes fall back to ``UnionRegex``.
+    and mixed shapes are folded into a ``CompositeSet`` (one matcher
+    per shape, OR-ed).
 
     A list that contains a root-anchored (absolute) pattern bypasses the
     macro-shape fast paths and uses ``Anchored``, which matches relative

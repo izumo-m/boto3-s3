@@ -44,7 +44,8 @@ _GENERAL_ERROR_RC = 255
 # Registering here is the only wiring step. The table is the single source for
 # stage 1 of the dispatch (names + help lines, rendered WITHOUT importing any
 # command module - the lazy-dispatch contract, docs/imports.md) and for stage 2
-# (only the matched module is imported). The help text is duplicated from each
+# (only the matched module is imported; rb also pulls in rm, its --force
+# engine). The help text is duplicated from each
 # class's `help` ClassVar on purpose - stage 1 must render `--help` without the
 # class - and test_command_table.py pins the two against drift.
 _COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
@@ -208,13 +209,19 @@ def _build_globals_parser() -> argparse.ArgumentParser:
     """Globals-only parser for the aws-shaped top-level pre-pass (``_dispatch``).
 
     aws parses the top-level globals over the *full* argv first
-    (``MainArgParser.parse_known_args``) and resolves them ahead of any
-    command-layer parsing. ``add_help=False`` keeps ``-h`` / ``--help`` in the
-    remainder (they win over the resolutions, like ``--version``'s parse-time
-    exit); everything this parser does not know - the subcommand token and its
-    options - passes through untouched.
+    (``MainArgParser.parse_known_args``), and that parse settles two outcomes
+    on the spot: a global that fails to parse (invalid choice, missing value)
+    and a parse-time ``--version``. ``add_help=False`` keeps ``-h`` /
+    ``--help`` in the remainder - they win over the later resolutions but NOT
+    over a parse error (measured: ``s3 ls -h --output bad`` errors instead of
+    helping); everything this parser does not know - the subcommand token and
+    its options - passes through untouched. Its captured output is the
+    dispatcher's replay source on those exits, so the usage line is pinned to
+    stage 1's: the replayed error must render byte-identically to the stage-1
+    report it supersedes.
     """
-    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
+    usage = _build_stage1_parser().format_usage().removeprefix("usage: ").rstrip("\n")
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=usage)
     globalargs.add_common_arguments(parser)
     return parser
 
@@ -349,7 +356,11 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     The common paths are already translated into `Boto3S3Error` (the library's
     `s3_errors` and the CLI's `build_client`); this is the catch-all so no
     path can crash the CLI with a traceback (rc 1), which the exit-code charter
-    forbids (docs/overview.md section 3).
+    forbids (docs/overview.md section 3) - with two deliberate escapes:
+    `AssertionError` (an internal-invariant bug) re-raises loudly instead of
+    being masked as a generic rc, and the ``BaseException`` family passes
+    (``SystemExit`` honors the requested orderly exit; ``KeyboardInterrupt``
+    is the outer 130 wrapper's).
     """
     # Import locally because only unexpected command failures need these types.
     from botocore.exceptions import (
@@ -376,10 +387,13 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
 
     *ctx* carries the runtime dependencies the command resolves (the S3 client
     factory, the auto-prompt backend); tests inject a ``Context`` built
-    around fakes. Always returns the exit code - argparse's ``SystemExit`` is
+    around fakes. Returns the exit code (the deliberate escapes: an
+    ``AssertionError`` - an internal bug - and a command-raised
+    ``SystemExit``, whose orderly exit is honored) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
-    and a Ctrl-C anywhere mirrors aws's ``InterruptExceptionHandler``: a bare
-    newline on stdout and rc 130 (128+SIGINT), never a traceback.
+    and a Ctrl-C mirrors aws's ``InterruptExceptionHandler``: a bare
+    newline on stdout and rc 130 (128+SIGINT), never a traceback (the
+    auto-prompt UI catches its own interrupt and returns 130 directly).
 
     ``--cli-auto-prompt`` is resolved here from the raw argv, before argparse, so
     it works without a subcommand, its mutual exclusion with
@@ -479,7 +493,8 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     static metadata lets top-level ``--help`` / ``--version`` exit without
     importing a command module or the AWS SDK (import contract,
     docs/imports.md).
-    Stage 2 imports just the matched command's module, builds its real parser,
+    Stage 2 imports just the matched command's module (rb also pulls in rm,
+    its --force engine), builds its real parser,
     and parses the stub-captured remainder into the stage-1 namespace (the
     suppressed-defaults parent keeps pre-subcommand globals intact). Once the
     subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
@@ -505,21 +520,34 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # (252), the --endpoint-url scheme check (252), then the timeout coercions
     # (255, read before connect, aws's registration order) - before ANY
     # command-layer parsing, so those errors beat an invalid choice, unknown
-    # options, and missing arguments (measured on aws 2.35.18). A parse-time
-    # -h/--help/--version wins instead (aws's parser actions fire before the
-    # resolutions), and an exactly-['help'] remainder is aws's help-token
-    # rule: the top-level help page, rc 0. The pre-pass output is discarded -
-    # on a pre-pass parse error, stage 1 below reproduces the canonical
-    # message itself.
+    # options, and missing arguments (measured on the pinned aws-cli). A parse-time
+    # -h/--help/--version wins over the resolutions (aws's parser actions fire
+    # first), and an exactly-['help'] remainder is aws's help-token rule: the
+    # top-level help page, rc 0. The parse itself settles even earlier: a
+    # global that fails to parse, and a parse-time --version, exit during
+    # aws's very first parse and beat everything downstream - the
+    # invalid-subcommand error and a -h anywhere in argv included (measured:
+    # `s3 bogus --output bad` blames --output, `s3 ls -h --output bad` errors
+    # instead of helping, `s3 bogus --version` prints the version). Those two
+    # exits are replayed from the capture; falling through to stage 1 would
+    # blame the subcommand first.
+    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
     try:
         with (
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(pre_stdout),
+            contextlib.redirect_stderr(pre_stderr),
         ):
             head, remainder = _build_globals_parser().parse_known_args(argv)
-    except SystemExit:
-        head, remainder = None, []
-    if head is not None and "-h" not in remainder and "--help" not in remainder:
+    except SystemExit as exc:
+        if not exc.code:
+            # --version fired - the globals parser's only zero-exit action
+            # (add_help=False keeps -h out of it).
+            sys.stdout.write(pre_stdout.getvalue())
+            return 0
+        if not suppress_usage_errors:
+            sys.stderr.write(pre_stderr.getvalue())
+        return _PARAM_VALIDATION_ERROR_RC
+    if "-h" not in remainder and "--help" not in remainder:
         from boto3_s3_cli import clientfactory
 
         try:
@@ -547,7 +575,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # like aws, never handed to a command parser that may define the same
         # flag. boto3-s3's top command is `aws s3`-equivalent, so this matches the
         # customizations command layer's wording (awscli customizations/commands.py
-        # joins with "," and NO space - verified against real aws 2.35.18, unlike the
+        # joins with "," and NO space - verified against the pinned aws-cli, unlike the
         # top-level clidriver.py which uses ", "), prefixed like aws's error handler
         # (errorformat.py "<prog>: [ERROR]: <msg>").
         if not suppress_usage_errors:

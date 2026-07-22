@@ -4,8 +4,9 @@
     "s3://<BUCKET>/d/big.bin",
     "s3://<BUCKET>/moved/big.bin"
   ],
-  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": {
     "ContentType": "text/css",
     "Metadata": {
@@ -13,9 +14,10 @@
     }
   },
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "moved/big.bin"
+    "moved/big.bin:9437184:f23f81d3"
   ],
   "scenario": "mv_copy_multipart_props",
   "src_tree": [],

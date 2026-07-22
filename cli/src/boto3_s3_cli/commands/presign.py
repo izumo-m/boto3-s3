@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3_cli import clientfactory, globalargs
+from boto3_s3 import S3Storage
+from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -34,10 +35,14 @@ class PresignCommand(Command):
         """Print the presigned URL and return an ``aws s3``-style exit code.
 
         Exit-code shape (docs/cli.md section 6): pure client-side
-        computation, so rc 1 and 254 cannot happen - 0 on success, 252 for
+        computation, so rc 1 cannot happen and no S3 request is sent (a
+        deferred credential resolution - an assume-role profile - can still
+        dial STS during signing, whose ClientError maps to 254) - 0 on success, 252 for
         botocore's client-side parameter validation (empty bucket or key,
         surfaced as the library's ValidationError through main), 253 for
-        client-construction failures, 255 for a non-integer ``--expires-in``.
+        client construction's unresolvable credentials / region (its other
+        botocore failures - a bad ``--profile``, partial credentials - are
+        255), 255 for a non-integer ``--expires-in``.
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
@@ -50,9 +55,9 @@ class PresignCommand(Command):
         expand_positional_paramfile(args, "path", name="path", operation="presign")
         expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
+        # --expires-in's argparse default is 3600, so the unset-None branch of
+        # parse_integer_option is unreachable here.
+        assert expires_in is not None
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; S3Storage takes both forms too.
@@ -60,5 +65,5 @@ class PresignCommand(Command):
         storage = S3Storage(args.path, client=s3.client())
         storage.validate()
         url = s3.presign(storage, expires_in=expires_in)
-        sys.stdout.write(url + "\n")
+        output.uni_write(sys.stdout, url + "\n")
         return 0

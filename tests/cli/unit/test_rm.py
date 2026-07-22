@@ -9,17 +9,21 @@ errors as one ``fatal error:`` line - never 254.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import sys
 from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import FileInfo
+from boto3_s3 import FileInfo, OpOutcome, OpResult, S3Storage, TransferType
 from boto3_s3.globsieve import GlobPattern, PatternKind
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import CliResult, run_cli_in_process
-from tests.utils.recorder import ApiCall, make_recording_client
+from boto3_s3_cli.commands.rm import _DeletePrinter
+from tests.utils.fakes3 import client_error
+from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -28,29 +32,12 @@ def _obj(key: str, size: int = 1) -> dict[str, Any]:
     return {"Key": key, "Size": size, "LastModified": _MTIME}
 
 
-def _client_error(code: str, status: int) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "message"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        "Operation",
-    )
-
-
-def _ctx(client: Any) -> Context:
-    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
-
-
-def _run_recorded(
-    parsed_responses: list[dict[str, Any]], argv: list[str]
-) -> tuple[CliResult, list[ApiCall]]:
-    client, calls = make_recording_client(parsed_responses)
-    return run_cli_in_process(argv, ctx=_ctx(client)), calls
-
-
 class _RaisingPaginatorClient:
-    """Fake whose ListObjectsV2 paginator raises on iteration."""
+    """Fake whose ListObjectsV2 page iterator raises on the first page fetch.
+
+    Mirrors the real phase: ``paginate()`` succeeds and the ClientError comes
+    out of iterating the returned pages.
+    """
 
     def __init__(self, error: ClientError) -> None:
         self._error = error
@@ -60,7 +47,11 @@ class _RaisingPaginatorClient:
 
         class _Paginator:
             def paginate(self, **_kwargs: Any) -> Any:
-                raise error
+                def pages() -> Any:
+                    raise error
+                    yield  # pragma: no cover - marks this function as a generator
+
+                return pages()
 
         return _Paginator()
 
@@ -77,41 +68,71 @@ class _RaisingDeleteClient:
 
 class TestOutputMatrix:
     def test_default_prints_delete_line(self) -> None:
-        result, _ = _run_recorded([{}], ["rm", "s3://b/k"])
+        result, _ = run_recorded([{}], ["rm", "s3://b/k"])
         assert result.rc == 0
         assert result.stdout == "delete: s3://b/k\n"
 
     def test_quiet_silences_success(self) -> None:
-        result, calls = _run_recorded([{}], ["rm", "s3://b/k", "--quiet"])
+        result, calls = run_recorded([{}], ["rm", "s3://b/k", "--quiet"])
         assert (result.rc, result.stdout, result.stderr) == (0, "", "")
         assert len(calls) == 1  # the delete still ran
 
     def test_only_show_errors_silences_success(self) -> None:
-        result, _ = _run_recorded([{}], ["rm", "s3://b/k", "--only-show-errors"])
+        result, _ = run_recorded([{}], ["rm", "s3://b/k", "--only-show-errors"])
         assert (result.rc, result.stdout) == (0, "")
 
     def test_only_show_errors_still_prints_dryrun(self) -> None:
         # aws quirk: OnlyShowErrorsResultPrinter does not override
         # the dryrun line.
-        result, calls = _run_recorded([], ["rm", "s3://b/k", "--dryrun", "--only-show-errors"])
+        result, calls = run_recorded([], ["rm", "s3://b/k", "--dryrun", "--only-show-errors"])
         assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://b/k\n")
         assert calls == []
 
     def test_quiet_silences_dryrun(self) -> None:
-        result, _ = _run_recorded([], ["rm", "s3://b/k", "--dryrun", "--quiet"])
+        result, _ = run_recorded([], ["rm", "s3://b/k", "--dryrun", "--quiet"])
         assert (result.rc, result.stdout, result.stderr) == (0, "", "")
 
     def test_quiet_silences_failure_lines_but_not_rc(self) -> None:
         # aws --quiet builds no result printer at all: even failure/fatal
         # lines vanish while the rc stays 1.
-        client = _RaisingDeleteClient(_client_error("NoSuchBucket", 404))
-        result = run_cli_in_process(["rm", "s3://b/k", "--quiet"], ctx=_ctx(client))
+        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404, "DeleteObject"))
+        result = run_cli_in_process(["rm", "s3://b/k", "--quiet"], ctx=client_ctx(client))
         assert (result.rc, result.stdout, result.stderr) == (1, "", "")
 
     def test_quiet_silences_fatal_lines_but_not_rc(self) -> None:
-        client = _RaisingPaginatorClient(_client_error("NoSuchBucket", 404))
-        result = run_cli_in_process(["rm", "s3://b/", "--recursive", "--quiet"], ctx=_ctx(client))
+        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
+        result = run_cli_in_process(
+            ["rm", "s3://b/", "--recursive", "--quiet"], ctx=client_ctx(client)
+        )
         assert (result.rc, result.stdout, result.stderr) == (1, "", "")
+
+
+class TestDeletePrinterEncoding:
+    def test_unencodable_key_prints_with_replacements(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The success line goes through uni_write (aws's uni_print): a
+        # non-ASCII key on an ascii-encoding stdout is '?'-replaced instead
+        # of raising UnicodeEncodeError out of the deleter-worker callback
+        # and killing the run.
+        class _AsciiStream(io.StringIO):
+            encoding = "ascii"
+
+            def write(self, text: str) -> int:
+                text.encode("ascii")  # raises UnicodeEncodeError on non-ASCII
+                return super().write(text)
+
+        stream = _AsciiStream()
+        monkeypatch.setattr(sys, "stdout", stream)
+        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer(
+            OpResult(
+                transfer_type=TransferType.DELETE,
+                compare_key="名前.txt",
+                outcome=OpOutcome.SUCCEEDED,
+            )
+        )
+        assert stream.getvalue() == "delete: s3://b/??.txt\n"
 
 
 class TestExitCodeShape:
@@ -127,8 +148,8 @@ class TestExitCodeShape:
         assert "Invalid argument type" in capsys.readouterr().err
 
     def test_per_key_failure_is_rc_1_with_delete_failed(self) -> None:
-        client = _RaisingDeleteClient(_client_error("NoSuchBucket", 404))
-        result = run_cli_in_process(["rm", "s3://b-no-such/k"], ctx=_ctx(client))
+        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404, "DeleteObject"))
+        result = run_cli_in_process(["rm", "s3://b-no-such/k"], ctx=client_ctx(client))
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3://b-no-such/k ")
         assert "NoSuchBucket" in result.stderr
@@ -136,22 +157,43 @@ class TestExitCodeShape:
     def test_listing_failure_is_rc_1_fatal_not_254(self) -> None:
         # ls maps a server ClientError to 254; rm must report rc 1 with a
         # "fatal error:" line instead (aws transfer-command convention).
-        client = _RaisingPaginatorClient(_client_error("NoSuchBucket", 404))
-        result = run_cli_in_process(["rm", "s3://b-no-such/", "--recursive"], ctx=_ctx(client))
+        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
+        result = run_cli_in_process(
+            ["rm", "s3://b-no-such/", "--recursive"], ctx=client_ctx(client)
+        )
         assert result.rc == 1
         assert result.stderr.startswith("fatal error: ")
         assert "NoSuchBucket" in result.stderr
+
+    def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
+        # aws's shared result machinery converts a Ctrl-C after the operation
+        # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
+        # received` line (measured mid-rm on the pinned 2.36.1), never the
+        # dispatcher backstop's 130, which stays for the pre-pipeline spans.
+        class _InterruptPaginatorClient:
+            def get_paginator(self, _name: Any) -> Any:
+                class _Paginator:
+                    def paginate(self, **_kwargs: Any) -> Any:
+                        raise KeyboardInterrupt
+
+                return _Paginator()
+
+        result = run_cli_in_process(
+            ["rm", "s3://b/p/", "--recursive"], ctx=client_ctx(_InterruptPaginatorClient())
+        )
+        assert result.rc == 1
+        assert result.stderr == "cancelled: ctrl-c received\n"
 
     def test_object_lambda_arn_stays_usage_error(self) -> None:
         # S3Storage.validate() ARN rejections must reach main's 252 mapping, not
         # be swallowed into rm's rc-1 fatal path.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
-        result = run_cli_in_process(["rm", f"s3://{arn}"], ctx=_ctx(object()))
+        result = run_cli_in_process(["rm", f"s3://{arn}"], ctx=client_ctx(object()))
         assert result.rc == 252
         assert "S3 Object Lambda" in result.stderr
 
     def test_empty_bucket_no_key_is_rc_1_fatal(self) -> None:
-        result = run_cli_in_process(["rm", "s3://"], ctx=_ctx(object()))
+        result = run_cli_in_process(["rm", "s3://"], ctx=client_ctx(object()))
         assert result.rc == 1
         assert result.stderr.startswith("fatal error: ")
         assert "Invalid bucket name" in result.stderr
@@ -173,7 +215,7 @@ class TestExitCodeShape:
     def test_empty_bucket_with_key_is_rc_1_delete_failed(self) -> None:
         # aws sends Bucket="" to DeleteObject and botocore fails client-side:
         # shaped as a per-key failure, not a usage error.
-        result = run_cli_in_process(["rm", "s3:///key"], ctx=_ctx(object()))
+        result = run_cli_in_process(["rm", "s3:///key"], ctx=client_ctx(object()))
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3:///key ")
         assert "Invalid bucket name" in result.stderr
@@ -185,7 +227,7 @@ class TestFilterWiring:
             {"Contents": [_obj("p/a.txt"), _obj("p/b.bin")]},
             {},
         ]
-        result, calls = _run_recorded(
+        result, calls = run_recorded(
             responses,
             ["rm", "s3://b/p/", "--recursive", "--exclude", "*", "--include", "*.txt"],
         )
@@ -196,7 +238,7 @@ class TestFilterWiring:
 
     def test_reverse_order_excludes_everything(self) -> None:
         responses = [{"Contents": [_obj("p/a.txt")]}]
-        result, calls = _run_recorded(
+        result, calls = run_recorded(
             responses,
             ["rm", "s3://b/p/", "--recursive", "--include", "*.txt", "--exclude", "*"],
         )
@@ -204,13 +246,9 @@ class TestFilterWiring:
         assert [c.operation for c in calls] == ["ListObjectsV2"]
 
     def test_exclude_on_single_key_is_silent_success(self) -> None:
-        result, calls = _run_recorded([], ["rm", "s3://b/data/a.txt", "--exclude", "*"])
+        result, calls = run_recorded([], ["rm", "s3://b/data/a.txt", "--exclude", "*"])
         assert (result.rc, result.stdout, result.stderr) == (0, "", "")
         assert calls == []
-
-
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("client factory must not be called")
 
 
 class TestParamfileAndQuery:
@@ -220,21 +258,19 @@ class TestParamfileAndQuery:
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
         ref = tmp_path / "u.txt"
         ref.write_text("s3://b/k")
-        result, calls = _run_recorded([], ["rm", f"file://{ref}", "--dryrun"])
+        result, calls = run_recorded([], ["rm", f"file://{ref}", "--dryrun"])
         assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://b/k\n")
         assert calls == []
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["rm", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["rm", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert (
             "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
         )
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(
-            ["rm", "s3://b/k", "--query", "]["], ctx=Context(client_factory=_unused_factory)
-        )
+        rc = cli.main(["rm", "s3://b/k", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
 
@@ -254,38 +290,52 @@ class TestAppendFilterAction:
         ]
 
     def test_compile_filter_none_for_no_patterns(self) -> None:
-        assert filters.compile_filter(None) is None
-        assert filters.compile_filter([]) is None
+        target = S3Storage("s3://b")
+        assert filters.compile_filter(None, src=target, dest=target, dir_op=True) is None
+        assert filters.compile_filter([], src=target, dest=target, dir_op=True) is None
 
     def test_absolute_pattern_is_dead_against_an_s3_key(self) -> None:
-        # rm lists S3 keys, which carry no drive / UNC anchor, so an absolute
-        # pattern can never match one (os.path.join drops the root onto an
-        # anchorless key, fnmatch misses) - exactly aws-cli, whose s3 paths are
-        # anchorless. Only the relative '*' bites here.
+        # rm lists S3 keys, whose bucket/key paths carry no drive / UNC anchor,
+        # so an absolute pattern can never match one (os.path.join replaces the
+        # base with it, fnmatch misses the anchorless path) - exactly aws-cli.
+        target = S3Storage("s3://b")
+        info = FileInfo(key="anything", compare_key="anything", storage=target)
+        # Alone, the absolute exclude is inert: everything survives.
+        inert = filters.compile_filter(
+            [GlobPattern.exclude("/elsewhere/*")], src=target, dest=target, dir_op=True
+        )
+        assert inert is not None
+        assert inert(info) is True
+        # Combined with a relative '*', only the relative pattern bites.
         keep = filters.compile_filter(
-            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")]
+            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
+            src=target,
+            dest=target,
+            dir_op=True,
         )
         assert keep is not None
-        assert keep(FileInfo(key="anything", compare_key="anything")) is False
+        assert keep(info) is False
 
 
 class TestScanInterruptPolicy:
-    def test_rm_storage_opts_out_of_the_interrupt_join(
+    def test_the_cli_posture_reaches_the_listing_scan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the recursive listing must not
-        # wait for an in-flight page pull on the way out (aws dies
-        # immediately); the library default keeps waiting.
+        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # wait_on_interrupt=False once, and rm threads it into its recursive
+        # listing scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
-        built: list[Any] = []
+        scan_waits: list[bool] = []
 
         class _Recording(boto3_s3.S3Storage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
+                assert options is not None
+                scan_waits.append(options.wait_on_interrupt)
+                return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "S3Storage", _Recording)
+        # Patch the command module's binding: rm.py imports S3Storage at top.
+        monkeypatch.setattr("boto3_s3_cli.commands.rm.S3Storage", _Recording)
         client, _calls = make_recording_client([{}])
-        assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=_ctx(client)) == 0
-        assert [s.scan_wait_on_interrupt for s in built] == [False]
+        assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=client_ctx(client)) == 0
+        assert scan_waits == [False]

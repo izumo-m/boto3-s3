@@ -30,7 +30,7 @@ that are not objects).
 
 | Argument / method | Description |
 |---|---|
-| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it uses **only the client and bucket** (it ignores the key/prefix part). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes). `batch_size` is 1-1000 (`ValueError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
+| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it addresses requests with **only the client and bucket** (the key/prefix part is ignored for addressing; the `storage` itself is kept and rides each `OpResult.src_storage`). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes). `batch_size` is 1-1000 (out of range raises `ValidationError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
 | `submit(info)` | Accumulates one listing entry (`FileInfo`) into the buffer; its `key` is the **full object key** to delete, and the rest of the entry (e.g. an `S3FileInfo.etag`) rides through to its `OpResult` untouched. Auto-flushes when `batch_size` is reached. An empty `info.key` raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the entry has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
 | `flush()` | Splits the buffer into batches of `batch_size` and hands them to the worker (a complete no-op when empty). **Each dispatch first waits for the previous batch to complete** - this is the backpressure point, and the point where an unexpected worker exception is re-raised on the caller's thread (keys not yet dispatched remain intact in the buffer). After a re-raise it re-splits even if the buffer exceeds `batch_size`, so a single call never exceeds 1000 keys. |
 | `close(*, flush=True)` | flush (with `flush=False` the remaining buffer is discarded) -> wait for in-flight -> stop the worker. Idempotent. Subsequent `submit` / `flush` raise `ValidationError`. A worker exception is re-raised here too, but it closes fully regardless. Keys left in the buffer by a re-raise or by `flush=False` are discarded **without an OpResult**. |
@@ -58,9 +58,11 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 - The worker is non-daemon. If you fail to close it, interpreter shutdown blocks
   until the in-flight batch completes, so using the context manager is
   recommended.
-- Cancellation never discards an in-flight batch's results. Unsent buffered
-  entries are discarded without an `OpResult`; a running batch completes and
-  continues delivering its per-key results before shutdown returns.
+- Cancellation never discards a *running* batch's results: a batch whose S3
+  request has started completes and delivers its per-key results before
+  shutdown returns. Unsent buffered entries are discarded without an
+  `OpResult`, and immediate mode may also cancel a dispatched batch that has
+  not started yet - its entries likewise produce no records.
 
 ## 3. Error model
 
@@ -124,7 +126,12 @@ versioned bucket) cannot be mapped back to submission order.
   that is observationally equivalent for ordinary keys: deleting a nonexistent
   key is treated as "success" on both sides (`DeleteObject` returns 204 for a
   missing key, and `DeleteObjects` likewise reports no error), and per-key
-  success and failure are preserved. A key containing XML 1.0-forbidden controls, surrogate code points,
+  success and failure are preserved. The equivalence bounds the *success* path:
+  when the producing listing/comparison dies mid-run (both sides exit nonzero),
+  the partial S3 state differs - aws has already issued a per-key delete for
+  everything enumerated, while the body exception here abandons the unsent
+  buffer (up to `batch_size - 1` entries; `close(flush=False)`, consistent
+  with the fatal-cancel contract in [`opresult.md`](./opresult.md)). A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys.

@@ -5,8 +5,7 @@ The public surface is re-exported lazily (PEP 562 ``__getattr__`` in
 contract that motivates it:
 
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
-  SDK module - ``boto3`` alone drags in ``s3transfer`` via its ``compat``
-  module, so an eager re-export taxes every importer ~120ms (docs/imports.md).
+  SDK module (docs/imports.md section 1).
 
 Module-loading cases run in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -14,9 +13,11 @@ already made by the test runner can't mask a regression.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -63,7 +64,7 @@ class TestLibraryImportContract:
         )
 
     def test_types_alone_stays_pure(self) -> None:
-        # docs/imports.md item 2-2 names types among the pure modules: the
+        # docs/imports.md section 1 item 2 names types among the pure modules: the
         # record/enum definitions must not drag in the SDK on import.
         _run_fresh(
             """
@@ -74,7 +75,7 @@ class TestLibraryImportContract:
         )
 
     def test_exceptions_alone_stays_pure(self) -> None:
-        # docs/imports.md item 2-2 names exceptions among the pure modules: the
+        # docs/imports.md section 1 item 2 names exceptions among the pure modules: the
         # taxonomy is plain Python and must stay SDK-free on import.
         _run_fresh(
             """
@@ -145,15 +146,58 @@ class TestLibraryImportContract:
 
 class TestLazyExports:
     def test_every_public_symbol_resolves(self) -> None:
-        # Guards __all__ / _EXPORT_HOMES / TYPE_CHECKING-import drift in both
-        # directions: every __all__ name must resolve, and the resolution map
-        # (_EXPORT_HOMES, plus the two special-cased names) must carry exactly
-        # __all__ - a stale entry on either side fails here.
+        # Guards __all__ / _EXPORT_HOMES drift in both directions: every
+        # __all__ name must resolve, and the resolution map (plus the
+        # special-cased __version__) must carry exactly __all__ - a stale
+        # entry on either side fails here. The TYPE_CHECKING leg of the
+        # three-way agreement is pinned by the source-level test below.
         import boto3_s3
 
         for name in boto3_s3.__all__:
             assert getattr(boto3_s3, name) is not None, name
-        assert set(boto3_s3._EXPORT_HOMES) | {"globsieve", "__version__"} == set(boto3_s3.__all__)
+        assert set(boto3_s3._EXPORT_HOMES) | {"__version__"} == set(boto3_s3.__all__)
+
+    def test_type_checking_imports_mirror_the_export_map(self) -> None:
+        # getattr resolution runs through _EXPORT_HOMES and never sees the
+        # TYPE_CHECKING block, so the three-way agreement promised in
+        # docs/imports.md section 3 needs a source-level check: the block
+        # must import exactly the _EXPORT_HOMES names, each from its home
+        # module, and annotate the special-cased __version__.
+        import boto3_s3
+
+        tree = ast.parse(Path(boto3_s3.__file__).read_text(encoding="utf-8"))
+        blocks = [
+            node.body
+            for node in tree.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "TYPE_CHECKING"
+        ]
+        assert len(blocks) == 1, "expected exactly one TYPE_CHECKING block"
+        imported: dict[str, str] = {}
+        annotated: list[str] = []
+        for stmt in blocks[0]:
+            if isinstance(stmt, ast.ImportFrom):
+                assert stmt.module is not None
+                for alias in stmt.names:
+                    imported[alias.asname or alias.name] = stmt.module
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                annotated.append(stmt.target.id)
+        assert imported == boto3_s3._EXPORT_HOMES
+        assert annotated == ["__version__"]
+
+    def test_every_root_export_is_in_its_home_module_all(self) -> None:
+        # The two-tier surface contract (docs/imports.md): a root export must
+        # also appear in its home module's __all__, so `from boto3_s3.types
+        # import *` and the root agree on what is public. getattr-based
+        # resolution above cannot catch a home-__all__ omission.
+        import importlib
+
+        import boto3_s3
+
+        for name, home in boto3_s3._EXPORT_HOMES.items():
+            module = importlib.import_module(home)
+            assert name in module.__all__, f"{name} missing from {home}.__all__"
 
     def test_resolved_symbols_are_the_real_ones(self) -> None:
         import boto3_s3

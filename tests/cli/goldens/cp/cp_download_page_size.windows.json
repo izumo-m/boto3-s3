@@ -7,8 +7,9 @@
     "--page-size",
     "2"
   ],
-  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": [
     "k00:1:148de9c5",
@@ -17,13 +18,14 @@
     "k03:1:148de9c5",
     "k04:1:148de9c5"
   ],
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "pg/k00",
-    "pg/k01",
-    "pg/k02",
-    "pg/k03",
-    "pg/k04"
+    "pg/k00:1:148de9c5",
+    "pg/k01:1:148de9c5",
+    "pg/k02:1:148de9c5",
+    "pg/k03:1:148de9c5",
+    "pg/k04:1:148de9c5"
   ],
   "scenario": "cp_download_page_size",
   "src_tree": null,

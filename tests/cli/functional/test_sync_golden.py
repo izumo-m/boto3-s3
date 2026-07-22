@@ -22,6 +22,7 @@ from tests.utils.golden import assert_matches_golden, load_golden
 from tests.utils.harness import (
     assert_stderr_tokens,
     capture_local_tree,
+    had_progress_lines,
     head_object_fields,
     normalize_cp_stdout,
     remaining_keys,
@@ -61,9 +62,14 @@ def test_sync_matches_golden(
         remaining_keys=remaining_keys(moto_s3, FUNCTIONAL_BUCKET),
         local_tree=capture_local_tree(str(tmp_path / "dest")) if scenario.capture_tree else None,
         head_fields=head_fields,
+        progress=(had_progress_lines(result.stdout) if scenario.compare_progress else None),
     )
     assert_stderr_tokens(
-        scenario.expected_stderr_tokens_ours, result.stderr, side="ours", scenario=scenario.name
+        scenario.expected_stderr_tokens_ours,
+        result.stderr,
+        side="ours",
+        scenario=scenario.name,
+        require_empty=scenario.stderr_exact_empty,
     )
     if scenario.mtime_key is not None:
         key, rel_path = scenario.mtime_key
@@ -133,5 +139,5 @@ class TestSyncGlacierOnMoto:
             ["sync", f"s3://{FUNCTIONAL_BUCKET}/cold", "out", "--ignore-glacier-warnings"]
         )
         assert result.rc == 0
-        assert result.stderr == ""
+        assert (result.stdout, result.stderr) == ("", "")  # a silent skip is silent on both
         assert not (tmp_path / "out" / "x.bin").exists()

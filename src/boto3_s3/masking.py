@@ -12,7 +12,7 @@ module is pure stdlib - it imports no ``boto3`` / ``botocore`` / ``s3transfer``
 
 The credential leak under ``--debug`` flows through the Python ``logging``
 system (botocore logs the signed ``AWSPreparedRequest`` - Authorization /
-Signature / X-Amz-Security-Token - and parsed response bodies, and s3transfer
+Signature / X-Amz-Security-Token - and raw response bodies, and s3transfer
 logs each task's kwargs including ``extra_args`` with the raw ``SSECustomerKey``,
 all at DEBUG), so masking lives in a logging filter on the handler, not in an
 ``http.client`` patch (the wire dump only
@@ -81,10 +81,20 @@ _AWS_ACCESS_KEY_ID_PARAM_RE = re.compile(
 # form, and the dict-repr header form botocore logs in
 # ``AWSPreparedRequest.__repr__`` (``'X-Amz-Security-Token': '...'``). ``key``
 # swallows the name, the ``:`` / ``=`` separator, and any opening quote so only
-# the value is replaced.
+# the value is replaced. ``x-amz-s3session-token`` is the same-shape secret on
+# the S3 Express (directory bucket) auth flow - the CreateSession-minted
+# session token botocore signs every zonal request with (its response-body twin
+# is already covered by the ``<SessionToken>`` / ``'SessionToken':`` patterns
+# below). The bare ``SecurityToken`` form is botocore's SigV2 *request*
+# signer's query parameter (query-protocol services; the S3 hmacv1 presigner
+# instead spells it ``x-amz-security-token``, covered above); the word
+# boundary keeps
+# ``XSecurityToken``-style superstrings unmatched, and the quote-or-separator
+# anchor keeps XML ``<SessionToken>`` to its own pattern.
 _TOKEN_VALUE = r"[^\s'\"&,\\}]+"
 _SECURITY_TOKEN_RE = re.compile(
-    rf"(?P<key>x-amz-security-token['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
+    rf"(?P<key>(?:x-amz-(?:security|s3session)-token|\bSecurityToken)['\"]?\s*[:=]\s*(?:b?['\"])?)"
+    rf"(?P<val>{_TOKEN_VALUE})",
     re.IGNORECASE,
 )
 
@@ -123,6 +133,19 @@ _WEB_IDENTITY_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# MFA one-time code on the AssumeRole / GetSessionToken request (full mask). A
+# profile with ``mfa_serial`` makes botocore prompt for the TOTP and log the
+# STS request_dict at DEBUG ("Making request ... with params: %s") with
+# ``'TokenCode': '123456'`` in the body (and, defensively, the urlencoded
+# ``TokenCode=123456`` query form). The code is single-use and short-lived, but
+# a real-time log collector still captures a live second factor; mask it like
+# the other request secrets. ``SerialNumber`` (the MFA device ARN) is not a
+# secret and is left untouched. Same key/value shape as the web-identity RE.
+_MFA_TOKEN_CODE_RE = re.compile(
+    rf"(?P<key>['\"]?TokenCode['\"]?\s*[:=]\s*(?:b?['\"])?)(?P<val>{_TOKEN_VALUE})",
+    re.IGNORECASE,
+)
+
 # SSE-C customer key (full mask): the base64 customer key is the symmetric
 # encryption key (a true secret). botocore puts it in the signed request header
 # ``x-amz-server-side-encryption-customer-key`` (and the copy-source variant),
@@ -158,12 +181,13 @@ _SIGV2_AUTH_HEADER_RE = re.compile(
 )
 
 # STS / metadata-service response-body temporary credentials. botocore logs the
-# parsed response body at DEBUG (``Response body:``), so an AssumeRole /
+# raw response body at DEBUG (``Response body:``), so an AssumeRole /
 # GetSessionToken / web-identity response leaks its ``SecretAccessKey`` and
 # ``SessionToken`` (the temporary secret key + token) in XML or JSON form. The
 # instance/container metadata fetchers emit two more DEBUG shapes of the same
-# secrets: the parsed-credentials *dict repr* (single quotes) when a response
-# misses a required field, and the raw IMDS/ECS JSON body on malformed JSON,
+# secrets: the parsed-credentials *dict repr* (single quotes) on some
+# retrieval-failure paths, and the raw ECS JSON body on malformed JSON
+# (IMDS's invalid-JSON path logs no body),
 # where the session token rides under the key ``Token``. The key/value regex is
 # therefore quote-agnostic and includes ``Token``; the quote anchored directly
 # to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked, and
@@ -201,8 +225,18 @@ _SIGNATURE_PROVIDED_RE = re.compile(r"(?P<key><SignatureProvided>)(?P<val>[^<]*)
 # and real URL schemes are short (RFC 3986). Python 3.10 has no atomic groups.
 _PROXY_URL_RE = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)"
-    r"(?P<user>[^/?#\s:@]+)(?::(?P<pass>[^/?#\s@]+))?@"
+    r"(?P<user>[^/?#\s:@]*)(?::(?P<pass>[^/?#\s@]*))?@"
 )
+
+
+def _mask_proxy_userinfo(m: re.Match[str]) -> str:
+    """``mask_proxy_url``'s notation, empty components included (botocore masks
+    ``user:@`` and ``:pass@`` too); a bare ``://@`` carries nothing and is kept."""
+    if not m.group("user") and not m.group("pass"):
+        return m.group(0)
+    masked = MASK + (":" + MASK if m.group("pass") is not None else "")
+    return m.group("scheme") + masked + "@"
+
 
 # Proxy-Authorization header value (defensive: it surfaces only in an
 # ``http.client`` wire dump, which this project does not emit). The quoted form
@@ -218,10 +252,16 @@ _PROXY_AUTH_PLAIN_RE = re.compile(
 
 
 def _reveal_access_key(value: str) -> str:
-    """Mask an Access Key ID, leaving its last ``MASK_REVEAL_LEN`` chars visible."""
-    if len(value) < MASK_MIN_LEN:
-        return MASK
-    return MASK + value[-MASK_REVEAL_LEN:]
+    """Mask an Access Key ID; only an AWS-shaped id keeps its tail visible.
+
+    The ``MASK_REVEAL_LEN`` tail reveal exists to tell AWS accounts apart, so
+    it applies only to a value shaped like an AWS Access Key ID
+    (``_ACCESS_KEY_ID_RE``). Anything else in the same slot - a MinIO
+    ``minioadmin``-style key, say - masks entirely (over-masking by design,
+    docs/masking.md section 4)."""
+    if _ACCESS_KEY_ID_RE.fullmatch(value):
+        return MASK + value[-MASK_REVEAL_LEN:]
+    return MASK
 
 
 def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
@@ -238,6 +278,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSO_BEARER_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSO_OIDC_BODY_JSON_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _WEB_IDENTITY_TOKEN_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _MFA_TOKEN_CODE_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_KEY_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
@@ -252,10 +293,7 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
         lambda m: m.group("key") + _reveal_access_key(m.group("val")), text
     )
     text = _ACCESS_KEY_ID_RE.sub(lambda m: _reveal_access_key(m.group(0)), text)
-    text = _PROXY_URL_RE.sub(
-        lambda m: m.group("scheme") + MASK + (":" + MASK if m.group("pass") else "") + "@",
-        text,
-    )
+    text = _PROXY_URL_RE.sub(_mask_proxy_userinfo, text)
     text = _PROXY_AUTH_QUOTED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _PROXY_AUTH_PLAIN_RE.sub(lambda m: m.group("key") + MASK, text)
     for secret in extra_secrets:
@@ -328,8 +366,19 @@ def set_stream_logger(
     Extra keyword-only parameters beyond boto3's signature: *stream* (defaults
     to ``sys.stderr``, like ``logging.StreamHandler``), *mask_secrets*, and
     *extra_secrets* (literal values at least ``MASK_MIN_LEN`` characters long,
-    masked wherever they appear; shorter values are skipped so a stray short
+    masked wherever they still appear after the built-in patterns ran - a
+    literal those already partially rewrote is not re-matched; shorter values
+    are skipped so a stray short
     string cannot blank out swaths of the log).
+
+    Scope (docs/masking.md section 3.3): masking is a property of the handler
+    this attaches - it redacts that handler's output and nothing else. It is
+    not a process-wide guarantee: a handler that other code attached to the
+    same logger formats each record independently and is not reached (Python
+    logging delivers a record to every handler on the chain separately, and a
+    handler-side filter is scoped to its own handler). Obtaining masked debug
+    output is done through this entry point (or the CLI's ``--debug``);
+    handlers installed by other code own their own output.
     """
     if format_string is None:
         format_string = "%(asctime)s %(name)s [%(levelname)s] %(message)s"
@@ -344,10 +393,6 @@ def set_stream_logger(
 
 
 __all__ = [
-    "MASK",
-    "MASK_MIN_LEN",
-    "MASK_REVEAL_LEN",
     "SecretMaskingFilter",
-    "mask_text",
     "set_stream_logger",
 ]

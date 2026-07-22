@@ -3,11 +3,16 @@
     "mb",
     "s3://<BUCKET>/some/key"
   ],
-  "aws_version": "aws-cli/2.34.53 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.22",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": true,
+  "bucket_tags": null,
+  "head_fields": null,
+  "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [],
   "scenario": "mb_key_dropped",
+  "src_tree": null,
   "stdout_lines": [
     "make_bucket: <BUCKET>"
   ]

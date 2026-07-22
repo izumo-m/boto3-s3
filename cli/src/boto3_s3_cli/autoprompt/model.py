@@ -63,7 +63,8 @@ class CompletionModel:
 
     Methods mirror the names/semantics of aws-cli's ``ModelIndex`` so the port
     stays faithful: ``command_names``, ``arg_names``,
-    ``get_argument_data``, plus ``global_arg_data`` for the option-name
+    ``get_argument_data``, plus ``global_arg_data`` (aws-cli's
+    ``get_global_arg_data``, shortened) for the option-name
     completer's global injection.
     """
 

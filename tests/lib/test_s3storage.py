@@ -7,7 +7,6 @@ wiring can be asserted.
 
 from __future__ import annotations
 
-import datetime as dt
 import io
 import threading
 from typing import Any
@@ -34,9 +33,8 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.storage import sieve_pages
+from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.recorder import ApiCall, make_recording_client
-
-_MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
 
 class _FakePaginator:
@@ -108,7 +106,7 @@ def _obj(
     storage_class: str | None = None,
     owner: str | None = None,
 ) -> dict[str, Any]:
-    obj: dict[str, Any] = {"Key": key, "Size": size, "LastModified": _MTIME}
+    obj: dict[str, Any] = {"Key": key, "Size": size, "LastModified": MTIME}
     if etag is not None:
         obj["ETag"] = etag
     if storage_class is not None:
@@ -146,7 +144,7 @@ class TestScanNonRecursive:
         assert info.key == "prefix/a.txt"
         assert info.compare_key == "a.txt"
         assert info.size == 10
-        assert info.mtime == _MTIME
+        assert info.mtime == MTIME
         assert info.etag == "abc"  # surrounding quotes stripped
         assert info.storage_class == "STANDARD"
         assert info.owner == "me"
@@ -364,22 +362,17 @@ class TestScanFilter:
             list(storage.scan(S3ScanOptions(recursive=True, filter=boom)))
 
 
-def _client_error(code: str, status: int) -> ClientError:
-    return ClientError(
-        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
-        "HeadObject",
-    )
-
-
 class TestGetFileinfo:
     """``S3Storage.get_fileinfo`` - a generic HeadObject: present / 404->None / raise."""
 
     def test_present_returns_fileinfo(self) -> None:
+        # A realistic HeadObject: StorageClass is present only for non-STANDARD
+        # classes (the API omits the header for STANDARD objects).
         head = {
             "ContentLength": 7,
-            "LastModified": _MTIME,
+            "LastModified": MTIME,
             "ETag": '"abc"',
-            "StorageClass": "STANDARD",
+            "StorageClass": "GLACIER",
         }
         storage, client = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
         info = storage.get_fileinfo()
@@ -392,16 +385,20 @@ class TestGetFileinfo:
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
 
     def test_404_returns_none(self) -> None:
-        storage, _ = _storage(url="s3://bucket/missing", head_error=_client_error("404", 404))
+        storage, _ = _storage(
+            url="s3://bucket/missing", head_error=client_error("404", 404, "HeadObject")
+        )
         assert storage.get_fileinfo() is None
 
     def test_other_error_raises(self) -> None:
-        storage, _ = _storage(url="s3://bucket/denied", head_error=_client_error("403", 403))
+        storage, _ = _storage(
+            url="s3://bucket/denied", head_error=client_error("403", 403, "HeadObject")
+        )
         with pytest.raises(AccessDeniedError):
             storage.get_fileinfo()
 
     def test_child_key_joins_under_the_prefix(self) -> None:
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket/prefix/", head_response=head)
         info = storage.get_fileinfo("sub/f.txt")
         assert info is not None
@@ -412,7 +409,7 @@ class TestGetFileinfo:
     def test_child_key_joins_under_a_slashless_prefix(self) -> None:
         # The "/" boundary is inserted even when the prefix lacks one, so a child
         # key is an entry beneath the location (not a bare-concat "prefixsub/...").
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket/prefix", head_response=head)
         info = storage.get_fileinfo("sub/f.txt")
         assert info is not None
@@ -420,7 +417,7 @@ class TestGetFileinfo:
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/sub/f.txt"}]
 
     def test_child_key_under_a_keyless_location_has_no_leading_slash(self) -> None:
-        head = {"ContentLength": 1, "LastModified": _MTIME}
+        head = {"ContentLength": 1, "LastModified": MTIME}
         storage, client = _storage(url="s3://bucket", head_response=head)
         info = storage.get_fileinfo("a.txt")
         assert info is not None
@@ -429,7 +426,7 @@ class TestGetFileinfo:
 
 
 def _bucket_entry(name: str) -> dict[str, Any]:
-    return {"Name": name, "CreationDate": _MTIME}
+    return {"Name": name, "CreationDate": MTIME}
 
 
 class TestListBuckets:
@@ -447,7 +444,7 @@ class TestListBuckets:
             ("alpha", FileKind.BUCKET),
             ("beta", FileKind.BUCKET),
         ]
-        assert results[0].mtime == _MTIME  # CreationDate
+        assert results[0].mtime == MTIME  # CreationDate
         assert results[0].size is None
 
     def test_filters_forwarded(self) -> None:
@@ -526,6 +523,19 @@ class TestScanErrorMapping:
             list(S3Storage("s3://bucket/prefix/").scan())
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
+    def test_malformed_env_endpoint_maps_to_invalid_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The lazy default build has the same plain-ValueError hole as
+        # S3.client(): botocore rejects a malformed AWS_ENDPOINT_URL with a
+        # ValueError that is not a BotoCoreError. It must surface as the
+        # translated refinement (rc 255 lane), never raw.
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "not-a-url")
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3Storage("s3://bucket/prefix/").get_client()
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
     def test_unresolvable_credentials_stay_plain_configuration_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -545,7 +555,13 @@ class TestScanErrorMapping:
 
     @pytest.mark.parametrize(
         ("status", "category"),
-        [(500, TransportError), (None, Boto3S3Error)],
+        [
+            (403, AccessDeniedError),
+            (404, NotFoundError),
+            (400, ValidationError),
+            (500, TransportError),
+            (None, Boto3S3Error),
+        ],
     )
     def test_unknown_code_widens_on_http_status(
         self, status: int | None, category: type[Boto3S3Error]
@@ -570,6 +586,22 @@ class TestScanErrorMapping:
         with pytest.raises(KeyboardInterrupt):
             with s3_errors(operation="ls"):
                 raise KeyboardInterrupt
+
+    def test_missing_dependency_stays_plain_configuration_error(self) -> None:
+        # A missing optional dependency (awscrt absent where SigV4a signing
+        # needs it - an MRAP presign, say) is the crt-absence family: the
+        # PLAIN ConfigurationError the CLI maps to rc 253, cause preserved.
+        # The engine-selection pass-through (crtsupport) never crosses this
+        # seam and stays unwrapped.
+        from botocore.exceptions import MissingDependencyException
+
+        from boto3_s3.s3storage import s3_errors
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            with s3_errors(operation="presign", bucket="b", key="k"):
+                raise MissingDependencyException(msg="Missing Dependency: install awscrt")
+        assert type(exc_info.value) is ConfigurationError
+        assert isinstance(exc_info.value.__cause__, MissingDependencyException)
 
     def test_object_scan_error_carries_no_fixed_operation(self) -> None:
         # The recursive object listing backs ls, rm, cp, mv, and sync source
@@ -639,14 +671,14 @@ class TestConstructor:
         explicit = S3Storage("s3://bucket/some/prefix")
         assert (bare.bucket, bare.key) == (explicit.bucket, explicit.key)
 
-    def test_url_is_canonicalized_with_scheme(self) -> None:
-        assert S3Storage("bucket/key").url == "s3://bucket/key"
+    def test_uri_is_canonicalized_with_scheme(self) -> None:
+        assert S3Storage("bucket/key").uri == "s3://bucket/key"
 
     def test_empty_bucket_is_the_service_root(self) -> None:
         for url in ("s3://", ""):
             storage = S3Storage(url)
             assert (storage.bucket, storage.key) == ("", "")
-            assert storage.url == "s3://"
+            assert storage.uri == "s3://"
 
     def test_key_without_bucket_is_rejected(self) -> None:
         # Construction is permissive (non-raising); validate() does the rejection.
@@ -758,7 +790,7 @@ class TestOpen:
     def test_rb_error_translates_to_taxonomy(self) -> None:
         # A GetObject 404 surfaces as NotFoundError (s3_errors taxonomy), like
         # the rest of the S3 call sites - not a raw botocore ClientError.
-        client, _calls = make_recording_client([_client_error("NoSuchKey", 404)])
+        client, _calls = make_recording_client([client_error("NoSuchKey", 404, "GetObject")])
         storage = S3Storage("s3://bucket/data", client=client)
         with pytest.raises(NotFoundError):
             storage.open("data/gone.txt", "rb")

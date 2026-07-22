@@ -25,8 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import boto3.session
-
 from benchmarks import stubs, workload
 from benchmarks.core import BenchmarkError, ScenarioResult, Side, VerificationError
 
@@ -106,11 +104,15 @@ def _make_context(responder: stubs.S3Responder) -> Context:
 
     One session is shared (its loader cache keeps repeat client builds cheap,
     as in any long-lived process); a fresh client is built per CLI invocation,
-    like the production ``build_client`` path the injection replaces.
+    like the production ``build_client`` path the injection replaces. The
+    session is the library's tuned `boto3_s3.session()` - the production CLI
+    installs the same fast timestamp parser on every session it builds, so
+    the injected context must measure the same configuration.
     """
+    import boto3_s3
     from boto3_s3_cli.commands.base import Context
 
-    session = boto3.session.Session()
+    session = boto3_s3.session()
 
     def factory(_args: Any) -> Any:
         client = session.client(

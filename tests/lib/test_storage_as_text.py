@@ -38,7 +38,7 @@ class TestS3StorageAsText:
         # url echoes the raw input; as_text rebuilds from bucket/key, so the
         # keyless trailing slash is normalized away (what the format grammar expects).
         storage = S3Storage("s3://bucket/")
-        assert storage.url == "s3://bucket/"
+        assert storage.uri == "s3://bucket/"
         assert storage.as_text() == "s3://bucket"
 
 

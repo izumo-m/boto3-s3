@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
@@ -83,7 +83,7 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
     aws-cli validates the value at parse time - before the integer coercions,
     the session profile, and every path validation - so this runs first in
     the commands whose later checks could otherwise mask it (measured against
-    aws 2.35.18: ``--page-size abc --endpoint-url badurl`` is the endpoint's
+    the pinned aws-cli: ``--page-size abc --endpoint-url badurl`` is the endpoint's
     252, not the conversion's 255). Also called inside the client builders,
     where botocore would otherwise raise a bare ``ValueError``.
     """
@@ -115,14 +115,26 @@ def validate_profile(args: argparse.Namespace) -> None:
 
 
 def build_session(args: argparse.Namespace) -> Boto3Session:
-    """Build and validate the one boto3 session owned by a CLI `S3` command."""
+    """Build and validate the one boto3 session owned by a CLI `S3` command.
+
+    The session's clients parse response timestamps through the library's
+    `fast_parse_timestamp` (registered on this CLI-owned session before any
+    client is built) - large listings parse their ``LastModified`` values at
+    C speed where aws-cli walks dateutil's generic parser per object, with
+    byte-identical output.
+    """
     import boto3
     import botocore.session
     from botocore.exceptions import BotoCoreError
 
+    from boto3_s3 import fast_parse_timestamp
+
     try:
         botocore_session = botocore.session.Session(profile=resolve_profile(args))
         botocore_session.get_scoped_config()
+        botocore_session.get_component("response_parser_factory").set_parser_defaults(
+            timestamp_parser=fast_parse_timestamp
+        )
         return boto3.Session(botocore_session=botocore_session)
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
@@ -138,7 +150,15 @@ def build_s3(args: argparse.Namespace) -> S3:
         def client(self) -> S3Client:
             return build_client(args, session=session)
 
-    return CliS3(session=session)
+    # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
+    # operation's unwind must not wait for an in-flight listing page pull
+    # (aws dies immediately); the library default keeps waiting.
+    # endpoint_url: build_client already applies it to every client this S3
+    # hands out (the client() override), so the S3-level copy only feeds the
+    # CRT lane's explicit-endpoint pin (docs/crt.md) - without it, an
+    # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
+    # dropped by the host heuristic and the CRT would re-resolve to public S3.
+    return CliS3(session=session, endpoint_url=args.endpoint_url, wait_on_interrupt=False)
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
@@ -204,8 +224,9 @@ def build_service_client(
     inherits them; fold the same timeouts and the UNSIGNED signature into this
     client's ``Config``.
     """
-    # Deferred like build_client: only a command that actually resolves
-    # access-point paths pays the boto3 import.
+    # Deferred like build_client: only a command that opts into path
+    # resolution (mv's --validate-same-s3-paths, which builds both resolver
+    # clients regardless of the path shapes) pays the boto3 import.
     import boto3
     import botocore.session
     from botocore import UNSIGNED
@@ -218,11 +239,19 @@ def build_service_client(
     else:
         verify = args.ca_bundle
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
-    # a bad --profile); translate them so they reach the exit-code mapping
-    # instead of escaping as an uncaught traceback (see build_client).
+    # a bad --profile); translate them so the credential/region 253 split
+    # survives - untranslated they would fall to the dispatcher's generic
+    # chain (see build_client).
     try:
         if session is None:
+            from boto3_s3 import fast_parse_timestamp
+
             botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            # Same fast timestamp parsing as build_session: every CLI-built
+            # session carries it.
+            botocore_session.get_component("response_parser_factory").set_parser_defaults(
+                timestamp_parser=fast_parse_timestamp
+            )
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
@@ -283,6 +312,50 @@ def _coerce_cli_timeout(value: str) -> int | None:
         raise InvalidValueError(str(exc)) from exc
 
 
+def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
+    """Whether a positional S3 path needs botocore's endpoint auth-scheme resolution.
+
+    True for an MRAP ARN bucket (must sign asymmetric SigV4a) and for an
+    S3 Express directory bucket (must sign ``sigv4-s3express`` with
+    `CreateSession` credentials) - the two shapes an explicit
+    `signature_version` would mis-sign, so the s3v4 pin stands down for them.
+    Reads the parsed positionals off the namespace - `paths` (a string, or the
+    transfer family's two-item list) and presign's `path`. The single-path
+    commands' positionals arrive paramfile-expanded by client-build time; the
+    transfer family's `paths` are consumed raw (a `file://` form there is
+    just a local path string, hiding nothing S3-shaped). Non-string values
+    (the readable-`fileb://` quirk leaves
+    `bytes`) never name either shape and are skipped.
+
+    presign's `path` is always an S3 reference - the command takes the target
+    with or without the `s3://` scheme (unlike the transfer family, where a
+    scheme-less positional is a local path). So a scheme-less directory-bucket
+    presign (``presign bucket--zone--x-s3/key``) is normalized to the `s3://`
+    form before the check, which `is_s3express_path` requires precisely
+    because a transfer positional could be a local file ending in ``--x-s3``.
+    Without this, the s3v4 pin would stay on and the URL would sign plain
+    SigV4 with no `CreateSession` - unusable against the directory bucket,
+    where aws (resolving the auth scheme off the final Bucket, not the input
+    notation) signs ``sigv4-s3express``.
+    """
+    from boto3_s3.pathresolver import is_mrap_path, is_s3express_path
+
+    values: list[object] = []
+    paths: object = getattr(args, "paths", None)
+    if isinstance(paths, (list, tuple)):
+        values.extend(cast("list[object]", paths))
+    else:
+        values.append(paths)
+    presign_path = getattr(args, "path", None)
+    if isinstance(presign_path, str) and not presign_path.startswith("s3://"):
+        presign_path = f"s3://{presign_path}"
+    values.append(presign_path)
+    return any(
+        isinstance(value, str) and (is_mrap_path(value) or is_s3express_path(value))
+        for value in values
+    )
+
+
 def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
@@ -317,15 +390,28 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     else:
         verify = args.ca_bundle  # a path, or None to use the default trust store
 
-    # aws-cli v2's bundled botocore has no SigV2 left at all, while stock
+    # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
+    # signers) left - only the generic query-protocol "v2" - while stock
     # botocore still downgrades *presigned URLs* to SigV2 in regions that
     # accept it (a default us-east-1 client) and resolves us-east-1
     # to the legacy global endpoint where aws v2 uses the regional one. Pin
     # both so every command - visibly, presign's URLs - matches aws v2.
+    # The pin stands down when the command targets an MRAP ARN or an S3
+    # Express directory bucket: an explicit signature_version suppresses
+    # botocore's auth-scheme resolution, and those endpoints must resolve to
+    # asymmetric SigV4a / ``sigv4-s3express`` (with `CreateSession`
+    # credentials) respectively - a pinned s3v4 matches both scheme names up
+    # to the first dash and silently signs a plain SigV4 request instead.
+    # aws v2's bundled botocore pins only the symmetric families
+    # (_pin_python_sigv4_signers) and leaves both resolutions alive. With
+    # awscrt absent, an MRAP target surfaces botocore's own
+    # MissingDependencyException (-> ConfigurationError, 253) instead of a
+    # silently mis-signed SigV4 request.
     overrides: dict[str, Any] = {
-        "signature_version": "s3v4",
         "s3": {"us_east_1_regional_endpoint": "regional"},
     }
+    if not _includes_endpoint_auth_path(args):
+        overrides["signature_version"] = "s3v4"
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED
     # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
@@ -339,11 +425,19 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile, or credential/region resolution failures). Translate them
     # into the library taxonomy so exit_code_for maps them (credential/region ->
-    # ConfigurationError [253], the rest -> InvalidConfigError [255]) instead of
-    # letting a raw botocore exception escape main() as an uncaught traceback (rc 1).
+    # ConfigurationError [253], the rest -> InvalidConfigError [255]); left
+    # raw they would fall to the dispatcher's generic chain, losing that
+    # 253/255 split.
     try:
         if session is None:
+            from boto3_s3 import fast_parse_timestamp
+
             botocore_session = botocore.session.Session(profile=resolve_profile(args))
+            # Same fast timestamp parsing as build_session: every CLI-built
+            # session carries it.
+            botocore_session.get_component("response_parser_factory").set_parser_defaults(
+                timestamp_parser=fast_parse_timestamp
+            )
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
@@ -375,20 +469,26 @@ def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
     user-visible difference in how ``aws s3`` behaves under throttling. The
     aws default fills in only when neither ``AWS_RETRY_MODE`` /
     ``AWS_MAX_ATTEMPTS`` nor the profile's ``retry_mode`` / ``max_attempts``
-    supplies a value, exactly like the bundled default chain. An
-    unconvertible ``max_attempts`` raises ``ValueError`` like the bundled
-    botocore's int cast (aws's general handler, rc 255 - main()'s backstop
-    maps it the same).
+    supplies a value, exactly like the bundled default chain. A supplied mode
+    is validated here against the bundled botocore's restricted set -
+    ``standard`` / ``adaptive`` only, with aws's exact wording (measured, rc
+    255): stock botocore would otherwise *accept* ``legacy`` (its own valid
+    mode) where aws v2 rejects it. An unconvertible ``max_attempts`` raises
+    ``ValueError`` like the bundled botocore's int cast (aws's general
+    handler, rc 255 - main()'s backstop maps it the same).
     """
     scoped = botocore_session.get_scoped_config()
     # Present-wins reads, like the profile/region env chains: aws treats a
     # present-but-empty AWS_RETRY_MODE / AWS_MAX_ATTEMPTS as a fatal value
-    # (rc 255), never as "unset" - the empty string flows through and fails
-    # at client construction here too (mode via botocore's retry-config
-    # validation, attempts via the int cast below).
+    # (rc 255), never as "unset" - the empty string fails the mode validation
+    # below (attempts via the int cast).
     mode = os.environ.get("AWS_RETRY_MODE")
     if mode is None:
         mode = scoped.get("retry_mode", "standard")
+    if mode not in ("standard", "adaptive"):
+        raise InvalidConfigError(
+            f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
+        )
     attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
     if attempts_raw is None:
         attempts_raw = scoped.get("max_attempts")

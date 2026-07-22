@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from boto3_s3_cli import cli
-from boto3_s3_cli.commands.base import Context
-
-
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("fileb positional failures must happen before client creation")
+from tests.utils.harness import unused_ctx
 
 
 @pytest.mark.parametrize(
@@ -38,7 +33,7 @@ def test_readable_positional_fileb_keeps_command_specific_aws_bug(
 
     result = cli.main(
         [command, f"fileb://{ref}"],
-        ctx=Context(client_factory=_unused_factory),
+        ctx=unused_ctx(),
     )
 
     assert result == expected_rc

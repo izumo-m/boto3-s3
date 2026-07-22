@@ -44,6 +44,7 @@ from tests.utils.harness import (
     assert_stderr_tokens,
     capture_local_tree,
     delete_under,
+    had_progress_lines,
     head_object_fields,
     normalize_cp_stdout,
     remaining_keys,
@@ -60,6 +61,7 @@ class _SideState:
     remaining: list[str]
     tree: list[str] | None
     head: dict[str, Any] | None
+    progress: bool | None
 
 
 def _run_side(
@@ -83,6 +85,7 @@ def _run_side(
         remaining=remaining_keys(s3_client, bucket),
         tree=capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None,
         head=head,
+        progress=had_progress_lines(result.stdout) if scenario.compare_progress else None,
     )
     if scenario.mtime_key is not None:
         key, rel_path = scenario.mtime_key
@@ -134,6 +137,7 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
                         remaining_keys=aws.remaining,
                         local_tree=aws.tree,
                         head_fields=aws.head,
+                        progress=aws.progress,
                     ),
                 )
             else:
@@ -146,6 +150,7 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
                     remaining_keys=aws.remaining,
                     local_tree=aws.tree,
                     head_fields=aws.head,
+                    progress=aws.progress,
                 )
 
         assert ours.result.rc == aws.result.rc, (
@@ -177,12 +182,14 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
             ours.result.stderr,
             side="ours",
             scenario=scenario.name,
+            require_empty=scenario.stderr_exact_empty,
         )
         assert_stderr_tokens(
             scenario.expected_stderr_tokens_aws,
             aws.result.stderr,
             side="aws",
             scenario=scenario.name,
+            require_empty=scenario.stderr_exact_empty,
         )
     finally:
         delete_under(s3_client, bucket, "")

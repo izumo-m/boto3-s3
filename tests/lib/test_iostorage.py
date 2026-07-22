@@ -11,10 +11,15 @@ import io
 import tempfile
 
 import pytest
+from boto3.s3.transfer import TransferConfig
 
 from boto3_s3.exceptions import ValidationError
 from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.s3 import S3
+from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, ScanOptions
+from tests.utils.fakes3 import get_response, head_response
+from tests.utils.recorder import make_recording_client
 
 
 class TestBinaryPassthrough:
@@ -102,6 +107,23 @@ class TestTextAdapter:
         assert sink.getvalue() == "ab"
 
 
+class TestCallerStreamPosition:
+    def test_download_leaves_the_stream_unrewound_at_the_write_end(self) -> None:
+        # docs/storage.md: the caller's stream is neither closed nor rewound -
+        # after a download it sits at the end of the written bytes, so the
+        # caller can keep appending (or must seek(0) themselves to read back).
+        buf = io.BytesIO()
+        client, _ = make_recording_client([head_response(), get_response()])
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            IOStorage(buf),
+            transfer_config=TransferConfig(use_threads=False),
+        )
+        assert not buf.closed
+        assert buf.tell() == len(b"payload")
+        assert buf.getvalue() == b"payload"
+
+
 class TestUnsupportedContainerOps:
     def test_scan_pages_raises(self) -> None:
         with pytest.raises(NotImplementedError):
@@ -134,6 +156,20 @@ class TestStdioStorage:
         writer.close()
         assert stdout.buffer.getvalue() == b"hi"
         assert not stdout.buffer.closed
+
+    def test_write_view_is_write_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws-cli's StdoutBytesWriter shape: exposing only write forces
+        # s3transfer's non-seekable download path, which orders ranged chunks
+        # before writing. A redirected stdout can report seekable (a regular
+        # file) while `>>` opened it O_APPEND - every write then lands at the
+        # end regardless of the seeked position, so a seek-based parallel
+        # download would interleave chunks in completion order.
+        stdout = _Stdio()
+        assert stdout.buffer.seekable()  # the hazard: the raw stream IS seekable
+        monkeypatch.setattr("sys.stdout", stdout)
+        writer = StdioStorage().open("k", "wb")
+        assert not hasattr(writer, "seek")
+        assert not hasattr(writer, "seekable")
 
     def test_read_picks_stdin_buffer_forced_non_seekable(
         self, monkeypatch: pytest.MonkeyPatch

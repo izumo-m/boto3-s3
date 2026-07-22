@@ -42,6 +42,14 @@ _FIRST_VALUE_RE = re.compile(
     f"({_ESCAPED_COMMA}|[{_START_WORD}])({_ESCAPED_COMMA}|[{_FIRST_FOLLOW_CHARS}])*",
     re.UNICODE,
 )
+# The csv second-value fragment (aws-cli's _SECOND_VALUE): its follow set stops
+# at '<' and resumes at '>', so '=' terminates a candidate - which is what makes
+# the probe in `_try_csv_continuation` fail over to the next pair.
+_SECOND_FOLLOW_CHARS = r"\s\!\#-&\(-\+\--\<\>-" + _MAX_CHAR
+_SECOND_VALUE_RE = re.compile(
+    f"({_ESCAPED_COMMA}|[{_START_WORD}])({_ESCAPED_COMMA}|[{_SECOND_FOLLOW_CHARS}])*",
+    re.UNICODE,
+)
 _SINGLE_QUOTED_RE = re.compile(r"'(?:\\'|[^'])*'", re.UNICODE)
 _DOUBLE_QUOTED_RE = re.compile(r'"(?:\\"|[^"])*"', re.UNICODE)
 
@@ -177,10 +185,81 @@ class _Parser:
         if first == "'":
             # "singled quoted" reproduces aws-cli's _NamedRegex name verbatim
             # (typo included) so the unterminated-quote wording matches byte for byte.
-            return self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
-        if first == '"':
-            return self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
-        return self._first_value_unquoted()
+            value = self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
+        elif first == '"':
+            value = self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
+        else:
+            value = self._first_value_unquoted()
+        # aws's _csv_value consumes whitespace after the value before its
+        # EOF/comma check, so a trailing space - or the newline a file://
+        # paramfile keeps at its end - after a *quoted* value is accepted
+        # (`--metadata "title='hello' "`). The unquoted regex already consumes
+        # trailing whitespace (and rstrips it), making this a no-op there.
+        self._consume_whitespace()
+        if not self._at_eof() and self._value[self._index] == ",":
+            self._try_csv_continuation()
+        return value
+
+    def _try_csv_continuation(self) -> None:
+        """aws's ``_csv_value`` second-value probe, scoped to the flat map.
+
+        aws never returns a scalar without probing a following ',' for a csv
+        list: the ',' is consumed and a second value attempted. The probe is
+        observable even though we accept no lists - on failure aws backtracks
+        only to the nearest ',', which absorbs an empty segment between pairs
+        (``a=b,,c=d`` parses to two pairs; measured rc 0 on the pinned aws
+        where the plain pair loop errored 252), and an at-EOF failure
+        propagates (``a=b,`` is aws's parse error, '<second>' wording). A
+        second value that *does* parse would build a csv list, schema-invalid
+        for a flat string map: rewind to the original comma and let the pair
+        loop re-read from there (the rc-252 shapes of the class docstring's
+        scope note).
+        """
+        start = self._index  # at the ',' after the scalar
+        self._expect(",", consume_whitespace=True)
+        try:
+            self._second_value()
+        except _ShorthandParseError:
+            if self._at_eof():
+                raise
+            self._backtrack_to(",")
+            return
+        # Second value parsed. aws now expects ',' to extend the csv list:
+        # - next non-ws char is NOT ',': aws's _expect failure backtracks from
+        #   *here* to the nearest ',' and keeps the scalar - landing inside an
+        #   escaped comma when that is what the probe consumed (the
+        #   ``k=,\\,a=b`` quirk, differentially verified against aws's parser);
+        # - otherwise a csv list forms, schema-invalid for the flat string
+        #   map: rewind to the original comma and let the pair loop report it
+        #   (rc 252 like aws's schema rejection, wording per the scope note).
+        self._consume_whitespace()
+        if not self._at_eof() and self._value[self._index] != ",":
+            self._backtrack_to(",")
+            return
+        self._index = start
+
+    def _second_value(self) -> None:
+        """Probe one csv second value (aws's ``_second_value``); result unused."""
+        if not self._at_eof():
+            first = self._value[self._index]
+            if first == "'":
+                self._consume_quoted(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
+                return
+            if first == '"':
+                self._consume_quoted(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
+                return
+        match = _SECOND_VALUE_RE.match(self._value[self._index :])
+        if match is None:
+            # aws's _must_consume_regex wording for the 'second' fragment.
+            raise _ShorthandParseError(
+                f"Expected: '<second>', received: '<none>' for input:\n "
+                f"{self._error_marker(self._index)}"
+            )
+        self._index += len(match.group(0))
+
+    def _backtrack_to(self, char: str) -> None:
+        while self._index >= 0 and self._value[self._index] != char:
+            self._index -= 1
 
     def _first_value_unquoted(self) -> str:
         match = _FIRST_VALUE_RE.match(self._value[self._index :])

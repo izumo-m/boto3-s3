@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Keep the module-level imports limited to the names used while configuring the
-# command; execution-only storage types are imported in `run()`.
+# Module-level imports are fine here: rm is loaded at dispatch (stage 2 of
+# the lazy dispatch), after the command is determined.
 from boto3_s3 import (
     BatchError,
     Boto3S3Error,
     OpOutcome,
     OpResult,
+    S3Storage,
     ValidationError,
 )
 from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
@@ -49,14 +50,24 @@ class _DeletePrinter:
     def __call__(self, result: OpResult) -> None:
         if self._quiet:
             return
+        # The printed line needs the full object key; a delete record's
+        # compare_key is the operation-relative form (docs/opresult.md), and
+        # the listed entry always rides on src_info.
+        info = result.src_info
+        key = info.key if info is not None else result.compare_key
         if result.outcome is OpOutcome.FAILED:
-            sys.stderr.write(
-                output.format_delete_failed(self._bucket, result.key, result.error) + "\n"
-            )
+            sys.stderr.write(output.format_delete_failed(self._bucket, key, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
-            sys.stdout.write(output.format_delete(self._bucket, result.key, dryrun=True) + "\n")
+            # uni_write (aws's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not raise out of the deleter worker
+            # and kill the run - aws prints it with replacements and finishes.
+            output.uni_write(
+                sys.stdout, output.format_delete(self._bucket, key, dryrun=True) + "\n"
+            )
         elif not self._only_show_errors:
-            sys.stdout.write(output.format_delete(self._bucket, result.key, dryrun=False) + "\n")
+            output.uni_write(
+                sys.stdout, output.format_delete(self._bucket, key, dryrun=False) + "\n"
+            )
 
 
 class RmCommand(Command):
@@ -81,10 +92,15 @@ class RmCommand(Command):
 
         Exit-code shape (differs from ``ls``): usage errors - a
         non-``s3://`` path, a rejected ARN form - exit 252 via ``main``, but
-        every error after the operation starts is rc 1: per-key failures
-        print ``delete failed:`` lines, anything that kills the run (the
+        every classified (``Boto3S3Error``) failure after the operation
+        starts is rc 1 (an unclassified exception falls to the dispatcher's
+        handler chain instead - the taxonomy promises classification for the
+        known failures, docs/exceptions.md): per-key failures
+        print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
+        ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
-        prints one ``fatal error:`` line. Nothing maps to 254 here.
+        prints one ``fatal error:`` line - all suppressed by ``--quiet``
+        with the exit codes kept. Nothing maps to 254 here.
         """
         # The aws parse-to-validation order (measured, docs/cli.md section 6):
         # the --query compile (252) leads, then the --endpoint-url scheme check
@@ -94,19 +110,21 @@ class RmCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
+        expand_integer_paramfile(args, "page_size", operation="rm")
+        page_size = parse_integer_option(args.page_size, operation="rm")
+        s3 = ctx.s3(args)
         if isinstance(args.paths, bytes):
             # Intentional aws-cli bug parity: S3TransferCommand decodes a
             # positional fileb:// back through the filesystem encoding before
             # validating and executing it. This is why rm reaches its normal
             # rc-1 operation-error path while ls / website crash at rc 255.
+            # The decode sits at aws's slot - _convert_path_args runs after the
+            # whole option unpack loop and after the client build - so a bad
+            # --page-size paramfile (252) and a bad --profile (255) both beat
+            # an undecodable fileb positional (measured against the pinned aws:
+            # fileb bytes 0xff + missing page-size paramfile is aws 252, and
+            # the decode's UnicodeDecodeError 255 fires only after them).
             args.paths = args.paths.decode(sys.getfilesystemencoding())
-        expand_integer_paramfile(args, "page_size", operation="rm")
-        page_size = parse_integer_option(args.page_size, operation="rm")
-        s3 = ctx.s3(args)
-        # Deferred: dispatch is the first point that needs the library's S3
-        # entry (whose chain reaches botocore).
-        from boto3_s3 import S3Storage
-
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
@@ -131,14 +149,13 @@ class RmCommand(Command):
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
         # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
         # from the now non-raising construction) through main -> rc 252, matching aws.
-        # scan_wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so the
-        # recursive listing must not wait for an in-flight page pull on the way out.
-        storage = S3Storage(
-            target, client=s3.client(), page_size=page_size, scan_wait_on_interrupt=False
-        )
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
 
-        item_filter = filters.compile_filter(args.filters)
+        # The target is both filter sides (aws sets dest = src for rm).
+        item_filter = filters.compile_filter(
+            args.filters, src=storage, dest=storage, dir_op=args.recursive
+        )
         printer = _DeletePrinter(
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )
@@ -153,6 +170,15 @@ class RmCommand(Command):
             )
         except BatchError:
             # Per-key failure lines were already streamed by the printer.
+            return 1
+        except KeyboardInterrupt:
+            # Same conversion as the cp/mv/sync span (transferargs.
+            # finish_transfer): aws's shared result machinery makes a
+            # mid-run Ctrl-C a cancelled run - one `cancelled: ctrl-c
+            # received` line, rc 1 (measured mid-rm, 2.36.1) - never the
+            # dispatcher's 130.
+            if not args.quiet:
+                sys.stderr.write("cancelled: ctrl-c received\n")
             return 1
         except Boto3S3Error as exc:
             if not args.quiet:

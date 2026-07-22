@@ -15,7 +15,6 @@ import gzip
 import io
 import os
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,8 +49,9 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
+from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
 from tests.utils.host import is_case_insensitive, skip_if_chmod_is_inert
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC = TransferConfig(use_threads=False)
 # The case-conflict gate detects a "two S3 twins in one listing" conflict via its
@@ -61,27 +61,6 @@ _SYNC = TransferConfig(use_threads=False)
 # 1) here. A fully synchronous NonThreadedExecutor (_SYNC) completes each twin
 # before the next is judged, emptying the set, so the conflict is never seen.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
-_MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
-
-
-def _head_response(**extra: Any) -> dict[str, Any]:
-    return {"ContentLength": 7, "LastModified": _MTIME, "ETag": '"abc"', **extra}
-
-
-def _get_response(body: bytes = b"payload") -> dict[str, Any]:
-    return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
 
 
 class TestUploadRoute:
@@ -96,12 +75,32 @@ class TestUploadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Key"] == "up/a.txt"
         assert results[0].outcome is OpOutcome.SUCCEEDED
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
+
+    def test_relative_source_survives_a_chdir_after_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A relative LocalStorage binds its cwd at construction (`abspath`);
+        # the up-front existence check must test that same anchor - the one
+        # the plan and the walk use - not the raw relative path against
+        # whatever the process chdir'd to since.
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        (workdir / "a.txt").write_bytes(b"x" * 7)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(workdir)
+        src = LocalStorage("a.txt")
+        monkeypatch.chdir(elsewhere)
+        client, calls = make_recording_client([{}])
+        S3().cp(src, S3Storage("s3://bucket/up/", client=client), transfer_config=_SYNC)
+        assert ops(calls) == ["PutObject"]
+        assert calls[0].params["Key"] == "up/a.txt"
 
     def test_oversize_upload_warns_but_still_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -122,7 +121,7 @@ class TestUploadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["PutObject"]  # warned, never skipped
+        assert ops(calls) == ["PutObject"]  # warned, never skipped
         outcomes = [r.outcome for r in results]
         assert outcomes.count(OpOutcome.WARNED) == 1
         assert outcomes.count(OpOutcome.SUCCEEDED) == 1
@@ -154,7 +153,7 @@ class TestUploadRoute:
         # The single-object HEAD path (head_single) stamps FileInfo.storage like
         # every listing path, so src_info agrees with src_storage (opresult.md)
         # and a filter can reach the backend (info.storage) on this route too.
-        client, _ = make_recording_client([_head_response(), _get_response()])
+        client, _ = make_recording_client([head_response(), get_response()])
         src = S3Storage("s3://b/d/a.txt", client=client)
         results: list[OpResult] = []
         S3().cp(src, str(tmp_path / "a.txt"), transfer_config=_SYNC, on_result=results.append)
@@ -284,7 +283,7 @@ class TestUploadRoute:
     def test_item_failures_aggregate_into_batch_error(self, tmp_path: Path) -> None:
         for name in ("a.txt", "b.txt"):
             (tmp_path / name).write_bytes(b"x")
-        client, _ = make_recording_client([_client_error("NoSuchBucket", 404, "PutObject"), {}])
+        client, _ = make_recording_client([client_error("NoSuchBucket", 404, "PutObject"), {}])
         with pytest.raises(BatchError) as excinfo:
             S3().cp(
                 str(tmp_path),
@@ -306,6 +305,24 @@ class TestUploadRoute:
         with pytest.raises(CancelledError):
             S3().cp(str(src), S3Storage("s3://b/k", client=client), cancel_token=token)
         assert calls == []
+
+    def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:
+        # The pre-cancel check acts before any side effect - here the
+        # recursive local-destination pre-create: a cancelled download run
+        # must not leave a fresh empty directory behind.
+        dest = tmp_path / "fresh" / "nested"
+        token = CancelToken()
+        token.cancel()
+        client, calls = make_recording_client([])
+        with pytest.raises(CancelledError):
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                str(dest),
+                recursive=True,
+                cancel_token=token,
+            )
+        assert calls == []
+        assert not dest.exists()
 
     def test_graceful_cancel_from_result_drains_submitted_transfers(self, tmp_path: Path) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
@@ -354,7 +371,9 @@ class TestUploadRoute:
             OpOutcome.SUCCEEDED,
         ]
 
-    def test_immediate_escalation_cancels_queued_transfers(self, tmp_path: Path) -> None:
+    def test_immediate_escalation_cancels_queued_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
             (tmp_path / name).write_bytes(name.encode())
         client, _ = make_recording_client([])
@@ -373,10 +392,41 @@ class TestUploadRoute:
         client._make_api_call = api_call  # type: ignore[method-assign]
         token = CancelToken()
 
-        def cancel_after_first(_result: OpResult) -> None:
-            token.cancel()
-            threading.Timer(0.05, lambda: token.cancel(mode=CancelMode.IMMEDIATE)).start()
-            threading.Timer(0.2, release_running.set).start()
+        # The escalation path under test is: a graceful cancel starts the drain
+        # (which spawns the immediate-cancel watcher), then the token upgrades to
+        # IMMEDIATE while that drain waits. Synchronize on the watcher and on the
+        # future-cancel it performs instead of sleeping, so the assertion never
+        # races the watcher's 0.1s poll - fixed sleeps flake on a busy CI runner.
+        watcher_running = threading.Event()
+        original_watch = Transferrer._watch_for_immediate_cancel
+
+        def watch(self: Transferrer) -> None:
+            watcher_running.set()
+            original_watch(self)
+
+        monkeypatch.setattr(Transferrer, "_watch_for_immediate_cancel", watch)
+
+        original_cancel_futures = Transferrer._cancel_futures
+
+        def cancel_futures(self: Transferrer) -> None:
+            original_cancel_futures(self)
+            # Queued transfers are now cancelled; let the accepted in-flight
+            # transfer finish so the drain (and cp) can complete.
+            release_running.set()
+
+        monkeypatch.setattr(Transferrer, "_cancel_futures", cancel_futures)
+
+        def escalate() -> None:
+            assert watcher_running.wait(5.0)
+            token.cancel(mode=CancelMode.IMMEDIATE)
+
+        results: list[OpResult] = []
+
+        def cancel_after_first(result: OpResult) -> None:
+            results.append(result)
+            if len(results) == 1:
+                token.cancel()
+                threading.Thread(target=escalate, daemon=True).start()
 
         threading.Timer(0.2, release_first.set).start()
         with pytest.raises(CancelledError):
@@ -389,13 +439,24 @@ class TestUploadRoute:
                 on_result=cancel_after_first,
             )
 
-        # The request executor may start b before a's completion callback runs;
-        # that request is accepted work and cannot be interrupted safely. c is
-        # still queued and is cancelled before it becomes an S3 request.
-        assert calls in (
-            ["PutObject:p/a.txt"],
-            ["PutObject:p/a.txt", "PutObject:p/b.txt"],
-        )
+        # The first accepted transfer runs; the submission pool may already have
+        # accepted a second before the drain began, and that request cannot be
+        # interrupted safely. The escalation cancels every transfer still queued,
+        # so the last file never becomes an S3 request: at most two of the three
+        # run, in no guaranteed order (the pool races per-file prep).
+        assert 1 <= len(calls) <= 2
+        assert set(calls) <= {"PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"}
+        # Every accepted item keeps its one record: a transfer whose request
+        # ran to completion reports SUCCEEDED (a running request cannot be
+        # interrupted, and s3transfer lets the completion win over the cancel
+        # mark), while a revoked queued one reports CANCELLED - never FAILED.
+        assert len(results) == 3
+        outcomes = [result.outcome for result in results]
+        assert outcomes.count(OpOutcome.SUCCEEDED) == len(calls)
+        assert outcomes.count(OpOutcome.CANCELLED) == 3 - len(calls)
+        for result in results:
+            if result.outcome is OpOutcome.CANCELLED:
+                assert isinstance(result.error, CancelledError)
 
 
 class TestFilters:
@@ -436,7 +497,7 @@ class TestFilters:
         # resolved (HeadObject, like aws's file generator) but an excluded
         # object transfers nothing - no GetObject, no local file, rc 0.
         drop = GlobFilter().exclude("*").compile()
-        client, calls = make_recording_client([_head_response()])
+        client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/pre/k.txt", client=client),
@@ -445,7 +506,7 @@ class TestFilters:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert results == []
         assert not (tmp_path / "k.txt").exists()
 
@@ -460,13 +521,13 @@ class TestFilters:
 
 class TestDownloadRoute:
     def test_single_download_heads_then_gets(self, tmp_path: Path) -> None:
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         dest = tmp_path / "out.bin"
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt", "ChecksumMode": "ENABLED"}
         assert dest.read_bytes() == b"payload"
-        assert os.stat(dest).st_mtime == _MTIME.timestamp()
+        assert os.stat(dest).st_mtime == MTIME.timestamp()
 
     def test_head_omits_checksum_mode_below_the_knob_floor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -477,41 +538,47 @@ class TestDownloadRoute:
         # - patched here, since the current botocore always carries the
         # attribute. The HEAD must go out without ChecksumMode (the
         # era-appropriate wire shape, docs/overview.md section 2), not raise.
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         monkeypatch.setattr(client.meta.config, "response_checksum_validation", None, raising=False)
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
             str(tmp_path / "out.bin"),
             transfer_config=_SYNC,
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt"}
 
     def test_missing_single_source_uses_the_rewritten_404_message(self, tmp_path: Path) -> None:
-        client, _ = make_recording_client([_client_error("404", 404, "HeadObject")])
+        client, _ = make_recording_client([client_error("404", 404, "HeadObject")])
         with pytest.raises(NotFoundError) as excinfo:
             S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
         assert str(excinfo.value) == (
             "An error occurred (404) when calling the HeadObject operation: "
             'Key "no-such" does not exist'
         )
+        # The rewrite replaces the s3_errors translation wholesale, so the
+        # originating ClientError stays on the DIRECT __cause__ - the
+        # exceptions.md section 2.1 reachability guarantee.
+        assert isinstance(excinfo.value.__cause__, ClientError)
 
-    def test_bucketless_service_root_source_reaches_head_not_silent_zero(
+    def test_bucketless_service_root_source_reaches_the_listing_not_silent_zero(
         self, tmp_path: Path
     ) -> None:
-        # A bare `s3://` (service root) as a non-recursive source must NOT take the
-        # keyless-bucket `cp s3://bucket .` zero-item short-circuit: it reaches
-        # HeadObject with Bucket="", which botocore rejects (Invalid bucket name)
-        # like `aws s3 cp s3://` (rc 1), not a silent rc-0 no-op.
+        # A bare `s3://` (service root) as a non-recursive source rides the
+        # keyless listing branch like any keyless source: aws reaches
+        # ListObjectsV2, whose Bucket="" dies at botocore's client-side
+        # Invalid-bucket validation (measured with --debug on the pinned aws:
+        # the failure fires at before-parameter-build.s3.ListObjectsV2) - the
+        # same fatal rc 1, never a silent rc-0 no-op.
         err = ParamValidationError(report='Invalid bucket name ""')
         client, calls = make_recording_client([err])
         with pytest.raises(ValidationError, match="Invalid bucket name"):
             S3().cp(S3Storage("s3://", client=client), str(tmp_path / "x"), transfer_config=_SYNC)
-        assert _ops(calls) == ["HeadObject"]  # attempted, not short-circuited to zero
+        assert ops(calls) == ["ListObjectsV2"]  # attempted, not short-circuited to zero
         assert calls[0].params["Bucket"] == ""
 
     def test_dryrun_heads_but_never_gets(self, tmp_path: Path) -> None:
-        client, calls = make_recording_client([_head_response()])
+        client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
@@ -519,7 +586,7 @@ class TestDownloadRoute:
             dryrun=True,
             on_result=results.append,
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
@@ -529,23 +596,23 @@ class TestDownloadRoute:
         client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(S3Storage("s3://bucket", client=client), str(tmp_path), on_result=results.append)
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
+        # No MaxKeys: the unset page size sends nothing, like aws-cli.
         assert calls[0].params == {
             "Bucket": "bucket",
             "Prefix": "",
-            "MaxKeys": 1000,
         }
         assert results == []
 
     def test_recursive_download_drops_markers_and_parent_escapes(self, tmp_path: Path) -> None:
         listing = {
             "Contents": [
-                {"Key": "pre/../evil", "Size": 1, "LastModified": _MTIME, "ETag": '"e"'},
-                {"Key": "pre/a.txt", "Size": 7, "LastModified": _MTIME, "ETag": '"abc"'},
-                {"Key": "pre/marker/", "Size": 0, "LastModified": _MTIME, "ETag": '"m"'},
+                {"Key": "pre/../evil", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
+                {"Key": "pre/a.txt", "Size": 7, "LastModified": MTIME, "ETag": '"abc"'},
+                {"Key": "pre/marker/", "Size": 0, "LastModified": MTIME, "ETag": '"m"'},
             ]
         }
-        client, calls = make_recording_client([listing, _get_response()])
+        client, calls = make_recording_client([listing, get_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/pre", client=client),
@@ -554,10 +621,10 @@ class TestDownloadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
         assert calls[0].params["Prefix"] == "pre/"
         assert (tmp_path / "out" / "a.txt").read_bytes() == b"payload"
-        outcomes = {result.key: result.outcome for result in results}
+        outcomes = {result.compare_key: result.outcome for result in results}
         assert outcomes["../evil"] is OpOutcome.WARNED
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
         assert str(warned.error) == ("Skipping file ../evil. File references a parent directory.")
@@ -570,7 +637,7 @@ class TestDownloadRoute:
         # outside the target directory).
         listing = {
             "Contents": [
-                {"Key": "pre//../secret", "Size": 1, "LastModified": _MTIME, "ETag": '"e"'},
+                {"Key": "pre//../secret", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
             ]
         }
         client, calls = make_recording_client([listing])
@@ -582,7 +649,7 @@ class TestDownloadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]  # skipped, never fetched
+        assert ops(calls) == ["ListObjectsV2"]  # skipped, never fetched
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert "references a parent directory" in str(results[0].error)
         assert not (tmp_path / "secret").exists()
@@ -603,7 +670,7 @@ class TestDownloadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert dest.read_bytes() == b"keep"
         assert results == []
 
@@ -627,61 +694,65 @@ class TestGlacierGate:
         return calls, results
 
     def test_glacier_object_warns_and_skips(self, tmp_path: Path) -> None:
-        calls, results = self._download(tmp_path, [_head_response(StorageClass="GLACIER")])
-        assert _ops(calls) == ["HeadObject"]
+        calls, results = self._download(tmp_path, [head_response(StorageClass="GLACIER")])
+        assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         message = str(results[0].error)
         assert message.startswith("Skipping file s3://b/cold. Object is of storage class GLACIER.")
         assert "Unable to perform download operations on GLACIER objects." in message
 
     def test_deep_archive_blocks_too(self, tmp_path: Path) -> None:
-        _, results = self._download(tmp_path, [_head_response(StorageClass="DEEP_ARCHIVE")])
+        _, results = self._download(tmp_path, [head_response(StorageClass="DEEP_ARCHIVE")])
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
 
     def test_restored_object_transfers(self, tmp_path: Path) -> None:
-        head = _head_response(
+        head = head_response(
             StorageClass="GLACIER", Restore='ongoing-request="false", expiry-date="..."'
         )
-        calls, results = self._download(tmp_path, [head, _get_response()])
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        calls, results = self._download(tmp_path, [head, get_response()])
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
     def test_force_glacier_transfer(self, tmp_path: Path) -> None:
         calls, _ = self._download(
             tmp_path,
-            [_head_response(StorageClass="GLACIER"), _get_response()],
+            [head_response(StorageClass="GLACIER"), get_response()],
             force_glacier_transfer=True,
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
 
     def test_ignore_glacier_warnings_skips_silently(self, tmp_path: Path) -> None:
         calls, results = self._download(
             tmp_path,
-            [_head_response(StorageClass="GLACIER")],
+            [head_response(StorageClass="GLACIER")],
             ignore_glacier_warnings=True,
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+        # The silent skip carries the listing entry like the no_overwrite
+        # skip does, so both silent-skip records read the same shape.
+        assert results[0].src_info is not None
+        assert results[0].src_info.size == 7
 
 
 class TestCopyRoute:
     def test_single_copy_heads_the_source_client(self, tmp_path: Path) -> None:
-        src_client, src_calls = make_recording_client([_head_response()])
+        src_client, src_calls = make_recording_client([head_response()])
         dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
             S3Storage("s3://dest-b/cp/", client=dest_client),
             transfer_config=_SYNC,
         )
-        assert _ops(src_calls) == ["HeadObject"]
-        assert _ops(dest_calls) == ["CopyObject"]
+        assert ops(src_calls) == ["HeadObject"]
+        assert ops(dest_calls) == ["CopyObject"]
         params = dest_calls[0].params
         assert params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.txt"}
         assert params["Bucket"] == "dest-b"
         assert params["Key"] == "cp/a.txt"
 
     def test_copy_options_flow_through(self, tmp_path: Path) -> None:
-        src_client, _ = make_recording_client([_head_response()])
+        src_client, _ = make_recording_client([head_response()])
         dest_client, dest_calls = make_recording_client([{}])
         S3().cp(
             S3Storage("s3://src-b/d/a.txt", client=src_client),
@@ -696,9 +767,9 @@ class TestCopyRoute:
     def test_annotation_read_failure_precedes_destination_creation(self) -> None:
         src_client, src_calls = make_recording_client(
             [
-                _head_response(ContentLength=9 * 1024 * 1024),
+                head_response(ContentLength=9 * 1024 * 1024),
                 {"TagSet": []},
-                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+                client_error("AccessDenied", 403, "ListObjectAnnotations"),
             ]
         )
         dest_client, dest_calls = make_recording_client([])
@@ -714,7 +785,7 @@ class TestCopyRoute:
                 ),
             )
 
-        assert _ops(src_calls) == [
+        assert ops(src_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
@@ -889,7 +960,7 @@ class TestNoOverwriteDownload:
     def test_existing_destination_is_a_silent_skip(self, tmp_path: Path) -> None:
         dest = tmp_path / "out.bin"
         dest.write_bytes(b"already here")
-        client, calls = make_recording_client([_head_response()])
+        client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
@@ -905,7 +976,7 @@ class TestNoOverwriteDownload:
 
     def test_missing_destination_downloads(self, tmp_path: Path) -> None:
         dest = tmp_path / "out.bin"
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
             str(dest),
@@ -922,7 +993,7 @@ class TestSourceScanConfig:
     config and a custom ``S3Storage`` subclass survive through the engine."""
 
     def test_recursive_s3_source_lists_with_the_constructor_config(self, tmp_path: Path) -> None:
-        client, calls = make_recording_client([_cc_listing(), _get_response(), _get_response()])
+        client, calls = make_recording_client([_cc_listing(), get_response(), get_response()])
         S3().cp(
             S3Storage("s3://b/cc/", client=client, page_size=5, fetch_owner=True),
             str(tmp_path / "out"),
@@ -944,9 +1015,9 @@ class TestSourceScanConfig:
                     yield page
 
         listing = {
-            "Contents": [{"Key": "d/a.txt", "Size": 7, "LastModified": _MTIME, "ETag": '"x"'}]
+            "Contents": [{"Key": "d/a.txt", "Size": 7, "LastModified": MTIME, "ETag": '"x"'}]
         }
-        client, _ = make_recording_client([listing, _get_response()])
+        client, _ = make_recording_client([listing, get_response()])
         out = tmp_path / "out"
         S3().cp(Tagged("s3://b/d/", client=client), str(out), recursive=True, transfer_config=_SYNC)
         # The override's compare_key rewrite shaped the download target: the
@@ -957,8 +1028,8 @@ class TestSourceScanConfig:
 def _cc_listing() -> dict[str, Any]:
     return {
         "Contents": [
-            {"Key": "cc/A.txt", "Size": 5, "LastModified": _MTIME, "ETag": '"u"'},
-            {"Key": "cc/a.txt", "Size": 5, "LastModified": _MTIME, "ETag": '"l"'},
+            {"Key": "cc/A.txt", "Size": 5, "LastModified": MTIME, "ETag": '"u"'},
+            {"Key": "cc/a.txt", "Size": 5, "LastModified": MTIME, "ETag": '"l"'},
         ]
     }
 
@@ -985,7 +1056,7 @@ class TestCaseConflictGate:
 
     def test_skip_blocks_the_case_twin(self, tmp_path: Path) -> None:
         calls, results, out = self._run(
-            tmp_path, CaseConflictMode.SKIP, [_cc_listing(), _get_response()]
+            tmp_path, CaseConflictMode.SKIP, [_cc_listing(), get_response()]
         )
         assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject"]
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
@@ -998,7 +1069,7 @@ class TestCaseConflictGate:
 
     def test_warn_downloads_both_with_a_notice(self, tmp_path: Path) -> None:
         calls, results, out = self._run(
-            tmp_path, CaseConflictMode.WARN, [_cc_listing(), _get_response(), _get_response()]
+            tmp_path, CaseConflictMode.WARN, [_cc_listing(), get_response(), get_response()]
         )
         assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject", "GetObject"]
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
@@ -1008,7 +1079,7 @@ class TestCaseConflictGate:
 
     def test_error_raises_the_awscli_failure(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
-        client, _ = make_recording_client([_cc_listing(), _get_response()])
+        client, _ = make_recording_client([_cc_listing(), get_response()])
         with pytest.raises(ValidationError) as excinfo:
             S3().cp(
                 S3Storage("s3://b/cc/", client=client),
@@ -1038,6 +1109,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=None,
             operation="mv",
+            wait_on_interrupt=True,
         )
         assert gate is not None
         first = TransferItem(
@@ -1067,6 +1139,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=item_filter,
             operation="cp",
+            wait_on_interrupt=True,
         )
         return gate, transferrer
 
@@ -1115,7 +1188,7 @@ class TestCaseConflictGate:
         out.mkdir()
         (out / "A.txt").write_bytes(b"old")
         calls, results, _ = self._run(
-            tmp_path, CaseConflictMode.SKIP, [_cc_listing(), _get_response(), _get_response()]
+            tmp_path, CaseConflictMode.SKIP, [_cc_listing(), get_response(), get_response()]
         )
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
         if is_case_insensitive(tmp_path):
@@ -1130,7 +1203,7 @@ class TestCaseConflictGate:
 
     def test_ignore_mode_builds_no_gate(self, tmp_path: Path) -> None:
         calls, results, _out = self._run(
-            tmp_path, CaseConflictMode.IGNORE, [_cc_listing(), _get_response(), _get_response()]
+            tmp_path, CaseConflictMode.IGNORE, [_cc_listing(), get_response(), get_response()]
         )
         assert [call.operation for call in calls] == ["ListObjectsV2", "GetObject", "GetObject"]
         assert [r for r in results if r.outcome is OpOutcome.NOTICE] == []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from boto3_s3 import FileInfo, FileKind, S3Storage
 from boto3_s3_cli import clientfactory, globalargs, output
 from boto3_s3_cli.commands.base import (
     Command,
@@ -45,7 +46,7 @@ class LsCommand(Command):
         # the positional, then --page-size (paramfile load 252, then the bare
         # int() coercion 255), then the bucket-listing filters. So a bad
         # --page-size value fires ahead of a bad --bucket-name-prefix /
-        # --bucket-region paramfile (measured on aws 2.35.18).
+        # --bucket-region paramfile (measured on the pinned aws-cli).
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")
@@ -53,9 +54,6 @@ class LsCommand(Command):
         page_size = parse_integer_option(args.page_size, operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import FileInfo, FileKind, S3Storage
-
         # Intentional aws-cli bug parity: a readable positional fileb:// is
         # still bytes here. Calling bytes.startswith(str) raises TypeError,
         # which the general handler maps to 255.
@@ -70,11 +68,7 @@ class LsCommand(Command):
             target = "s3://"
 
         s3 = ctx.s3(args)
-        # scan_wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so
-        # the listing must not wait for an in-flight page pull on the way out.
-        storage = S3Storage(
-            target, client=s3.client(), page_size=page_size, scan_wait_on_interrupt=False
-        )
+        storage = S3Storage(target, client=s3.client(), page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 
@@ -89,14 +83,17 @@ class LsCommand(Command):
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
             )
-            sys.stdout.write(line + "\n")
+            # uni_write (aws's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not abort the listing mid-way - aws
+            # prints it with replacements and finishes rc 0.
+            output.uni_write(sys.stdout, line + "\n")
             if info.kind is FileKind.FILE:
                 total_objects += 1
                 total_size += info.size or 0
 
         s3.ls(
             storage,
-            on_result=print_result,
+            on_entry=print_result,
             recursive=args.recursive,
             request_payer=args.request_payer,
             bucket_name_prefix=args.bucket_name_prefix,
@@ -104,8 +101,11 @@ class LsCommand(Command):
         )
 
         if args.summarize:
-            sys.stdout.write(
-                output.format_summary(total_objects, total_size, human_readable=args.human_readable)
+            output.uni_write(
+                sys.stdout,
+                output.format_summary(
+                    total_objects, total_size, human_readable=args.human_readable
+                ),
             )
 
         # aws-cli parity: exit 1 when a key/prefix was given but nothing matched.

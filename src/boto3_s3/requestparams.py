@@ -4,10 +4,14 @@ A pure-function port of aws-cli's ``RequestParamsMapper``
 (aws-cli's awscli/customizations/s3/utils.py): one ``map_*`` function per
 S3 operation the transfer path performs, each returning a fresh dict of
 PascalCase API parameters built from the snake_case ``TransferOptions``.
-Falsy values are omitted exactly like aws-cli's truthiness gates.
+Falsy values are omitted exactly like aws-cli's truthiness gates - including
+their quirks: a truthy SSE-C algorithm carries its dependent key value
+verbatim even when falsy, as aws does.
 
-Only the operations the ``s3transfer``-driven path actually calls are ported
-(put/get/copy/head/tagging/delete); aws-cli's CreateMultipartUpload /
+Only the operations the transfer path actually calls are ported
+(put/get/copy/head/tagging/delete, plus the annotation pair -
+list/get object annotations - that ``copy_props=ALL`` staging reads);
+aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
@@ -247,15 +251,6 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
         params["IfNoneMatch"] = "*"
 
 
-__all__ = [
-    "map_copy_object_params",
-    "map_delete_object_params",
-    "map_get_object_annotation_params",
-    "map_get_object_params",
-    "map_get_object_tagging_params",
-    "map_head_object_params",
-    "map_head_object_params_with_copy_source_sse",
-    "map_list_object_annotations_params",
-    "map_put_object_params",
-    "map_put_object_tagging_params",
-]
+# Package-internal: the mappers are consumed by producers/transfer only and
+# carry no documented surface (docs/imports.md).
+__all__: list[str] = []

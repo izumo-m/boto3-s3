@@ -11,6 +11,7 @@ covered end-to-end through `main` too.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,14 +35,7 @@ from boto3_s3 import (
 )
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-
-
-def _client_error(code: str, status: int) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, "ListObjectsV2")
+from tests.utils.fakes3 import MTIME, client_error
 
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
@@ -51,14 +45,18 @@ def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
 
 class TestExitCodeFor:
     def test_server_side_error_maps_to_254(self) -> None:
-        exc = _with_cause(NotFoundError("no such bucket"), _client_error("NoSuchBucket", 404))
+        exc = _with_cause(
+            NotFoundError("no such bucket"), client_error("NoSuchBucket", 404, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
     def test_client_error_cause_wins_over_validation_category(self) -> None:
         # A server-rejected call (HTTP 400) that the library files under
         # ValidationError still exits 254: aws-cli maps every error that
         # reached the server to CLIENT_ERROR_RC.
-        exc = _with_cause(ValidationError("bad request"), _client_error("InvalidRequest", 400))
+        exc = _with_cause(
+            ValidationError("bad request"), client_error("InvalidRequest", 400, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
     def test_client_side_validation_maps_to_252(self) -> None:
@@ -82,12 +80,19 @@ class TestExitCodeFor:
     def test_client_error_cause_wins_over_refining_subclass(self) -> None:
         # The ClientError-cause branch stays first: an error that reached the
         # server exits 254 regardless of the taxonomy class.
-        exc = _with_cause(InvalidConfigError("rejected"), _client_error("InvalidRequest", 400))
+        exc = _with_cause(
+            InvalidConfigError("rejected"), client_error("InvalidRequest", 400, "ListObjectsV2")
+        )
         assert cli.exit_code_for(exc) == 254
 
 
 class _RaisingClient:
-    """Fake S3 client whose paginator raises a ClientError on iteration."""
+    """Fake S3 client whose page iterator raises a ClientError on iteration.
+
+    The real paginator's ``paginate()`` only builds the iterator; the server
+    error surfaces on the first page fetch, so the fake raises from ``next()``,
+    not from ``paginate()`` itself.
+    """
 
     def __init__(self, error: ClientError) -> None:
         self._error = error
@@ -97,24 +102,22 @@ class _RaisingClient:
 
         class _Paginator:
             def paginate(self, **kwargs: Any) -> Any:
-                raise error
+                def pages() -> Any:
+                    raise error
+                    yield  # pragma: no cover - marks this function as a generator
+
+                return pages()
 
         return _Paginator()
 
 
-class _BrokenPipeClient:
-    """Fake whose ListObjectsV2 paginator raises BrokenPipeError on iteration.
-
-    Models a downstream reader closing the pipe (``... | head``): the library
-    does not translate a BrokenPipeError (``s3_errors`` catches only
-    ClientError / BotoCoreError), so it escapes the command and reaches
-    ``_dispatch``'s dedicated ``except BrokenPipeError`` handler.
-    """
+class _OnePageClient:
+    """Fake whose ListObjectsV2 paginator yields a single canned page."""
 
     def get_paginator(self, name: str) -> Any:
         class _Paginator:
             def paginate(self, **kwargs: Any) -> Any:
-                raise BrokenPipeError
+                yield {"Contents": [{"Key": "p/x", "Size": 1, "LastModified": MTIME}]}
 
         return _Paginator()
 
@@ -156,7 +159,7 @@ class TestMainExitCodes:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws s3 joins multiple unknown options with "," and NO space (the
-        # customizations command layer; verified against real aws 2.35.18), not
+        # customizations command layer; verified against the pinned aws-cli), not
         # ", ". Both option positions share this wording.
         assert cli.main(["cp", "a.txt", "s3://b/", "--foo", "--bar"]) == 252
         assert "Unknown options: --foo,--bar" in capsys.readouterr().err
@@ -184,7 +187,7 @@ class TestMainExitCodes:
         assert "command" in capsys.readouterr().err
 
     def test_server_error_surfaces_as_254(self, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _RaisingClient(_client_error("NoSuchBucket", 404))
+        client = _RaisingClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         ctx = Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
         err = capsys.readouterr().err
@@ -211,7 +214,7 @@ class TestMainExitCodes:
             # PartialCredentialsError has no dedicated aws handler -> the general
             # 255, NOT 253 (only NoCredentials / NoRegion are 253).
             (PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"), 255),
-            (_client_error("AccessDenied", 403), 254),
+            (client_error("AccessDenied", 403, "ListObjectsV2"), 254),
             (ParamValidationError(report="Invalid bucket name"), 252),
             (RuntimeError("boom"), 255),
         ],
@@ -237,19 +240,31 @@ class TestMainExitCodes:
             assert "An error occurred (ParamValidation):" in err
         assert "Traceback" not in err
 
-    def test_broken_pipe_from_a_command_exits_0(self) -> None:
+    def test_broken_pipe_from_a_command_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws-cli exits 0 when a downstream reader closes the pipe
-        # (docs/cli.md section 6): a BrokenPipeError escaping the command maps to
-        # 0, not a fatal rc. The library does not translate it, so it reaches
-        # _dispatch's dedicated handler.
-        ctx = Context(client_factory=lambda _args: _BrokenPipeClient())  # pyright: ignore[reportArgumentType]
+        # (docs/cli.md section 6). The real seam is the stdout write: ls has a
+        # line to print and the pipe is gone, so ``uni_write(sys.stdout, ...)``
+        # raises BrokenPipeError. The library does not translate it
+        # (``s3_errors`` catches only ClientError / BotoCoreError), so it
+        # escapes the command and reaches _dispatch's dedicated handler.
+        class _DeadPipe:
+            encoding = "utf-8"
+
+            def write(self, _text: str) -> int:
+                raise BrokenPipeError
+
+            def flush(self) -> None:
+                raise BrokenPipeError
+
+        ctx = Context(client_factory=lambda _args: _OnePageClient())  # pyright: ignore[reportArgumentType]
+        monkeypatch.setattr(sys, "stdout", _DeadPipe())
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
 
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
-        # and rc 130 (128+SIGINT), never a traceback (measured on aws 2.35.18).
+        # and rc 130 (128+SIGINT), never a traceback (measured on the pinned aws-cli).
         # KeyboardInterrupt is a BaseException, so it passes _dispatch's
         # handlers and reaches main's backstop.
         class _InterruptClient:
@@ -262,6 +277,25 @@ class TestMainExitCodes:
 
         ctx = Context(client_factory=lambda _args: _InterruptClient())  # pyright: ignore[reportArgumentType]
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
+        out, err = capsys.readouterr()
+        assert rc == 130
+        assert out == "\n"
+        assert err == ""
+
+    def test_keyboard_interrupt_before_the_pipeline_stays_130(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        # The cancelled-run conversion (transferargs.finish_transfer, rc 1)
+        # covers only the pipeline span of the transfer family; a Ctrl-C in
+        # client construction is still the dispatcher backstop's 130 with the
+        # bare newline, like aws's InterruptExceptionHandler.
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def factory(_args: Any) -> Any:
+            raise KeyboardInterrupt
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        rc = cli.main(["cp", str(tmp_path / "a.txt"), "s3://bucket/k"], ctx=ctx)
         out, err = capsys.readouterr()
         assert rc == 130
         assert out == "\n"
@@ -347,9 +381,91 @@ class TestValidationOrder:
         assert rc == 252
 
 
+class TestPreParseErrorAttribution:
+    """A global that fails to parse - or a parse-time ``--version`` - settles
+    the run in the pre-pass, like aws's ``MainArgParser``: it beats the
+    invalid-subcommand error and a ``-h`` anywhere in argv (measured against
+    the pinned aws-cli: ``s3 bogus --output bad`` blames ``--output``,
+    ``s3 ls -h --output bad`` errors instead of helping, ``s3 bogus
+    --version`` prints the version at rc 0)."""
+
+    # Every choices-validated global; aws rejects each the same way (measured
+    # per option against the pinned aws-cli, same [ERROR] line and rc).
+    @pytest.mark.parametrize(
+        "option", ["--output", "--color", "--cli-error-format", "--cli-binary-format"]
+    )
+    def test_bad_global_choice_beats_the_invalid_subcommand(
+        self, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["nosuchcmd", option, "bad"]) == 252
+        err = capsys.readouterr().err
+        assert f"argument {option}: Found invalid choice 'bad'" in err
+        assert "nosuchcmd" not in err
+
+    # Every value-taking global left without its value; aws rejects each the
+    # same way (measured per option against the pinned aws-cli).
+    @pytest.mark.parametrize(
+        "option",
+        [
+            "--profile",
+            "--region",
+            "--endpoint-url",
+            "--ca-bundle",
+            "--query",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+        ],
+    )
+    def test_missing_global_value_beats_the_invalid_subcommand(
+        self, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["nosuchcmd", option]) == 252
+        err = capsys.readouterr().err
+        assert f"argument {option}: expected one argument" in err
+        assert "nosuchcmd" not in err
+
+    def test_version_beats_the_invalid_subcommand(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["nosuchcmd", "--version"]) == 0
+        assert capsys.readouterr().out.startswith("boto3-s3-cli/")
+
+    def test_parse_error_beats_help_in_either_position(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's main parse precedes its help handling entirely, so -h cannot
+        # rescue a bad global even when it comes first.
+        assert cli.main(["ls", "-h", "--output", "bad"]) == 252
+        assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
+        assert cli.main(["--help", "--output", "bad"]) == 252
+        assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
+
+    def test_replayed_error_renders_the_stage1_usage(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The pre-pass replay must be byte-identical to the stage-1 report it
+        # supersedes: same [ERROR] line, same usage block (the globals parser
+        # borrows stage 1's usage, <command> token and all).
+        assert cli.main(["ls", "--output", "bad"]) == 252
+        err = capsys.readouterr().err
+        assert "argument --output: Found invalid choice 'bad'" in err
+        assert "usage: boto3-s3 " in err
+        assert "<command>" in err
+
+    def test_bare_invalid_subcommand_is_still_blamed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # With no global parse error the attribution stays on the subcommand -
+        # including beside unknown options and a trailing -h (all measured).
+        assert cli.main(["nosuchcmd"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+        assert cli.main(["nosuchcmd", "--unknown-opt"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+        assert cli.main(["nosuchcmd", "-h"]) == 252
+        assert "Found invalid choice 'nosuchcmd'" in capsys.readouterr().err
+
+
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
-    against the pinned aws 2.35.18; docs/cli.md section 5.7, table in
+    against the pinned aws-cli; docs/cli.md section 5.7, table in
     section 6): the ``--query`` compile (252) -> the ``--endpoint-url`` scheme
     check (252) -> the ``--cli-read-timeout`` / ``--cli-connect-timeout``
     coercions (255, read first; resolved in the dispatch pre-pass, so they
@@ -526,6 +642,38 @@ class TestParseToValidationOrder:
         )
         assert rc == 255
 
+    def test_expected_size_readable_fileb_is_a_param_validation_252(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --expected-size is a string-model option in aws (no cli_type_name),
+        # NOT part of the integer-family expansion: a readable fileb:// is
+        # botocore's bytes rejection at parse time (252), where the integer
+        # helper would run int(b'5') and proceed. Measured.
+        blob = tmp_path / "size.bin"
+        blob.write_bytes(b"5")
+        rc = cli.main(["cp", "-", "s3://b/k", "--expected-size", f"fileb://{blob}"])
+        assert rc == 252
+        assert (
+            "Invalid type for parameter input, value: b'5', "
+            "type: <class 'bytes'>, valid types: <class 'str'>"
+        ) in capsys.readouterr().err
+
+    def test_rm_page_size_paramfile_beats_the_positional_fileb_decode(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rm decodes a readable positional fileb:// back through the
+        # filesystem encoding at aws's slot - after the whole option unpack
+        # loop and the client build - so a bad --page-size paramfile (252)
+        # beats the decode's UnicodeDecodeError (255). Measured.
+        ref = tmp_path / "path.bin"
+        ref.write_bytes(b"\xff\xfe")
+        rc = cli.main(["rm", f"fileb://{ref}", "--page-size", "file:///nonexistent/pp.txt"])
+        assert rc == 252
+        assert (
+            "Error parsing parameter '--page-size': Unable to load paramfile"
+            in capsys.readouterr().err
+        )
+
     def test_ls_endpoint_beats_the_integer_coercion(self) -> None:
         rc = cli.main(["ls", "s3://b", "--page-size", "abc", "--endpoint-url", "badurl"])
         assert rc == 252
@@ -539,11 +687,14 @@ class TestParseToValidationOrder:
         # file:// reference on --page-size is its 252, not the int()'s 255.
         assert cli.main(["ls", "s3://b", "--page-size", "file:///no/x"]) == 252
 
-    def test_metadata_fileb_shorthand_value_is_a_usage_error(self) -> None:
-        # a@=fileb://... loads bytes; aws rejects the non-string map value at
-        # parse time (252) - it must not reach the transfer (rc 1).
-        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "a@=fileb:///no/x"])
-        assert rc == 252  # the missing paramfile itself is also a 252
+    def test_metadata_fileb_shorthand_value_is_a_usage_error(self, tmp_path: Path) -> None:
+        # a@=fileb://... loads real bytes; aws rejects the non-string map value
+        # at parse time (252) - it must not reach the transfer (rc 1). The file
+        # exists, so the 252 cannot be the missing-paramfile one.
+        blob = tmp_path / "v.bin"
+        blob.write_bytes(b"\x00\x01")
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@=fileb://{blob}"])
+        assert rc == 252
 
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
         # A whole-value --metadata fileb:// load failure is the paramfile 252.
@@ -568,23 +719,40 @@ class TestParseToValidationOrder:
         )
         assert rc == 252
 
-    def test_query_compile_beats_the_endpoint_and_paramfile(self) -> None:
+    def test_query_compile_beats_the_endpoint_and_paramfile(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # aws resolves --query at top-level-args-parsed, ahead of --endpoint-url
         # and every paramfile: a bad expression is its 252 first. Measured for
         # each transfer command (they share the classify_paths head).
         for command in ("cp", "mv", "sync"):
             rc = cli.main(
-                [command, self._MISSING, "s3://b/k", "--query", "][", "--endpoint-url", "badurl"]
+                [
+                    command,
+                    self._MISSING,
+                    "s3://b/k",
+                    "--query",
+                    "][",
+                    "--endpoint-url",
+                    "badurl",
+                    "--metadata",
+                    "file:///no/x",
+                ]
             )
             assert rc == 252, command
+            err = capsys.readouterr().err
+            # All three failures are 252s; the message proves the query one won.
+            assert "Bad value for --query" in err, command
 
     def test_local_local_stays_252_in_a_regionless_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # aws's client construction cannot fail on a missing region (its
         # bundled botocore defers region resolution to request time), so the
-        # usage error must keep winning in a regionless env - this guards
-        # against ever hoisting the client build above the validations.
+        # usage error must keep winning in a regionless env. A hoisted but
+        # still-succeeding client build would pass this too - the ordering
+        # itself is pinned by the error-precedence tests above; this pins the
+        # observable outcome in the region-free environment.
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
@@ -617,7 +785,7 @@ class TestRecursiveDestDirCreation:
 class TestHelpToken:
     """aws's parser turns an exactly-``['help']`` token list into the help
     page (rc 0) at every level - its ``ArgTableArgParser`` special case.
-    Measured on aws 2.35.18: ``s3 help`` and ``s3 ls help`` are 0,
+    Measured on the pinned aws-cli: ``s3 help`` and ``s3 ls help`` are 0,
     ``s3 help foo`` is 252, and a bad timeout still beats the token (255)."""
 
     def test_top_level_help_token(self, capsys: pytest.CaptureFixture[str]) -> None:

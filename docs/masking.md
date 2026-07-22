@@ -14,7 +14,9 @@ wiring in `cli/src/boto3_s3_cli/cli.py`, and the startup-cost contract in
 - The default policy is to **mask** (`set_stream_logger(mask_secrets=True)` is the
   default). The policy is expressed through the arguments of a module function;
   there is no instance-level setting like `Config` (since `logging` is
-  process-global, masking is also configured globally, once).
+  process-global, masking is configured globally - call it once per process;
+  each call attaches a fresh handler, and the CLI removes stale handlers of
+  its own before re-attaching).
 - The library is `boto3`-faithful: the entry point `set_stream_logger` has the
   same first three positional arguments as `boto3.set_stream_logger`
   (`name='boto3_s3'` / `level=DEBUG` / `format_string`), and its own arguments
@@ -31,13 +33,18 @@ in the `http.client` wire dump (verified against live botocore).
 
 - In `botocore/endpoint.py`, `logger.debug("Sending http request: %s", request)`
   has a `request` that is an `AWSPreparedRequest`. Its `__repr__` renders
-  `headers=` as the `HTTPHeaders` text form - plain `Header: value` lines - so the
-  signed `Authorization: AWS4-HMAC-SHA256 Credential=AKIA.../..., Signature=...` and
-  the `X-Amz-Security-Token: ...` header are emitted in full (older botocore
-  rendered a Python dict repr; the patterns cover both).
+  `headers=` as a Python dict repr (`HeadersDict`), so the signed
+  `Authorization: AWS4-HMAC-SHA256 Credential=AKIA.../..., Signature=...` and
+  the `X-Amz-Security-Token` values are emitted in full (an older botocore
+  rendered the plain `Header: value` line form; the patterns cover both).
 - `botocore/auth.py` emits `CanonicalRequest:\n<...>`, `StringToSign:\n<...>`, and
-  `Signature:\n<hex>` at DEBUG level (the first two include the signed headers,
-  i.e. `x-amz-security-token`).
+  `Signature:\n<hex>` at DEBUG level (the `CanonicalRequest` includes the signed
+  header values, i.e. `x-amz-security-token` in the clear; the `StringToSign`
+  carries only the canonical request's SHA-256 hash). On the S3 Express (directory bucket) flow the
+  same surfaces carry `x-amz-s3session-token` instead - the CreateSession-minted
+  session token - masked by the same pattern; the CreateSession *response body*
+  that mints it is the ordinary `<SessionToken>` / `'SessionToken':` shape
+  already covered below.
 - An SSE-C transfer (`cp/mv/sync --sse-c --sse-c-key ...`) carries the base64
   customer key - the symmetric encryption key itself - in the signed
   `x-amz-server-side-encryption-customer-key` header (and the copy-source
@@ -49,7 +56,8 @@ in the `http.client` wire dump (verified against live botocore).
   JSON. These are masked in both encodings. The instance/container metadata
   fetchers (`botocore/utils.py`) add two more DEBUG shapes of the same secrets:
   the parsed-credentials *dict repr* (single quotes) when a response misses a
-  required field, and the raw IMDS/ECS JSON body on malformed JSON, where the
+  required field, and the raw ECS/container JSON body on malformed JSON (the
+  IMDS fetcher logs its malformed-JSON case *without* the body), where the
   session token rides under the key `Token`. The key/value pattern is therefore
   quote-agnostic and includes `Token` (the quote anchored to the key name keeps
   `ContinuationToken` / `NextToken` visible).
@@ -91,7 +99,32 @@ values back). It also masks any attached exception traceback (`record.exc_text`,
 which the handler's formatter appends from `exc_info`), so a secret embedded in an
 exception message is redacted on that channel too, not only in the message.
 
-### 3.3 The `http.client` wire dump is not handled
+### 3.3 Scope: the handler boto3-s3 attaches
+
+Masking is a property of **the handler boto3-s3 attaches** - the CLI's `--debug`
+stream handler, and the one `set_stream_logger(mask_secrets=True)` installs. It
+redacts everything that handler writes, and nothing else. This is deliberate and
+sufficient under supported usage, because in both cases boto3-s3 owns the debug
+handler on the `boto3` / `botocore` / `s3transfer` loggers, so every
+credential-bearing record it emits is masked.
+
+It is **not** a process-wide guarantee that no handler will ever format a raw
+record. Python logging delivers each record to every handler on the logger chain
+independently, and a handler-side filter only rewrites its own handler's copy. So
+a handler that *other code* attached to those loggers formats the record on its
+own, unmasked - a filter on our handler cannot reach it, and (section 3.2) a
+filter on the logger cannot reach a record that propagated up from a child logger
+either. Redacting such a handler would require installing filters on every
+credential-emitting child logger (`botocore.auth`, `botocore.endpoint`,
+`botocore.parsers`, ...), a set botocore is free to change between versions.
+
+By specification this is out of scope: attaching foreign handlers to boto3 /
+botocore loggers - importing the CLI's internals to do so, or configuring their
+logging around the library - is not a supported way to obtain masked output. Get
+masked debug output the supported way (run the CLI with `--debug`, or call
+`set_stream_logger`); a handler installed by other code owns its own output.
+
+### 3.4 The `http.client` wire dump is not handled
 
 As in section 2, the `http.client` wire dump does not appear under the default
 `--debug`. If a wire-dump output option is added in the future, the monkeypatch-
@@ -106,7 +139,10 @@ replacing the userinfo with `***`). Non-secret structure (parameter names, the
 credential scope, the proxy host) is preserved.
 
 The only exception is the **AWS Access Key ID**: to allow distinguishing which
-account issued a request, **the last 4 characters are kept** (`***MPLE`).
+account issued a request, **the last 4 characters are kept** (`***MPLE`). The
+tail reveal applies to the `AKIA` / `ASIA`-shaped ids the pattern recognizes; a
+non-AWS-shaped id in the same slot (MinIO's `minioadmin`, say) masks entirely -
+over-masking, with the credential scope still preserved.
 
 ### 4.1 Target patterns
 
@@ -125,11 +161,13 @@ that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
 | sso-oidc token-endpoint bodies (`"accessToken"` / `"refreshToken"` / `"idToken"` / `"clientSecret"` in a CreateToken / RegisterClient `Response body:` line) | `"accessToken": "aoat-..."` -> `"accessToken": "***"` | `***` |
 | STS / metadata-service response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML; quote-agnostic `SecretAccessKey`/`SessionToken`/`Token` key-value in JSON bodies and the metadata fetchers' dict reprs) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>`, `'Token': 'FQo...'` -> `'Token': '***'` | `***`. `ContinuationToken` / `NextToken` are kept (quote-anchored key) |
 | Signature-mismatch byte-dump (`<CanonicalRequestBytes>` / `<StringToSignBytes>` in a `SignatureDoesNotMatch` response body - a hex dump that reconstructs the signed headers) | `<CanonicalRequestBytes>78 2d 61 ...</CanonicalRequestBytes>` -> `<CanonicalRequestBytes>***</CanonicalRequestBytes>` | `***` (whole dump) |
+| Signature-mismatch echo (`<SignatureProvided>` in the same body; the header/query `Signature` patterns never match this XML element) | `<SignatureProvided>frJI...</SignatureProvided>` -> `<SignatureProvided>***</SignatureProvided>` | `***` |
+| Web-identity / SAML request tokens (`WebIdentityToken` / `SAMLAssertion` in the unsigned STS call's logged request dict, and the urlencoded query form) | `'WebIdentityToken': 'eyJ...'` -> `'WebIdentityToken': '***'` | `***` |
 | SSE-C customer key (`x-amz-server-side-encryption-customer-key` and the `copy-source` variant, dict / colon form, case-insensitive) | `'x-amz-server-side-encryption-customer-key': '<b64>'` -> `'...customer-key': '***'` | `***`. The `-md5` companion header (a non-secret hash) is kept |
 | SSE-C customer key, boto3 parameter form (`'SSECustomerKey'` / `'CopySourceSSECustomerKey'` in a logged kwargs dict - s3transfer logs each task's `extra_args` at DEBUG *before* botocore base64-encodes the key) | `'SSECustomerKey': '<raw key>'` -> `'SSECustomerKey': '***'` (str or bytes repr) | `***`. The `...KeyMD5` companion is kept |
-| Proxy URL userinfo | `https://user:pass@proxy:8080` -> `https://***:***@proxy:8080` | `***:***` (per `mask_proxy_url`) |
+| Proxy URL userinfo | `https://user:pass@proxy:8080` -> `https://***:***@proxy:8080` | `***:***` (per `mask_proxy_url`; an empty user / password component is masked too, a bare `://@` is kept) |
 | `Proxy-Authorization` (dict / colon form, defensive) | `Proxy-Authorization: Basic ...` -> `Proxy-Authorization: ***` | `***` |
-| `extra_secrets` (caller-specified actual values, at least `MASK_MIN_LEN`) | each occurrence -> `***` | `***` |
+| `extra_secrets` (caller-specified actual values, at least `MASK_MIN_LEN`) | each occurrence -> `***` | `***`; applied *after* the built-in patterns, so a substring one of them already rewrote (an access key id's `***MPLE` tail, say) is not re-masked |
 
 ## 5. Wiring (library / CLI)
 

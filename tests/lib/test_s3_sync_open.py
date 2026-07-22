@@ -15,9 +15,7 @@ not the comparator (covered in ``test_s3_sync.py``) - is what is under test.
 
 from __future__ import annotations
 
-import io
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -28,27 +26,10 @@ from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, OpOutcome, OpResult
 from tests.lib.test_s3_cp_open import _MemStorage, _NoDeleteMem, _ReadOnlyMem
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.fakes3 import get_response, listing
+from tests.utils.recorder import make_recording_client, ops
 
 _SERIAL = TransferConfig(use_threads=False)
-_MTIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
-
-
-def _listing(*entries: tuple[str, int]) -> dict[str, Any]:
-    return {
-        "Contents": [
-            {"Key": key, "Size": size, "LastModified": _MTIME, "ETag": '"e"'}
-            for key, size in entries
-        ]
-    }
-
-
-def _get_response(body: bytes = b"payload") -> dict[str, Any]:
-    return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
 
 
 class TestSyncOpens3Upload:
@@ -56,14 +37,14 @@ class TestSyncOpens3Upload:
 
     def test_uploads_each_source_entry(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
-        client, calls = make_recording_client([_listing(), {}, {}])  # empty dest, 2 PutObject
+        client, calls = make_recording_client([listing(), {}, {}])  # empty dest, 2 PutObject
         S3().sync(
             src,
             S3Storage("s3://b/dest/", client=client),
             update_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "PutObject"]
         assert calls[0].params["Prefix"] == "dest/"
         assert [call.params["Key"] for call in calls[1:]] == ["dest/a.txt", "dest/sub/b.txt"]
 
@@ -72,7 +53,7 @@ class TestSyncOpens3Upload:
         # custom source side is never deleted).
         src = _MemStorage({"a.txt": b"x"}, location="mem://data/")
         client, calls = make_recording_client(
-            [_listing(("dest/a.txt", 1), ("dest/orphan.txt", 2)), {}, {}]
+            [listing(("dest/a.txt", 1), ("dest/orphan.txt", 2)), {}, {}]
         )
         S3().sync(
             src,
@@ -81,9 +62,34 @@ class TestSyncOpens3Upload:
             delete_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "PutObject", "DeleteObjects"]
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "DeleteObjects"]
         keys = [entry["Key"] for entry in calls[2].params["Delete"]["Objects"]]
         assert keys == ["dest/orphan.txt"]
+
+    def test_custom_listing_is_requested_sorted(self) -> None:
+        # docs/sync.md: the merge-join depends on byte order, so the custom
+        # side's scan_pages must receive ScanOptions(sort=True) - declaring
+        # SORTABLE_SCAN alone (the gate) is not the same as being asked to
+        # sort this scan.
+        class _OptionsRecordingMem(_MemStorage):
+            def __init__(self, store: dict[str, bytes], *, location: str = "mem://data/") -> None:
+                super().__init__(store, location=location)
+                self.scan_options: list[Any] = []
+
+            def scan_pages(self, options: Any) -> Any:
+                self.scan_options.append(options)
+                return super().scan_pages(options)
+
+        src = _OptionsRecordingMem({"a.txt": b"x"}, location="mem://data/")
+        client, calls = make_recording_client([listing(), {}])
+        S3().sync(
+            src,
+            S3Storage("s3://b/dest/", client=client),
+            update_filter=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
+        assert [options.sort for options in src.scan_options] == [True]
 
     def test_unsorted_source_is_rejected(self) -> None:
         # No SORTABLE_SCAN -> the merge-join cannot trust the order, so reject up
@@ -104,9 +110,9 @@ class TestSyncS3openDownload:
         dest = _MemStorage(store, location="mem://data/")
         client, calls = make_recording_client(
             [
-                _listing(("src/a.txt", 3), ("src/sub/b.txt", 3)),
-                _get_response(b"AAA"),
-                _get_response(b"BBB"),
+                listing(("src/a.txt", 3), ("src/sub/b.txt", 3)),
+                get_response(b"AAA"),
+                get_response(b"BBB"),
             ]
         )
         S3().sync(
@@ -115,15 +121,34 @@ class TestSyncS3openDownload:
             update_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
+
+    def test_no_overwrite_skips_existing_pairs(self) -> None:
+        # docs/transfer.md: sync + no_overwrite on a custom destination skips
+        # any key that already exists there (the pair never reaches the
+        # comparator), and only the genuinely new key transfers.
+        store = {"a.txt": b"old"}
+        dest = _MemStorage(store, location="mem://data/")
+        client, calls = make_recording_client(
+            [listing(("src/a.txt", 3), ("src/b.txt", 3)), get_response(b"BBB")]
+        )
+        S3().sync(
+            S3Storage("s3://b/src/", client=client),
+            dest,
+            update_filter=True,
+            no_overwrite=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert store == {"a.txt": b"old", "b.txt": b"BBB"}
 
     def test_delete_removes_orphan_custom_keys(self) -> None:
         # The destination is custom, so orphans are removed through its own
         # Storage.delete (not os.remove / DeleteObject).
         store = {"a.txt": b"old", "orphan.txt": b"gone"}
         dest = _MemStorage(store, location="mem://data/")
-        client, calls = make_recording_client([_listing(("src/a.txt", 3)), _get_response(b"AAA")])
+        client, calls = make_recording_client([listing(("src/a.txt", 3)), get_response(b"AAA")])
         S3().sync(
             S3Storage("s3://b/src/", client=client),
             dest,
@@ -131,7 +156,7 @@ class TestSyncS3openDownload:
             delete_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
         assert dest.deletes == ["orphan.txt"]
         assert store == {"a.txt": b"AAA"}
 
@@ -149,7 +174,7 @@ class TestSyncS3openDownload:
 
         monkeypatch.setattr(dest, "delete", _delete_with_response)
         # empty source -> nothing to transfer, only the orphan removal
-        client, _calls = make_recording_client([_listing()])
+        client, _calls = make_recording_client([listing()])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://b/src/", client=client),
@@ -178,20 +203,20 @@ class TestSyncS3openDownload:
         # Without --delete the custom destination needs no DELETE; the sync runs.
         store: dict[str, bytes] = {}
         dest = _NoDeleteMem(store, location="mem://data/")
-        client, calls = make_recording_client([_listing(("src/a.txt", 3)), _get_response(b"AAA")])
+        client, calls = make_recording_client([listing(("src/a.txt", 3)), get_response(b"AAA")])
         S3().sync(
             S3Storage("s3://b/src/", client=client),
             dest,
             update_filter=True,
             transfer_config=_SERIAL,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
         assert store == {"a.txt": b"AAA"}
 
     def test_dryrun_lists_but_never_opens_the_backend(self) -> None:
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
-        client, calls = make_recording_client([_listing(("src/a.txt", 3))])
+        client, calls = make_recording_client([listing(("src/a.txt", 3))])
         results: list[OpResult] = []
         S3().sync(
             S3Storage("s3://b/src/", client=client),
@@ -201,7 +226,7 @@ class TestSyncS3openDownload:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        assert _ops(calls) == ["ListObjectsV2"]
+        assert ops(calls) == ["ListObjectsV2"]
         assert store == {}
         assert dest.opens == []
         assert [r.outcome for r in results] == [OpOutcome.DRYRUN]

@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3-cli"
-version = "0.6.0"
+version = "0.6.1"
 description = "An `aws s3` compatible CLI built on the boto3-s3 library."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Masanao Izumo" },
 ]
-keywords = ["aws", "s3", "cli"]
+keywords = ["aws", "s3", "boto3", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -17,12 +17,17 @@ classifiers = [
     "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Utilities",
     "Typing :: Typed",
 ]
 dependencies = [
     # Versioned independently; the range pins the library API this CLI is built against.
-    "boto3-s3>=0.7.0,<0.8.0",
+    "boto3-s3>=0.8.0,<0.9.0",
     # Imported directly (the Session in build_client and the [s3] config read,
     # the autoprompt completers); floor matches boto3-s3's pin.
     "boto3>=1.28",
@@ -43,6 +48,7 @@ boto3-s3 = "boto3_s3_cli.cli:main"
 Homepage = "https://github.com/izumo-m/boto3-s3"
 Repository = "https://github.com/izumo-m/boto3-s3"
 Documentation = "https://github.com/izumo-m/boto3-s3/blob/main/cli/README.md"
+Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/cli/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 
 [build-system]

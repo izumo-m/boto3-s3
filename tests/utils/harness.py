@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from boto3_s3_cli.commands.base import Context
+    from tests.utils.recorder import ApiCall
 
 _SUBPROCESS_TIMEOUT = 60.0
 
@@ -65,6 +66,35 @@ def run_cli_in_process(argv: list[str], *, ctx: Context | None = None) -> CliRes
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         rc = cli.main(argv, ctx=ctx)
     return CliResult(rc, out.getvalue(), err.getvalue())
+
+
+def client_ctx(client: Any) -> Context:
+    """A ``Context`` whose client factory hands back ``client`` unconditionally."""
+    from boto3_s3_cli.commands.base import Context
+
+    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
+
+
+def unused_ctx() -> Context:
+    """A ``Context`` for paths that must fail before client construction: the
+    factory fails the test if it is ever called."""
+    from boto3_s3_cli.commands.base import Context
+
+    def _unused_factory(_args: Any) -> Any:
+        raise AssertionError("client factory must not be called")
+
+    return Context(client_factory=_unused_factory)
+
+
+def run_recorded(
+    parsed_responses: list[dict[str, Any] | Exception], argv: list[str]
+) -> tuple[CliResult, list[ApiCall]]:
+    """Run the CLI in-process against a recording client scripted with
+    ``parsed_responses``; returns the outcome and the recorded calls."""
+    from tests.utils.recorder import make_recording_client
+
+    client, calls = make_recording_client(parsed_responses)
+    return run_cli_in_process(argv, ctx=client_ctx(client)), calls
 
 
 def _run_subprocess(
@@ -206,12 +236,31 @@ def run_cli_in_process_streaming(
     return CliResult(rc, stdout, err.getvalue())
 
 
+def _add_connection_close(request: Any, **_kwargs: Any) -> None:
+    request.headers["Connection"] = "close"
+
+
 def seed_bucket(client: Any, bucket: str, seed: Mapping[str, int | bytes]) -> None:
     """Put one object per entry: an ``int`` means ``b"x" * size``, ``bytes``
-    are the exact body (transfer scenarios compare downloaded content)."""
+    are the exact body (transfer scenarios compare downloaded content).
+
+    A zero-byte PUT to a trailing-slash key (directory marker) leaves MinIO's
+    connection unable to answer the next request on it, which then stalls for
+    the client's full read timeout before a retry on a fresh connection
+    succeeds (observed on both minio/minio and pgsty/minio; real S3 and moto
+    are unaffected). ``Connection: close`` on those PUTs makes the server
+    close the poisoned connection so it is never reused.
+    """
     for key, spec in seed.items():
         body = spec if isinstance(spec, bytes) else b"x" * spec
-        client.put_object(Bucket=bucket, Key=key, Body=body)
+        is_marker = key.endswith("/") and not body
+        if is_marker:
+            client.meta.events.register_first("before-send.s3.PutObject", _add_connection_close)
+        try:
+            client.put_object(Bucket=bucket, Key=key, Body=body)
+        finally:
+            if is_marker:
+                client.meta.events.unregister("before-send.s3.PutObject", _add_connection_close)
 
 
 def delete_keys(client: Any, bucket: str, *keys: str) -> None:
@@ -302,14 +351,20 @@ def capture_local_tree(root: str) -> list[str]:
     """The local end state a transfer scenario is compared on.
 
     One ``relpath:size:sha256-prefix`` entry per file under *root*
-    (``/``-separated, sorted). Mtimes are deliberately not captured - the
-    download mtime stamp is asserted live per side, not via goldens.
+    (``/``-separated, sorted), plus one ``relpath/:dir`` entry per **empty**
+    directory - a sync that must materialize a bare prefix as a directory
+    (or an mv that must leave an emptied source dir behind) is otherwise
+    invisible to a files-only capture. Mtimes are deliberately not captured -
+    the download mtime stamp is asserted live per side, not via goldens.
     """
     import hashlib
     import os
 
     entries: list[str] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        if not dirnames and not filenames and dirpath != root:
+            rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+            entries.append(f"{rel}/:dir")
         for name in filenames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root).replace(os.sep, "/")
@@ -324,8 +379,13 @@ def head_object_fields(
 ) -> dict[str, Any]:
     """Selected HeadObject fields - how transfer scenarios pin object shape
     (ContentType / Metadata / StorageClass...) in goldens; absent fields are
-    ``None`` so the JSON stays comparable across endpoints."""
-    response = client.head_object(Bucket=bucket, Key=key)
+    ``None`` so the JSON stays comparable across endpoints. Requesting any
+    ``Checksum*`` field turns on ``ChecksumMode`` (S3 omits checksums from a
+    plain HEAD)."""
+    kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
+    if any(field.startswith("Checksum") for field in fields):
+        kwargs["ChecksumMode"] = "ENABLED"
+    response = client.head_object(**kwargs)
     return {field: response.get(field) for field in fields}
 
 
@@ -513,21 +573,75 @@ def capture_bucket_state(client: Any, bucket: str) -> tuple[bool, list[str] | No
 
 
 def remaining_keys(client: Any, bucket: str) -> list[str]:
-    """Every key left in *bucket*, sorted - the end-state a destructive
-    command is compared on (complements the sorted-stdout relaxation)."""
+    """Every object left in *bucket* as ``key:size:sha256-prefix``, sorted.
+
+    The end-state a transfer/destructive command is compared on (complements
+    the sorted-stdout relaxation). Hashing the body makes an upload that
+    corrupted its content - same key, wrong bytes - diverge instead of
+    passing on the key name alone. An unreadable body (e.g. a non-restored
+    GLACIER object) records ``?`` so the key/size still compare.
+    """
+    import hashlib
+
     paginator = client.get_paginator("list_objects_v2")
-    keys: list[str] = []
+    entries: list[str] = []
     for page in paginator.paginate(Bucket=bucket):
-        keys.extend(obj["Key"] for obj in page.get("Contents", []))
-    return sorted(keys)
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            try:
+                body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+                digest = hashlib.sha256(body).hexdigest()[:8]
+            except Exception:
+                digest = "?"
+            entries.append(f"{key}:{obj['Size']}:{digest}")
+    return sorted(entries)
 
 
-def assert_stderr_tokens(tokens: tuple[str, ...], stderr: str, *, side: str, scenario: str) -> None:
+def capture_bucket_tags(client: Any, bucket: str) -> list[str]:
+    """The bucket's tag set as sorted ``Key=Value`` strings (``[]`` = no tags)."""
+    from botocore.exceptions import ClientError
+
+    try:
+        tags = client.get_bucket_tagging(Bucket=bucket)["TagSet"]
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchTagSet", "NoSuchTagSetError"):
+            return []
+        raise
+    return sorted(f"{tag['Key']}={tag['Value']}" for tag in tags)
+
+
+def had_progress_lines(stdout: str) -> bool:
+    """Whether the run printed any ``Completed ...`` progress line.
+
+    The normalizers strip progress unconditionally (its content is timing
+    noise), so its *presence* is captured separately - it is what
+    ``--no-progress`` / ``--quiet`` actually change on a piped stdout.
+    """
+    return any(
+        segment.startswith("Completed ")
+        for raw in stdout.splitlines()
+        for segment in raw.split("\r")
+    )
+
+
+def assert_stderr_tokens(
+    tokens: tuple[str, ...],
+    stderr: str,
+    *,
+    side: str,
+    scenario: str,
+    require_empty: bool = False,
+) -> None:
     """Assert each token appears in *stderr* (substring check, never equality).
 
     aws-cli and boto3-s3 wrap error text differently, so stderr is only ever
-    probed for stable tokens (error codes, option names).
+    probed for stable tokens (error codes, option names). ``require_empty``
+    additionally asserts *stderr* is exactly empty - the one thing a token
+    list cannot express (a ``--quiet`` contract: an empty token tuple asserts
+    nothing at all, so a reappearing error line would pass silently).
     """
+    if require_empty and stderr != "":
+        pytest.fail(f"[{scenario}] {side} stderr must be empty but was:\n{stderr}")
     missing = [token for token in tokens if token not in stderr]
     if missing:
         pytest.fail(f"[{scenario}] {side} stderr is missing expected tokens {missing!r}:\n{stderr}")

@@ -63,13 +63,14 @@ class Golden:
     rc: int
     stdout_lines: list[str]
     aws_version: str
-    # Bucket end state after the run (destructive commands only; None = not
-    # captured / not compared, which keeps the ls goldens valid unchanged).
+    # Bucket end state after the run (destructive commands and every cp
+    # replay; None = not captured / not compared, which keeps the ls goldens
+    # valid unchanged).
     remaining_keys: list[str] | None = None
     # Whether the scenario bucket exists after the run (bucket-lifecycle
     # commands only; same None-means-not-compared convention).
     bucket_exists: bool | None = None
-    # Transfer-scenario end states (cp/mv; same convention): the local
+    # Transfer-scenario end states (cp/mv/sync; same convention): the local
     # destination tree (harness.capture_local_tree) and selected HeadObject
     # fields of one probe key (harness.head_object_fields).
     local_tree: list[str] | None = None
@@ -78,6 +79,16 @@ class Golden:
     # deleted, or left behind on dryrun/filter/failure; cp goldens predate
     # the field and load it as None).
     src_tree: list[str] | None = None
+    # Whether the run printed any progress line (``harness.had_progress_lines``;
+    # scenarios opting in via ``compare_progress`` - what --no-progress/--quiet
+    # change on a piped stdout; None = not compared).
+    progress: bool | None = None
+    # The bucket's tag set after the run (``harness.capture_bucket_tags``,
+    # sorted ``Key=Value``; mb scenarios opting in; None = not compared).
+    # Empty on moto/MinIO for a --tags create (neither honors
+    # CreateBucketConfiguration.Tags): an aws-vs-ours no-divergence pin, not
+    # a tag-application check.
+    bucket_tags: list[str] | None = None
 
 
 def golden_path(kind: str, name: str) -> Path:
@@ -105,7 +116,7 @@ def detect_aws_version() -> str:
     return proc.stdout.decode(errors="replace").strip() or "unknown"
 
 
-# The version inside an ``aws --version`` line ("aws-cli/2.35.18 Python/... ...").
+# The version inside an ``aws --version`` line ("aws-cli/2.36.1 Python/... ...").
 _AWS_VERSION_RE = re.compile(r"aws-cli/(\d+(?:\.\d+)*)")
 
 _VENDORED_AWSCLI_INIT = (
@@ -207,6 +218,8 @@ def assert_matches_golden(
     local_tree: list[str] | None = None,
     head_fields: dict[str, Any] | None = None,
     src_tree: list[str] | None = None,
+    progress: bool | None = None,
+    bucket_tags: list[str] | None = None,
 ) -> None:
     """Compare one run against *golden*; *side* labels who diverged.
 
@@ -243,6 +256,14 @@ def assert_matches_golden(
     if golden.head_fields is not None and head_fields != golden.head_fields:
         problems.append(
             f"head fields: {side} shows {head_fields!r}, golden has {golden.head_fields!r}"
+        )
+    if golden.progress is not None and progress != golden.progress:
+        problems.append(
+            f"progress lines: {side} printed={progress!r}, golden has {golden.progress!r}"
+        )
+    if golden.bucket_tags is not None and bucket_tags != golden.bucket_tags:
+        problems.append(
+            f"bucket tags: {side} shows {bucket_tags!r}, golden has {golden.bucket_tags!r}"
         )
     if problems:
         pytest.fail(f"[{golden.scenario}] {side} diverged from golden:\n" + "\n".join(problems))

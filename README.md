@@ -1,5 +1,10 @@
 # boto3-s3
 
+[![PyPI](https://img.shields.io/pypi/v/boto3-s3)](https://pypi.org/project/boto3-s3/)
+[![Python versions](https://img.shields.io/pypi/pyversions/boto3-s3)](https://pypi.org/project/boto3-s3/)
+[![License](https://img.shields.io/pypi/l/boto3-s3)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
+[![CI](https://github.com/izumo-m/boto3-s3/actions/workflows/ci.yml/badge.svg)](https://github.com/izumo-m/boto3-s3/actions/workflows/ci.yml)
+
 A Python library for running every `aws s3` operation in-process, with an
 `aws s3 sync`-compatible synchronization pipeline at its core. Applications
 that currently shell out to `aws s3 sync` can make the same default
@@ -75,9 +80,12 @@ operations require separate, prebuilt clients — see
 [Running operations across threads](#running-operations-across-threads).
 
 ```python
+import boto3_s3
 from boto3_s3 import S3
 
-s3 = S3()
+# boto3_s3.session(): a boto3 Session whose clients parse listing timestamps
+# at C speed. A bare S3() works too, with plain boto3.client("s3") semantics.
+s3 = S3(session=boto3_s3.session())
 
 # Sync a directory tree up to S3, removing remote extras (mirror).
 s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
@@ -90,7 +98,7 @@ s3.cp("s3://my-bucket/report.csv", "./report.csv")
 s3.ls(
     "s3://my-bucket/site/",
     recursive=True,
-    on_result=lambda info: print(info.key, info.size),
+    on_entry=lambda info: print(info.key, info.size),
 )
 
 # Delete everything under a prefix.
@@ -196,8 +204,8 @@ The content strategies are opt-in submodule imports —
 Because it runs in-process, sync provides **structured results without parsing
 console output**. `on_result` receives terminal item outcomes as the run
 proceeds, plus any additional warning or notice records. Each result carries a
-`transfer_type` (upload / download / copy / delete) and an `outcome` (succeeded /
-failed / warned / skipped / dryrun / notice):
+`transfer_type` (upload / download / copy / move / delete) and an `outcome`
+(succeeded / failed / warned / skipped / dryrun / cancelled / notice):
 
 ```python
 from boto3_s3 import TransferType, OpOutcome
@@ -206,7 +214,7 @@ uploaded = []
 
 def track(r):
     if r.transfer_type is TransferType.UPLOAD and r.outcome is OpOutcome.SUCCEEDED:
-        uploaded.append(r.key)
+        uploaded.append(r.compare_key)
 
 s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 print(f"{len(uploaded)} files uploaded")
@@ -219,7 +227,7 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | `aws s3` | What it does |
 | --- | --- | --- |
-| `ls(target="s3://", *, on_result, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_result`. The listing page size is the `S3Storage`'s own `page_size` config. |
+| `ls(target="s3://", *, on_entry, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_entry`. The listing page size is the `S3Storage`'s own `page_size` config. |
 | `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
 | `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
@@ -240,13 +248,23 @@ For a specific **profile, region, or endpoint**, hand the `S3` object a
 string then inherits it:
 
 ```python
-import boto3
+import boto3_s3
 from boto3_s3 import S3, S3Storage
 
-session = boto3.Session(profile_name="prod", region_name="eu-west-1")
+session = boto3_s3.session(profile_name="prod", region_name="eu-west-1")
 s3 = S3(session=session)
 s3.cp("./artifact.tar.gz", "s3://prod-bucket/artifacts/")
 ```
+
+`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session(**kwargs)` — minus
+`botocore_session=`, since the factory builds and owns the botocore session
+the fast parser is installed on — whose clients parse S3 response timestamps
+at C speed. The difference on a large `ls` / `sync` / `rm` is severalfold, and
+aws-cli has no equivalent. A plain `boto3.Session` works identically apart
+from that speed (and the parsed timestamps' `tzinfo` class: `timezone.utc`
+instead of dateutil's `tzutc` — equal values, different type); a session you pass
+is always used as-is (`boto3_s3.fast_parse_timestamp` is exported for wiring
+the parser into a botocore session you manage yourself).
 
 When a single operation needs **more than one client** — a cross-account
 S3-to-S3 copy is the clearest case — the instance default can't express it.
@@ -263,9 +281,11 @@ s3.cp(
 
 An S3-compatible endpoint such as MinIO is just a differently-built client.
 Build the `S3` object with that endpoint to use it for every location, or pass
-`S3Storage(url, client=minio)` when only one side needs it:
+`S3Storage(uri, client=minio)` when only one side needs it:
 
 ```python
+import boto3
+
 minio = boto3.client(
     "s3",
     endpoint_url="http://localhost:9000",
@@ -274,7 +294,7 @@ minio = boto3.client(
 )
 S3().ls(
     S3Storage("s3://bucket/", client=minio),
-    on_result=lambda info: print(info.key),
+    on_entry=lambda info: print(info.key),
 )
 ```
 
@@ -384,14 +404,16 @@ Batch operations stream item records instead of returning a list:
   and non-raising.
 - `on_progress(TransferProgress)` — byte-level transfer progress
   (`cp` / `mv` / `sync`; `rm` moves no bytes).
-- `S3.ls(..., on_result=...)` — receives each listed `FileInfo`, in listing
+- `S3.ls(..., on_entry=...)` — receives each listed `FileInfo`, in listing
   order on the calling thread.
 - `cancel_token` — a `CancelToken` whose `cancel()` stops new work and drains
   accepted work (`ls` / `cp` / `mv` / `rm` / `sync`). Pass
   `mode=CancelMode.IMMEDIATE` to additionally request best-effort cancellation
   of pending and in-flight work. A later immediate request upgrades an earlier
   graceful request; cancellation never downgrades.
-- `dryrun=True` — reports every would-be action without any mutating call.
+- `dryrun=True` — reports every would-be action without any mutating S3 call
+  (like aws, a recursive download / `sync` still pre-creates the local
+  destination directory).
 
 ## Custom backends
 
@@ -416,7 +438,7 @@ dependency pass-throughs are not wrapped.
 | --- | --- |
 | `Boto3S3Error` | Root of the hierarchy. Carries `operation` / `bucket` / `key`. |
 | `ValidationError` | A supplied value, precondition, or path is invalid. |
-| `ConfigurationError` | Credentials / region / profile / endpoint missing or unresolvable. |
+| `ConfigurationError` | Credentials / region missing or unresolvable (an unreachable endpoint is `TransportError`; a present-but-unusable config raises the refining `InvalidConfigError`). |
 | `NotFoundError` | The target does not exist (S3 404, local `FileNotFoundError`). |
 | `AccessDeniedError` | Permission denied (S3 403, local `PermissionError`). |
 | `TransportError` | Network or local I/O failure (connection, timeout, `OSError`). |
@@ -463,6 +485,9 @@ Bug reports, questions, and ideas are welcome on the
 [issue tracker](https://github.com/izumo-m/boto3-s3/issues). To work on the code,
 [`CONTRIBUTING.md`](https://github.com/izumo-m/boto3-s3/blob/main/CONTRIBUTING.md)
 covers local setup (uv), the test suite, and the coding and commit conventions.
+Report security vulnerabilities privately as described in
+[`SECURITY.md`](https://github.com/izumo-m/boto3-s3/blob/main/SECURITY.md),
+not on the public issue tracker.
 
 ## License
 

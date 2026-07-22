@@ -17,14 +17,12 @@ the custom side is pure Python.
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import GlobFilter, producers
 from boto3_s3.exceptions import (
     BatchError,
     CancelledError,
@@ -35,7 +33,8 @@ from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import CancelToken, FileInfo, FileKind, OpOutcome, OpResult, TransferType
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
+from tests.utils.recorder import make_recording_client, ops
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -44,27 +43,6 @@ if TYPE_CHECKING:
     from boto3_s3.types import ScanOptions
 
 _SYNC = TransferConfig(use_threads=False)
-_MTIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
-
-
-def _head_response(**extra: Any) -> dict[str, Any]:
-    return {"ContentLength": 7, "LastModified": _MTIME, "ETag": '"abc"', **extra}
-
-
-def _get_response(body: bytes = b"payload") -> dict[str, Any]:
-    return {"Body": io.BytesIO(body), "ContentLength": len(body), "ETag": '"abc"'}
 
 
 def _basename(location: str) -> str:
@@ -143,7 +121,7 @@ class _MemStorage(Storage):
         # scan_pages returns already-filtered pages (the contract): a real custom
         # backend would push options.filter to its source; this in-memory one sieves.
         infos = [
-            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
+            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=MTIME, compare_key=key)
             for key, data in sorted(self._store.items())
         ]
         if options.filter is not None:
@@ -163,7 +141,7 @@ class _MemStorage(Storage):
             key=key,
             kind=FileKind.FILE,
             size=len(self._store[key]),
-            mtime=_MTIME,
+            mtime=MTIME,
             compare_key=_basename(self._location),
         )
 
@@ -179,7 +157,7 @@ class _ArrivalOrderMem(_MemStorage):
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         yield [
-            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=_MTIME, compare_key=key)
+            FileInfo(key=key, kind=FileKind.FILE, size=len(data), mtime=MTIME, compare_key=key)
             for key, data in self._store.items()  # insertion order, NOT sorted
         ]
 
@@ -227,7 +205,7 @@ class TestOpenUploadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Key"] == "up/a.txt"
         assert results[0].outcome is OpOutcome.SUCCEEDED
@@ -245,6 +223,46 @@ class TestOpenUploadRoute:
             transfer_config=_SYNC,
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
+
+    def test_upload_guesses_content_type_from_the_entry_key(self) -> None:
+        # Open-route uploads are shaped like local ones (docs/transfer.md
+        # section 12): the default guess reads the entry's key, so a custom
+        # backend's .jpg lands as image/jpeg without the backend doing
+        # anything. Only a true stream (no filename) skips the guess.
+        src = _MemStorage({"img/photo.jpg": b"x"}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert calls[0].params["ContentType"] == "image/jpeg"
+
+    def test_oversize_upload_warns_but_still_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The open-route mirror of the local route's oversize pre-warning
+        # (aws-cli's _warn_if_too_large): warn but still attempt, rendering
+        # through the open side's own display form.
+        monkeypatch.setattr("boto3_s3.producers._MAX_UPLOAD_SIZE", 1)
+        src = _MemStorage({"big.bin": b"xx"}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            src,
+            S3Storage("s3://b/tree", client=client),
+            recursive=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["PutObject"]  # warned, never skipped
+        outcomes = [r.outcome for r in results]
+        assert outcomes.count(OpOutcome.WARNED) == 1
+        assert outcomes.count(OpOutcome.SUCCEEDED) == 1
+        warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
+        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
+        assert "big.bin" in str(warned.error)
 
     def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
         # sync is the only order-sensitive consumer (docs/storage.md section 3):
@@ -393,18 +411,18 @@ class TestOpenDownloadRoute:
         # itself, key ""); the writer commits only when the transfer closes it.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"": b"payload"}
 
     def test_single_download_into_a_directory_uses_the_basename(self) -> None:
         # A "/"-terminated destination adopts the source's name (use_src_name).
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"a.txt": b"payload"}
 
     def test_single_download_is_filtered_too(self) -> None:
@@ -414,11 +432,11 @@ class TestOpenDownloadRoute:
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
         drop = GlobFilter().exclude("*").compile()
-        client, calls = make_recording_client([_head_response()])
+        client, calls = make_recording_client([head_response()])
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert store == {}
         assert dest.opens == []
 
@@ -427,30 +445,32 @@ class TestOpenDownloadRoute:
         dest = _MemStorage(store, location="mem://data/")
         listing = {
             "Contents": [
-                {"Key": "pre/a.txt", "Size": 3, "LastModified": _MTIME, "ETag": '"a"'},
-                {"Key": "pre/sub/b.txt", "Size": 3, "LastModified": _MTIME, "ETag": '"b"'},
+                {"Key": "pre/a.txt", "Size": 3, "LastModified": MTIME, "ETag": '"a"'},
+                {"Key": "pre/sub/b.txt", "Size": 3, "LastModified": MTIME, "ETag": '"b"'},
             ]
         }
-        client, calls = make_recording_client(
-            [listing, _get_response(b"AAA"), _get_response(b"BBB")]
-        )
+        client, calls = make_recording_client([listing, get_response(b"AAA"), get_response(b"BBB")])
         S3().cp(
             S3Storage("s3://b/pre", client=client),
             dest,
             recursive=True,
             transfer_config=_SYNC,
         )
-        assert _ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_keyless_non_recursive_source_writes_nothing(self) -> None:
-        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches nothing.
+        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches
+        # nothing. The listing is issued like the built-in download route
+        # (test_s3_cp.py pins the same shape) - a denied/failing ListBucket
+        # must stay observable, not be optimized to a silent rc 0.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([])
+        client, calls = make_recording_client([{}])
         results: list[OpResult] = []
         S3().cp(S3Storage("s3://bucket", client=client), dest, on_result=results.append)
-        assert calls == []
+        assert ops(calls) == ["ListObjectsV2"]
+        assert calls[0].params == {"Bucket": "bucket", "Prefix": ""}
         assert results == []
         assert store == {}
 
@@ -458,7 +478,7 @@ class TestOpenDownloadRoute:
         # The source-side glacier gate still runs for a custom destination.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([_head_response(StorageClass="GLACIER")])
+        client, calls = make_recording_client([head_response(StorageClass="GLACIER")])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/cold", client=client),
@@ -466,8 +486,12 @@ class TestOpenDownloadRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
+        # docs/opresult.md: a WARNED record still carries the run's storages.
+        assert results[0].src_storage is not None
+        assert results[0].src_storage.as_text() == "s3://b/cold"
+        assert results[0].dest_storage is dest
         assert store == {}
 
     def test_dryrun_heads_but_never_opens_the_backend(self) -> None:
@@ -475,7 +499,7 @@ class TestOpenDownloadRoute:
         # for writing - opening "wb" on a real backend is itself a side effect.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([_head_response()])
+        client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client),
@@ -483,7 +507,7 @@ class TestOpenDownloadRoute:
             dryrun=True,
             on_result=results.append,
         )
-        assert _ops(calls) == ["HeadObject"]
+        assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
         assert dest.opens == []
         assert store == {}
@@ -501,7 +525,7 @@ class TestOpenDownloadRoute:
         # write on close: _CloseFileobj flips the settled future to a failure.
         store: dict[str, bytes] = {}
         dest = _CommitFailMem(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([_head_response(), _get_response()])
+        client, calls = make_recording_client([head_response(), get_response()])
         results: list[OpResult] = []
         with pytest.raises(BatchError):
             S3().cp(
@@ -510,9 +534,252 @@ class TestOpenDownloadRoute:
                 transfer_config=_SYNC,
                 on_result=results.append,
             )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert "commit failed" in str(results[0].error)
+
+
+class TestOpenRouteContracts:
+    """Cross-cutting open-route guarantees (docs/transfer.md sections 11-12,
+    docs/storage.md): validation order, no_overwrite semantics, per-item
+    failure isolation, handle ownership, and the local-only gates that must
+    NOT apply to a custom destination."""
+
+    def test_validate_runs_before_the_backend_or_s3_is_touched(self) -> None:
+        # docs/storage.md: operations call the backend's validate() up front,
+        # so a malformed location fails before any scan/open/API call.
+        class _InvalidMem(_MemStorage):
+            def validate(self) -> None:
+                raise ValidationError("malformed mem location")
+
+        src = _InvalidMem({"": b"x"}, location="mem://data/a.txt")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError, match="malformed mem location"):
+            S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
+        assert calls == []
+        assert src.opens == []
+
+    def test_upload_no_overwrite_carries_if_none_match(self) -> None:
+        # docs/transfer.md: opens3 guards no_overwrite exactly like a built-in
+        # upload - conditionally, on the wire.
+        src = _MemStorage({"": b"x" * 3}, location="mem://data/a.txt")
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            src,
+            S3Storage("s3://b/k", client=client),
+            no_overwrite=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["PutObject"]
+        assert calls[0].params["IfNoneMatch"] == "*"
+
+    def test_download_no_overwrite_has_no_guard_on_a_custom_destination(self) -> None:
+        # docs/transfer.md: s3open has no exists-gate - the backend owns its
+        # key space, so an existing key is simply overwritten (no HEAD-side
+        # skip, no IfNoneMatch anywhere).
+        store: dict[str, bytes] = {"": b"old"}
+        dest = _MemStorage(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([head_response(), get_response()])
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            dest,
+            no_overwrite=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["HeadObject", "GetObject"]
+        assert store == {"": b"payload"}
+
+    def test_mv_commit_failure_keeps_the_s3_source(self) -> None:
+        # docs/transfer.md: mv deletes the source only after the item
+        # succeeds - a failed backend commit must leave the S3 object alone.
+        store: dict[str, bytes] = {}
+        dest = _CommitFailMem(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                dest,
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert store == {}
+
+    def test_backend_failure_fails_the_item_and_the_run_continues(self) -> None:
+        # docs/transfer.md: an open/write failure on one item is that item's
+        # FAILED record - the run moves on to the next item instead of dying.
+        class _FirstOpenFailMem(_MemStorage):
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                if mode == "wb" and key == "a.txt":
+                    self.opens.append((key, mode))
+                    raise RuntimeError("backend rejected the open")
+                return super().open(key, mode, size=size)
+
+        store: dict[str, bytes] = {}
+        dest = _FirstOpenFailMem(store, location="mem://data/")
+        listing = {
+            "Contents": [
+                {"Key": "pre/a.txt", "Size": 3, "LastModified": MTIME, "ETag": '"a"'},
+                {"Key": "pre/b.txt", "Size": 3, "LastModified": MTIME, "ETag": '"b"'},
+            ]
+        }
+        client, calls = make_recording_client([listing, get_response(b"AAA"), get_response(b"BBB")])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                dest,
+                recursive=True,
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert (excinfo.value.succeeded, excinfo.value.failed) == (1, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED, OpOutcome.SUCCEEDED]
+        # The failed first item did not stop the second from being fetched.
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
+        assert store == {"b.txt": b"BBB"}
+
+    def test_upload_closes_the_source_reader(self) -> None:
+        # docs/transfer.md: the route closes every fileobj the backend's
+        # open() returned - the writer side is pinned by the commit-on-close
+        # tests; this pins the reader handle.
+        readers: list[io.BytesIO] = []
+
+        class _TrackingMem(_MemStorage):
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                self.opens.append((key, mode))
+                reader = io.BytesIO(self._store[key])
+                readers.append(reader)
+                return reader  # type: ignore[return-value]
+
+        src = _TrackingMem({"": b"x" * 5}, location="mem://data/a.txt")
+        client, put_calls = make_recording_client([{}])
+        S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
+        assert ops(put_calls) == ["PutObject"]
+        assert [reader.closed for reader in readers] == [True]
+
+    def test_local_only_gates_do_not_apply_to_a_custom_destination(self) -> None:
+        # docs/transfer.md: the case-conflict and parent-reference gates guard
+        # the local filesystem; a custom backend owns its key space, so case
+        # twins and dot-dot segments land verbatim.
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/")
+        listing = {
+            "Contents": [
+                {"Key": "pre/A.txt", "Size": 1, "LastModified": MTIME, "ETag": '"A"'},
+                {"Key": "pre/a.txt", "Size": 1, "LastModified": MTIME, "ETag": '"a"'},
+                {"Key": "pre/sub/../odd.txt", "Size": 1, "LastModified": MTIME, "ETag": '"o"'},
+            ]
+        }
+        client, calls = make_recording_client(
+            [listing, get_response(b"1"), get_response(b"2"), get_response(b"3")]
+        )
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            dest,
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject", "GetObject"]
+        assert store == {"A.txt": b"1", "a.txt": b"2", "sub/../odd.txt": b"3"}
+
+
+class TestDeferredOpen:
+    """``Storage.open`` runs when the transfer first moves bytes - never at
+    queue time (the lazy handles the item builders hand the engine;
+    transfer.md section 12). The wrapper-level tests pin the handle contract
+    directly; the route-level ones pin the backend-visible consequences."""
+
+    def test_reader_opens_on_first_read_only(self) -> None:
+        backend = _MemStorage({"k": b"abc"})
+        reader = producers._DeferredReader(backend, "k", 3)
+        assert backend.opens == []  # built (queued), not opened
+        assert reader.read(2) == b"ab"
+        assert reader.read() == b"c"
+        assert backend.opens == [("k", "rb")]  # exactly one open
+        reader.close()
+        assert reader.read() == b""  # post-close reads are EOF, never a reopen
+        reader.close()  # idempotent
+
+    def test_reader_close_without_read_never_opens(self) -> None:
+        backend = _MemStorage({"k": b"abc"})
+        producers._DeferredReader(backend, "k", 3).close()
+        assert backend.opens == []
+
+    def test_writer_opens_on_first_write_and_close_commits(self) -> None:
+        store: dict[str, bytes] = {}
+        backend = _MemStorage(store)
+        writer = producers._DeferredWriter(backend, "k", 2)
+        assert backend.opens == []
+        writer.write(b"hi")
+        writer.close()
+        assert store == {"k": b"hi"}
+        assert backend.opens == [("k", "wb")]
+
+    def test_writer_close_without_write_commits_an_empty_object(self) -> None:
+        # The zero-byte-download shape: no chunk ever arrives, close still
+        # materializes the empty object (aws writes the empty local file).
+        store: dict[str, bytes] = {}
+        backend = _MemStorage(store)
+        producers._DeferredWriter(backend, "k", 0).close()
+        assert store == {"k": b""}
+        assert backend.opens == [("k", "wb")]
+
+    def test_writer_discard_without_write_leaves_the_backend_untouched(self) -> None:
+        store: dict[str, bytes] = {}
+        backend = _MemStorage(store)
+        producers._DeferredWriter(backend, "k", 5).discard()
+        assert store == {}
+        assert backend.opens == []
+
+    def test_writer_discard_after_write_closes_the_partial_object(self) -> None:
+        # Once bytes were written the backend object exists; discard releases
+        # the handle (the backend's own close semantics decide what a partial
+        # write leaves behind - _MemWriter commits its buffer).
+        store: dict[str, bytes] = {}
+        backend = _MemStorage(store)
+        writer = producers._DeferredWriter(backend, "k", 5)
+        writer.write(b"pa")
+        writer.discard()
+        assert backend.opens == [("k", "wb")]
+        assert store == {"k": b"pa"}
+
+    def test_zero_byte_download_commits_the_empty_object(self) -> None:
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([head_response(ContentLength=0), get_response(b"")])
+        S3().cp(S3Storage("s3://b/empty", client=client), dest, transfer_config=_SYNC)
+        assert ops(calls) == ["HeadObject", "GetObject"]
+        assert store == {"": b""}
+        assert dest.opens == [("", "wb")]
+
+    def test_failed_download_leaves_the_backend_untouched(self) -> None:
+        # The GetObject fails after submission: the deferred writer never
+        # opened, and the failure-path release prefers discard - no object is
+        # committed. (The eager open used to have already created one.)
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/out.bin")
+        client, calls = make_recording_client(
+            [head_response(), client_error("AccessDenied", 403, "GetObject")]
+        )
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://b/k", client=client),
+                dest,
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert store == {}
+        assert dest.opens == []
 
 
 class TestMoveRoute:
@@ -536,7 +803,7 @@ class TestMoveRoute:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
         # The single source's open key is "" (the location itself); delete uses it.
         assert src.deletes == [""]
@@ -562,7 +829,7 @@ class TestMoveRoute:
     def test_move_into_a_custom_destination_deletes_the_s3_source(self) -> None:
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        client, calls = make_recording_client([_head_response(), _get_response(), {}])
+        client, calls = make_recording_client([head_response(), get_response(), {}])
         results: list[OpResult] = []
         S3().mv(
             S3Storage("s3://b/d/a.txt", client=client),
@@ -571,7 +838,7 @@ class TestMoveRoute:
             on_result=results.append,
         )
         # Download into the custom dest, then DeleteObject the S3 source.
-        assert _ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
+        assert ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "d/a.txt"}
         assert store == {"": b"payload"}
         assert [(r.transfer_type, r.outcome) for r in results] == [
@@ -590,7 +857,7 @@ class TestMoveRoute:
         # The source delete must not run when the transfer failed: the bytes
         # never arrived, so mv keeps the only copy.
         src = _MemStorage({"": b"x" * 7}, location="mem://data/a.txt")
-        client, _ = make_recording_client([_client_error("NoSuchBucket", 404, "PutObject")])
+        client, _ = make_recording_client([client_error("NoSuchBucket", 404, "PutObject")])
         with pytest.raises(BatchError):
             S3().mv(src, S3Storage("s3://gone/up/", client=client), transfer_config=_SYNC)
         assert src.deletes == []

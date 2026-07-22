@@ -25,10 +25,13 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
+import boto3
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     EndpointConnectionError,
+    HTTPClientError,
+    MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
     ParamValidationError,
@@ -75,7 +78,10 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
 # (aws's dedicated rc-253 handlers); the present-but-unusable configuration
 # family below refines to InvalidConfigError (aws's general handler, rc 255) -
-# the same split the CLI's clientfactory applies (docs/exceptions.md section 3).
+# the same split point as the CLI's clientfactory (docs/exceptions.md section
+# 3). Membership differs: the factory's construction-scoped catch maps every
+# other BotoCoreError to InvalidConfigError, while this general translator
+# lists only the known config shapes and keeps anything unlisted at the base.
 _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     NoRegionError,
@@ -84,7 +90,14 @@ _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     PartialCredentialsError,
     ProfileNotFound,
 )
-_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (EndpointConnectionError, BotoConnectionError)
+# Both halves of botocore's transport tree: ConnectionError (endpoint /
+# connect-timeout / proxy) and HTTPClientError (read timeout, a closed
+# connection - "An HTTP Client raised an unhandled exception").
+_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    EndpointConnectionError,
+    BotoConnectionError,
+    HTTPClientError,
+)
 
 # S3 error Code -> exception category, shared by every translation path: the
 # request-level ClientError below and the per-key DeleteObjects ``Errors[]``
@@ -123,8 +136,10 @@ _S3_SCHEME = "s3://"
 # (aws-cli's awscli/customizations/s3/utils.py). An ARN's resource part
 # may itself contain "/", so these run before the plain first-"/" split; the
 # whole ARN (group "bucket") is what the S3 API takes as ``Bucket``. The
-# *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above) are
-# ``S3Storage.validate``'s concern - the split accepts them whole.
+# *rejected* ARN forms (Object Lambda, Outposts bucket - the pair above)
+# match neither regex and fall to the plain first-"/" split (cut mid-ARN);
+# ``S3Storage.validate`` rejects them before an operation consumes that
+# split.
 _S3_ACCESSPOINT_TO_BUCKET_KEY_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3:[a-z\-0-9]*:[0-9]{12}:accesspoint[:/][^/]+)/?(?P<key>.*)$"
 )
@@ -134,19 +149,25 @@ _S3_OUTPOST_TO_BUCKET_KEY_RE = re.compile(
 )
 
 
-def _parse_s3_url(url: str) -> tuple[str, str]:
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
     """Split an ``s3://bucket/key`` URL into ``(bucket, key)`` - no validation.
 
     Either part may be empty: a bare ``"s3://"`` is the service root (bucket
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    ``S3Storage.split_bucket_key``). The strict aws-cli checks - the
-    unsupported S3 Object Lambda / Outposts *bucket* ARN forms, and a key with
-    no bucket - are deferred to ``S3Storage.validate``, so construction
+    ``S3Storage.split_bucket_key``; aws's own splitter first *blocks* the
+    unsupported ARN forms - ``block_unsupported_resources`` - and otherwise
+    rejects nothing, while ours accepts everything and defers that same
+    rejection to ``validate``).
+    The strict checks - the
+    unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
+    parse-time 252), and a key with
+    no bucket (whose aws handling varies per command - docs/cli.md) - are
+    deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
-    rest = url.partition("://")[2]
+    rest = uri.partition("://")[2]
     return S3Storage.split_bucket_key(rest)
 
 
@@ -186,7 +207,9 @@ def translate_boto_error(
 
     ``ClientError`` goes through the code/status table; botocore's credential,
     transport, and request-shape errors map to their categories - unresolvable
-    credentials/region to ``ConfigurationError``, a present-but-unusable
+    credentials/region and a missing optional dependency
+    (``MissingDependencyException`` - awscrt absent where SigV4a signing needs
+    it) to ``ConfigurationError``, a present-but-unusable
     profile or partial credentials to its ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. An
@@ -199,6 +222,15 @@ def translate_boto_error(
         return exc
     if isinstance(exc, ClientError):
         return _translate_client_error(exc, operation=operation, bucket=bucket, key=key)
+    if isinstance(exc, MissingDependencyException):
+        # A missing optional dependency (awscrt: the SigV4a signing an MRAP
+        # target needs, the CRT checksum family) is an environment problem,
+        # so it keeps the plain ConfigurationError of the crt-absence family
+        # (the CLI's `[s3] preferred_transfer_client = crt` degradation, rc
+        # 253). The engine-selection path re-raises boto3's exception
+        # unwrapped instead (crtsupport - the documented pass-through); that
+        # exception never crosses this seam.
+        return ConfigurationError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _UNRESOLVED_CONFIG_ERRORS):
         return ConfigurationError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _INVALID_CONFIG_ERRORS):
@@ -223,10 +255,11 @@ def s3_errors(
 
 def _page_to_infos(
     page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str, storage: S3Storage
-) -> list[FileInfo]:
+) -> list[S3FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
-    Runs on the prefetch worker thread. Non-recursive listings emit one
+    Runs on the prefetch worker thread under ``Storage.scan`` (a direct
+    ``scan_pages`` consumer drives it on its own thread). Non-recursive listings emit one
     ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
     objects); every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
@@ -238,7 +271,7 @@ def _page_to_infos(
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
     """
-    infos: list[FileInfo] = []
+    infos: list[S3FileInfo] = []
     if not recursive:
         for common in page.get("CommonPrefixes", []):
             dir_prefix = common.get("Prefix")
@@ -274,7 +307,7 @@ def _page_to_infos(
     return infos
 
 
-def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[FileInfo]:
+def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[S3FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
     Runs on the consumer's iteration thread - ``S3.ls`` iterates
@@ -286,7 +319,7 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
     """
-    infos: list[FileInfo] = []
+    infos: list[S3FileInfo] = []
     for bucket in page.get("Buckets", []):
         name = bucket.get("Name")
         if name is None:
@@ -324,7 +357,9 @@ class S3Storage(Storage):
     region / endpoint / profile, pass a pre-built ``client``.
 
     How this source is *listed* is configured on the constructor too: ``page_size``
-    (the ``ListObjectsV2`` page size) and ``fetch_owner`` (populate each entry's
+    (the ``ListObjectsV2`` page size; the default ``None`` sends no ``MaxKeys``,
+    like aws-cli's unset ``--page-size``, so the server pages at its own
+    default) and ``fetch_owner`` (populate each entry's
     owner) are held on the instance and seeded into every scan via
     ``default_scan_options``, so a listing is tuned once here rather than per
     operation.
@@ -336,7 +371,10 @@ class S3Storage(Storage):
     side and pass it in rather than relying on the lazy default.
 
     Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
-    enumerates in native UTF-8 byte order (``ListObjectsV2``), reads an object
+    enumerates in native UTF-8 byte order (``ListObjectsV2``, the recursive
+    form; the non-recursive form re-groups each page's sub-"directories"
+    ahead of its objects, and S3 Express directory buckets return no order
+    at all), reads an object
     (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
     because every S3 write rides ``s3transfer`` (see ``open``).
     ``scan_options_type`` is ``S3ScanOptions`` (arg-less
@@ -474,14 +512,13 @@ class S3Storage(Storage):
 
     def __init__(
         self,
-        url: str | os.PathLike[str],
+        uri: str | os.PathLike[str],
         *,
         client: S3Client | None = None,
-        page_size: int = 1000,
+        page_size: int | None = None,
         fetch_owner: bool = False,
-        scan_wait_on_interrupt: bool = True,
     ) -> None:
-        text = os.fspath(url)
+        text = os.fspath(uri)
         # Explicit construction means "this is an S3 location", so the s3:// scheme
         # is optional here for convenience: "bucket/key" reads the same as
         # "s3://bucket/key" (mirrors aws-cli ls/presign/website). S3.resolve stays
@@ -489,22 +526,20 @@ class S3Storage(Storage):
         # still tell bare local paths from S3.
         if not text.startswith(_S3_SCHEME):
             text = f"{_S3_SCHEME}{text}"
-        self._url = text
-        self._bucket, self._key = _parse_s3_url(text)
+        self._uri = text
+        self._bucket, self._key = _parse_s3_uri(text)
         self._client = client
         self._owns_client = client is None
         # How this source is listed (the scan's source-config): the ListObjectsV2
         # page size and whether each entry's owner is fetched. Seeded into every
         # scan via default_scan_options, so an app tunes the listing once here
-        # rather than passing it through each operation. scan_wait_on_interrupt
-        # is the Ctrl-C exit policy (Storage.scan_wait_on_interrupt).
+        # rather than passing it through each operation.
         self._page_size = page_size
         self._fetch_owner = fetch_owner
-        self.scan_wait_on_interrupt = scan_wait_on_interrupt
 
     @property
-    def url(self) -> str:
-        return self._url
+    def uri(self) -> str:
+        return self._uri
 
     @property
     def bucket(self) -> str:
@@ -538,7 +573,9 @@ class S3Storage(Storage):
         scheme-less ``bucket/key`` root falls straight out of the join, and so
         does the keyless-bucket normalization (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``) - only the bare service root ``s3://`` stays empty.
+        root ``bucket/``) - only the bare service root ``s3://`` stays empty (a
+        ``dir_op`` still appends its trailing ``/``, so that root formats as
+        ``"/"``).
         A ``dir_op`` root is ``/``-terminated and takes the source's name;
         otherwise only an explicit trailing ``/`` does.
         """
@@ -554,15 +591,18 @@ class S3Storage(Storage):
 
     @override
     def validate(self) -> None:
-        """Reject the resource forms ``aws s3`` rejects at parse time (rc 252).
+        """Reject the malformed resource forms the strict checks cover.
 
         Deferred from construction (``Storage.validate``): S3 Object Lambda
-        and Outposts *bucket* ARNs (s3api / s3control territory), and a key with
-        no bucket (``"s3:///k"``). The library calls this before an operation and
+        and Outposts *bucket* ARNs (s3api / s3control territory; aws's uniform
+        parse-time 252), and a key with
+        no bucket (``"s3:///k"`` - aws's handling of that form varies per
+        command, so the CLI invokes this only where its command's parity point
+        wants the rejection). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
         """
-        rest = self._url.partition("://")[2]
+        rest = self._uri.partition("://")[2]
         if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
             raise ValidationError(
                 "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
@@ -572,7 +612,7 @@ class S3Storage(Storage):
                 "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
             )
         if not self._bucket and self._key:
-            raise ValidationError(f"s3:// URL has a key but no bucket: {self._url!r}")
+            raise ValidationError(f"s3:// URL has a key but no bucket: {self._uri!r}")
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.
@@ -583,17 +623,21 @@ class S3Storage(Storage):
         default build raises the translated ``Boto3S3Error`` -
         ``ConfigurationError`` for unresolvable credentials / region, its
         ``InvalidConfigError`` refinement for a set-but-unusable
-        ``AWS_PROFILE`` - never the raw botocore error (docs/exceptions.md
+        ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
+        botocore error (docs/exceptions.md
         section 1).
         """
         if self._client is None:
-            # Only the default-client fallback needs boto3. Callers passing a
-            # client never load it here.
-            import boto3
-
             # operation=None: no subcommand is in scope at build time.
             with s3_errors(operation=None):
-                self._client = boto3.client("s3")
+                try:
+                    self._client = boto3.client("s3")
+                except ValueError as exc:
+                    # A malformed endpoint from the environment
+                    # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
+                    # BotoCoreError - the same hole S3.client() plugs
+                    # (docs/exceptions.md).
+                    raise InvalidConfigError(str(exc)) from exc
         return self._client
 
     def close(self) -> None:
@@ -615,17 +659,21 @@ class S3Storage(Storage):
         return S3ScanOptions(page_size=self._page_size, fetch_owner=self._fetch_owner)
 
     @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one ``list[FileInfo]`` per ``ListObjectsV2`` page (paginated).
+    def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
+        """Yield one ``list[S3FileInfo]`` per ``ListObjectsV2`` page (paginated;
+        a page the filter empties entirely is skipped, not yielded empty).
 
         Object listing only - the openable-entity enumeration ``scan`` promises
         (aws-cli's ``_list_all_objects``). ``options.recursive`` omits
         ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
         passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
         ``S3FileInfo`` per sub-"directory" (before the page's objects).
-        ``FileInfo.key`` is the full S3 key (or the prefix for directories), in
-        ListObjectsV2's UTF-8 lexicographic byte order across pages - so a
-        recursive stream is directly merge-joinable (the basis of ``sync``).
+        ``FileInfo.key`` is the full S3 key (or the prefix for directories) -
+        for a recursive listing, in ListObjectsV2's UTF-8 lexicographic byte
+        order across pages, so that stream is directly merge-joinable (the
+        basis of ``sync``; the non-recursive form emits each page's
+        directories ahead of its objects, and S3 Express directory buckets
+        guarantee no order - why ``sync`` rejects them).
         ``options.fetch_owner`` sends ``FetchOwner=True`` to populate
         ``S3FileInfo.owner``. The bare service root (empty bucket) is *not* an
         object container: it is listed with ``list_buckets`` (``S3.ls``
@@ -651,8 +699,8 @@ class S3Storage(Storage):
             raw = sieve_pages(raw, options.filter)
         yield from raw
 
-    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[FileInfo]]:
-        """Yield one raw ``list[FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
+    def _scan_object_pages(self, options: S3ScanOptions) -> Iterator[list[S3FileInfo]]:
+        """Yield one raw ``list[S3FileInfo]`` per ``ListObjectsV2`` page (pre-filter).
 
         ``options.prefix`` overrides the storage's own key as the listing anchor
         (a transfer's normalized prefix) - both the ``Prefix`` and the

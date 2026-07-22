@@ -20,6 +20,8 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from boto3_s3 import (
     AccessDeniedError,
     Boto3S3Error,
+    CancelMode,
+    CancelToken,
     ConfigurationError,
     LocalStorage,
     NotFoundError,
@@ -33,6 +35,7 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.deleter import S3_DELETE_BATCH
+from tests.utils.fakes3 import client_error
 
 
 class _FakeS3Client:
@@ -81,7 +84,9 @@ def _deleter(fake: _FakeS3Client, **kwargs: Any) -> S3Deleter:
 
 
 def _info(key: str) -> S3FileInfo:
-    """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters)."""
+    """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters;
+    with no ``compare_key`` stamped, the emitted record's ``compare_key`` falls
+    back to the full key)."""
     return S3FileInfo(key=key)
 
 
@@ -92,13 +97,7 @@ def _keys(calls: list[dict[str, Any]]) -> list[list[str]]:
 def _client_error(
     code: str = "AccessDenied", status: int = 403, operation: str = "DeleteObjects"
 ) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "boom"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
+    return client_error(code, status, operation, message="boom")
 
 
 def _deleter_worker_alive() -> bool:
@@ -110,8 +109,11 @@ def _deleter_worker_alive() -> bool:
 class TestConstruction:
     @pytest.mark.parametrize("batch_size", [0, -1, S3_DELETE_BATCH + 1])
     def test_batch_size_out_of_bounds_rejected(self, batch_size: int) -> None:
-        with pytest.raises(ValueError, match="batch_size"):
+        # Exact type: the caller-argument guard raises inside the taxonomy,
+        # like the storage-type guard above it.
+        with pytest.raises(ValidationError, match="batch_size") as excinfo:
             _deleter(_FakeS3Client(), batch_size=batch_size)
+        assert type(excinfo.value) is ValidationError
 
     @pytest.mark.parametrize("batch_size", [1, S3_DELETE_BATCH])
     def test_batch_size_bounds_accepted(self, batch_size: int) -> None:
@@ -217,6 +219,39 @@ class TestBatching:
         deleter.close()
         assert _keys(fake.calls) == [["a"]]
 
+    def test_empty_compare_key_is_preserved(self) -> None:
+        # A legitimately empty compare_key (a folder-marker object equal to
+        # the listing prefix) must not fall back to the full key - only a
+        # None (hand-built entry) does. `or` would swallow it.
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        deleter.submit(S3FileInfo(key="prefix/", compare_key=""))
+        deleter.close()
+        assert [r.compare_key for r in results] == [""]
+        assert results[0].src_info is not None
+        assert results[0].src_info.key == "prefix/"
+
+    def test_immediate_cancel_delivers_the_started_batch_and_drops_the_rest(self) -> None:
+        # docs/deleter.md: IMMEDIATE cannot claw back a batch the worker
+        # already started - all of its results are delivered - while work not
+        # yet dispatched is abandoned without records.
+        fake = _FakeS3Client()
+        fake.gate = threading.Event()
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, cancel_token=token)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))  # batch 1 dispatched, held in flight on the gate
+        assert fake.entered.wait(timeout=5.0)
+        deleter.submit(_info("c"))  # buffered; must never be dispatched
+        token.cancel(mode=CancelMode.IMMEDIATE)
+        fake.gate.set()
+        deleter.close()
+        assert _keys(fake.calls) == [["a", "b"]]
+        assert [r.compare_key for r in results] == ["a", "b"]
+        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
+
     def test_duplicate_keys_pass_through(self) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []
@@ -225,11 +260,62 @@ class TestBatching:
         deleter.submit(_info("k"))
         deleter.close()
         assert _keys(fake.calls) == [["k", "k"]]
-        assert [r.key for r in results] == ["k", "k"]
+        assert [r.compare_key for r in results] == ["k", "k"]
         assert deleter.succeeded == 2
+
+    def test_duplicate_keys_share_one_capture_slot_last_entry_wins(self) -> None:
+        # docs/deleter.md: capture keys the response entries by object key, so
+        # duplicate submissions share a single slot and the batch response's
+        # last entry for that key is what both records carry.
+        fake = _FakeS3Client(
+            [
+                {
+                    "Deleted": [
+                        {"Key": "k", "VersionId": "v1"},
+                        {"Key": "k", "VersionId": "v2"},
+                    ]
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, capture_response=True)
+        deleter.submit(_info("k"))
+        deleter.submit(_info("k"))
+        deleter.close()
+        assert [r.compare_key for r in results] == ["k", "k"]
+        assert results[0].extra_info == results[1].extra_info
+        first = results[0].extra_info
+        assert first is not None and first["delete"] == {"VersionId": "v2"}
 
 
 class TestXmlIncompatibleFallback:
+    @pytest.mark.parametrize(
+        ("char", "compatible"),
+        [
+            ("\t", True),
+            ("\n", True),
+            ("\r", True),
+            ("\x00", False),
+            ("\x1f", False),  # last C0 control below the allowed range
+            ("\x20", True),  # first allowed non-control
+            ("퟿", True),  # last code point before the surrogate block
+            ("\ud800", False),  # first surrogate
+            ("\udfff", False),  # last surrogate
+            ("", True),  # first code point after the surrogate block
+            ("�", True),  # last allowed BMP code point
+            ("￾", False),  # first terminal BMP noncharacter
+            ("￿", False),  # second terminal BMP noncharacter
+            ("\U00010000", True),  # first astral code point
+            ("\U0010ffff", True),  # last code point
+        ],
+    )
+    def test_xml_char_production_boundaries(self, char: str, compatible: bool) -> None:
+        # Pins the predicate exactly at the edges of XML 1.0's Char production,
+        # where an off-by-one in the character class would flip silently.
+        from boto3_s3.deleter import _delete_objects_compatible
+
+        assert _delete_objects_compatible(f"key-{char}-tail") is compatible
+
     def test_only_xml_incompatible_keys_use_delete_object(self) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []
@@ -253,7 +339,7 @@ class TestXmlIncompatibleFallback:
             "control-\x01",
             "noncharacter-\uffff",
         ]
-        assert [result.key for result in results] == list(keys)
+        assert [result.compare_key for result in results] == list(keys)
         assert all(result.outcome is OpOutcome.SUCCEEDED for result in results)
 
     def test_all_incompatible_keys_skip_delete_objects(self) -> None:
@@ -319,7 +405,7 @@ class TestResults:
         for key in ("a", "b", "c"):
             deleter.submit(_info(key))
         deleter.close()
-        assert [r.key for r in results] == ["a", "b", "c"]
+        assert [r.compare_key for r in results] == ["a", "b", "c"]
         assert all(r.transfer_type is TransferType.DELETE for r in results)
         assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
         assert all(r.bytes_transferred == 0 for r in results)
@@ -327,6 +413,10 @@ class TestResults:
         assert (deleter.succeeded, deleter.failed) == (3, 0)
         assert deleter.first_error is None
 
+    # Table-driven translator breadth: the per-key route shares one code ->
+    # category table with the request-level path, so codes that in practice
+    # arrive request-level (NoSuchBucket) are exercised synthetically here -
+    # the table is the subject, not the wire realism of each entry.
     @pytest.mark.parametrize(
         ("code", "category"),
         [
@@ -367,8 +457,10 @@ class TestResults:
         deleter.close()
         error = results[0].error
         assert type(error) is Boto3S3Error
+        # Both fallbacks are botocore's ClientError defaults, so the synthetic
+        # per-key string reads exactly like a real DeleteObject failure.
         assert str(error) == (
-            "An error occurred (Unknown) when calling the DeleteObjects operation: no message"
+            "An error occurred (Unknown) when calling the DeleteObjects operation: Unknown"
         )
 
     def test_mixed_batch_keeps_submission_order(self) -> None:
@@ -380,7 +472,7 @@ class TestResults:
         for key in ("a", "b", "c"):
             deleter.submit(_info(key))
         deleter.close()
-        assert [(r.key, r.outcome) for r in results] == [
+        assert [(r.compare_key, r.outcome) for r in results] == [
             ("a", OpOutcome.SUCCEEDED),
             ("b", OpOutcome.FAILED),
             ("c", OpOutcome.SUCCEEDED),
@@ -450,7 +542,8 @@ class TestResults:
         # An Errors[] entry without Key, or whose key was never submitted,
         # cannot be attributed; the affected key reads as a success (the
         # Quiet=True synthesis limit), so the deleter warns loudly instead of
-        # crashing the batch or staying silent.
+        # crashing the batch or staying silent. (Synthetic by design: real
+        # DeleteObjects answers only requested keys - this pins the defense.)
         fake = _FakeS3Client(
             script=[
                 {
@@ -483,7 +576,7 @@ class TestResults:
         seen: list[str] = []
 
         def explosive(result: OpResult) -> None:
-            seen.append(result.key)
+            seen.append(result.compare_key)
             if len(seen) == 2:
                 raise RuntimeError("callback boom")
 
@@ -528,7 +621,7 @@ class TestCaptureSlots:
                             "DeleteMarker": True,
                             "DeleteMarkerVersionId": "dm1",
                         },
-                        {"Key": "prefix/b.txt", "VersionId": "v2"},
+                        {"Key": "prefix/b.txt"},
                     ],
                     "RequestCharged": "requester",
                 }
@@ -543,12 +636,16 @@ class TestCaptureSlots:
         # without that the per-key slots below could not be reconstructed.
         assert fake.calls[0]["Delete"]["Quiet"] is False
         slots = [(r.extra_info or {}).get("delete") for r in results]
+        # The marker's id lands in VersionId, as a single DeleteObject reports
+        # it (DeleteObjects' DeleteMarkerVersionId is the batch wire form).
         assert slots[0] == {
             "DeleteMarker": True,
-            "DeleteMarkerVersionId": "dm1",
+            "VersionId": "dm1",
             "RequestCharged": "requester",
         }
-        assert slots[1] == {"VersionId": "v2", "RequestCharged": "requester"}
+        # A plain unversioned delete answers with just its Key; the slot
+        # carries only the batch-wide RequestCharged.
+        assert slots[1] == {"RequestCharged": "requester"}
         assert all(slot is not None and "Key" not in slot for slot in slots)
 
 
@@ -571,7 +668,7 @@ class TestThreading:
             fake.gate.set()
             with contextlib.suppress(Exception):
                 deleter.close()
-        assert [r.key for r in results] == ["a", "b"]
+        assert [r.compare_key for r in results] == ["a", "b"]
 
     def test_second_flush_waits_for_first(self) -> None:
         fake = _FakeS3Client()
@@ -609,7 +706,7 @@ class TestThreading:
             fake.gate.set()
             with contextlib.suppress(Exception):
                 deleter.close(flush=False)
-        assert [r.key for r in results] == ["a", "b"]
+        assert [r.compare_key for r in results] == ["a", "b"]
         assert deleter.succeeded == 2
         assert not _deleter_worker_alive()
 
@@ -714,4 +811,4 @@ class TestLifecycle:
                 deleter.submit(_info("c"))  # buffered; must be abandoned
                 raise ValueError("body boom")
         assert _keys(fake.calls) == [["a", "b"]]  # "c" was never sent
-        assert [r.key for r in results] == ["a", "b"]  # the in-flight batch was awaited
+        assert [r.compare_key for r in results] == ["a", "b"]  # the in-flight batch was awaited

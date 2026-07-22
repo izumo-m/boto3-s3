@@ -1,5 +1,9 @@
 # boto3-s3-cli
 
+[![PyPI](https://img.shields.io/pypi/v/boto3-s3-cli)](https://pypi.org/project/boto3-s3-cli/)
+[![Python versions](https://img.shields.io/pypi/pyversions/boto3-s3-cli)](https://pypi.org/project/boto3-s3-cli/)
+[![License](https://img.shields.io/pypi/l/boto3-s3-cli)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
+
 An `aws s3`-compatible command line, built on the
 [`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
 
@@ -13,7 +17,7 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 ## Why use it
 
 - **Fast startup.** In a representative Linux measurement, syncing a directory
-  that contained one small file was about 1.9x faster than aws-cli v2.
+  that contained one small file was about 2.2x faster than aws-cli v2.
 - **Compact installation.** A default dependency-complete installation was
   about 31.5 MiB, compared with about 268 MiB for the corresponding aws-cli v2
   installation.
@@ -59,9 +63,9 @@ Each tool ran as a fresh process 20 times, with a different destination for
 every run and alternating execution order, on one x86-64 WSL2/Linux host with a
 warm filesystem cache:
 
-| Operation | `boto3-s3-cli` 0.4.0 | aws-cli 2.35.18 |
+| Operation | `boto3-s3-cli` 0.6.0 | aws-cli 2.36.1 |
 | --- | ---: | ---: |
-| One-file `sync` (median) | 244 ms | 463 ms |
+| One-file `sync` (median) | 204 ms | 452 ms |
 
 The measurement includes SDK setup, remote listing, and the actual upload.
 
@@ -102,6 +106,11 @@ pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive complet
 
 With the autoprompt extra, run `boto3-s3 --cli-auto-prompt` to complete
 arguments interactively as you type.
+
+Installing the package also makes a `boto3_s3_cli` Python package importable,
+but that is an implementation detail with no API guarantee: the supported
+interface is the `boto3-s3` command. For a Python API, use the
+[`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
 
 ## Examples
 
@@ -166,3 +175,6 @@ Apache-2.0. See
 repository.
 
 Main project (source, issues): <https://github.com/izumo-m/boto3-s3>.
+Report security vulnerabilities privately as described in
+[`SECURITY.md`](https://github.com/izumo-m/boto3-s3/blob/main/SECURITY.md),
+not on the public issue tracker.

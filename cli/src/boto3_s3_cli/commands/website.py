@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from boto3_s3 import ValidationError
+from boto3_s3 import S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, usage
 from boto3_s3_cli.commands.base import (
     Command,
@@ -34,7 +34,9 @@ class WebsiteCommand(Command):
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
         ClientError-cause mapping; botocore's client-side parameter
-        validation (empty bucket) is 252; client construction is 253.
+        validation (empty bucket) is 252; client construction's unresolvable
+        credentials / region is 253 (its other botocore failures - a bad
+        ``--profile``, partial credentials - are 255).
         """
         # aws's parse-time order (measured, docs/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then
@@ -42,12 +44,11 @@ class WebsiteCommand(Command):
         # options are all expanded at parse time - before the request is built.
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
+        raw_paths = args.paths
         expand_positional_paramfile(args, "paths", name="paths", operation="website")
+        paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
@@ -58,6 +59,15 @@ class WebsiteCommand(Command):
             # The resulting int has no startswith(), so aws exits 255.
             raise AttributeError("'int' object has no attribute 'startswith'")
         path: str = args.paths
+        if paths_expanded:
+            # The file:// half of the same bug: the unwrapped value is the
+            # loaded text, and indexing it takes its FIRST CHARACTER as the
+            # path (measured: a paramfile containing "s3://mybucket" makes aws
+            # PutBucketWebsite on bucket "s"; an empty file is aws's
+            # IndexError, rc 255 through the general handler). Reproducing it
+            # matters beyond the rc: using the full text would perform a write
+            # on a bucket aws never touches.
+            path = path[0]
         if path.startswith("s3://"):
             path = path[len("s3://") :]
         if path.endswith("/"):

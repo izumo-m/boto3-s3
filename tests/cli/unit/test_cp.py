@@ -21,10 +21,10 @@ from typing import Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -35,14 +35,6 @@ _SYNC = TransferConfig(use_threads=False)
 # tests use a single worker (max_concurrent_requests = 1). _SYNC completes each
 # twin before the next is judged, emptying the set.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
 
 
 def _recording_ctx(
@@ -208,7 +200,7 @@ class TestPipelineErrors:
     def test_single_source_404_is_a_fatal_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        ctx, _ = _recording_ctx([_client_error("404", 404, "HeadObject")])
+        ctx, _ = _recording_ctx([client_error("404", 404, "HeadObject")])
         rc = cli.main(["cp", "s3://b/no-such", str(tmp_path / "x")], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 1
@@ -222,7 +214,7 @@ class TestPipelineErrors:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        ctx, _ = _recording_ctx([_client_error("NoSuchBucket", 404, "PutObject")])
+        ctx, _ = _recording_ctx([client_error("NoSuchBucket", 404, "PutObject")])
         rc = cli.main(["cp", str(src), "s3://missing-b/k"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 1
@@ -362,12 +354,19 @@ class TestSourceRegionWiring:
     def _factory_recording_ctx(self) -> tuple[Context, list[argparse.Namespace]]:
         namespaces: list[argparse.Namespace] = []
 
+        # Which client serves which operation depends on --source-region (one
+        # client takes both, or the source client takes the HEAD), so answer
+        # by operation name, each with its real response shape - CopyObject
+        # nests its ETag under CopyObjectResult, unlike HeadObject.
+        shapes: dict[str, dict[str, Any]] = {
+            "HeadObject": {"ContentLength": 1, "ETag": '"e"', "LastModified": MTIME},
+            "CopyObject": {"CopyObjectResult": {"ETag": '"e"', "LastModified": MTIME}},
+        }
+
         def factory(args: argparse.Namespace) -> Any:
             namespaces.append(args)
-            # Generous identical canned lists: whichever of HeadObject /
-            # CopyObject lands on this client finds a workable response
-            # (leftovers are allowed by the recorder).
-            client, _ = make_recording_client([{"ContentLength": 1, "ETag": '"e"'}, {}, {}])
+            client: Any = make_recording_client([])[0]
+            client._make_api_call = lambda operation_name, _params: shapes[operation_name]
             return client
 
         return Context(client_factory=factory, transfer_config=_SYNC), namespaces
@@ -459,6 +458,25 @@ class TestStreaming:
         assert rc == 0
         assert [c.operation for c in calls] == ["PutObject"]
 
+    def test_expected_size_above_the_threshold_goes_multipart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The hint must reach the engine: a stream cannot be sized up front,
+        # so only --expected-size can push it over the multipart threshold
+        # (default 8 MiB). The actual bytes stay tiny - the decision is made
+        # from the hint alone, exactly aws's use of expected-size.
+        monkeypatch.setattr("sys.stdin", _StdinShim(b"foo\n"))
+        ctx, calls = _recording_ctx([{"UploadId": "u"}, {"ETag": '"p1"'}, {}])
+        rc = cli.main(
+            ["cp", "-", "s3://bucket/k", "--expected-size", str(9 * 1024 * 1024)], ctx=ctx
+        )
+        assert rc == 0
+        assert [c.operation for c in calls] == [
+            "CreateMultipartUpload",
+            "UploadPart",
+            "CompleteMultipartUpload",
+        ]
+
     def test_expected_size_non_integer_is_a_fatal_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -492,6 +510,49 @@ class TestStreaming:
         captured = capsys.readouterr()
         assert rc == 1
         assert "fatal error: maximum recursion depth exceeded" in captured.err
+
+    def test_mid_pipeline_ctrl_c_is_rc_1_cancelled_like_aws(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A Ctrl-C inside the pipeline span is aws's cancelled run - rc 1
+        # with one `cancelled: ctrl-c received` line (measured mid-sync on
+        # the pinned 2.36.1), never the dispatcher backstop's 130, which
+        # stays for the pre-pipeline spans (test_exit_codes).
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", interrupt)
+        ctx, _ = _recording_ctx([])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == "cancelled: ctrl-c received\n"
+        assert captured.out == ""
+
+    def test_mid_pipeline_ctrl_c_respects_quiet(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # --quiet suppresses the cancelled line like the fatal-error line
+        # (aws attaches no result printer under --quiet); the rc stays 1.
+        (tmp_path / "a.txt").write_bytes(b"x")
+
+        def interrupt(*_args: object, **_kwargs: object) -> object:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", interrupt)
+        ctx, _ = _recording_ctx([])
+        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive", "--quiet"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == ""
 
     def test_expected_size_non_integer_ignored_off_the_stream_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -552,16 +613,16 @@ class TestNoOverwrite:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        ctx, _ = _recording_ctx([_client_error("PreconditionFailed", 412, "PutObject")])
+        ctx, _ = _recording_ctx([client_error("PreconditionFailed", 412, "PutObject")])
         rc = cli.main(["cp", str(src), "s3://b/k", "--no-overwrite"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 0
-        assert captured.err == ""
+        assert (captured.out, captured.err) == ("", "")  # no upload line either
 
     def test_existing_download_destination_is_skipped(self, tmp_path: Path) -> None:
         dest = tmp_path / "out.bin"
         dest.write_bytes(b"keep me")
-        ctx, calls = _recording_ctx([{"ContentLength": 3, "LastModified": None, "ETag": '"e"'}])
+        ctx, calls = _recording_ctx([{"ContentLength": 3, "LastModified": MTIME, "ETag": '"e"'}])
         rc = cli.main(["cp", "s3://b/k", str(dest), "--no-overwrite"], ctx=ctx)
         assert rc == 0
         assert [c.operation for c in calls] == ["HeadObject"]
@@ -695,36 +756,30 @@ class TestSourceScanWiring:
         assert calls[0].operation == "ListObjectsV2"
         assert calls[0].params["MaxKeys"] == 5
 
-    def test_scanning_storages_opt_out_of_the_interrupt_join(
+    def test_the_cli_posture_reaches_the_source_scan(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI, so the storages the CLI builds
-        # for a transfer must not wait for an in-flight page pull on the way
-        # out (aws dies immediately); the library default keeps waiting.
+        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # wait_on_interrupt=False once, and the operation threads it into the
+        # ScanOptions of every scan it starts (here the upload's source walk);
+        # the library default keeps waiting.
         import boto3_s3
 
-        built: list[Any] = []
-
-        class _RecS3(boto3_s3.S3Storage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+        scan_waits: list[bool] = []
 
         class _RecLocal(boto3_s3.LocalStorage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
+                assert options is not None
+                scan_waits.append(options.wait_on_interrupt)
+                return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "S3Storage", _RecS3)
-        monkeypatch.setattr(boto3_s3, "LocalStorage", _RecLocal)
+        # Patch the binding module: transferargs imports LocalStorage at top.
+        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.LocalStorage", _RecLocal)
         (tmp_path / "f.txt").write_bytes(b"x")
         ctx, _calls = _recording_ctx([{}])
         rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
         assert rc == 0
-        transfer_sides = [s for s in built if s.scan_wait_on_interrupt is False]
-        # Both real transfer sides opt out; plan-only throwaways (path_storage)
-        # keep the library default and never scan.
-        assert len(transfer_sides) == 2
+        assert scan_waits == [False]
 
 
 class TestCaseConflict:

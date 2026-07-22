@@ -67,7 +67,7 @@ class SyncPair:
     ``file_at_src_and_dest`` strategy slot). ``src`` / ``dest`` are the two
     sides' listing entries, both always present - a filter reads
     ``pair.src.size`` / ``pair.dest.mtime`` directly, with no ``None``
-    handling. ``key`` is the compare key - the entry's path relative to its
+    handling. ``compare_key`` is the entry's path relative to its
     side's listing (directory-relative for a local side, ``Prefix``-relative
     for an S3 side), ``/``-separated on every platform - so name-based filters
     need not care where either side lives. ``transfer_type`` is the sync's
@@ -82,7 +82,7 @@ class SyncPair:
     any backend, not just a local filesystem.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     src: FileInfo
     dest: FileInfo
@@ -93,12 +93,12 @@ class SrcOnlyPair:
     """A compare key present only on the source side - a new entry.
 
     ``S3.sync`` routes it to the create lane (``create_filter``; aws-cli's
-    ``file_not_at_dest`` slot, where copying is hard-coded). ``key`` and
+    ``file_not_at_dest`` slot, where copying is hard-coded). ``compare_key`` and
     ``transfer_type`` are as on ``SyncPair``; ``src`` is the source listing
     entry, and there is no ``dest`` attribute at all.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     src: FileInfo
 
@@ -108,12 +108,12 @@ class DestOnlyPair:
     """A compare key present only on the destination side - an orphan.
 
     The delete candidate: ``S3.sync`` routes it to the delete lane
-    (``delete_filter``; aws-cli's ``file_not_at_src`` slot). ``key`` and
+    (``delete_filter``; aws-cli's ``file_not_at_src`` slot). ``compare_key`` and
     ``transfer_type`` are as on ``SyncPair``; ``dest`` is the destination
     listing entry, and there is no ``src`` attribute at all.
     """
 
-    key: str
+    compare_key: str
     transfer_type: TransferType
     dest: FileInfo
 
@@ -136,8 +136,12 @@ class ParallelFilter(Generic[_T]):
     predicate does per-entry I/O decides many entries concurrently - a content
     ``update_filter=`` strategy (``EtagComparison`` / ``ChecksumComparison``), or a
     ``create`` / ``delete`` filter that reads bytes / object tags / attributes.
-    Passing it is observationally identical to passing ``decide`` bare, only
-    faster - **except** that parallelizing ``create_filter`` makes the
+    For a pure (stateless) predicate the decisions are the same as passing
+    ``decide`` bare, only
+    faster (a stateful one can observe the concurrency); what changes is
+    ordering: pooled decisions emit their results in
+    completion order rather than compare-key order (sync.md section 10), and
+    parallelizing ``create_filter`` makes the
     ``--case-conflict`` "first key wins" order non-deterministic (a library-only
     knob, so no ``aws s3`` parity is at stake). The result set and the exit are
     otherwise unchanged.
@@ -148,14 +152,15 @@ class ParallelFilter(Generic[_T]):
     lane its own, are the caller's to arrange - but the ``sync`` call itself must
     **not** run as a task on that same pool: the lane blocks its thread waiting
     for decide futures that need a free worker, so a bounded pool driving both
-    deadlocks. The wrapped ``decide`` runs on that
+    can deadlock once no worker is left free. The wrapped ``decide`` runs on that
     pool's threads, so it must be thread-safe;
     ``ChecksumComparison`` and
     ``EtagComparison`` are (read-only over their
     fields; ``ChecksumComparison``'s S3-side clients are built at construction,
     and a botocore client is safe to share for concurrent calls). A
-    ``ProcessPoolExecutor`` will not work (the predicate and its S3 client are not
-    picklable) - the pool must be thread-based.
+    ``ProcessPoolExecutor`` will not work (the wrapped predicate and the
+    pair's storage-backed entries close over live handles - S3 clients,
+    ``FileInfo.storage`` - that do not pickle) - the pool must be thread-based.
 
     ``_T`` is the wrapped predicate's argument: ``SyncPair`` for a
     ``update_filter`` (a ``PairFilter``), ``FileInfo``
@@ -173,8 +178,11 @@ def _byte_ordered(
     """Dev-only pass-through that asserts a side ascends by ``compare_key``.
 
     ``Comparator.compare``'s merge-join assumes both sides arrive in UTF-8
-    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str`` order is code-point
-    = byte order). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
+    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str``
+    code-point order equals UTF-8 byte order for Unicode scalar values - a
+    surrogateescaped local name sits outside that equivalence, but both the
+    walk's sort and this guard use the same ``str`` order, so the two stay
+    consistent with each other). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
     order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
     ``--delete`` the deletion of files present on both sides. This trips a loud
     ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call
@@ -234,20 +242,22 @@ class Comparator:
         dest = next(dest_iter, None)
         while src is not None and dest is not None:
             if src[0] < dest[0]:
-                yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
+                yield SrcOnlyPair(compare_key=src[0], transfer_type=transfer_type, src=src[1])
                 src = next(src_iter, None)
             elif src[0] > dest[0]:
-                yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+                yield DestOnlyPair(compare_key=dest[0], transfer_type=transfer_type, dest=dest[1])
                 dest = next(dest_iter, None)
             else:
-                yield SyncPair(key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1])
+                yield SyncPair(
+                    compare_key=src[0], transfer_type=transfer_type, src=src[1], dest=dest[1]
+                )
                 src = next(src_iter, None)
                 dest = next(dest_iter, None)
         while src is not None:
-            yield SrcOnlyPair(key=src[0], transfer_type=transfer_type, src=src[1])
+            yield SrcOnlyPair(compare_key=src[0], transfer_type=transfer_type, src=src[1])
             src = next(src_iter, None)
         while dest is not None:
-            yield DestOnlyPair(key=dest[0], transfer_type=transfer_type, dest=dest[1])
+            yield DestOnlyPair(compare_key=dest[0], transfer_type=transfer_type, dest=dest[1])
             dest = next(dest_iter, None)
 
 

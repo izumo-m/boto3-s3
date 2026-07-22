@@ -44,6 +44,22 @@ class TestParseMapOption:
     def test_single_quoted_value_with_comma(self) -> None:
         assert _parse("k='a,b',j=c") == {"k": "a,b", "j": "c"}
 
+    def test_trailing_whitespace_after_quoted_value(self) -> None:
+        # aws's _csv_value consumes whitespace after the value before its
+        # EOF/comma check (verified against the pinned aws-cli: rc 0). The
+        # newline form is the natural shape of a file:// paramfile that keeps
+        # its trailing newline.
+        assert _parse("title='hello' ") == {"title": "hello"}
+        assert _parse("title='hello'\n") == {"title": "hello"}
+        assert _parse('k="a,b" ,j=c') == {"k": "a,b", "j": "c"}
+
+    def test_non_comma_after_quoted_value_and_whitespace_rejected(self) -> None:
+        # The whitespace is consumed first, so the error names the offending
+        # character, matching aws's wording (verified against the pinned
+        # aws-cli).
+        with pytest.raises(ValidationError, match="Expected: ',', received: 'x'"):
+            _parse("title='hello' x")
+
     def test_json_object_form(self) -> None:
         assert _parse('{"a":"b","c":"d"}') == {"a": "b", "c": "d"}
 
@@ -55,10 +71,67 @@ class TestParseMapOption:
         assert _parse("foo=1,=bar") == {"foo": "1", "": "bar"}
 
 
+class TestCsvSecondValueProbe:
+    """aws's ``_csv_value`` second-value probe, observable in the flat map
+    (``_try_csv_continuation``): an empty segment between pairs is absorbed,
+    a trailing comma is aws's ``'<second>'`` parse error, and a second value
+    that parses still errors as the csv-list shapes. All expectations
+    differentially verified against the pinned aws-cli."""
+
+    def test_empty_segment_between_pairs_is_absorbed(self) -> None:
+        # The failed probe backtracks only to the nearest ',', so the empty
+        # segment vanishes and both pairs parse (measured rc 0 on the pinned
+        # aws where the plain pair loop errored 252).
+        assert _parse("a=b,,c=d") == {"a": "b", "c": "d"}
+
+    def test_empty_segment_with_whitespace_is_absorbed(self) -> None:
+        assert _parse("a=b , , c=d") == {"a": "b", "c": "d"}
+
+    def test_repeated_empty_segments_are_absorbed(self) -> None:
+        assert _parse("x=1,,y=2,,z=3") == {"x": "1", "y": "2", "z": "3"}
+
+    def test_empty_value_before_an_empty_segment(self) -> None:
+        assert _parse("a=,,b=c") == {"a": "", "b": "c"}
+
+    def test_backtrack_lands_inside_an_escaped_comma(self) -> None:
+        # The probe consumes the escaped comma "\," as its second value; when
+        # the following '=' fails the csv-list extension, aws backtracks to
+        # the nearest ',' - the one INSIDE the escape - and the pair loop
+        # re-reads "a=aa" from there.
+        assert _parse(r"-=,\,a=aa") == {"-": "", "a": "aa"}
+
+    def test_trailing_comma_is_the_second_value_parse_error(self) -> None:
+        # An at-EOF probe failure propagates with aws's exact wording
+        # (measured live).
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("a=b,")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': "
+            "Expected: '<second>', received: '<none>' for input:\n"
+            " a=b,\n"
+            "    ^"
+        )
+
+    def test_double_trailing_comma_still_errors(self) -> None:
+        # The first ',' probe backtracks, the pair loop consumes the second,
+        # and EOF fails the next pair's '=' expectation.
+        with pytest.raises(ValidationError, match="Expected: '=', received: 'EOF'"):
+            _parse("a=b,,")
+
+    def test_csv_list_shapes_still_error(self) -> None:
+        # A second value that parses would form a csv list, schema-invalid for
+        # the flat string map: rc 252 like aws's schema rejection, wording per
+        # the parser's scope note - so only the error class is pinned.
+        with pytest.raises(ValidationError):
+            _parse("a=b,c")
+        with pytest.raises(ValidationError):
+            _parse("a=b,c,d=e")
+
+
 class TestAtEqualsParamfile:
     """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
     ``file://`` loads text, ``fileb://`` bytes, a prefix-less value passes
-    through (verified against aws 2.35.18: ``--metadata a@=file://f`` parses
+    through (verified against the pinned aws-cli: ``--metadata a@=file://f`` parses
     and transfers)."""
 
     def test_plain_value_passes_through(self) -> None:
@@ -129,7 +202,7 @@ class TestParseMapOptionErrors:
 class TestSyntaxErrorWordingParity:
     """Byte-exact aws parser wording for the shorthand syntax-error paths.
 
-    Each expected string was measured against the pinned aws 2.35.18
+    Each expected string was measured against the pinned aws-cli
     (``aws s3 cp ... --metadata <input>``): aws single-quote-wraps the offending
     character literally (not via ``repr``), prefixes the echoed input line with
     one space, and places the caret with ``ShorthandParseError._error_location``

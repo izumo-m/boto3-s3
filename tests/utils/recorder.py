@@ -51,6 +51,7 @@ def make_recording_client(
     *,
     region: str = "us-east-1",
     service: str = "s3",
+    endpoint_url: str | None = None,
 ) -> tuple[S3Client, list[ApiCall]]:
     """Build a client for *service* replaying *parsed_responses* in call order.
 
@@ -59,7 +60,9 @@ def make_recording_client(
     ``Exception`` is raised instead of returned - the aws-cli harness's
     ``http_response.status_code = 500`` cases port as a canned ``ClientError``.
     *region* feeds ``client.meta.region_name`` for commands that read it
-    (``mb``'s LocationConstraint); *service* serves the non-S3 clients mv's
+    (``mb``'s LocationConstraint); *endpoint_url* feeds
+    ``client.meta.endpoint_url`` for consumers that compare it (the CRT
+    explicit-endpoint gate); *service* serves the non-S3 clients mv's
     path validation builds (``s3control`` / ``sts``) - the return type is
     nominally ``S3Client`` either way, deliberately (every consumer treats it
     as ``Any``). Credentials come from the fake environment installed by the
@@ -69,7 +72,9 @@ def make_recording_client(
     cached and leaking into the e2e suite's real client later in the same
     run.
     """
-    client: Any = boto3.session.Session().client(service, region_name=region)
+    client: Any = boto3.session.Session().client(
+        service, region_name=region, endpoint_url=endpoint_url
+    )
     calls: list[ApiCall] = []
     remaining = list(parsed_responses)
 
@@ -87,3 +92,8 @@ def make_recording_client(
 
     client._make_api_call = _canned_api_call
     return client, calls
+
+
+def ops(calls: list[ApiCall]) -> list[str]:
+    """Just the operation names, in call order - what most tests pin."""
+    return [call.operation for call in calls]

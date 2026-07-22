@@ -15,6 +15,7 @@ import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.harness import client_ctx, unused_ctx
 
 
 class _FakePresignClient:
@@ -25,10 +26,6 @@ class _FakePresignClient:
     def generate_presigned_url(self, method: str, **kwargs: Any) -> str:
         self.calls.append((method, kwargs["Params"], kwargs["ExpiresIn"]))
         return self.url
-
-
-def _ctx(client: Any) -> Context:
-    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
 
 
 def _real_client_ctx() -> Context:
@@ -44,7 +41,7 @@ def _real_client_ctx() -> Context:
 class TestPresign:
     def test_prints_url_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
         client = _FakePresignClient()
-        rc = cli.main(["presign", "s3://bucket/key.txt"], ctx=_ctx(client))
+        rc = cli.main(["presign", "s3://bucket/key.txt"], ctx=client_ctx(client))
         assert rc == 0
         assert capsys.readouterr().out == client.url + "\n"
         assert client.calls == [("get_object", {"Bucket": "bucket", "Key": "key.txt"}, 3600)]
@@ -53,18 +50,18 @@ class TestPresign:
         # aws-cli only strips a *present* s3:// prefix; unlike mb/rb/rm a
         # bare bucket/key path is accepted.
         client = _FakePresignClient()
-        assert cli.main(["presign", "bucket/key"], ctx=_ctx(client)) == 0
+        assert cli.main(["presign", "bucket/key"], ctx=client_ctx(client)) == 0
         assert client.calls[0][1] == {"Bucket": "bucket", "Key": "key"}
 
     def test_expires_in_converted_to_int(self) -> None:
         client = _FakePresignClient()
-        assert cli.main(["presign", "s3://b/k", "--expires-in", "120"], ctx=_ctx(client)) == 0
+        assert cli.main(["presign", "s3://b/k", "--expires-in", "120"], ctx=client_ctx(client)) == 0
         assert client.calls[0][2] == 120
 
     def test_negative_expires_in_passes_through(self) -> None:
         # No range validation anywhere: aws signs -1 and S3 rejects at use.
         client = _FakePresignClient()
-        assert cli.main(["presign", "s3://b/k", "--expires-in", "-1"], ctx=_ctx(client)) == 0
+        assert cli.main(["presign", "s3://b/k", "--expires-in", "-1"], ctx=client_ctx(client)) == 0
         assert client.calls[0][2] == -1
 
 
@@ -87,8 +84,14 @@ class TestPresignExitCodeShape:
         assert rc == 252
         assert "Invalid length for parameter Key" in err
 
-    def test_trailing_slash_is_param_validation_252(self) -> None:
-        assert cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx()) == 252
+    def test_trailing_slash_is_param_validation_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx())
+        assert rc == 252
+        # The same empty-Key client-side validation as the bucket-only form -
+        # not some other usage rejection.
+        assert "Invalid length for parameter Key" in capsys.readouterr().err
 
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["presign", "s3://"], ctx=_real_client_ctx())
@@ -108,13 +111,9 @@ class TestPresignExitCodeShape:
     def test_object_lambda_arn_stays_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         # S3Storage.validate() ARN rejections must reach main's 252 mapping.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
-        rc = cli.main(["presign", f"s3://{arn}"], ctx=_ctx(object()))
+        rc = cli.main(["presign", f"s3://{arn}"], ctx=client_ctx(object()))
         assert rc == 252
         assert "S3 Object Lambda" in capsys.readouterr().err
-
-
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("client factory must not be called")
 
 
 class TestPresignParamfileAndQuery:
@@ -125,17 +124,15 @@ class TestPresignParamfileAndQuery:
         ref = tmp_path / "u.txt"
         ref.write_text("s3://b/k")
         client = _FakePresignClient()
-        assert cli.main(["presign", f"file://{ref}"], ctx=_ctx(client)) == 0
+        assert cli.main(["presign", f"file://{ref}"], ctx=client_ctx(client)) == 0
         assert client.calls[0][1] == {"Bucket": "b", "Key": "k"}
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["presign", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["presign", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(
-            ["presign", "s3://b/k", "--query", "]["], ctx=Context(client_factory=_unused_factory)
-        )
+        rc = cli.main(["presign", "s3://b/k", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err

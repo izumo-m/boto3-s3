@@ -115,6 +115,7 @@ class TestCustomBackendScanOptions:
             recursive=True,
             on_warning=None,
             item_filter=None,
+            wait_on_interrupt=True,
         )
         assert isinstance(opts, MyScanOptions)  # own type, not a base ScanOptions
         assert opts.recursive is True  # common knob overlaid
@@ -126,6 +127,7 @@ class TestCustomBackendScanOptions:
             recursive=False,
             on_warning=None,
             item_filter=None,
+            wait_on_interrupt=True,
         )
         assert type(base_opts) is ScanOptions
 
@@ -182,6 +184,26 @@ class TestScanFilterSafetyNet:
         # backend so a downstream consumer (a content update_filter opening
         # info.storage, an on_result callback) can reach it on custom backends.
         assert infos and all(info.storage is backend for info in infos)
+
+    def test_safety_net_stamp_precedes_the_filter(self) -> None:
+        # FileInfo's contract: `storage` is stamped before any filter runs, so
+        # a predicate can reach the producing backend (e.g. a HeadObject for a
+        # tag the listing omits) even on a backend whose scan_pages does not
+        # stamp it.
+        class Unfiltered(_Stub):
+            @override
+            def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
+                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+
+        backend = Unfiltered()
+        seen: list[Storage | None] = []
+
+        def probe(info: FileInfo) -> bool:
+            seen.append(info.storage)
+            return True
+
+        list(backend.scan(ScanOptions(filter=probe)))
+        assert seen and all(storage is backend for storage in seen)
 
 
 class TestAutoBitLayout:

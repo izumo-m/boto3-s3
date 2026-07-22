@@ -16,7 +16,7 @@
 """Port of aws-cli's functional sync tests to ``boto3-s3 sync``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_sync_command.py``
-(aws-cli 2.35.18). Test names, canned responses, and expected operations are
+(aws-cli 2.36.1). Test names, canned responses, and expected operations are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
@@ -39,8 +39,6 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
   batch through ``DeleteObjects`` (accepted wire-level deviation,
   docs/deleter.md section 4 - the rm port rule), so per-key expectations become
   one ``DeleteObjects`` carrying the keys with ``Quiet: True``.
-- ``ListObjectsV2`` expectations gain our explicit ``MaxKeys: 1000``
-  page-size default (rm port rule).
 - The per-algorithm checksum matrices are parametrized instead of being
   nine near-identical methods (cp port rule).
 - The aws-cli's ``_oserror`` / ``_valueerror`` file-deleted-mid-walk pair
@@ -90,7 +88,7 @@ _SYNC_CONFIG = TransferConfig(use_threads=False)
 # keeps the gate deterministic.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
-_LIST_BASE = {"MaxKeys": 1000}
+_LIST_BASE: dict[str, object] = {}
 
 
 def _run_cmd(
@@ -778,8 +776,10 @@ class TestSyncCaseConflict:
         assert f"Failed to download bucket/{self.upper_key}" in result.stderr
 
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
-        # The first (admitted) key still downloads; only the conflicting
-        # second key trips the error gate - so one GetObject is scripted.
+        # The gate's fatal cancels the already-admitted first twin, so its
+        # GetObject normally never fires; the response is scripted defensively
+        # because the cancellation races the worker by nature (aws's original
+        # scripts only the listing and asserts no operations).
         result, _ = _run_cmd(
             [
                 list_objects_response([self.upper_key, self.lower_key]),

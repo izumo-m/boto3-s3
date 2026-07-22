@@ -12,8 +12,9 @@ orchestrator (``boto3_s3.s3``) calls them as ``producers.upload_items(...)``
 and the producer/orchestrator boundary is physical, not just conceptual.
 
 Kept out of ``boto3_s3.transfer`` on purpose: the engine module is
-deliberately blind to ``transferplan`` / the storage backends, while the
-producers need all of them. Like the planner, importing this module currently
+deliberately blind to ``transferplan`` and touches the storage layer only at
+named seams (the ``LocalStorage`` fsync opt-in probe, ``translate_os_error``),
+while the producers need all of them. Like the planner, importing this module currently
 reaches ``botocore.exceptions`` through the backends; that timing is not an
 interface guarantee.
 """
@@ -42,7 +43,8 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator
+    from typing import BinaryIO
 
 
 def walk_source_scan_options(
@@ -52,15 +54,18 @@ def walk_source_scan_options(
     sort: bool = False,
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
+    wait_on_interrupt: bool,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
 
     Built from the storage's own ``default_scan_options`` - which seeds the
     source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
     ``detect_symlink_loops`` / ``enumerate_all_entries``, a
-    custom backend's own knobs, all configured on the constructor) - with only the
-    operation-inherent knobs overlaid (``recursive`` /
-    ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
+    custom backend's own knobs, all configured on the constructor) - with only
+    the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
+    ``sort`` / ``on_warning`` / the item ``filter``) and the application's
+    Ctrl-C posture (``wait_on_interrupt``, declared once on
+    ``S3(wait_on_interrupt=...)``). So a ``LocalStorage`` subclass,
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
@@ -80,6 +85,7 @@ def walk_source_scan_options(
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
+        wait_on_interrupt=wait_on_interrupt,
     )
     return options
 
@@ -182,7 +188,19 @@ def _glacier_gate(
     if not _glacier_blocked(info, options=options):
         return False
     if options.get("ignore_glacier_warnings"):
-        transferrer.skip(TransferItem(compare_key=compare_key, src_display=src_display))
+        # Carry the listing entry like the no_overwrite skip does, so an
+        # on_result consumer reads the same record shape from both silent
+        # skips (the destination fields stay unset - the gate runs before
+        # the destination is derived).
+        transferrer.skip(
+            TransferItem(
+                compare_key=compare_key,
+                size=info.size,
+                mtime=info.mtime,
+                src_info=info,
+                src_display=src_display,
+            )
+        )
     else:
         transferrer.warner.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
     return True
@@ -197,8 +215,9 @@ class CaseConflictGate:
     overwrites); everything else runs the conflict check
     (``CaseConflictSync``): a conflict exists when another file with the
     same lowercased name was already admitted in this run, or the
-    destination path exists (only possible on a case-insensitive
-    filesystem, where a case-variant satisfies ``os.path.exists``). The
+    destination path exists (on a case-insensitive filesystem a
+    case-variant satisfies ``os.path.exists``; an exact-case file that
+    appeared after the membership pre-scan trips it on any filesystem). The
     messages are aws's verbatim, emitted as uncounted NOTICE records (aws
     prints them straight to stderr, bypassing its warned count).
     """
@@ -267,7 +286,8 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
-) -> Iterator[TransferItem]:
+    wait_on_interrupt: bool,
+) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
 
     A recursive source enumerates through ``plan.src.scan`` so a ``LocalStorage``
@@ -289,6 +309,7 @@ def upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
+                wait_on_interrupt=wait_on_interrupt,
             )
         )
     else:
@@ -346,7 +367,8 @@ def s3_source_items(
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
     operation: str,
-) -> Iterator[TransferItem]:
+    wait_on_interrupt: bool,
+) -> Generator[TransferItem, None, None]:
     """Materialize download/copy items from an S3 source, gates applied."""
     src_bucket = src_storage.bucket
     if plan.dir_op:
@@ -355,14 +377,16 @@ def s3_source_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
+            wait_on_interrupt=wait_on_interrupt,
         )
-    elif src_storage.bucket and not src_storage.key:
+    elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
         # bucket and exact-matches nothing -> zero items, rc 0. Preserve the
         # listing because its failure (notably AccessDenied) is observable.
-        # A bucketless service root (`cp s3://`) is NOT this case: it falls to
-        # head_single, whose empty Bucket hits botocore's Invalid-bucket
-        # ParamValidation like aws.
+        # A bucketless service root (`cp s3://`) takes this branch too: aws
+        # reaches ListObjectsV2, whose empty Bucket dies at botocore's
+        # client-side Invalid-bucket validation (measured, --debug: the
+        # failure fires at before-parameter-build.s3.ListObjectsV2).
         scan_options = replace(
             src_storage.default_scan_options(),
             # BucketLister does not send a Delimiter on this aws-cli route,
@@ -370,6 +394,7 @@ def s3_source_items(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
+            wait_on_interrupt=wait_on_interrupt,
         )
         infos = (
             info
@@ -517,6 +542,7 @@ def scan_s3_source(
     key_prefix: str,
     item_filter: FileFilter | None,
     options: TransferOptions,
+    wait_on_interrupt: bool,
 ) -> Iterator[FileInfo]:
     """A recursive object listing anchored at the '/'-normalized ``key_prefix``.
 
@@ -525,9 +551,10 @@ def scan_s3_source(
     Folder markers never surface; the scan stamps each entry's ``Prefix``-relative
     ``compare_key``, which ``item_filter`` matches against. Built from the passed
     ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
-    config and a custom ``S3Storage`` subclass survive), with the operation-inherent
+    config and a custom ``S3Storage`` subclass survive), with the run-level
     knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
-    ``key_prefix``, and ``request_payer`` from the transfer options.
+    ``key_prefix``, ``request_payer`` from the transfer options, and the
+    application's Ctrl-C posture (``wait_on_interrupt``).
     """
 
     def scan_filter(info: FileInfo) -> bool:
@@ -545,6 +572,7 @@ def scan_s3_source(
         prefix=key_prefix,
         filter=scan_filter,
         request_payer=options.get("request_payer"),
+        wait_on_interrupt=wait_on_interrupt,
     )
     return storage.scan(scan_options)
 
@@ -580,13 +608,17 @@ def head_single(
         with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
+        # Chain the originating ClientError directly: this aws-worded error
+        # replaces the s3_errors translation wholesale, and the section 2.1
+        # reachability guarantee (exceptions.md) promises the ClientError on
+        # the *direct* `__cause__` of an error raised for a failed S3 request.
         raise NotFoundError(
             "An error occurred (404) when calling the HeadObject operation: "
             f'Key "{key}" does not exist',
             operation=operation,
             bucket=src_storage.bucket,
             key=key,
-        ) from exc
+        ) from (exc.__cause__ or exc)
     etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
@@ -680,7 +712,8 @@ def open_upload_items(
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
-) -> Iterator[TransferItem]:
+    wait_on_interrupt: bool,
+) -> Generator[TransferItem, None, None]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
     The open-route mirror of ``upload_items`` - a recursive source
@@ -709,6 +742,7 @@ def open_upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
+                wait_on_interrupt=wait_on_interrupt,
             )
         )
     else:
@@ -723,31 +757,136 @@ def open_upload_items(
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
     for info in infos:
-        yield open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
+        yield open_upload_item(
+            plan, info, dest_bucket=dest_bucket, transferrer=transferrer, dryrun=dryrun
+        )
+
+
+class _DeferredReader:
+    """Lazy ``Storage.open(key, "rb")``: the backend opens on the first read.
+
+    Built when the item is, opened when s3transfer actually starts consuming
+    this item's bytes. Exposing only ``read`` routes s3transfer to its
+    non-seekable upload path, which reads the source sequentially on the
+    bounded submission stage (`max_in_memory_upload_chunks` supplies the
+    backpressure), so a recursive run over a custom backend holds open
+    handles only for the items being read (~submission concurrency) - not
+    one per queued item, which crossed ``RLIMIT_NOFILE`` around a thousand
+    queued entries. An open/read failure surfaces inside the transfer task
+    as that item's per-item failure (the capability gate's documented
+    contract: runtime errors stay per-item). ``close`` is idempotent and
+    closes only what was opened - an item that never read (failed, cancelled)
+    leaves the backend untouched; after ``close``, ``read`` returns ``b""``.
+    """
+
+    def __init__(self, storage: Storage, key: str, size: int | None) -> None:
+        self._storage = storage
+        self._key = key
+        self._size = size
+        self._fileobj: BinaryIO | None = None
+        self._closed = False
+
+    def read(self, amt: int | None = None) -> bytes:
+        if self._closed:
+            return b""
+        if self._fileobj is None:
+            self._fileobj = self._storage.open(self._key, "rb", size=self._size)
+        return self._fileobj.read() if amt is None else self._fileobj.read(amt)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._fileobj is not None:
+            self._fileobj.close()
+
+
+class _DeferredWriter:
+    """Lazy ``Storage.open(key, "wb")``: the backend opens on the first write.
+
+    Built when the item is, opened when this item's first downloaded chunk
+    actually arrives (under the default checksum validation: one plain
+    GetObject below the multipart threshold, ranged GETs above it; a
+    "when_required" client always opens with a ranged first-chunk probe).
+    Exposing only ``write`` routes s3transfer to its
+    non-seekable download path, which writes chunks strictly in order (the
+    ordering stdout gets), so a custom destination receives one sequential
+    stream and a queued-but-unstarted item holds no open writer. ``close``
+    commits: a successful download that wrote nothing (a zero-byte object)
+    still materializes the empty object by opening on close. ``discard`` -
+    preferred by the failure-path close (`_CloseFileobj` / the submit-error
+    cleanup) - closes only what was opened, so an item that failed or was
+    cancelled before its first write leaves the backend untouched.
+    """
+
+    def __init__(self, storage: Storage, key: str, size: int | None) -> None:
+        self._storage = storage
+        self._key = key
+        self._size = size
+        self._fileobj: BinaryIO | None = None
+        self._closed = False
+
+    def _ensure_open(self) -> BinaryIO:
+        if self._fileobj is None:
+            self._fileobj = self._storage.open(self._key, "wb", size=self._size)
+        return self._fileobj
+
+    def write(self, data: bytes) -> int:
+        if self._closed:
+            raise ValueError("write to a closed deferred writer")
+        return self._ensure_open().write(data)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._ensure_open().close()
+
+    def discard(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._fileobj is not None:
+            self._fileobj.close()
 
 
 def open_upload_item(
-    plan: transferplan.TransferPlan, info: FileInfo, *, dest_bucket: str, dryrun: bool
+    plan: transferplan.TransferPlan,
+    info: FileInfo,
+    *,
+    dest_bucket: str,
+    transferrer: Transferrer,
+    dryrun: bool,
 ) -> TransferItem:
     """One upload item reading the custom source through ``Storage.open``.
 
-    ``dryrun`` skips the ``open`` (the item is only reported, never
-    submitted), so a dry run never reads from the backend.
+    ``dryrun`` builds no reader at all; a live run hands the engine a
+    `_DeferredReader`, so the backend opens only when the transfer actually
+    starts reading - never at queue time.
     """
     compare_key = _compare_key(info)
     open_key = compare_key if plan.dir_op else ""
     dest = transferplan.dest_for(plan, compare_key)
+    if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
+        # The open-route mirror of upload_item_from_info's oversize warning
+        # (aws-cli's _warn_if_too_large): warn but still attempt, rendered
+        # through the open side's own display form.
+        transferrer.warner.warn(
+            f"File {open_side_display(plan.src, open_key)} exceeds s3 upload limit of "
+            f"{_MAX_UPLOAD_SIZE_TEXT}.",
+            key=compare_key,
+        )
     return TransferItem(
         compare_key=compare_key,
         size=info.size,
         mtime=info.mtime,
-        # src_info carries the source listing entry so an mv can delete it via the
-        # backend's Storage.delete(info). info.key addresses the same object open_key
-        # opens: for a recursive item info.key is the compare_key (the open key), for a
-        # single source it is "" (the location). The backend resolves both in its own
-        # key space.
+        # src_info carries the source listing entry so an mv can delete it via
+        # the backend's Storage.delete(info), addressed by the entry's own full
+        # info.key. The open key is separate: the relative compare_key for a
+        # recursive item, "" (the location itself) for a single source; the
+        # backend resolves each in its own key space.
         src_info=info,
-        src_fileobj=None if dryrun else plan.src.open(open_key, "rb", size=info.size),
+        src_fileobj=None if dryrun else _DeferredReader(plan.src, open_key, info.size),
         dest_bucket=dest_bucket,
         dest_key=dest[len(dest_bucket) + 1 :],
         src_display=open_side_display(plan.src, open_key),
@@ -764,7 +903,8 @@ def open_download_items(
     options: TransferOptions,
     operation: str,
     dryrun: bool,
-) -> Iterator[TransferItem]:
+    wait_on_interrupt: bool,
+) -> Generator[TransferItem, None, None]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
     The open-route mirror of the S3-source half of ``s3_source_items``:
@@ -784,14 +924,30 @@ def open_download_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
+            wait_on_interrupt=wait_on_interrupt,
         )
-    elif src_storage.bucket and not src_storage.key:
-        # Keyless non-recursive source (`cp s3://bucket custom`): aws lists
-        # the bucket and exact-matches nothing -> zero items (the built-in
-        # download path's behavior, without issuing the listing). A bucketless
-        # service root (`cp s3:// custom`) instead falls to head_single, whose
-        # empty Bucket hits botocore's Invalid-bucket ParamValidation like aws.
-        return
+    elif not src_storage.key:
+        # Keyless non-recursive source (`cp s3://bucket custom`): mirror the
+        # built-in download path (s3_source_items) - aws lists the bucket and
+        # exact-matches nothing -> zero items, rc 0. The listing is issued,
+        # not skipped, because its failure (notably NoSuchBucket/AccessDenied)
+        # is observable. A bucketless service root (`cp s3:// custom`) takes
+        # this branch too: ListObjectsV2's empty Bucket dies at botocore's
+        # client-side Invalid-bucket validation, aws's measured shape.
+        scan_options = replace(
+            src_storage.default_scan_options(),
+            # BucketLister does not send a Delimiter on this aws-cli route,
+            # even though the transfer itself is non-recursive.
+            recursive=True,
+            prefix="",
+            request_payer=options.get("request_payer"),
+            wait_on_interrupt=wait_on_interrupt,
+        )
+        infos = (
+            info
+            for info in src_storage.scan(scan_options)
+            if f"{src_bucket}/{info.key}" == src_bucket
+        )
     else:
         infos = head_single(
             src_storage,
@@ -829,8 +985,10 @@ def open_download_item(
     """One download item writing the custom destination through ``Storage.open``,
     or ``None`` once the glacier gate consumed it.
 
-    ``dryrun`` skips the destination ``open`` (the item is only reported,
-    never submitted), so a dry run never opens the backend for writing.
+    ``dryrun`` builds no writer at all; a live run hands the engine a
+    `_DeferredWriter`, so the backend opens only when the item's first chunk
+    actually arrives - never at queue time, and never for an item that fails
+    before its first write.
     """
     compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
@@ -854,7 +1012,7 @@ def open_download_item(
         src_bucket=src_bucket,
         src_key=info.key,
         src_info=info,
-        dest_fileobj=None if dryrun else plan.dest.open(open_key, "wb", size=info.size),
+        dest_fileobj=None if dryrun else _DeferredWriter(plan.dest, open_key, info.size),
         src_display=src_display,
         dest_display=open_side_display(plan.dest, open_key),
     )
@@ -868,6 +1026,7 @@ def cp_case_gate(
     transferrer: Transferrer,
     item_filter: FileFilter | None,
     operation: str,
+    wait_on_interrupt: bool,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -883,7 +1042,9 @@ def cp_case_gate(
     (``default_scan_options``), warns into the transfer rollup, and applies
     the run's ``item_filter``, exactly like a source walk. Each entry's
     stamped ``compare_key`` is the membership key. Scoped to
-    ``s3local`` (a case-insensitive *filesystem* destination); a custom
+    ``s3local`` (a local-filesystem destination - the gate exists for
+    case-insensitive filesystems but runs for every local destination
+    without probing the filesystem's case behavior, matching aws); a custom
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
     """
@@ -899,6 +1060,7 @@ def cp_case_gate(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
+                wait_on_interrupt=wait_on_interrupt,
             )
         )
     }
@@ -936,7 +1098,8 @@ def sync_entries(
     item_filter: FileFilter | None,
     transferrer: Transferrer,
     options: TransferOptions,
-) -> Iterator[tuple[str, FileInfo]]:
+    wait_on_interrupt: bool,
+) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
     A local side walks in aws-cli byte order with its warnings routed to
@@ -944,8 +1107,10 @@ def sync_entries(
     shared anchored listing (folder markers dropped). Each side reads its own
     source-config from its storage (a local side's ``follow_symlinks``, an S3
     side's ``page_size`` / ``fetch_owner``) via ``default_scan_options``, so both
-    the source and the destination listing honor the storage each was built with -
-    aws-cli maps the same knobs onto the destination listing too. Both sides'
+    the source and the destination listing honor the storage each was built with.
+    aws-cli likewise threads its listing knobs (page size, symlink policy)
+    onto the destination side; ``fetch_owner`` is ours alone - aws's transfer
+    path fetches no owner. Both sides'
     producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
     it and the pair key is taken from it.
     """
@@ -956,6 +1121,7 @@ def sync_entries(
             key_prefix=key_prefix,
             item_filter=item_filter,
             options=options,
+            wait_on_interrupt=wait_on_interrupt,
         ):
             yield _compare_key(info), info
         return
@@ -966,6 +1132,7 @@ def sync_entries(
             sort=True,  # the merge-join needs both sides byte-ordered
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
+            wait_on_interrupt=wait_on_interrupt,
         )
     ):
         yield _compare_key(info), info
@@ -991,7 +1158,9 @@ def sync_transfer_item(
     """
     info = pair.src
     if plan.paths_type == "opens3":
-        item = open_upload_item(plan, info, dest_bucket=dest_bucket, dryrun=dryrun)
+        item = open_upload_item(
+            plan, info, dest_bucket=dest_bucket, transferrer=transferrer, dryrun=dryrun
+        )
     elif plan.paths_type == "s3open":
         item = open_download_item(
             plan,
@@ -1031,3 +1200,8 @@ def sync_transfer_item(
     if item is not None:
         item.dest_info = pair.dest if isinstance(pair, SyncPair) else None
     return item
+
+
+# Package-internal: the shared producer/gate helpers are consumed by s3.py
+# only and carry no documented surface (docs/imports.md).
+__all__: list[str] = []

@@ -16,7 +16,7 @@
 """Port of aws-cli's functional mv tests to ``boto3-s3 mv``.
 
 Provenance: aws-cli's ``tests/functional/s3/test_mv_command.py``
-(aws-cli 2.35.18). Test names, canned responses, and expected operations are
+(aws-cli 2.36.1). Test names, canned responses, and expected operations are
 kept verbatim where possible so the file stays diffable against the aws-cli
 original when aws-cli is updated.
 
@@ -801,9 +801,15 @@ class TestMvRecursiveCaseConflict:
 
     # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
     def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
-        # The first (admitted) key still downloads and its source is deleted;
-        # only the conflicting second key trips the error gate, so a single
-        # get-then-delete pair is scripted.
+        # The gate's fatal cancels the already-admitted first twin (the
+        # engine shuts down with cancel=True on a fatal, like aws's manager
+        # context), so its download - and with it mv's source delete -
+        # normally never becomes an API call. That cancellation races the
+        # worker by nature (aws's own sync original scripts only the listing
+        # and asserts no operations), so the admitted twin's get-then-delete
+        # pair is scripted defensively and the assertions accept either
+        # outcome; the conflicting key must never reach the API, and its
+        # source must never be deleted.
         result, calls = _run_cmd(
             [
                 list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
@@ -815,9 +821,13 @@ class TestMvRecursiveCaseConflict:
             transfer_config=_CASE_CONFLICT_CONFIG,
         )
         assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
-        # Only the admitted first twin is deleted; the failed key never is.
-        assert _operations(calls) == ["ListObjectsV2", "GetObject", "DeleteObject"]
-        assert calls[2].params == {"Bucket": "bucket", "Key": self.UPPER_KEY}
+        operations = _operations(calls)
+        assert operations[0] == "ListObjectsV2"
+        assert operations in (
+            ["ListObjectsV2"],  # the admitted twin cancelled (the usual case)
+            ["ListObjectsV2", "GetObject", "DeleteObject"],  # it out-raced the cancel
+        )
+        assert all(call.params.get("Key") != self.LOWER_KEY for call in calls[1:])
 
     def test_warn_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")

@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded only once cp is determined (stage 2 of the lazy dispatch).
-from boto3_s3 import NotFoundError, StdioStorage, ValidationError
+# Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch) -
+# or up front when auto-prompt builds the full command model.
+from boto3_s3 import NotFoundError, S3Storage, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -28,19 +29,27 @@ class CpCommand(Command):
 
         Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
         keep their class, in aws's measured head order - the
-        ``--endpoint-url`` scheme, ``--metadata`` parsing, paramfile / blob
-        loads, path types, SSE-C pairing, the checksum/path-format pairing,
-        streaming with ``--recursive`` or ``--no-overwrite``, and the S3
+        ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
+        parsing (a readable
+        ``fileb://`` there decodes to 255 instead, the per-command
+        paramfile quirk), path types, the checksum/path-format pairing,
+        SSE-C pairing,
+        streaming with ``--recursive`` (either side) or a streaming
+        *download* with ``--no-overwrite``, and the S3
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
         source, and the ``--recursive`` destination-directory pre-create
         are 255; client creation (unresolvable credentials/region) is
-        253 - while everything raised by the transfer pipeline is rc 1:
+        253 - while everything raised by the transfer pipeline is rc 1
+        (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
         kills the run (a listing error, the single-source 404, a bad
         ``--grants`` shape, a non-integer ``--expected-size``, a missing
-        stdin) prints one ``fatal error:`` line, and a warnings-only run
-        exits 2. The boundary is the ``S3().cp`` call.
+        stdin) prints one ``fatal error:`` line - all suppressed by
+        ``--quiet`` with the exit codes kept - and a warnings-only run
+        exits 2. The boundary is ``finish_transfer``'s run span: the
+        ``S3().cp`` call plus the ``--expected-size`` integer conversion
+        just ahead of it.
         """
         head = transferargs.classify_paths(args, ctx, operation="cp")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -77,9 +86,6 @@ class CpCommand(Command):
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
-
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
 
         s3 = head.s3
         client = s3.client()
@@ -126,7 +132,11 @@ class CpCommand(Command):
 
         item_filter = None
         if not is_stream:
-            item_filter = filters.compile_filter(args.filters)
+            # Non-stream: the locations are the resolve_locations pair, whose
+            # bases the filter joins its patterns onto (aws create_filter).
+            item_filter = filters.compile_filter(
+                args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
+            )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.

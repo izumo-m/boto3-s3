@@ -108,8 +108,9 @@ class TestPreferredTransferClient:
             )
 
     def test_bare_construct_does_not_raise(self) -> None:
-        # The floor shim must not crash on a default construct (it forwards
-        # preferred_transfer_client=None to a base ctor that may lack it).
+        # The floor shim must not crash on a default construct: nothing is
+        # forwarded for an unset preferred_transfer_client (only-when-set),
+        # and the shim's fallback attribute keeps the field readable.
         assert getattr(TransferConfig(), "preferred_transfer_client", None) == "auto"
 
 

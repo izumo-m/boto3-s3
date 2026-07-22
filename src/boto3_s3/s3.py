@@ -4,27 +4,38 @@
 ``Location`` argument resolves to a ``Storage``: a local path becomes a
 ``LocalStorage`` and an ``"s3://..."`` string becomes an ``S3Storage``. The
 boto3 client lives on the ``S3Storage``; when its client is omitted it falls
-back to ``boto3.client("s3")``. To target a custom endpoint / profile / region
-(e.g. MinIO) or a second account for S3-to-S3, pass an explicit
-``S3Storage(url, client=...)`` instead of a bare string.
+back to ``boto3.client("s3")``. The recommended construction is
+``S3(session=boto3_s3.session())`` - the tuned session's clients parse
+response timestamps at C speed (`sessions.py`); a zero-config ``S3()``
+deliberately keeps plain ``boto3.client("s3")`` semantics, never consulting
+``boto3.DEFAULT_SESSION`` state to decide anything. To target a custom
+endpoint / profile / region (e.g. MinIO) or a second account for S3-to-S3,
+pass an explicit ``S3Storage(uri, client=...)`` instead of a bare string.
+
+This module is SDK-backed by declaration: it imports boto3 at module top.
+Only the package root's lazy re-export keeps a bare ``import boto3_s3``
+SDK-free (docs/imports.md).
 """
 
 from __future__ import annotations
 
 import functools
+import inspect
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec, TypeVar, cast
 
+import boto3
 from typing_extensions import Unpack
 
 from boto3_s3 import producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
     Comparator,
     DestOnlyPair,
@@ -39,6 +50,7 @@ from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
     CancelledError,
+    InvalidConfigError,
     NotFoundError,
     ValidationError,
 )
@@ -64,17 +76,13 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only: importing it for real would drag boto3 + s3transfer into
-    # every `boto3_s3` import (import contract, docs/imports.md).
+    # Annotation-only names: mypy_boto3_s3 is a stubs-only distribution, and
+    # the rest are used in annotations alone.
     from boto3 import Session
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import WebsiteConfigurationTypeDef
-
-    # Local + SDK-free, but kept annotation-only so `aws_config()` stays an
-    # opt-in module load (the reader's botocore touch is deferred into it).
-    from boto3_s3.awsconfig import AwsConfig
 
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
@@ -96,6 +104,27 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     return f"{head}/" if sep else ""
 
 
+# Every key TransferOptions accepts (the TypedDict is total=False, so the
+# two frozensets union to the full key set regardless of future totality).
+_TRANSFER_OPTION_KEYS = frozenset(TransferOptions.__required_keys__) | frozenset(
+    TransferOptions.__optional_keys__
+)
+
+
+def _validate_transfer_options(options: TransferOptions, *, operation: str) -> None:
+    """Reject unknown ``**options`` keys eagerly (pre-pipeline `ValidationError`).
+
+    ``Unpack[TransferOptions]`` already enforces the key set for type-checked
+    callers, but an unchecked caller's typo (``dry_run`` for ``dryrun``) would
+    otherwise be silently ignored - and on ``mv`` still delete the source.
+    """
+    unknown = sorted(set(options) - _TRANSFER_OPTION_KEYS)
+    if unknown:
+        raise ValidationError(
+            f"Unknown transfer option(s): {', '.join(unknown)}", operation=operation
+        )
+
+
 def _emit_result(
     on_result: ResultCallback | None,
     *,
@@ -109,7 +138,7 @@ def _emit_result(
         on_result(
             OpResult(
                 transfer_type=TransferType.DELETE,
-                key=info.key,
+                compare_key=info.compare_key if info.compare_key is not None else info.key,
                 outcome=outcome,
                 error=error,
                 src=f"s3://{storage.bucket}/{info.key}",
@@ -365,7 +394,11 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
     (Their bare RuntimeError -> rc 255; ``NotFoundError`` without a
     ``ClientError`` cause maps the same.)
     """
-    if not os.path.exists(storage.path):
+    # Test the construction-time abspath (the anchor scan / the plan use) so
+    # the check agrees with the walk even if the process chdir'd since the
+    # storage was built; the message keeps the raw form, like aws echoing the
+    # user-typed path.
+    if not os.path.exists(storage.abspath):
         raise NotFoundError(
             f"The user-provided path {storage.path} does not exist.", operation=operation
         )
@@ -379,8 +412,11 @@ def _classify_transfer_route(
     Returns ``(transfer_type, client_provider, source_client_provider,
     dest_bucket)``: the providers are the S3 side(s) whose ``get_client()``
     drives s3transfer (``source_client_provider`` only on the s3s3 route) -
-    handed back unresolved so each caller keeps its established effect order
-    (its destination-directory creation runs before any client is built).
+    handed back unresolved so each caller keeps its established effect order:
+    its destination-directory creation runs before ``get_client()`` resolves,
+    which *builds* a client only for a caller-constructed ``S3Storage``
+    without one (a ``resolve()``-made storage already carries a client built
+    at resolve time).
     The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
     pair, because the engine reaches into ``S3Storage``'s client/bucket and
     ``LocalStorage``'s path directly; an open route pairs a capability-checked
@@ -501,7 +537,7 @@ class _SyncDeletes:
         display = (
             to_native_path(info.key)
             if isinstance(dest, LocalStorage)
-            else producers.open_side_display(dest, pair.key)
+            else producers.open_side_display(dest, pair.compare_key)
         )
         if self._dryrun:
             self._emit(info=info, outcome=OpOutcome.DRYRUN, src=display)
@@ -524,6 +560,10 @@ class _SyncDeletes:
     def _fail(self, exc: Exception, info: FileInfo) -> Boto3S3Error:
         """Map a synchronous-delete error into the taxonomy and count it."""
         error = translate_boto_error(exc, operation="sync", key=info.key)
+        if error is not exc:
+            # Same cause link as the transfer engine's _record_failure
+            # (exceptions.md section 2.1); a pass-through keeps its own cause.
+            error.__cause__ = exc
         self._local_failed += 1
         if self._local_first_error is None:
             self._local_first_error = error
@@ -558,7 +598,7 @@ class _SyncDeletes:
             self._on_result(
                 OpResult(
                     transfer_type=TransferType.DELETE,
-                    key=info.key,
+                    compare_key=info.compare_key if info.compare_key is not None else info.key,
                     outcome=outcome,
                     error=error,
                     src=src,
@@ -606,7 +646,7 @@ class S3:
     Overriding ``resolve`` reaches the transfer ops only; the S3-only ops bypass
     it (they always read their target as S3), so their endpoint / credentials are
     customized through ``client`` alone. A second account for S3-to-S3, or a
-    per-location client, is expressed by an explicit ``S3Storage(url,
+    per-location client, is expressed by an explicit ``S3Storage(uri,
     client=...)``. Debug-log secret masking is configured via
     `boto3_s3.set_stream_logger`. The instance's own state
     is thread-safe to share, but its clients need care: ``client()`` is not safe
@@ -614,8 +654,22 @@ class S3:
     ``s3transfer``, whose per-transfer setup is not thread-safe on a shared
     client. To run operations in parallel across threads, build one client per
     thread sequentially, up front, then give each thread its own
-    ``S3Storage(url, client=...)`` - never share a client, never build clients
+    ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
+
+    ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
+    every operation this instance runs. ``True`` (the default): a
+    ``KeyboardInterrupt`` propagates only after the operation has reclaimed
+    all of its resources (enumeration workers joined), so an app that catches
+    the interrupt can keep calling operations. ``False``: the app treats
+    Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
+    prefetch worker instead of waiting out an in-flight listing page pull
+    (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
+    interrupt itself is always re-raised, never converted or swallowed; and
+    the posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit`` and
+    every other exception always get the full reclamation (``sys.exit()``
+    requests an *orderly* termination). The posture reaches the scans through
+    ``ScanOptions.wait_on_interrupt``.
     """
 
     def __init__(
@@ -625,11 +679,13 @@ class S3:
         endpoint_url: str | None = None,
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
+        wait_on_interrupt: bool = True,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
+        self._wait_on_interrupt = wait_on_interrupt
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -640,6 +696,11 @@ class S3:
         """The session that supplies this instance's default clients and AWS config."""
         return self._session
 
+    @property
+    def wait_on_interrupt(self) -> bool:
+        """The Ctrl-C posture declared at construction (see the class docstring)."""
+        return self._wait_on_interrupt
+
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
 
@@ -647,25 +708,27 @@ class S3:
         connection, hence no ``close()``. Built from ``session`` (or boto3's
         default session) with ``endpoint_url`` / ``config`` applied. Override to
         change credentials, reuse a cached client, or return a test double; reuse
-        one explicitly via ``S3Storage(url, client=s3.client())``. A failed build
+        one explicitly via ``S3Storage(uri, client=s3.client())``. A failed build
         raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
         unresolvable credentials / region, its ``InvalidConfigError``
-        refinement for a set-but-unusable ``AWS_PROFILE`` or partial
-        credentials - never the raw botocore error (docs/exceptions.md
-        section 1).
+        refinement for a set-but-unusable ``AWS_PROFILE``, partial
+        credentials, or a malformed ``endpoint_url`` - never the raw botocore
+        error (docs/exceptions.md section 1).
         """
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
-            if self._session is not None:
-                return self._session.client(
-                    "s3", endpoint_url=self._endpoint_url, config=self._config
-                )
-            # Import locally so callers that only use SDK-independent modules
-            # do not pay for boto3. `S3` construction itself has no SDK-free
-            # contract (docs/imports.md).
-            import boto3
-
-            return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+            try:
+                if self._session is not None:
+                    return self._session.client(
+                        "s3", endpoint_url=self._endpoint_url, config=self._config
+                    )
+                return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+            except ValueError as exc:
+                # botocore rejects a malformed endpoint_url with a plain
+                # ValueError (not a BotoCoreError), which would leak raw
+                # through s3_errors. A set-but-unusable setting is
+                # InvalidConfigError's definition (docs/exceptions.md).
+                raise InvalidConfigError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -697,13 +760,11 @@ class S3:
         This is a building block offered **explicitly**: ``S3``'s own operations
         (``cp`` / ``sync`` / ...) never read the config file on their own, so they
         carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
-        memoized per instance (the file is parsed once). Matching ``aws s3``'s
+        memoized per instance (the file is parsed once in the common case;
+        concurrent first calls may benignly recompute - see ``__init__``). Matching ``aws s3``'s
         ``[s3]`` semantics on top of these values (the defaults table, validation,
         the engine decision) is the CLI distribution's job, not the library's.
         """
-        # Load the optional config reader only when a caller asks for it.
-        from boto3_s3.awsconfig import AwsConfig
-
         if self._aws_config is None:
             self._aws_config = AwsConfig.from_session(self._session)
         return self._aws_config
@@ -714,7 +775,7 @@ class S3:
         self,
         target: Location = "s3://",
         *,
-        on_result: ListingCallback,
+        on_entry: ListingCallback,
         recursive: bool = False,
         request_payer: str | None = None,
         bucket_name_prefix: str | None = None,
@@ -729,18 +790,25 @@ class S3:
         ``ls`` dispatches to `S3Storage.list_buckets` (aws-cli's ``ls``
         splits the bucket listing from the object listing the same way), yielding
         one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
-        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing and
+        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing on
+        a botocore that models them (the back-compat floor's unpaginated
+        fallback cannot send them - `S3Storage.list_buckets`) and
         are meaningless for an object listing; conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
-        aws-cli). The listing page size (object and bucket listings alike) is the
+        aws-cli). The listing page size (object listings, and bucket listings on a
+        paginator-capable botocore - the floor's fallback issues one
+        unpaginated call) is the
         ``S3Storage``'s own ``page_size`` config (its constructor) - pass a
         configured ``S3Storage`` as ``target`` to tune it. A non-S3 ``Location``
         raises ``ValidationError``. The target is validated eagerly. Entries are
-        delivered in listing order to `on_result` on the calling thread.
+        delivered in listing order to `on_entry` on the calling thread.
 
-        `cancel_token` may be cancelled from `on_result` or another thread.
+        `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
-        page request already in progress, reclaims the prefetch worker, and then
+        page request already in progress, reclaims the prefetch worker (the
+        object listing's machinery; the service-root bucket listing iterates
+        its pages directly, so cancellation there just stops between pages),
+        and then
         raises `CancelledError`. Both cancellation modes therefore have the
         same effect for listing: synchronous S3 page requests cannot be aborted
         safely once started.
@@ -755,6 +823,7 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 ),
                 cancel_token=cancel_token,
             )
@@ -762,7 +831,7 @@ class S3:
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
-                on_result(info)
+                on_entry(info)
                 if cancel_token is not None and cancel_token.cancelled:
                     break
         finally:
@@ -843,8 +912,9 @@ class S3:
         by HeadObject - a
         404 raises ``NotFoundError`` with aws's rewritten ``Key "..." does
         not exist`` message. A keyless non-recursive S3 source matches
-        nothing and transfers nothing (aws lists and discards; same outcome
-        without the requests).
+        nothing and transfers nothing (aws lists and discards; the listing
+        is issued here too, so its failure - NoSuchBucket, a denied
+        ListBucket - stays observable instead of a silent rc 0).
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
@@ -872,8 +942,11 @@ class S3:
         on the non-stream routes, exactly like aws's ``--expected-size`` (which
         only matters for a stdin upload above ~50 GB).
 
-        Results stream to ``on_result`` from worker threads (fast,
-        non-raising callbacks); failures aggregate into ``BatchError`` with
+        Results stream to ``on_result`` from the engine's worker threads for
+        submitted transfers; non-submitting records - dryrun, skips, notices,
+        and some warnings - are emitted inline on the calling thread
+        (docs/opresult.md). Callbacks must be fast and
+        non-raising. Failures aggregate into ``BatchError`` with
         the first failure as ``__cause__``, warnings alone do not raise (the
         CLI derives exit code 2 from its warned count). Failures *before*
         any item work - an unreadable destination, the missing-source check
@@ -881,6 +954,7 @@ class S3:
         with aws's wording (their pre-pipeline rc 255 shape - no
         ``ClientError`` cause, so the CLI maps it to the general rc).
         """
+        _validate_transfer_options(options, operation="cp")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
@@ -952,6 +1026,12 @@ class S3:
         """
         src_storage.validate()
         dest_storage.validate()
+        # A pre-cancelled token acts before this method's side effects: the
+        # destination pre-create below, the case-gate's destination walk, and
+        # any lazily-deferred client build (a caller-made S3Storage without a
+        # client; resolve() above already built clients for string arguments).
+        # ls / rm poll right after resolution the same way.
+        _raise_if_cancelled(cancel_token, operation)
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=recursive, operation=operation
         )
@@ -960,8 +1040,10 @@ class S3:
             plan, operation=operation
         )
         # aws-cli's _validate_path_args only creates the dest dir when it does
-        # not already exist; check the raw user path (plan.dest_root carries a
-        # trailing os.sep, so exists() is False for an existing *file*). An
+        # not already exist; check the sep-less construction-time abspath
+        # (plan.dest_root carries a trailing os.sep, so exists() on it is
+        # False for an existing *file*; the same anchor keeps the check
+        # consistent with the plan if the process chdir'd since). An
         # existing-file dest then skips makedirs and fails per item like aws
         # (rc 1) instead of crashing up front; an empty listing transfers
         # nothing and exits 0. (sync's guard differs: unconditional, bare
@@ -969,7 +1051,7 @@ class S3:
         if (
             recursive
             and isinstance(dest_storage, LocalStorage)
-            and not os.path.exists(dest_storage.path)
+            and not os.path.exists(dest_storage.abspath)
         ):
             try:
                 os.makedirs(plan.dest_root, exist_ok=True)
@@ -1014,6 +1096,7 @@ class S3:
             transferrer=transferrer,
             item_filter=item_filter,
             operation=operation,
+            wait_on_interrupt=self._wait_on_interrupt,
         )
         with transferrer:
             if not dryrun:
@@ -1029,6 +1112,7 @@ class S3:
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             elif plan.paths_type == "s3open":
                 assert src_s3 is not None
@@ -1040,6 +1124,7 @@ class S3:
                     options=options,
                     operation=operation,
                     dryrun=dryrun,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             elif src_s3 is None:
                 items = producers.upload_items(
@@ -1047,6 +1132,7 @@ class S3:
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     item_filter=item_filter,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
             else:
                 items = producers.s3_source_items(
@@ -1059,24 +1145,42 @@ class S3:
                     options=options,
                     case_gate=case_gate,
                     operation=operation,
+                    wait_on_interrupt=self._wait_on_interrupt,
                 )
-            # Check cancellation *before* pulling the next item, not after: the
-            # open routes (_open_upload_item / _open_download_item) open the
-            # backend fileobj as the generator yields, so materializing an item we
-            # then discard on cancellation would leak that open fileobj. Pulling
-            # only once the run is still live means a cancelled run never opens an
-            # item it will not submit.
-            item_iter = iter(items)
-            while True:
-                _raise_if_cancelled(cancel_token, operation)
-                try:
-                    item = next(item_iter)
-                except StopIteration:
-                    break
-                if dryrun:
-                    transferrer.dryrun(item)
-                else:
-                    transferrer.submit(item)
+            # Check cancellation *before* pulling the next item, not after:
+            # pulling only while the run is live keeps a cancelled run from
+            # enumerating and materializing items it will never submit - the
+            # listing stops promptly instead of paging on. (The open routes'
+            # deferred handles never open for an unsubmitted item, so no
+            # resource is at stake; this is about not doing pointless work.)
+            interrupted = False
+            try:
+                item_iter = iter(items)
+                while True:
+                    _raise_if_cancelled(cancel_token, operation)
+                    try:
+                        item = next(item_iter)
+                    except StopIteration:
+                        break
+                    if dryrun:
+                        transferrer.dryrun(item)
+                    else:
+                        transferrer.submit(item)
+            except KeyboardInterrupt:
+                interrupted = True
+                raise
+            finally:
+                # Close the producer (joining its scan prefetch worker) before
+                # Transferrer.__exit__ shuts down and unregisters the capture
+                # handlers - the teardown mirror of prepare()'s
+                # register-before-enumeration ordering, so no listing traffic
+                # emits on the client during the deregistration. Under the
+                # process-fatal posture a Ctrl-C unwind skips it: closing
+                # would throw GeneratorExit into the producer, whose prefetch
+                # teardown always joins, and the unwind must not wait on an
+                # in-flight page pull (`S3` docstring, `wait_on_interrupt`).
+                if self._wait_on_interrupt or not interrupted:
+                    items.close()
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
             raise BatchError(
@@ -1149,8 +1253,13 @@ class S3:
                 compare_key=storage.key,
                 size=expected_size,
                 # dryrun reports the item without submitting it, so skip the open -
-                # matching the open routes (_open_upload_item / _open_download_item)
-                # and keeping a side-effecting custom IOStorage untouched on a dry run.
+                # like the open routes (open_upload_item / open_download_item),
+                # keeping a side-effecting stream untouched on a dry run. A live
+                # run opens eagerly here, unlike those routes' deferred handles:
+                # a stream storage wraps an already-open in-hand stream (no
+                # resource is acquired), it is a single item (nothing queues
+                # up), and StdioStorage's missing-stdio ValidationError keeps
+                # its documented in-pipeline slot.
                 src_fileobj=None if dryrun else src_storage.open(storage.key, "rb"),
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
@@ -1264,6 +1373,7 @@ class S3:
         ``--validate-same-s3-paths`` machinery; bring your own s3control /
         sts clients) when that risk applies.
         """
+        _validate_transfer_options(options, operation="mv")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
@@ -1283,6 +1393,14 @@ class S3:
             # every object into it while deleting the sources.
             raise ValidationError(
                 "mv supports a stream destination only for a single object (non-recursive)",
+                operation="mv",
+            )
+        if isinstance(dest_storage, IOStorage) and options.get("no_overwrite"):
+            # cp's stream gate, ported: a streaming download has no existing
+            # destination to guard, so no_overwrite is meaningless - fail loud
+            # rather than silently ignore it and delete the source anyway.
+            raise ValidationError(
+                "no_overwrite is not supported for streaming downloads",
                 operation="mv",
             )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
@@ -1401,26 +1519,37 @@ class S3:
         a synchronous ``Storage.delete`` for a local one
         (``LocalStorage.delete``, an ``os.remove``) or a custom (open-route)
         one (through the backend's own ``delete``). ``dryrun``
-        reports every would-be transfer and deletion without any API call.
+        reports every would-be transfer and deletion without any mutating
+        API call (both sides' listings still run).
         Local listing warnings (unreadable / vanished / special files,
         invalid timestamps) surface from **both** sides as WARNED records,
         exactly like aws walking both trees.
 
         A missing local source directory raises (aws's ``The user-provided
         path ... does not exist.``); a local destination directory is
-        created up front even when nothing transfers. Item failures -
+        created up front even when nothing transfers. An S3 Express
+        directory bucket on either side is then rejected (aws's ``Cannot
+        use sync command with a directory bucket.``): its unordered
+        listings would break the sorted merge-join. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
-        rollup counts (first failure as ``__cause__``). `cancel_token` raises
+        rollup counts (a failure sample as ``__cause__``: the transfer
+        rollup's first, else the delete rollup's). `cancel_token` raises
         `CancelledError` after shutdown: graceful mode stops new pair actions
         and drains accepted transfers/deletes; immediate mode additionally
         requests best-effort future cancellation.
         """
+        _validate_transfer_options(options, operation="sync")
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
         src_storage.validate()
         dest_storage.validate()
+        # A pre-cancelled token acts before this method's side effects (the
+        # destination pre-create below, any lazily-deferred client build - a
+        # caller-made S3Storage without a client; resolve() above already
+        # built clients for string arguments), like cp/mv/ls/rm.
+        _raise_if_cancelled(cancel_token, "sync")
         plan = transferplan.plan_transfer(
             src_storage, dest_storage, recursive=True, operation="sync"
         )
@@ -1433,11 +1562,23 @@ class S3:
         # exists() test (not exist_ok=True) is deliberate: a destination that
         # exists as a *file* passes here and fails per item instead
         # ([Errno 20], rc 1). (cp's guard differs: recursive-gated, exist_ok.)
-        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.path):
+        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.abspath):
             try:
-                os.makedirs(dest_storage.path)
+                os.makedirs(dest_storage.abspath)
             except OSError as exc:
                 raise translate_os_error(exc, operation="sync", key=None) from exc
+        # An S3 Express directory bucket lists in unspecified order
+        # (`ListObjectsV2` drops the lexicographic guarantee), which would feed
+        # the sorted merge-join unsorted input - `delete_filter` could then
+        # remove keys that exist on both sides. aws-cli rejects sync outright
+        # on either side (`_validate_not_s3_express_bucket_for_sync`), after
+        # creating the local destination directory as above; so does the CLI
+        # layer, making this the backstop for direct library callers.
+        for side_storage in (src_storage, dest_storage):
+            if isinstance(side_storage, S3Storage) and side_storage.bucket.endswith("--x-s3"):
+                raise ValidationError(
+                    "Cannot use sync command with a directory bucket.", operation="sync"
+                )
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the
@@ -1519,6 +1660,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
+                wait_on_interrupt=self._wait_on_interrupt,
             )
             dest_entries = producers.sync_entries(
                 dest_storage,
@@ -1526,7 +1668,29 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
+                wait_on_interrupt=self._wait_on_interrupt,
             )
+
+            def _close_scans(
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: object,
+            ) -> None:
+                # Close both sides' producers (joining their scan prefetch
+                # workers) before the stack unwinds into Transferrer.__exit__'s
+                # capture deregistration - the teardown mirror of prepare()'s
+                # register-before-enumeration ordering. Under the process-fatal
+                # posture a Ctrl-C unwind skips it: closing would throw
+                # GeneratorExit into the producers, whose prefetch teardown
+                # always joins, and the unwind must not wait on an in-flight
+                # page pull (`S3` docstring, `wait_on_interrupt`).
+                if self._wait_on_interrupt or not (
+                    exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
+                ):
+                    dest_entries.close()
+                    src_entries.close()
+
+            stack.push(_close_scans)
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
 
             def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
@@ -1670,10 +1834,13 @@ class S3:
             request_payer=request_payer,
             prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),
+            wait_on_interrupt=self._wait_on_interrupt,
         )
 
         if dryrun:
-            for info in storage.scan(options):
+            # cancel_token on the scan too (like ls): the prefetch producer
+            # stops between page pulls instead of fetching pages nobody reads.
+            for info in storage.scan(options, cancel_token=cancel_token):
                 _raise_if_cancelled(cancel_token, "rm")
                 _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
                 _raise_if_cancelled(cancel_token, "rm")
@@ -1688,7 +1855,9 @@ class S3:
             operation="rm",
             capture_response=capture_response,
         ) as deleter:
-            for info in storage.scan(options):
+            # cancel_token on the scan too (like ls): the prefetch producer
+            # stops between page pulls instead of fetching pages nobody reads.
+            for info in storage.scan(options, cancel_token=cancel_token):
                 _raise_if_cancelled(cancel_token, "rm")
                 deleter.submit(info)
             _raise_if_cancelled(cancel_token, "rm")
@@ -1857,20 +2026,28 @@ class S3:
         aws-cli only ever signs ``get_object``; ``put_object`` is this
         library's permissive superset.
 
-        The signature version follows the client's configuration, exactly
-        like boto3: a default client still downgrades presigned URLs to
-        SigV2 in regions that accept it (e.g. us-east-1). For aws-cli v2's
-        always-SigV4 URLs, build the client with
-        ``Config(signature_version="s3v4")`` - the CLI layer does exactly
-        that.
+        The URL is signed with SigV4, matching ``aws s3 presign``. This
+        matters because botocore, left to itself, still downgrades a default
+        us-east-1 client's presigned URL to the deprecated SigV2 - a URL a
+        SigV4-only bucket (or a modern bucket policy) rejects. So for the one
+        signer botocore would pick as SigV2 (the legacy hmacv1 ``"s3"``), the
+        presign is forced to ``"s3v4"`` for this call only, via botocore's
+        per-call ``choose-signer`` seam - no new client is built, and the
+        client's own configuration is otherwise untouched. The auth-scheme
+        signers a directory bucket (``v4-s3express``) or an MRAP ARN
+        (``s3v4a``) resolve to, and an unsigned client, are left as botocore
+        chose them.
         """
         storage = self._resolve_s3_target(target, operation="presign")
+        client = storage.get_client()
+        operation = "GetObject" if method == "get_object" else "PutObject"
         with s3_errors(operation="presign", bucket=storage.bucket, key=storage.key):
-            return storage.get_client().generate_presigned_url(
-                method,
-                Params={"Bucket": storage.bucket, "Key": storage.key},
-                ExpiresIn=expires_in,
-            )
+            with _sigv4_presign(client, operation):
+                return client.generate_presigned_url(
+                    method,
+                    Params={"Bucket": storage.bucket, "Key": storage.key},
+                    ExpiresIn=expires_in,
+                )
 
     def website(
         self,
@@ -1906,6 +2083,48 @@ class S3:
             )
 
 
+@contextmanager
+def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
+    """Force a presign onto SigV4 for the duration of one call.
+
+    A default S3 client (no explicit ``signature_version``) resolves the
+    generic ``"v4-query"`` presign signer, which a later botocore
+    choose-signer handler then downgrades to the legacy hmacv1 SigV2 - the
+    URL a SigV4-only bucket rejects. This registers an earlier
+    ``choose-signer.s3.<operation>`` handler that answers ``"s3v4-query"`` for
+    exactly that ``"v4-query"`` input, pre-empting the downgrade (the emitter
+    takes the first non-None response). Every other signer gets ``None`` - a
+    defer - so an already-explicit ``s3v4``, an unsigned
+    (``--no-sign-request``) client, a user's explicit legacy ``s3``, and the
+    ``s3express`` / ``s3v4a`` auth-scheme signers all sign exactly as botocore
+    chose (the unsigned path in particular breaks if this handler answers for
+    it). The CLI, which pins ``s3v4`` on its client, resolves ``"s3v4-query"``
+    and is untouched. ``"v4-query"`` / ``"s3v4-query"`` are botocore-internal
+    signer tokens; if a botocore version renames them this override simply
+    no-ops back to botocore's default (no crash). Scoped to this client and
+    operation, unregistered in a ``finally`` so no shared state leaks and no
+    new client is built.
+
+    A client that does not expose botocore's event seam (a stand-in that only
+    implements ``generate_presigned_url``) is left to its own signing - the
+    override is a best-effort upgrade, never a hard requirement.
+    """
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is None or not hasattr(events, "register"):
+        yield
+        return
+
+    def _choose(signature_version: str, **_kwargs: Any) -> str | None:
+        return "s3v4-query" if signature_version == "v4-query" else None
+
+    event = f"choose-signer.s3.{operation}"
+    events.register(event, _choose)
+    try:
+        yield
+    finally:
+        events.unregister(event, _choose)
+
+
 # -- module-level convenience -------------------------------------------------
 # Thin wrappers over a default ``S3()`` for the common zero-config case
 # (``boto3_s3.cp(...)`` rather than ``S3().cp(...)``), in the spirit of requests'
@@ -1921,6 +2140,16 @@ def _delegate(method: Callable[Concatenate[S3, _P], _R]) -> Callable[_P, _R]:
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         return method(S3(), *args, **kwargs)
 
+    # ``functools.wraps`` sets ``__wrapped__``, which would make
+    # ``inspect.signature`` report the method's signature *with* ``self``. Pin
+    # the self-stripped signature explicitly (it wins over ``__wrapped__``) so
+    # runtime introspection matches the documented contract - the method's
+    # exact signature minus ``self`` (docs/s3.md) - for help generators and
+    # ``Signature.bind`` consumers, not just for type checkers.
+    method_signature = inspect.signature(method)
+    wrapper.__signature__ = method_signature.replace(  # pyright: ignore[reportAttributeAccessIssue]
+        parameters=list(method_signature.parameters.values())[1:]
+    )
     return wrapper
 
 

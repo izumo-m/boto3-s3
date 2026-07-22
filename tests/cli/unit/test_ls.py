@@ -8,12 +8,14 @@ scan -> format path without network and without monkeypatching.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.harness import unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -152,9 +154,15 @@ class TestLsAllBuckets:
         assert "Total Objects: 0" in out
         assert "Total Size: 0" in out
 
-    def test_ignored_globals_are_accepted(self) -> None:
+    def test_ignored_globals_are_accepted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Accepted-and-ignored means the listing itself is untouched: the
+        # output matches a plain run line for line.
+        ctx, _ = _fake_ctx([{"Contents": [_obj("p/a")]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        plain = capsys.readouterr().out
         ctx, _ = _fake_ctx([{"Contents": [_obj("p/a")]}])
         assert cli.main(["ls", "--no-paginate", "--output", "json", "s3://bucket/p/"], ctx=ctx) == 0
+        assert capsys.readouterr().out == plain
 
     def test_invalid_choice_exits_param_validation_rc(
         self, capsys: pytest.CaptureFixture[str]
@@ -215,10 +223,6 @@ class TestRecognizedExtraGlobals:
         assert cli.main(["ls", "--cli-binary-format", "bogus", "s3://b/p/"]) == 252
 
 
-def _unused_factory(_args: Any) -> Any:
-    raise AssertionError("client factory must not be called")
-
-
 class TestParamfileExpansion:
     """aws paramfile-expands the positional and the bucket-listing filters at
     parse time (rc 252 on a bad reference), naming the argument as aws does."""
@@ -232,7 +236,7 @@ class TestParamfileExpansion:
         assert cli.main(["ls", f"file://{ref}"], ctx=ctx) == 1
 
     def test_positional_missing_reference_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["ls", "file:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         err = capsys.readouterr().err
         assert "Error parsing parameter 'paths': Unable to load paramfile" in err
@@ -242,7 +246,7 @@ class TestParamfileExpansion:
     ) -> None:
         rc = cli.main(
             ["ls", "s3://b", "--bucket-name-prefix", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--bucket-name-prefix'" in capsys.readouterr().err
@@ -252,17 +256,18 @@ class TestParamfileExpansion:
     ) -> None:
         rc = cli.main(
             ["ls", "s3://b", "--bucket-region", "file:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
 
-    def test_bucket_name_prefix_reference_is_expanded(self) -> None:
+    def test_bucket_name_prefix_reference_is_expanded(self, tmp_path: Path) -> None:
+        # aws paramfile-expands --bucket-name-prefix: a file:// reference
+        # forwards the file's contents as the Prefix.
+        ref = tmp_path / "prefix.txt"
+        ref.write_text("al")
         ctx, client = _fake_ctx([{"Buckets": []}])
-        # A readable reference would forward its contents as Prefix; here just
-        # confirm a bare value still forwards (the expand is a no-op without the
-        # prefix, so behavior is unchanged for the common case).
-        assert cli.main(["ls", "--bucket-name-prefix", "al"], ctx=ctx) == 0
+        assert cli.main(["ls", "--bucket-name-prefix", f"file://{ref}"], ctx=ctx) == 0
         assert client.calls[0]["Prefix"] == "al"
 
     def test_positional_missing_fileb_reference_is_252(
@@ -270,7 +275,7 @@ class TestParamfileExpansion:
     ) -> None:
         # aws expands fileb:// as well as file://, so a missing one is the same
         # load 252 (not the 254/1 of a literal path reaching the client).
-        rc = cli.main(["ls", "fileb:///no/x"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", "fileb:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert (
             "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
@@ -283,7 +288,7 @@ class TestParamfileExpansion:
         # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
         ref = tmp_path / "u.bin"
         ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=Context(client_factory=_unused_factory))
+        rc = cli.main(["ls", f"fileb://{ref}"], ctx=unused_ctx())
         assert rc == 255
         assert "startswith first arg must be bytes" in capsys.readouterr().err
 
@@ -294,7 +299,7 @@ class TestParamfileExpansion:
         # fileb:// is the load 252, not the bare int() coercion's 255.
         rc = cli.main(
             ["ls", "s3://b", "--page-size", "fileb:///no/x"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 252
         assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
@@ -317,7 +322,7 @@ class TestParamfileExpansion:
         ref.write_bytes(b"abc")
         rc = cli.main(
             ["ls", "s3://b", "--page-size", f"fileb://{ref}"],
-            ctx=Context(client_factory=_unused_factory),
+            ctx=unused_ctx(),
         )
         assert rc == 255
         assert "invalid literal for int() with base 10: b'abc'" in capsys.readouterr().err
@@ -328,9 +333,7 @@ class TestQueryValidation:
     every other head check (globalargs.validate_query)."""
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(
-            ["ls", "s3://b", "--query", "]["], ctx=Context(client_factory=_unused_factory)
-        )
+        rc = cli.main(["ls", "s3://b", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
 
@@ -340,22 +343,24 @@ class TestQueryValidation:
 
 
 class TestScanInterruptPolicy:
-    def test_ls_storage_opts_out_of_the_interrupt_join(
+    def test_the_cli_posture_reaches_the_listing_scan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the listing storage must not
-        # wait for an in-flight page pull on the way out (aws dies
-        # immediately); the library default keeps waiting.
+        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # wait_on_interrupt=False once, and ls threads it into its listing
+        # scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
-        built: list[Any] = []
+        scan_waits: list[bool] = []
 
         class _Recording(boto3_s3.S3Storage):
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                built.append(self)
+            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
+                assert options is not None
+                scan_waits.append(options.wait_on_interrupt)
+                return super().scan(options, cancel_token=cancel_token)
 
-        monkeypatch.setattr(boto3_s3, "S3Storage", _Recording)
+        # Patch the command module's binding: ls.py imports S3Storage at top.
+        monkeypatch.setattr("boto3_s3_cli.commands.ls.S3Storage", _Recording)
         ctx, _client = _fake_ctx([{"Contents": []}])
         assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
-        assert [s.scan_wait_on_interrupt for s in built] == [False]
+        assert scan_waits == [False]

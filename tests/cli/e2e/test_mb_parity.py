@@ -26,6 +26,7 @@ from tests.utils.golden import (
 from tests.utils.harness import (
     assert_stderr_tokens,
     capture_bucket_state,
+    capture_bucket_tags,
     create_bucket_in_region,
     force_delete_bucket,
     normalize_rm_stdout,
@@ -49,10 +50,12 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
     _reset(s3_client, mb_bucket, scenario)
     aws_result = run_aws_subprocess(argv)
     aws_exists, aws_remaining = capture_bucket_state(s3_client, mb_bucket)
+    aws_tags = capture_bucket_tags(s3_client, mb_bucket) if scenario.capture_tags else None
 
     _reset(s3_client, mb_bucket, scenario)
     ours_result = run_cli_subprocess(argv)
     ours_exists, ours_remaining = capture_bucket_state(s3_client, mb_bucket)
+    ours_tags = capture_bucket_tags(s3_client, mb_bucket) if scenario.capture_tags else None
 
     aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=mb_bucket)
     ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=mb_bucket)
@@ -69,6 +72,7 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
                     aws_version=detect_aws_version(),
                     remaining_keys=aws_remaining,
                     bucket_exists=aws_exists,
+                    bucket_tags=aws_tags,
                 ),
             )
         else:
@@ -80,6 +84,7 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
                 compare_stdout=scenario.compare_stdout,
                 remaining_keys=aws_remaining,
                 bucket_exists=aws_exists,
+                bucket_tags=aws_tags,
             )
 
     assert ours_result.rc == aws_result.rc, (
@@ -97,15 +102,20 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
         f"  ours: exists={ours_exists} keys={ours_remaining!r}\n"
         f"  aws:  exists={aws_exists} keys={aws_remaining!r}"
     )
+    assert ours_tags == aws_tags, (
+        f"[{scenario.name}] bucket-tag parity broken:\n  ours: {ours_tags!r}\n  aws:  {aws_tags!r}"
+    )
     assert_stderr_tokens(
         scenario.expected_stderr_tokens_ours,
         ours_result.stderr,
         side="ours",
         scenario=scenario.name,
+        require_empty=scenario.stderr_exact_empty,
     )
     assert_stderr_tokens(
         scenario.expected_stderr_tokens_aws,
         aws_result.stderr,
         side="aws",
         scenario=scenario.name,
+        require_empty=scenario.stderr_exact_empty,
     )

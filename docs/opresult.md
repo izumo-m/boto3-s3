@@ -1,23 +1,28 @@
 # The `OpResult` record
 
 `OpResult` is the per-item completion record passed to the `on_result`
-callback of `cp` / `mv` / `rm` / `sync`. One record is emitted per item, from a
-worker thread (s3transfer's for transfers, `S3Deleter`'s for batched deletes) -
-so `on_result` must be fast and must not raise.
+callback of `cp` / `mv` / `rm` / `sync`. One record is emitted per item - from
+a worker thread on the asynchronous paths (s3transfer's for submitted
+transfers, `S3Deleter`'s for batched deletes), and inline on the operation's
+own thread for the synchronous ones (dry-run, the single-key `rm`, local /
+custom-destination deletes, `use_threads=False`) - so `on_result` must be fast
+and must not raise either way.
 
-It is a **single type discriminated by `transfer_type`**, not a per-subcommand
-hierarchy - mirroring aws-cli, whose every result is one `BaseResult` keyed by
-its `transfer_type`. The caller already knows which subcommand it invoked, so
-the record only needs to say *what happened to this item*.
+It is a **single type discriminated by `transfer_type` and `outcome`**, not a
+per-subcommand hierarchy. aws-cli uses one result kind per event
+(`SuccessResult` / `FailureResult` / `DryRunResult` / ..., each still keyed by
+its `transfer_type`); boto3-s3 folds the event kind into `outcome`. The caller
+already knows which subcommand it invoked, so the record only needs to say
+*what happened to this item*.
 
 ## Fields
 
 | field | meaning |
 |---|---|
 | `transfer_type` | the verb (aws-cli's `transfer_type`): `upload` / `download` / `copy` / `move` / `delete`. |
-| `key` | the operation-relative identity - the transfer `compare_key`, or the deleted object's key. Also the token the CLI matches byte-progress against. |
-| `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE`. |
-| `bytes_transferred` | bytes moved (0 for a delete or an advisory). |
+| `compare_key` | the operation-relative identity: the item's compare key (`/`-separated, relative to the operation's root) - the same key space filters match against. A delete record's full object key stays on `src_info.key`. Also the token the CLI matches byte-progress against. |
+| `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE` / `CANCELLED`. |
+| `bytes_transferred` | bytes moved, on `SUCCEEDED`; 0 for a delete, an advisory, and every non-`SUCCEEDED` transfer record (a failure reports 0 even when bytes landed - e.g. an `mv` whose transfer succeeded but whose source delete failed). |
 | `error` | a `Boto3S3Error` on a failure; the advisory text on `WARNED` / `NOTICE`. Always the library taxonomy (every path translates into it), never a raw exception. |
 | `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
 | `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
@@ -36,8 +41,10 @@ The **source side** is the object being acted on: the source of a transfer, or
 the object a delete removes (aws models a delete as `src`=path, `dest`=None - so
 a delete fills the `src_*` trio and leaves `dest_*` empty). The **destination
 side** is where a transfer writes; `dest_info` is populated only by `sync` (the
-pre-existing object the copy compared against) - `cp` / `mv` never list the
-destination, so they carry `dest` / `dest_storage` but no `dest_info`.
+pre-existing object the copy compared against) - `cp` / `mv` populate no
+`dest_info` (their normal path never lists the destination; the
+`--case-conflict` gate's membership pre-scan is internal and stamps nothing),
+so they carry `dest` / `dest_storage` but no `dest_info`.
 
 So `src_storage` + `src_info.key` (or `dest_storage` + `dest_info.key`) re-reaches
 the object directly - e.g. a HeadObject - without re-deriving anything.
@@ -53,11 +60,11 @@ fields are kept because they are populated even where the entry is absent - a
 | field | cp / mv | sync (copy) | rm / sync (delete) | warning · notice |
 |---|---|---|---|---|
 | `transfer_type` | upload / download / copy (mv → `move`) | upload / download / copy | `delete` | the run's verb |
-| `key` | `compare_key` | `compare_key` | the object key | `compare_key` (often `""`) |
-| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
+| `compare_key` | the transfer's compare key | the transfer's compare key | the operation-relative compare key (full object key: `src_info.key`) | the compare key, often `""` |
+| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN / CANCELLED | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
 | `src` / `dest` | both | both | `src` only | — / — |
-| `bytes_transferred` | bytes | bytes | 0 | 0 |
-| `error` | on FAILED | on FAILED | on FAILED | the message body |
+| `bytes_transferred` | bytes (SUCCEEDED; else 0) | bytes (SUCCEEDED; else 0) | 0 | 0 |
+| `error` | on FAILED / CANCELLED | on FAILED / CANCELLED | on FAILED | the message body |
 | `src_info` | the source entry | the source entry | the removed object | — |
 | `dest_info` | — | update: the pre-existing dest / new: — | — | — |
 | `src_storage` | source side | source side | the deleted-from side (`rm`: the target bucket; `sync --delete`: the run's dest) | run's source side |
@@ -66,7 +73,52 @@ fields are kept because they are populated even where the entry is absent - a
 
 A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
 `dest_info` are both `None` and the stream endpoint renders as `-`; the
-`src_storage` / `dest_storage` are still the two sides.
+`src_storage` / `dest_storage` are still the two sides. One accepted gap: a
+glacier `SKIPPED` record (`ignore_glacier_warnings=True`) carries no `dest` /
+`dest_info` - its gate runs before the destination is derived.
+
+## When `on_result` fires (the contract)
+
+Every item that reaches the operation layer produces **exactly one outcome
+record**: `SUCCEEDED` / `FAILED` / `SKIPPED` / `DRYRUN` / `CANCELLED`. An item
+that never reaches it - filtered out during enumeration, or never enumerated
+because the run died first - produces nothing. The delete lane carries one
+carve-out: a cancellation can also discard `S3Deleter`-buffered entries
+(accepted but not yet dispatched) without a record
+([`deleter.md`](./deleter.md) section 2). `WARNED` / `NOTICE` sit outside
+that one-per-item rule: they are advisory records, not tied 1:1 to an item (a
+walk warning has no transfer item at all, and a `NOTICE` may precede the same
+item's real outcome). Aggregate counts always agree with the records: the
+engine's rollup counters and `BatchError`'s fields are the per-outcome record
+counts ([`exceptions.md`](./exceptions.md) section 4).
+
+A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode,
+Ctrl-C) resolves the accepted transfer items like this:
+
+- accepted but not yet running - or abandoned mid-flight - reports
+  `CANCELLED`, with `error` a `CancelledError` naming the cause;
+- an in-flight request that completes despite the cancellation reports its
+  real outcome: a running request cannot be interrupted, its bytes really
+  landed, and s3transfer lets the completion win over the cancel mark;
+- work never accepted (a graceful cancel stops the submission loop before the
+  next item) produces no record.
+
+A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
+items run to completion and report their real outcomes, so no `CANCELLED`
+records arise. A run a cancellation actually cut short always ends by raising
+(the fatal, or `CancelledError`), never by a `BatchError` - so `CANCELLED`
+records appear in no `BatchError` count, and the engine's `cancelled` rollup
+counter is exact once the operation has raised. (A cancel that arrives with
+nothing left to cut - e.g. from the last item's own failure callback - changes
+nothing: the run ends as it would have, a `BatchError` for the failure.) (`rm` / `sync --delete` deletions go
+through `S3Deleter`, whose own contract is
+[`deleter.md`](./deleter.md) section 2.)
+
+aws-cli cancels the same transfer set (measured against the pinned aws-cli)
+but reports it differently: one `fatal error:` line, with the cancelled items
+dropped from its output and its counts entirely. The per-item `CANCELLED`
+records are the library's deliberately richer surface; the CLI maps them back
+to aws's silence.
 
 ## `extra_info` (result metadata)
 
@@ -86,9 +138,11 @@ exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None
 
 ### `capture_response` - the full S3 responses
 
-`cp` / `mv` / `rm` / `sync` accept `capture_response=True`, which surfaces the
-**full S3 responses** an operation produced, keyed by role - only the slots that
-apply are present:
+`cp` / `mv` / `rm` / `sync` accept `capture_response=True`, which surfaces, on
+each **successful** record, the **full S3 responses** the operation produced (a
+`FAILED` / `CANCELLED` record keeps `extra_info=None` - an unfinished item's
+captured responses are dropped), keyed by role - only the slots that apply are
+present:
 
 - **`extra_info["write"]`** - the transferred object's write response for an
   **upload** or **copy**: the `PutObject`, `CopyObject`, or
@@ -106,10 +160,14 @@ apply are present:
   its range-specific fields (`ContentRange` / `ContentLength`) are dropped, so the
   slot reads like a whole-object response. `"ETag"` is promoted from it.
 - **`extra_info["delete"]`** - the removed object's `DeleteObject`-shaped
-  response (`VersionId` / `DeleteMarker` / `DeleteMarkerVersionId` /
-  `RequestCharged`, whichever apply), whenever the backend produces one: an `mv`'s
-  S3 source removal, and each object `rm` / `sync --delete` removes from S3 or from
-  a custom backend whose `Storage.delete` returns a response. The batched path
+  response (`VersionId` / `DeleteMarker` /
+  `RequestCharged`, whichever apply; the batched wire form's
+  `DeleteMarkerVersionId` is renamed to `VersionId`, as a single
+  `DeleteObject` reports it), whenever the backend produces one: an `mv`'s
+  S3 source removal, and each object `rm` / `sync --delete` removes from S3. A
+  custom backend's slot is whatever `Mapping` its `Storage.delete` returns,
+  surfaced as-is minus a `ResponseMetadata` key - only the built-in S3 paths
+  guarantee the `DeleteObject` shape. The batched path
   reconstructs one per key from its `DeleteObjects` `Deleted[]` entry plus the
   shared `RequestCharged`, so the caller sees the same single-object shape
   regardless of the batch wire form (docs/deleter.md); `rm`'s blind single-key path
@@ -132,9 +190,15 @@ events - the delete calls are issued directly - so it works on any engine.
 ## `error`
 
 `error` is always a `Boto3S3Error` (the library exception taxonomy) or `None` -
-never a raw exception. A `FAILED` record carries the failure; a `WARNED` /
-`NOTICE` record carries the advisory text - a `WARNED` body is bare (the CLI
-prints `warning: {error}`), while a `NOTICE` body already carries its own
+never a raw exception. A `FAILED` record carries the failure; a `CANCELLED`
+record carries a `CancelledError` whose message names what revoked the item
+where the canceller supplied a reason (classic: the fatal's text, or the
+cancel reason; an immediate-mode escalation during the drain revokes without a
+message, and those records carry the bare `canceled`; the CRT manager cancels
+without the message, so its records carry awscrt's cancellation wording
+instead); a `WARNED` / `NOTICE` record carries
+the advisory text - a `WARNED` body is bare (the CLI prints
+`warning: {error}`), while a `NOTICE` body already carries its own
 `warning: ` prefix (the CLI prints it verbatim).
 
 ## Example
@@ -146,10 +210,10 @@ def on_result(r: OpResult) -> None:
     if r.outcome is not OpOutcome.SUCCEEDED:
         return
     if r.transfer_type is TransferType.DELETE:
-        print("removed", r.src_info.key if r.src_info else r.key)
+        print("removed", r.src_info.key if r.src_info else r.compare_key)
         return
     etag = (r.extra_info or {}).get("ETag")  # copy / download; upload only under capture_response
-    print("transferred", r.src_info.key if r.src_info else r.key, etag)
+    print("transferred", r.src_info.key if r.src_info else r.compare_key, etag)
 ```
 
 Re-reaching the result object (e.g. to HEAD it):
@@ -157,9 +221,14 @@ Re-reaching the result object (e.g. to HEAD it):
 ```python
 from boto3_s3 import S3Storage
 
-# The backend is not always S3 (`sync --delete` onto a local or custom dest
-# deletes there), so narrow before using the S3-only surface.
-storage, info = r.src_storage, r.src_info  # a delete's removed object
+# The backend is not always S3 (an upload's source is local; `sync --delete`
+# onto a local or custom dest deletes there), so narrow before using the
+# S3-only surface.
+storage, info = r.src_storage, r.src_info  # a download / copy's source object
 if isinstance(storage, S3Storage) and info is not None:
     head = storage.get_client().head_object(Bucket=storage.bucket, Key=info.key)
 ```
+
+Pick a side that still exists when the callback uses it: a delete record's
+`src_info` names the object the run just removed, so a HEAD there can only
+404.

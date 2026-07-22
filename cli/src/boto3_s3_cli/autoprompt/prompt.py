@@ -6,8 +6,11 @@ Imported only when ``--cli-auto-prompt`` fires on an install that has the
 (a port of aws-cli's ``awscli/autoprompt/prompttoolkit.py``'s adapter), and
 ``PromptToolkitAutoPrompter`` runs the editable prompt and returns the
 edited argv. We use ``prompt_toolkit``'s standard completion menu rather than
-cloning aws's full-screen doc-panel app - the contract is candidate parity, not
-UI chrome (console output is non-contractual, option-handling section 6).
+cloning aws's multi-pane doc-panel application (itself built with
+``Application(full_screen=False)``, not a literal full-screen UI). Neither the
+chrome nor the candidate set is contractual - docs/autoprompt.md declares aws
+auto-prompt parity an explicit non-goal (console output is non-contractual,
+option-handling section 6).
 """
 
 from __future__ import annotations

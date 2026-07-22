@@ -54,9 +54,12 @@ class TransferPlan:
     honor a ``Storage`` subclass override) instead of re-deriving the walk from
     the formatted root. ``src_root`` / ``dest_root`` are the *formatted* sides
     (aws-cli's ``FileFormat.format`` output): S3 in ``bucket/key`` form, local as
-    a native absolute path, and a custom ``open`` side as ``""`` (it addresses
-    entries by the relative ``compare_key`` its own ``open`` takes); directory
-    semantics are expressed by a trailing separator. ``--exclude`` / ``--include``
+    a native absolute path, and a custom ``open`` side as ``""`` (its entries
+    are addressed separately: a recursive item's ``open`` takes the relative
+    ``compare_key``, a single item ``""`` - the location itself); directory
+    semantics are expressed by a trailing separator on the built-in sides
+    (the custom side's root stays bare ``""``, its directory-ness carried by
+    ``use_src_name`` alone). ``--exclude`` / ``--include``
     need no source/destination path here: ``boto3_s3.globsieve`` matches a
     relative pattern against each item's ``compare_key`` and a root-anchored one
     against its full ``key`` at match time.

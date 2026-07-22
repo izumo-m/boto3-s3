@@ -33,6 +33,7 @@ from tests.utils.harness import (
     assert_stderr_tokens,
     capture_local_tree,
     delete_under,
+    had_progress_lines,
     head_object_fields,
     normalize_cp_stdout,
     remaining_keys,
@@ -56,6 +57,7 @@ class _SideState:
     tree: list[str] | None
     src_tree: list[str]
     head: dict[str, Any] | None
+    progress: bool | None
 
 
 def _run_side(
@@ -85,6 +87,7 @@ def _run_side(
         tree=capture_local_tree(str(workdir / "dest")) if scenario.capture_tree else None,
         src_tree=capture_local_tree(str(workdir / "src")),
         head=head,
+        progress=had_progress_lines(result.stdout) if scenario.compare_progress else None,
     )
     if expected_mtime is not None and scenario.mtime_key is not None:
         stamped = os.stat(workdir / scenario.mtime_key[1]).st_mtime
@@ -117,6 +120,7 @@ def test_mv_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
                         remaining_keys=aws.remaining,
                         local_tree=aws.tree,
                         head_fields=aws.head,
+                        progress=aws.progress,
                         src_tree=aws.src_tree,
                     ),
                 )
@@ -130,6 +134,7 @@ def test_mv_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
                     remaining_keys=aws.remaining,
                     local_tree=aws.tree,
                     head_fields=aws.head,
+                    progress=aws.progress,
                     src_tree=aws.src_tree,
                 )
 
@@ -166,12 +171,14 @@ def test_mv_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
             ours.result.stderr,
             side="ours",
             scenario=scenario.name,
+            require_empty=scenario.stderr_exact_empty,
         )
         assert_stderr_tokens(
             scenario.expected_stderr_tokens_aws,
             aws.result.stderr,
             side="aws",
             scenario=scenario.name,
+            require_empty=scenario.stderr_exact_empty,
         )
     finally:
         delete_under(s3_client, bucket, "")

@@ -74,6 +74,64 @@ class TestPresign:
         with pytest.raises(ValidationError):
             S3().presign(123)  # pyright: ignore[reportArgumentType]
 
+    def test_default_client_signs_sigv4_not_legacy_sigv2(self) -> None:
+        # Real botocore (no fake): left alone, a default us-east-1 client
+        # downgrades a presigned URL to the deprecated SigV2
+        # (AWSAccessKeyId/Signature/Expires), which a SigV4-only bucket
+        # rejects. The library forces SigV4 to match `aws s3 presign`, and
+        # restores the client's own signing afterwards (no leak).
+        import boto3
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        client = session.client("s3", region_name="us-east-1")
+        # Sanity: the bare client really does downgrade here.
+        bare = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "b", "Key": "k"}, ExpiresIn=60
+        )
+        assert "AWSAccessKeyId=" in bare and "X-Amz-Signature=" not in bare
+
+        url = S3().presign(S3Storage("s3://b/k", client=client))
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+        assert "X-Amz-Signature=" in url
+
+        # The override is scoped to the call: the client's own default returns.
+        after = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "b", "Key": "k"}, ExpiresIn=60
+        )
+        assert "AWSAccessKeyId=" in after and "X-Amz-Signature=" not in after
+
+    def test_explicit_sigv4_client_is_unchanged(self) -> None:
+        # A client already pinned to s3v4 (the CLI's own build) resolves the
+        # s3v4 signer, which the override returns unchanged - the CLI's presign
+        # goldens are unaffected. Compare the signature *scheme* (the query
+        # parameter keys), not the whole URL, whose Date/Signature move with
+        # wall-clock time.
+        import urllib.parse
+
+        import boto3
+        from botocore.config import Config
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        client = session.client(
+            "s3", region_name="us-east-1", config=Config(signature_version="s3v4")
+        )
+
+        def param_keys(url: str) -> set[str]:
+            return {k for k, _ in urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query)}
+
+        pinned = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "b", "Key": "k"}, ExpiresIn=3600
+        )
+        via_library = S3().presign(S3Storage("s3://b/k", client=client))
+        assert param_keys(via_library) == param_keys(pinned)
+        assert "X-Amz-Algorithm" in param_keys(via_library)  # SigV4, not downgraded
+
 
 class TestPresignErrors:
     def test_param_validation_error_becomes_validation_error(self) -> None:

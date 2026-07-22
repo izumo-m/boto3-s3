@@ -10,7 +10,7 @@ rem
 rem Idempotent: a matching extraction is reused (no re-download).
 rem
 rem   scripts\install-awscli.cmd            # match the source checkout
-rem   scripts\install-awscli.cmd 2.35.18    # a specific version (required on the
+rem   scripts\install-awscli.cmd 2.36.1     # a specific version (required on the
 rem                                         # NTFS test copy, which carries no
 rem                                         # source checkout - testing.md section 8)
 rem

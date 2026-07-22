@@ -94,10 +94,35 @@ class Context:
             def client(self) -> S3Client:
                 return client_factory(args)
 
-        return InjectedClientS3()
+        # wait_on_interrupt=False like build_s3: the injected-client seam must
+        # keep the CLI's process-fatal Ctrl-C posture.
+        return InjectedClientS3(wait_on_interrupt=False)
+
+    def with_s3(self, s3: S3) -> Context:
+        """A view of this context whose ``s3`` always returns *s3*.
+
+        ``rb --force``'s session-sharing seam: aws hands its one CLI session
+        to the inner rm (``RmCommand(self._session)``), so the inner run must
+        not build a second session - a ``credential_process`` helper would run
+        twice, an MFA / assume-role flow would prompt twice, and the object
+        deletes could then run under a different identity than the final
+        ``DeleteBucket``. Every other dependency (factories, transfer config,
+        prompter) carries over unchanged.
+        """
+        clone = Context(
+            client_factory=self.client_factory if self._client_factory_injected else None,
+            s3_factory=lambda _args: s3,
+            service_client_factory=(
+                self.service_client_factory if self._service_client_factory_injected else None
+            ),
+            transfer_config=self.transfer_config,
+            auto_prompter=self.auto_prompter,
+        )
+        return clone
 
     def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
-        """Build an additional S3 client from the command's bound session."""
+        """Build an additional S3 client from the command's bound session
+        (an injected test factory builds from its own wiring instead)."""
         if self._client_factory_injected:
             return self.client_factory(args)
         return build_client(args, session=s3.session)
@@ -110,13 +135,14 @@ class Context:
         *,
         region: str | None = None,
     ) -> Any:
-        """Build a non-S3 client from the command's bound session."""
+        """Build a non-S3 client from the command's bound session
+        (an injected test factory builds from its own wiring instead)."""
         if self._service_client_factory_injected:
             return self.service_client_factory(service, args, region=region)
         return build_service_client(service, args, region=region, session=s3.session)
 
 
-def parse_integer_option(value: object, *, operation: str) -> int:
+def parse_integer_option(value: object, *, operation: str) -> int | None:
     """Convert an integer option value the way aws-cli does: rc 255 on failure.
 
     aws-cli converts ``cli_type_name: integer`` options with a bare ``int()``
@@ -125,9 +151,12 @@ def parse_integer_option(value: object, *, operation: str) -> int:
     ``type=int`` would turn the same mistake into a usage error (252), so
     integer options are declared without it and converted here at ``run()``
     start, before the client factory builds anything (aws fails at parse
-    time, before its client exists).
+    time, before its client exists). ``None`` (the option not given) passes
+    through unconverted, like aws's unset-integer handling.
     """
-    if isinstance(value, int):  # the argparse default, already converted
+    if value is None:
+        return None
+    if isinstance(value, int):  # an argparse integer default, already converted
         return value
     # argparse hands us a str, a fileb:// paramfile hands us bytes; both go
     # straight into int() the way aws does. int() coerces str and bytes alike,
@@ -150,8 +179,8 @@ def _expand_string_paramfile(
     Shared body of the string option and positional helpers below. aws expands
     both prefixes at parse time, so a missing reference is the load 252; a
     ``file://`` yields text, while a ``fileb://`` yields bytes that botocore
-    then rejects for a string parameter with its own 252 (measured against aws
-    2.35.18: ``value: b'...', valid types: <class 'str'>``). A value without a
+    then rejects for a string parameter with its own 252 (measured against the
+    pinned aws-cli: ``value: b'...', valid types: <class 'str'>``). A value without a
     prefix (or a non-string, e.g. an integer default) is untouched. *name* is
     the argument name aws reports in the load failure.
     """
@@ -239,14 +268,18 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
 
     Not range-validated: aws-cli passes any int through and lets the server
     decide, and the exit-code charter requires matching the resulting codes
-    (0 lists nothing -> rc 1; a negative value is the server's
+    (0 lists nothing - ls's empty listing exits 1, rm and the transfers 0;
+    a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
     family, whose post-start errors are uniformly 1 - docs/cli.md sections
     5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare
     ``int()`` conversion, not argparse's 252 (``parse_integer_option``
-    converts at ``run()`` start).
+    converts at ``run()`` start). The default is ``None`` like aws-cli's,
+    which sends **no** ``MaxKeys`` / ``MaxBuckets`` on the wire (the server
+    pages at its own default) - an explicit 1000 here would be a wire
+    divergence.
     """
-    parser.add_argument("--page-size", default=1000)
+    parser.add_argument("--page-size", default=None)
 
 
 def add_request_payer_argument(parser: argparse.ArgumentParser) -> None:

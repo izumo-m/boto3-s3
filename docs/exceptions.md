@@ -15,7 +15,7 @@ Related: the entry point to the design as a whole is
   exception** (success = no exception, error = always an exception; no return
   codes or error-report objects).
 - The hierarchy is **`Boto3S3Error` (root) + 6 categories + 2 refining
-  subclasses**. Collapsing everything into a single `botocore`-style
+  subclasses + the `BatchError` aggregate** (section 4). Collapsing everything into a single `botocore`-style
   `ClientError` is **rejected** (because boto3-s3 spans both the local FS and
   S3, it preserves a cross-cutting classification in which "an S3 403 and a
   local `PermissionError` belong to the same category").
@@ -41,8 +41,9 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
-`-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
-                            #   Unrelated to the CancelledError of asyncio / concurrent.futures
++-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
+|                           #   Unrelated to the CancelledError of asyncio / concurrent.futures
+`-- BatchError              # aggregate: a batch operation's failure rollup (counts + first_error; section 4)
 ```
 
 The two **refining subclasses** exist for the CLI's exit-code parity: aws
@@ -61,8 +62,12 @@ class Boto3S3Error(Exception):
                  key: str | None = None) -> None: ...
 ```
 
-- Programming bugs (`TypeError` / `AssertionError`, etc.) are not wrapped and
-  pass through. `KeyboardInterrupt` / `SystemExit` also pass through.
+- Programming bugs (`TypeError` / `AssertionError`, etc.) are not wrapped on
+  the synchronous paths - they pass through. Inside the asynchronous transfer
+  engine every task exception must land in its item's record, so an
+  unclassified one surfaces there wrapped in the base `Boto3S3Error` (the
+  last-resort clause) instead. `KeyboardInterrupt` / `SystemExit` always pass
+  through.
 - **Intentional pass-through exception**: using
   `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent passes
   through the same `botocore.exceptions.MissingDependencyException` as boto3 does.
@@ -70,7 +75,51 @@ class Boto3S3Error(Exception):
   stay boto3-faithful ([`crt.md`](./crt.md) section 3 / section 6). The CLI
   distribution maps this situation to a `ConfigurationError` (rc 253) ahead of
   time to prevent a traceback (the decision tree of crt.md section 4), so this
-  library exception never passes through the CLI.
+  library exception never passes through the CLI. The pass-through is scoped to
+  that engine-selection path: the same exception surfacing inside a translated
+  S3 call - SigV4a signing for an MRAP target without awscrt, say - converts to
+  the plain `ConfigurationError` like the section 3 table's other environment
+  errors.
+
+### 2.1 The attribute contract (stable vs. display)
+
+What a consumer may rely on across releases is **class identity** (the
+hierarchy above) and the **structured attributes**: `operation` / `bucket` /
+`key` on every `Boto3S3Error`, plus `BatchError`'s counters (`succeeded` /
+`failed` / `warned` / `skipped` and the derived `total`, section 4).
+**Message strings are display only**: they carry aws-cli wording and change
+whenever parity tracking requires, so never parse `str(exc)` - branch on the
+class and read the attributes.
+
+`__cause__` reachability: an error raised for a failed S3 request carries the
+originating botocore `ClientError` on `__cause__` (the `raise ... from`
+boundary conversion of section 1) - the CLI's rc-254 test reads exactly this
+(section 5). Per-item failure records link the same way: the translation
+stamps the original exception onto the record error's `__cause__` (a
+pass-through `Boto3S3Error` keeps whatever cause it already has). `BatchError`
+is two levels deep: its `__cause__` is the **translated** first failure (a
+`Boto3S3Error`, section 4), never the raw backend exception, so an
+exception-backed failure's original - a `ClientError` where the server was
+reached - sits at `__cause__.__cause__`, and that is a guarantee. The one
+exception-free path is a per-key `DeleteObjects` `Errors[]` entry: it is
+synthesized from the response body (section 3) with no exception object
+behind it, so its `__cause__` is `None` and only the message carries the
+code.
+
+The context attributes are best-effort, and `operation=None` is a legitimate
+value: it means no subcommand-scoped operation was in scope - client
+construction, and the shared object-listing path that backs every recursive
+scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
+would mislabel the others). A locally-originating error carries a filesystem
+path in `key` (and no `bucket`) when set: the field names the failing entry in
+the backend's own address space, not always an S3 key.
+
+Custom backends: an exception a custom `Storage` raises that is not already a
+`Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as
+a per-item failure (the translators' last-resort clause, section 3), but one
+raised during enumeration (`scan`) or on the fatal path propagates **as-is**.
+The library assumes a well-behaved backend that maps its own errors to this
+taxonomy ([`storage.md`](./storage.md) section 2).
 
 ## 3. backend / local -> category mapping (representative examples)
 
@@ -81,9 +130,11 @@ class Boto3S3Error(Exception):
 | S3 `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` (5xx / throttle) | `TransportError` |
 | local `PermissionError` (incl. the post-download utime EPERM) | `AccessDeniedError` |
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
-| connection failure / timeout / other `OSError` (I/O, incl. a failed `makedirs`) | `TransportError` |
+| connection failure / timeout; a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
+| an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
-| `ProfileNotFound` / `PartialCredentialsError` / other config-flavored `BotoCoreError` at client construction | `InvalidConfigError` |
+| `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
+| `ProfileNotFound` / `PartialCredentialsError` (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
 | an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
@@ -95,7 +146,10 @@ accepting new work, discard work not yet accepted, drain accepted work, reclaim
 their workers, and then raise `CancelledError`. Passing
 `mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
 pending and in-flight futures. Synchronous external I/O already running cannot
-be killed safely and may still finish. Cancellation is monotonic and idempotent:
+be killed safely and may still finish - such a completion reports its real
+outcome, while a revoked accepted item reports one `CANCELLED` record
+([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error
+cancels the same way). Cancellation is monotonic and idempotent:
 an immediate request upgrades graceful cancellation, and later requests never
 downgrade it. `on_result` may call `cancel()`; it only changes token state and
 never shuts an engine down from the callback's worker thread.
@@ -112,7 +166,10 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 *translation* creates a direct base instance in only three places:
 
 - that final widening fallback;
-- `translate_boto_error`'s last clause, for an exception nothing classifies;
+- `translate_boto_error`'s last clause, for an exception no earlier clause
+  claims - notably an `OSError` raised inside s3transfer's task execution,
+  deliberately kept base (not `TransportError`) so aws's message rides
+  through verbatim;
 - the deleter's per-key `Errors[]` translation, whose entries carry a bare code
   with no HTTP status to widen on (an unknown code becomes the base category,
   deleter.md section 3).
@@ -143,6 +200,10 @@ class BatchError(Boto3S3Error):
 - The raise condition is **only when `failed > 0`** (Model 1). It does not raise
   for `warned`/`skipped` alone (`failed == 0`). In that case, obtain the counts
   through the `on_result` hook (for the exit code, see section 5).
+- `CANCELLED` records never reach a `BatchError`: a cancelling run ends by
+  raising the fatal (or `CancelledError`) instead, and cancelled items are not
+  failures - the engine's separate `cancelled` rollup counter carries them
+  ([`opresult.md`](./opresult.md), the `on_result` contract).
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
 - `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item
@@ -206,6 +267,8 @@ Two families override this with their own catch and so do **not** reach
   the documented **rc 255** exception.
 
 `CancelledError` is **not** given a special exit code by the CLI (there is no rc
-130 mapping for it). The CLI's only rc 130 is a `KeyboardInterrupt` / `EOFError`
-raised inside the `--cli-auto-prompt` interactive session, which is outside the
-exit-code charter.
+130 mapping for it). rc 130 comes from `main()`'s `KeyboardInterrupt` backstop -
+a Ctrl-C outside the transfer pipeline's window (inside it, the CLI reports
+aws's `cancelled: ctrl-c received` line and rc 1 - cli.md section 6) - and from
+a `KeyboardInterrupt` / `EOFError` inside the `--cli-auto-prompt` interactive
+session (the latter outside the exit-code charter).

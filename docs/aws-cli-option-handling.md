@@ -9,7 +9,7 @@ share the same command machinery (see section 2.1).
 
 Reference points:
 
-- Reference CLI: **AWS CLI v2.35.18** (the pinned aws-cli). `aws s3` semantics
+- Reference CLI: **the pinned aws-cli** (AWS CLI v2). `aws s3` semantics
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's
@@ -84,7 +84,7 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 matches that.
 
 `--cli-error-format` controls the top-level CLI exception rendering in
-aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli 2.35.18's
+aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli's
 default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
 table renderings remain outside the parity target. In particular, parameter
 validation failures use `An error occurred (ParamValidation): <message>`.
@@ -108,8 +108,11 @@ path); the library accepts a raw `bytes` key and does no base64 step of its own.
 
 aws-cli registers a global URI paramfile handler on every `aws s3` argument -
 positional and optional alike - so `file://` (text) and `fileb://` (binary)
-load from disk for *any* arg, not just the SSE-C keys, all resolved at parse
-time before the command runs. `boto3-s3-cli` matches this on the positional
+load from disk for any *single-string* arg, not just the SSE-C keys, all
+resolved at parse time before the command runs. (A list-valued argument - the
+`--exclude` / `--include` filter accumulation, `mb`'s two-token `--tags` - is
+not expanded: aws's paramfile hook rewrites only a plain string value, and
+boto3-s3-cli keeps those verbatim too.) `boto3-s3-cli` matches this on the positional
 too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
 `cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
 `file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
@@ -119,8 +122,10 @@ too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
 covers the free-string transfer options (`--content-type`,
 `--website-redirect`, `--cache-control`, `--content-disposition`,
 `--content-encoding`, `--content-language`, `--expires`, `--source-region`,
-`--sse-kms-key-id`), the string-typed integer options (`--page-size` /
-`--progress-frequency` / `--expected-size` / `--expires-in`, expanded before
+`--sse-kms-key-id`, and `--expected-size` - a plain string in aws's table, so
+a readable `fileb://` is rejected with the bytes 252 while its `int()` runs
+only on the stream route at submit), the string-typed integer options
+(`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
 their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
 after both integer coercions, before its shorthand parse; the shorthand also
 accepts aws's `key@=file://...` operator). The choices-validated options
@@ -133,8 +138,11 @@ the positional's `paths`/`path` or the option's `--flag` form).
 
 `fileb://` is not a free pass-through wherever it is accepted, though: only
 the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
-loaded *bytes* verbatim (they reach S3 as a `string`-shaped request parameter
-untouched, as above). Every free-string option in the list above still runs a
+loaded *bytes* verbatim into the request (a `string`-shaped request parameter
+untouched, as above). `--grants` also keeps its loaded bytes, but they flow
+into the grant *parsing* rather than a request parameter (as in aws, whose
+paramfile hands its grant handling the same bytes). Every other free-string
+option in the list above still runs a
 `fileb://` value through the same string-typed parameter check aws applies:
 `--content-type fileb://x` loads the bytes and then fails botocore's
 client-side check for a `string`-typed parameter (`Invalid type for
@@ -219,14 +227,17 @@ enforces that `--sse-c` / `--sse-c-key` (and the copy-source pair) are supplied
 together; that pairing check is route-independent and belongs to neither
 case (a) nor case (b).
 
-**Case (b): silently ignored, not rejected.** The remaining direction-specific
-options - `metadata_directive`, `copy_props`, `guess_mime_type`,
-`case_conflict` - are accepted on any route and simply have no effect when the
-route does not use them: either the corresponding S3 request parameter is never
-emitted (`metadata_directive` / `copy_props` are copy-only; `case_conflict` is
-download-only), or the route-specific logic just does not run (`guess_mime_type`
-is an internal flag carried on every route but only consulted to infer
-`ContentType` on the upload path). aws-cli applies the shared transfer arguments
+**Case (b): silently ignored, not rejected.** Every other direction-specific
+option is accepted on any route and simply has no effect when the route does
+not use it. `metadata_directive` / `copy_props` are copy-only and
+`case_conflict` download-only; `guess_mime_type` is an internal flag carried on
+every route but only consulted to infer `ContentType` on the upload path;
+`--expected-size` is consulted only on the streaming upload. The same rule
+covers the write-side request options on a download - `--acl`,
+`--storage-class`, the content headers, `--metadata`, the SSE family,
+`--grants` - because the `GetObject` mapping emits only SSE-C / request-payer /
+checksum-mode: either the corresponding S3 request parameter is never emitted,
+or the route-specific logic just does not run. aws-cli applies the shared transfer arguments
 uniformly and acts only on the route-relevant ones. `boto3-s3` does the same:
 the internal snake->PascalCase translation only emits the parameters that are
 valid for the chosen direction.
@@ -274,7 +285,7 @@ The default enhanced-style parameter-validation envelope is reproduced where
 practical: parser failures, unknown options, path/option validation failures,
 and auto-prompt flag conflicts use
 `An error occurred (ParamValidation): <message>`. This target is the default
-output of aws-cli 2.35.18; selecting another `--cli-error-format` does not alter
+output of aws-cli; selecting another `--cli-error-format` does not alter
 `boto3-s3-cli` output, as described in section 2.1.
 
 Two deliberate output-pipeline deviations sit under this umbrella

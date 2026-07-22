@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -21,7 +22,13 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from boto3_s3 import transfer
-from boto3_s3.exceptions import ConfigurationError, NotFoundError, ValidationError
+from boto3_s3.exceptions import (
+    AccessDeniedError,
+    CancelledError,
+    ConfigurationError,
+    NotFoundError,
+    ValidationError,
+)
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.transfer import (
     TransferItem,
@@ -41,22 +48,11 @@ from boto3_s3.types import (
     TransferType,
 )
 from tests.utils.fakemodel import model_only_client
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC_CONFIG = TransferConfig(use_threads=False)
 _MIB = 1024 * 1024
-
-
-def _client_error(code: str, status: int, operation: str) -> ClientError:
-    response: Any = {
-        "Error": {"Code": code, "Message": "stub"},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, operation)
-
-
-def _ops(calls: list[ApiCall]) -> list[str]:
-    return [call.operation for call in calls]
 
 
 class _OpenSink(io.BytesIO):
@@ -130,7 +126,7 @@ class TestUpload:
             dest_display="s3://bucket/up/a.bin",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Bucket"] == "bucket"
         assert calls[0].params["Key"] == "up/a.bin"
         assert (transferrer.succeeded, transferrer.failed) == (1, 0)
@@ -147,7 +143,9 @@ class TestUpload:
         item = TransferItem(
             compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
-        _, _, results, _ = _run(TransferType.UPLOAD, [item], [{}])
+        # A realistic PutObject response carries an ETag; extra_info must stay
+        # None anyway (the response is discarded, not mined for the ETag).
+        _, _, results, _ = _run(TransferType.UPLOAD, [item], [{"ETag": '"abc123"'}])
         assert results[0].extra_info is None
 
     def test_multipart_upload_sequence(self, tmp_path: Path) -> None:
@@ -161,7 +159,7 @@ class TestUpload:
             [item],
             [{"UploadId": "upload-id"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPart",
             "UploadPart",
@@ -227,13 +225,19 @@ class TestUpload:
             compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(
-            TransferType.UPLOAD, [item], [_client_error("NoSuchBucket", 404, "PutObject")]
+            TransferType.UPLOAD, [item], [client_error("NoSuchBucket", 404, "PutObject")]
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert isinstance(transferrer.first_error, NotFoundError)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert str(results[0].error).startswith("An error occurred (NoSuchBucket)")
+        # The attribute contract (exceptions.md section 2.1): an
+        # exception-backed per-item failure links its original ClientError on
+        # the record error's __cause__, matching the raise-from paths.
+        error = results[0].error
+        assert error is not None
+        assert isinstance(error.__cause__, ClientError)
 
     def test_invalid_grants_raise_at_submit_time(self, tmp_path: Path) -> None:
         # aws maps request params per item inside its pipeline, so a bad
@@ -299,7 +303,7 @@ class TestDownload:
             TransferType.DOWNLOAD, [item], [self._get_object_response()]
         )
         # Size + etag were both provided, so no HeadObject probe happened.
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
         assert item.mtime is not None
@@ -335,10 +339,14 @@ class TestDownload:
         outcomes = [result.outcome for result in results]
         assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
         warned = results[0]
-        assert "but was unable to update the last modified time." in str(warned.error)
-        assert str(warned.error).startswith(f"Skipping file {item.dest_path}.")
-        # EPERM gets aws's re-wording (aws-cli set_file_utime).
-        assert "attempting to modify the utime of the file failed" in str(warned.error)
+        # aws's full fixed wording, the destination path twice, then the
+        # EPERM re-wording from aws-cli's set_file_utime.
+        assert str(warned.error) == (
+            f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
+            "but was unable to update the last modified time. "
+            "The file was downloaded, but attempting to modify the utime of the file "
+            "failed. Is the file owned by another user?"
+        )
 
     def test_download_request_params(self, tmp_path: Path) -> None:
         item = self._item(tmp_path)
@@ -366,7 +374,7 @@ class TestDownload:
         calls, _, results, _ = _run(
             TransferType.DOWNLOAD, [item], [head, self._get_object_response()]
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"payload"
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
         assert results[0].bytes_transferred == 7
@@ -395,7 +403,7 @@ class TestCopy:
         calls, source_calls, _, transferrer = _run(
             TransferType.COPY, [self._item()], [{}], source_responses=[]
         )
-        assert _ops(calls) == ["CopyObject"]
+        assert ops(calls) == ["CopyObject"]
         assert calls[0].params["CopySource"] == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert "MetadataDirective" not in calls[0].params
         assert "TaggingDirective" not in calls[0].params
@@ -426,7 +434,7 @@ class TestCopy:
             source_responses=[],
             options=TransferOptions(metadata_directive="REPLACE"),
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPartCopy",
             "UploadPartCopy",
@@ -456,19 +464,17 @@ class TestCopy:
         assert create.params["Metadata"] == {"a": "b"}
 
     def test_multipart_default_heads_source_and_copies_small_tags(self) -> None:
-        # Where s3transfer still forwards inline Tagging to the create call
-        # (< upstream 0.19) the small set rides the header; where it is
-        # blacklisted the engine routes it through the post-copy
-        # PutObjectTagging instead (transfer._mpu_inline_tagging_supported).
-        inline = transfer._mpu_inline_tagging_supported()
+        # The small set rides the Tagging header on the create call, aws-cli's
+        # wire shape: its bundled s3transfer keeps the header off the create
+        # blacklist, and _allow_inline_mpu_tagging realigns upstream 0.19's
+        # table at manager build - uniform across the supported range (older
+        # s3transfer never blacklisted it).
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
         ]
-        if not inline:
-            responses.append({})  # PutObjectTagging
         source_responses: list[dict[str, Any] | Exception] = [
             {"ContentType": "text/css", "Metadata": {}},
             {"TagSet": [{"Key": "team", "Value": "a&b"}]},
@@ -479,17 +485,34 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         create = calls[0]
         assert create.params["ContentType"] == "text/css"
-        if inline:
-            assert create.params["Tagging"] == "team=a%26b"
-        else:
-            assert "Tagging" not in create.params
-            assert _ops(calls)[-1] == "PutObjectTagging"
-            assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "team", "Value": "a&b"}]}
+        assert create.params["Tagging"] == "team=a%26b"
+        assert "PutObjectTagging" not in ops(calls)
         assert transferrer.succeeded == 1
+
+    def test_multipart_tagging_read_failure_names_the_source(self) -> None:
+        # _SetTags._get_source_tags pre-translates its GetObjectTagging read
+        # carrying the *source* bucket/key; a raw ClientError would otherwise
+        # be re-tagged with the copy destination by _record_failure.
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            client_error("AccessDenied", 403, "GetObjectTagging"),
+        ]
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=source_responses,
+        )
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert calls == []  # the on_queued failure precedes CreateMultipartUpload
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert type(error) is AccessDeniedError
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 
     def test_single_part_copy_excludes_annotations(self) -> None:
         # Every copy-props mode short of ALL sends AnnotationDirective=EXCLUDE
@@ -529,7 +552,7 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {},  # HeadObject
             {"TagSet": []},
-            {"Annotations": [{"AnnotationName": "ann1"}]},
+            {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
             {"AnnotationPayload": io.BytesIO(b"payload")},
         ]
         calls, source_calls, _, transferrer = _run(
@@ -540,14 +563,14 @@ class TestCopy:
             options=TransferOptions(copy_props=CopyPropsMode.ALL),
         )
         assert "AnnotationDirective" not in calls[0].params
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
             "GetObjectAnnotation",
         ]
         assert source_calls[2].params == {"Bucket": "src-b", "Key": "d/a.bin"}
-        assert _ops(calls)[-1] == "PutObjectAnnotation"
+        assert ops(calls)[-1] == "PutObjectAnnotation"
         assert calls[-1].params == {
             "Bucket": "dest-b",
             "Key": "cp/a.bin",
@@ -556,6 +579,55 @@ class TestCopy:
             "ObjectIfMatch": '"dest-etag"',
             "VersionId": "dest-v1",
         }
+        assert transferrer.succeeded == 1
+
+    def test_all_multipart_deferred_lists_every_annotation_page(self) -> None:
+        # s3transfer's own post-complete read calls list_object_annotations
+        # once and never follows NextContinuationToken; the deferred-mode
+        # adapter paginates underneath so a multi-page source keeps its tail
+        # (aws-cli collects the names with a paginator). Payload reads stay
+        # lazy per-name pass-throughs.
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation ann1
+            {},  # PutObjectAnnotation ann2
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {
+                "Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}],
+                "NextContinuationToken": "next",
+            },
+            {"Annotations": [{"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7}]},
+            {"AnnotationPayload": io.BytesIO(b"one")},
+            {"AnnotationPayload": io.BytesIO(b"two")},
+        ]
+
+        calls, source_calls, _, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(
+                copy_props=CopyPropsMode.ALL,
+                annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+            ),
+        )
+
+        assert ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert source_calls[3].params["ContinuationToken"] == "next"
+        assert [call.params["AnnotationName"] for call in calls[-2:]] == ["ann1", "ann2"]
         assert transferrer.succeeded == 1
 
     def test_all_multipart_deferred_read_failure_happens_after_destination(self) -> None:
@@ -567,12 +639,15 @@ class TestCopy:
                 {"CopyPartResult": {"ETag": '"p1"'}},
                 {"CopyPartResult": {"ETag": '"p2"'}},
                 {"ETag": '"dest-etag"'},
-                {},  # native-path failure cleanup AbortMultipartUpload
+                # The real wire outcome: the upload id was already completed,
+                # so s3transfer's cleanup abort gets NoSuchUpload (404) - and
+                # must swallow it without disturbing the recorded failure.
+                client_error("NoSuchUpload", 404, "AbortMultipartUpload"),
             ],
             source_responses=[
                 {},
                 {"TagSet": []},
-                _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+                client_error("AccessDenied", 403, "ListObjectAnnotations"),
             ],
             options=TransferOptions(
                 copy_props=CopyPropsMode.ALL,
@@ -580,8 +655,8 @@ class TestCopy:
             ),
         )
 
-        assert _ops(source_calls)[-1] == "ListObjectAnnotations"
-        assert _ops(calls) == [
+        assert ops(source_calls)[-1] == "ListObjectAnnotations"
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPartCopy",
             "UploadPartCopy",
@@ -602,7 +677,7 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {},  # HeadObject
             {"TagSet": []},
-            _client_error("AccessDenied", 403, "ListObjectAnnotations"),
+            client_error("AccessDenied", 403, "ListObjectAnnotations"),
         ]
 
         calls, source_calls, results, transferrer = _run(
@@ -613,7 +688,7 @@ class TestCopy:
             options=TransferOptions(copy_props=CopyPropsMode.ALL),
         )
 
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "HeadObject",
             "GetObjectTagging",
             "ListObjectAnnotations",
@@ -634,10 +709,10 @@ class TestCopy:
         source_responses: list[dict[str, Any] | Exception] = [
             {"TagSet": []},
             {
-                "Annotations": [{"AnnotationName": "ann1"}],
+                "Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}],
                 "NextContinuationToken": "next",
             },
-            {"Annotations": [{"AnnotationName": "ann2"}]},
+            {"Annotations": [{"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7}]},
             {"AnnotationPayload": io.BytesIO(b"one")},
             {"AnnotationPayload": io.BytesIO(b"two")},
         ]
@@ -653,7 +728,7 @@ class TestCopy:
             ),
         )
 
-        assert _ops(source_calls) == [
+        assert ops(source_calls) == [
             "GetObjectTagging",
             "ListObjectAnnotations",
             "ListObjectAnnotations",
@@ -690,8 +765,8 @@ class TestCopy:
                 {"TagSet": []},
                 {
                     "Annotations": [
-                        {"AnnotationName": "ann1"},
-                        {"AnnotationName": "ann2"},
+                        {"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7},
+                        {"AnnotationName": "ann2", "LastModified": MTIME, "Size": 7},
                     ]
                 },
                 {"AnnotationPayload": io.BytesIO(b"first")},
@@ -727,7 +802,7 @@ class TestCopy:
             config=LibraryTransferConfig(use_threads=False, annotation_temp_dir=missing),
         )
 
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert calls == []
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -739,8 +814,8 @@ class TestCopy:
             [],
             source_responses=[
                 {"TagSet": []},
-                {"Annotations": [{"AnnotationName": "ann1"}]},
-                _client_error("AccessDenied", 403, "GetObjectAnnotation"),
+                {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
+                client_error("AccessDenied", 403, "GetObjectAnnotation"),
             ],
             options=TransferOptions(
                 copy_props=CopyPropsMode.ALL,
@@ -773,7 +848,7 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(calls)[-1] == "PutObjectTagging"
+        assert ops(calls)[-1] == "PutObjectTagging"
         assert calls[-1].params["Tagging"] == {"TagSet": [{"Key": "k", "Value": big}]}
         assert "Tagging" not in calls[0].params
         assert transferrer.succeeded == 1
@@ -786,7 +861,7 @@ class TestCopy:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "PutObjectTagging"),
             {},  # rollback DeleteObject
         ]
         source_responses: list[dict[str, Any] | Exception] = [
@@ -799,7 +874,7 @@ class TestCopy:
             responses,
             source_responses=source_responses,
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -864,6 +939,99 @@ class TestNonTransferOutcomes:
         assert all(p.bytes_total == 1000 for p in progress)
 
 
+class TestFatalCancellation:
+    """A fatal escaping the submission loop cancels the accepted transfers
+    (aws's manager-context behavior, measured live: a mid-listing fatal
+    leaves every queued transfer unrun), and each revoked item reports one
+    CANCELLED record naming the fatal (docs/opresult.md)."""
+
+    def test_fatal_mid_enumeration_cancels_queued_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from s3transfer.manager import TransferCoordinatorController
+
+        names = ("a.bin", "b.bin", "c.bin")
+        for name in names:
+            (tmp_path / name).write_bytes(b"x")
+        items = [
+            TransferItem(
+                compare_key=name,
+                size=1,
+                src_path=str(tmp_path / name),
+                dest_bucket="b",
+                dest_key=f"p/{name}",
+                src_display=str(tmp_path / name),
+                dest_display=f"s3://b/p/{name}",
+            )
+            for name in names
+        ]
+        client, _ = make_recording_client([])
+        api_calls: list[str] = []
+        first_started = threading.Event()
+        release_first = threading.Event()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            api_calls.append(f"{operation}:{params['Key']}")
+            if len(api_calls) == 1:
+                first_started.set()
+                assert release_first.wait(5.0)
+            return {}
+
+        client._make_api_call = api_call  # type: ignore[method-assign]
+
+        # Release the blocked in-flight request only once the shutdown's
+        # cancel has revoked every pending coordinator, so the "queued items
+        # never reach the API" assertion cannot race the worker. The in-flight
+        # one still finishes - a running request cannot be interrupted - and
+        # reports SUCCEEDED: s3transfer lets a completing task overwrite the
+        # mid-flight cancel mark (the bytes really landed; aws's engine does
+        # the same, its printer just never shows it).
+        original_cancel = TransferCoordinatorController.cancel
+
+        def cancel(self: Any, *args: Any, **kwargs: Any) -> None:
+            original_cancel(self, *args, **kwargs)
+            release_first.set()
+
+        monkeypatch.setattr(TransferCoordinatorController, "cancel", cancel)
+
+        results: list[OpResult] = []
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(max_concurrency=1),
+            on_result=results.append,
+        )
+        with pytest.raises(NotFoundError, match="listing died"):
+            with transferrer:
+                for item in items:
+                    transferrer.submit(item)
+                # Let the first request actually start before the fatal: the
+                # shape under test is "in-flight finishes, queued revoked" -
+                # without this the fatal can also beat the worker and revoke
+                # all three (a legal but different outcome).
+                assert first_started.wait(5.0)
+                raise NotFoundError("listing died mid-enumeration")
+
+        # Only the already-running first transfer reached the API; the queued
+        # two were revoked before ever becoming requests (aws's transfer set:
+        # its uploads in flight at the fatal land on S3 the same way). Record
+        # order is not part of the contract - a revoked item's record fires
+        # from the cancelling thread or the executor's skip path, whichever
+        # its submission had reached.
+        assert len(api_calls) == 1
+        by_key = {result.compare_key: result for result in results}
+        assert len(results) == 3 and set(by_key) == {"a.bin", "b.bin", "c.bin"}
+        assert by_key["a.bin"].outcome is OpOutcome.SUCCEEDED
+        for key in ("b.bin", "c.bin"):
+            result = by_key[key]
+            assert result.outcome is OpOutcome.CANCELLED
+            assert isinstance(result.error, CancelledError)
+            assert "listing died mid-enumeration" in str(result.error)
+        assert (transferrer.succeeded, transferrer.failed, transferrer.cancelled) == (1, 0, 2)
+        # first_error stays reserved for real failures (BatchError's sample).
+        assert transferrer.first_error is None
+
+
 class TestNoOverwrite:
     def test_put_object_carries_if_none_match(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
@@ -885,10 +1053,10 @@ class TestNoOverwrite:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("PreconditionFailed", 412, "PutObject")],
+            [client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert transferrer.first_error is None
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
@@ -905,7 +1073,7 @@ class TestNoOverwrite:
             [{"UploadId": "u"}, {"ETag": '"p1"'}, {"ETag": '"p2"'}, {}],
             options=TransferOptions(no_overwrite=True),
         )
-        assert _ops(calls) == [
+        assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPart",
             "UploadPart",
@@ -938,6 +1106,10 @@ class TestNoOverwrite:
             options=TransferOptions(no_overwrite=True, metadata_directive="REPLACE"),
         )
         assert "IfNoneMatch" not in calls[0].params
+        # The conditional write rides only the completing call: neither part
+        # copy may carry it (aws puts IfNoneMatch on CompleteMultipartUpload).
+        assert "IfNoneMatch" not in calls[1].params
+        assert "IfNoneMatch" not in calls[2].params
         assert calls[3].params["IfNoneMatch"] == "*"
 
 
@@ -965,7 +1137,7 @@ class TestMove:
             compare_key="a.bin", size=7, src_path=str(src), dest_bucket="b", dest_key="k"
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert not src.exists()
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -976,11 +1148,11 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
-        # The mtime stamp still lands (after the delete in our ordering).
+        # The mtime stamp lands (registered before the delete, aws's order).
         assert item.mtime is not None
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
@@ -999,8 +1171,8 @@ class TestMove:
         calls, source_calls, _, transferrer = _run(
             TransferType.COPY, [item], [{}], source_responses=[{}], is_move=True
         )
-        assert _ops(calls) == ["CopyObject"]
-        assert _ops(source_calls) == ["DeleteObject"]
+        assert ops(calls) == ["CopyObject"]
+        assert ops(source_calls) == ["DeleteObject"]
         assert source_calls[0].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert transferrer.succeeded == 1
 
@@ -1021,10 +1193,10 @@ class TestMove:
             TransferType.COPY,
             [item],
             [{}],
-            source_responses=[_client_error("AccessDenied", 403, "DeleteObject")],
+            source_responses=[client_error("AccessDenied", 403, "DeleteObject")],
             is_move=True,
         )
-        assert _ops(source_calls) == ["DeleteObject"]
+        assert ops(source_calls) == ["DeleteObject"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
         assert error is not None
@@ -1047,10 +1219,10 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD,
             [item],
-            [self._get_object_response(), _client_error("AccessDenied", 403, "DeleteObject")],
+            [self._get_object_response(), client_error("AccessDenied", 403, "DeleteObject")],
             is_move=True,
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         # The bytes are on disk (aws ditto), but the move reports failed.
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
@@ -1087,10 +1259,10 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("NoSuchBucket", 404, "PutObject")],
+            [client_error("NoSuchBucket", 404, "PutObject")],
             is_move=True,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert src.exists()
         assert transferrer.failed == 1
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
@@ -1104,11 +1276,11 @@ class TestMove:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD,
             [item],
-            [_client_error("PreconditionFailed", 412, "PutObject")],
+            [client_error("PreconditionFailed", 412, "PutObject")],
             options=TransferOptions(no_overwrite=True),
             is_move=True,
         )
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert src.exists()
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
@@ -1131,7 +1303,7 @@ class TestMove:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "PutObjectTagging"),
             {},  # rollback DeleteObject (destination side)
         ]
         source_responses: list[dict[str, Any] | Exception] = [
@@ -1141,10 +1313,10 @@ class TestMove:
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         assert calls[-1].params == {"Bucket": "dest-b", "Key": "cp/a.bin"}
         # No source-side delete: the only source calls are the props reads.
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
@@ -1168,8 +1340,8 @@ class TestMove:
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
-            _client_error("AccessDenied", 403, "PutObjectTagging"),
-            _client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
+            client_error("AccessDenied", 403, "PutObjectTagging"),
+            client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
         ]
         source_responses: list[dict[str, Any] | Exception] = [
             {},
@@ -1179,9 +1351,9 @@ class TestMove:
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
         )
-        assert _ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
         # The source delete proceeds - the transfer is recorded as a success.
-        assert _ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
         assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
         assert (transferrer.succeeded, transferrer.failed) == (1, 0)
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -1254,7 +1426,7 @@ class TestDownloadMoveFsync:
         )
         # The delete still runs - fsync only precedes it. POSIX fsyncs the file
         # and its parent directory (2); Windows the file alone (1).
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert len(fds) == (2 if os.name == "posix" else 1)
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert transferrer.succeeded == 1
@@ -1277,7 +1449,7 @@ class TestDownloadMoveFsync:
             dest_storage=LocalStorage(tmp_path, fsync=True),
         )
         # The bytes are on disk, but the source survives and the move reports failed.
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -1296,7 +1468,7 @@ class TestDownloadMoveFsync:
             is_move=True,
             dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws parity
         )
-        assert _ops(calls) == ["GetObject", "DeleteObject"]
+        assert ops(calls) == ["GetObject", "DeleteObject"]
         assert fds == []
         assert transferrer.succeeded == 1
 
@@ -1335,7 +1507,7 @@ class TestDownloadMoveFsync:
             [self._get_object_response()],
             dest_storage=LocalStorage(tmp_path, fsync=True),
         )
-        assert _ops(calls) == ["GetObject"]
+        assert ops(calls) == ["GetObject"]
         assert fds == []
         assert transferrer.succeeded == 1
 
@@ -1383,7 +1555,7 @@ class TestStreams:
             dest_display="s3://bucket/streaming.txt",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "streaming.txt"
         # No path means no mimetypes guess: ContentType stays unset.
         assert "ContentType" not in calls[0].params
@@ -1399,10 +1571,12 @@ class TestStreams:
             dest_key="streaming.txt",
         )
         calls, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}])
-        assert _ops(calls) == ["PutObject"]
+        assert ops(calls) == ["PutObject"]
         assert transferrer.succeeded == 1
-        # The provided size reaches the future (aws ProvideSizeSubscriber) and
-        # SUCCEEDED reports it, unlike the size-less streaming upload above.
+        # SUCCEEDED reports the item's size, unlike the size-less streaming
+        # upload above. (This asserts the record, not _ProvideSize's delivery:
+        # the probe-skip that delivery buys is pinned by the cp download tests'
+        # call sequences - GetObject with no HeadObject when size+etag ride.)
         assert results[0].bytes_transferred == 4
 
     def test_stream_download_probes_then_writes(self) -> None:
@@ -1425,7 +1599,7 @@ class TestStreams:
                 {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
             ],
         )
-        assert _ops(calls) == ["HeadObject", "GetObject"]
+        assert ops(calls) == ["HeadObject", "GetObject"]
         assert sink.getvalue() == b"foo\n"
         assert transferrer.succeeded == 1
 
@@ -1478,7 +1652,9 @@ class TestEngineSelection:
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
-        client, _ = make_recording_client([])
+        # The run's client was built with the explicit endpoint (the CLI flow,
+        # and S3.resolve() with S3(endpoint_url=...)), so the pin applies.
+        client, _ = make_recording_client([], endpoint_url=vpce)
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
@@ -1487,6 +1663,35 @@ class TestEngineSelection:
         )
         transferrer._get_manager()
         assert seen == [vpce]
+
+    def test_crt_endpoint_is_dropped_for_a_storage_supplied_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The explicit endpoint pin belongs to the client built from it. A
+        # storage-supplied client with its own endpoint must not be pinned to
+        # the S3-level one - the CRT would dial one endpoint with another's
+        # credentials (the classic lane just uses the client) - so the manager
+        # falls back to the host heuristic on the client's own endpoint.
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+
+        def fake_create(
+            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+        ) -> Any:
+            seen.append(endpoint)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])  # default AWS endpoint, not the S3-level one
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            crt_endpoint="https://endpoint-a.example.com",
+        )
+        transferrer._get_manager()
+        assert seen == [None]
 
     def test_session_is_threaded_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
@@ -1562,15 +1767,39 @@ class TestCrtSubscriberCompat:
         _ProvideETag("abc").on_queued(future)  # must not raise
 
 
+class TestResponseCaptureExpectGate:
+    """``transfer._ResponseCapture``: only keys admitted via ``expect()`` record.
+
+    A same-client GetObject issued outside the engine - a content filter
+    reading a pair the run then rejects - must not grow the read store for the
+    rest of the run, since no item would ever drain it.
+    """
+
+    def test_unexpected_key_is_not_stored(self) -> None:
+        from boto3_s3.transfer import _ResponseCapture
+
+        capture = _ResponseCapture()
+        capture.expect("b", "k")
+        parsed = {"ETag": '"e"', "ResponseMetadata": {"HTTPStatusCode": 200}}
+        capture._record_read(parsed, {"boto3_s3_capture_key": ("b", "k")})
+        capture._record_read(parsed, {"boto3_s3_capture_key": ("b", "other")})
+        # The expected key surfaces (transport internals stripped); the
+        # never-expected key stored nothing.
+        assert capture.pop_read("b", "k") == {"ETag": '"e"'}
+        assert capture.pop_read("b", "other") is None
+
+
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (docs/transfer.md):
-        # the engine pair plus the SDK-floor probes (--no-overwrite, section 7;
-        # copy_props=ALL, section 4). A symbol added or dropped must be a
-        # deliberate __all__ / docs decision.
+        # the engine pair, the Warner protocol its `warner` seam returns, and
+        # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
+        # section 4). A symbol added or dropped must be a deliberate
+        # __all__ / docs decision.
         assert set(transfer.__all__) == {
             "TransferItem",
             "Transferrer",
+            "Warner",
             "annotations_copy_unsupported_reason",
             "conditional_write_unsupported_reason",
         }
@@ -1606,6 +1835,29 @@ class TestConditionalWriteSupport:
         )
         assert reason is not None
         assert "1.41.0" in reason and "CopyObject" in reason
+
+    def test_upload_refused_without_s3transfer_create_blocklist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # s3transfer < 0.11 hands the full extra_args to CreateMultipartUpload
+        # (no CREATE_MULTIPART_BLOCKLIST), so a botocore that models
+        # IfNoneMatch - the real boto3 1.35.16+ / s3transfer 0.10.x pairing -
+        # would fail every multipart --no-overwrite upload deep in botocore.
+        # The probe refuses uploads up front instead.
+        monkeypatch.delattr("s3transfer.upload.UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST")
+        client = model_only_client({"PutObject", "CompleteMultipartUpload"})
+        reason = conditional_write_unsupported_reason(client, is_copy=False)
+        assert reason is not None
+        assert "0.11.0" in reason and "CreateMultipartUpload" in reason
+
+    def test_copy_unaffected_by_missing_upload_blocklist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The copy-side blacklist exists across the whole supported s3transfer
+        # range; only the upload path needs the 0.11 refusal.
+        monkeypatch.delattr("s3transfer.upload.UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST")
+        client = model_only_client({"CopyObject"})
+        assert conditional_write_unsupported_reason(client, is_copy=True) is None
 
     def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
         # ConfigurationError: the environment (SDK floor) lacks the
@@ -1708,7 +1960,7 @@ class TestAnnotationsCopySupport:
 
     def test_copy_props_none_value_means_default(self) -> None:
         # The constructor interprets the mode once; a None copy_props reads
-        # as unspecified (the falsy convention the other options follow),
+        # as unspecified (an is-None check: None only, not any falsy value),
         # not a ValueError - so a permissive caller's dryrun still constructs.
         client = model_only_client(set(), member="AnnotationDirective")
         transferrer = Transferrer(
@@ -1732,6 +1984,33 @@ class TestAnnotationsCopySupport:
                 source_client=client,
                 options=cast(TransferOptions, {"copy_props": "al"}),
             )
+
+    def test_empty_string_copy_props_raises_validation_error(self) -> None:
+        # "" is present but empty (an untyped caller's value): the is-None
+        # unspecified check must not swallow it into DEFAULT - it fails the
+        # enum conversion like any other bad string.
+        client = self._capable_client()
+        with pytest.raises(ValidationError) as excinfo:
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"copy_props": ""}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid copy_props value: ''"
+
+    def test_empty_string_annotation_copy_mode_raises_validation_error(self) -> None:
+        client = self._capable_client()
+        with pytest.raises(ValidationError) as excinfo:
+            Transferrer(
+                TransferType.COPY,
+                client,
+                source_client=client,
+                options=cast(TransferOptions, {"annotation_copy_mode": ""}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid annotation_copy_mode value: ''"
 
     @pytest.mark.parametrize("mode", list(AnnotationCopyMode))
     def test_annotation_copy_mode_accepts_every_public_mode(self, mode: AnnotationCopyMode) -> None:

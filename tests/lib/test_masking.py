@@ -17,8 +17,10 @@ SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 SIGNATURE = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 SESSION_TOKEN = "FQoGZXIvYXdzEMPLELONGSESSIONTOKENvalue1234567890abcdefABCDEF+/=="
 # A 44-char base64 SSE-C customer key (raw 32-byte AES-256 key, base64-encoded).
-SSE_C_KEY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"
+SSE_C_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
+# Importable module attributes; only SURFACE_NAMES form the documented
+# tier-2 surface (the primitives are internal helpers).
 MODULE_NAMES = [
     "MASK",
     "MASK_MIN_LEN",
@@ -27,6 +29,7 @@ MODULE_NAMES = [
     "mask_text",
     "set_stream_logger",
 ]
+SURFACE_NAMES = ["SecretMaskingFilter", "set_stream_logger"]
 
 
 @contextmanager
@@ -82,11 +85,36 @@ class TestMaskTextNotation:
         assert ACCESS_KEY_ID not in out
         assert out == "X-Amz-Credential=***MPLE%2F20260613%2Fus-east-1%2Fs3%2Faws4_request"
 
+    def test_non_aws_shaped_credential_masks_entirely(self) -> None:
+        # The tail reveal is scoped to AWS-shaped ids; a foreign key in the
+        # same slot (a MinIO admin key, say) must not leak its tail.
+        out = m.mask_text("Credential=minioadmin1234567890/20260613/us-east-1/s3/aws4_request")
+        assert out == "Credential=***/20260613/us-east-1/s3/aws4_request"
+
+    def test_non_aws_shaped_access_key_id_param_masks_entirely(self) -> None:
+        out = m.mask_text("AWSAccessKeyId=minioadmin1234567890&Expires=60")
+        assert out.startswith("AWSAccessKeyId=***")
+        assert "minioadmin" not in out
+        assert "7890" not in out
+
     def test_session_token_query_form(self) -> None:
         out = m.mask_text(f"https://b/k?X-Amz-Security-Token={SESSION_TOKEN}&X-Amz-Expires=60")
         assert SESSION_TOKEN not in out
         assert "X-Amz-Security-Token=***" in out
         assert "X-Amz-Expires=60" in out
+
+    def test_sigv2_security_token_query_form(self) -> None:
+        # botocore's SigV2 request signer (query-protocol services) puts the
+        # session token in a bare `SecurityToken` parameter - no x-amz-
+        # prefix (the S3 hmacv1 presigner spells it x-amz-security-token,
+        # already covered above); a listing continuation token stays visible.
+        out = m.mask_text(
+            f"https://b/k?AWSAccessKeyId=AKIA1234567890ABCDEF&SecurityToken={SESSION_TOKEN}"
+            "&ContinuationToken=abcdef123456"
+        )
+        assert SESSION_TOKEN not in out
+        assert "SecurityToken=***" in out
+        assert "ContinuationToken=abcdef123456" in out
 
     def test_sso_bearer_token_dict_repr_header(self) -> None:
         # botocore's `sso GetRoleCredentials` request carries the bearer token
@@ -128,6 +156,19 @@ class TestMaskTextNotation:
         out = m.mask_text(f"{{'X-Amz-Security-Token': b'{SESSION_TOKEN}'}}")
         assert SESSION_TOKEN not in out
         assert "'X-Amz-Security-Token': b'***'" in out
+
+    def test_s3express_session_token_header_forms(self) -> None:
+        # The S3 Express (directory bucket) flow signs every zonal request with
+        # the CreateSession-minted x-amz-s3session-token - the same secret
+        # grade as x-amz-security-token, in the same canonical-request and
+        # dict-repr DEBUG surfaces.
+        out = m.mask_text(f"x-amz-s3session-token:{SESSION_TOKEN}")
+        assert SESSION_TOKEN not in out
+        assert out.startswith("x-amz-s3session-token:***")
+        out = m.mask_text(f"{{'X-Amz-S3session-Token': '{SESSION_TOKEN}', 'Host': 'b.s3'}}")
+        assert SESSION_TOKEN not in out
+        assert "'X-Amz-S3session-Token': '***'" in out
+        assert "'Host': 'b.s3'" in out
 
     def test_sse_c_key_dict_repr_header_masked_md5_kept(self) -> None:
         # The base64 customer key is the symmetric encryption key (a true
@@ -313,6 +354,28 @@ class TestMaskTextNotation:
         assert assertion not in out
         assert "'SAMLAssertion': '***'" in out
 
+    def test_mfa_token_code_request_dict_masked(self) -> None:
+        # A profile with mfa_serial makes botocore log the STS request_dict with
+        # the live TOTP in 'TokenCode'; the MFA device ARN in 'SerialNumber' is
+        # not a secret and must stay visible.
+        line = (
+            "Making request for AssumeRole with params: "
+            "{'Action': 'AssumeRole', 'RoleArn': 'arn:aws:iam::111122223333:role/r', "
+            "'TokenCode': '123456', 'SerialNumber': 'arn:aws:iam::111122223333:mfa/alice'}"
+        )
+        out = m.mask_text(line)
+        assert "'TokenCode': '***'" in out
+        assert "123456" not in out
+        assert "'SerialNumber': 'arn:aws:iam::111122223333:mfa/alice'" in out
+
+    def test_mfa_token_code_query_body_masked(self) -> None:
+        # The urlencoded query-protocol body form (defensive coverage).
+        body = "Action=AssumeRole&TokenCode=987654&SerialNumber=arn%3Aaws&Version=2011-06-15"
+        out = m.mask_text(body)
+        assert "TokenCode=***" in out
+        assert "987654" not in out
+        assert "Version=2011-06-15" in out
+
     def test_long_non_url_run_does_not_hang(self) -> None:
         # Guards against ReDoS in the proxy-URL regex: a long contiguous
         # scheme-class run that never reaches "://" must mask in linear time.
@@ -364,6 +427,18 @@ class TestMaskTextProxy:
     def test_proxy_url_userinfo_without_password(self) -> None:
         out = m.mask_text("proxy http://onlyuser@proxy.internal:3128 set")
         assert out == "proxy http://***@proxy.internal:3128 set"
+
+    def test_proxy_url_empty_password_still_masks(self) -> None:
+        # botocore's mask_proxy_url masks the username of ``user:@`` too.
+        out = m.mask_text("proxy https://myuser:@proxy.example.com:8080 set")
+        assert out == "proxy https://***:***@proxy.example.com:8080 set"
+
+    def test_proxy_url_empty_username_still_masks(self) -> None:
+        out = m.mask_text("proxy https://:s3cr3tpw@proxy.example.com set")
+        assert out == "proxy https://***:***@proxy.example.com set"
+
+    def test_bare_userinfo_marker_is_kept(self) -> None:
+        assert m.mask_text("https://@proxy.internal/x") == "https://@proxy.internal/x"
 
     def test_matches_botocore_mask_proxy_url(self) -> None:
         # Parity proof: same notation as the only masking precedent in botocore.
@@ -496,7 +571,7 @@ class TestPublicModuleSurface:
         assert hasattr(m, name)
 
     def test_module_all_lists_exactly_the_names(self) -> None:
-        assert sorted(m.__all__) == sorted(MODULE_NAMES)
+        assert sorted(m.__all__) == sorted(SURFACE_NAMES)
 
     def test_set_stream_logger_is_public_top_level(self) -> None:
         assert "set_stream_logger" in boto3_s3.__all__

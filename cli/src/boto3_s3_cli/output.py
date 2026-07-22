@@ -13,8 +13,30 @@ from boto3_s3 import FileKind
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from typing import TextIO
 
     from boto3_s3 import FileInfo
+
+
+def uni_write(stream: TextIO, text: str) -> None:
+    """aws-cli's ``uni_print``: write ``text``, surviving an unencodable char.
+
+    On a console/codepage that cannot encode the text (a non-ASCII key on a
+    cp932 or ``ascii`` stream), re-encode with the stream's encoding and
+    ``errors='replace'`` rather than raising - one unencodable key must never
+    abort a listing or a delete run mid-way (aws prints the line with ``?``
+    substitutions and completes). Flushes like ``uni_print`` does. Every
+    stdout line that can carry a key/path goes through here; stderr needs no
+    fallback (Python opens it with ``errors='backslashreplace'``) but using
+    this helper there is harmless.
+    """
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        stream.write(text.encode(encoding, "replace").decode(encoding))
+    stream.flush()
+
 
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _SIZE_WIDTH = 10
@@ -26,7 +48,10 @@ def human_readable_size(size: float) -> str:
     """Format a byte count like aws-cli's ``--human-readable`` (base-2 units).
 
     Accepts a float so the transfer progress display can feed it byte-per-
-    second rates (aws renders both through one helper, ``utils.py``).
+    second rates (aws renders both through one helper, ``utils.py``). One
+    unreachable-range deviation: past EiB aws's suffix loop falls through and
+    returns ``None`` (rendering ``None``); this keeps counting in EiB - a
+    total below 1 EiB (millions of max-size objects) never gets there.
     """
     base = 1024
     value = float(size)

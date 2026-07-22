@@ -156,9 +156,17 @@ class TestBuildTransferConfig:
         runtime_config = _runtime_config(**scoped)
         config = runtimeconfig.build_transfer_config(scoped, runtime_config, "classic")
         assert config.multipart_threshold == 10 * _MIB
-        # multipart_chunksize was not set -> boto3's UNSET sentinel is kept so
-        # the CRT engine treats it as "use the dynamic part size".
+        # multipart_chunksize keeps boto3's UNSET sentinel - what lets the CRT
+        # engine use its dynamic part size.
         assert config.get_deep_attr("multipart_chunksize") is config.UNSET_DEFAULT
+        # And every other constructor key sits at a fresh constructor's own
+        # default (UNSET where boto3 uses the sentinel, None elsewhere).
+        base = type(config)()
+        ctor_keys = runtimeconfig._TRANSFER_CONFIG_CTOR_KEYS  # pyright: ignore[reportPrivateUsage]
+        for rc_key, ctor_key in ctor_keys.items():
+            if rc_key in scoped:
+                continue
+            assert config.get_deep_attr(ctor_key) == base.get_deep_attr(ctor_key), ctor_key
 
     def test_preferred_transfer_client_carries_the_resolved_engine(self) -> None:
         config = runtimeconfig.build_transfer_config({}, _runtime_config(), "crt")
@@ -178,6 +186,14 @@ class TestBuildTransferConfig:
         config = runtimeconfig.build_transfer_config({}, _runtime_config(), "classic")
         assert config.max_in_memory_upload_chunks == 6
         assert config.max_in_memory_download_chunks == 6
+
+    def test_download_io_queue_depth_matches_awscli(self) -> None:
+        # aws-cli's bundled s3transfer defaults max_io_queue_size to 1000 and
+        # no [s3] key maps to it; boto3's TransferConfig dials the same
+        # s3transfer default down to 100, so an unpinned config would give
+        # slow disks a tenth of aws's download readahead.
+        config = runtimeconfig.build_transfer_config({}, _runtime_config(), "classic")
+        assert config.max_io_queue_size == 1000
 
     def test_crt_tuning_fields_pass_through(self) -> None:
         scoped = {"target_bandwidth": "100MB/s", "direct_io": "true"}
@@ -211,11 +227,18 @@ class TestBuildTransferConfig:
         assert config.max_bandwidth == 10 * _MIB
 
     def test_crt_omits_classic_only_attributes(self) -> None:
-        # The request queue size and in-memory chunk caps are classic-only
-        # tuning aws-cli never applies to the CRT client.
+        # The request queue size, in-memory chunk caps, and download IO queue
+        # depth are classic-only tuning aws-cli never applies to the CRT
+        # client.
         scoped = {"max_queue_size": "500"}
         config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
-        assert config.max_request_queue_size != 500
+        # All four knobs sit at a fresh constructor's own defaults: the scoped
+        # queue size was not applied and the classic pins did not run.
+        base = type(config)()
+        assert config.max_request_queue_size == base.max_request_queue_size
+        assert config.max_in_memory_upload_chunks == base.max_in_memory_upload_chunks
+        assert config.max_in_memory_download_chunks == base.max_in_memory_download_chunks
+        assert config.max_io_queue_size == base.max_io_queue_size
 
 
 class TestResolveTransferConfig:

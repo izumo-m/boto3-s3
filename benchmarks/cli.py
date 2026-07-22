@@ -193,7 +193,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
 def _cmd_list() -> int:
     print("e2e scenarios (default scale):")
     for scenario in e2e.build_scenarios(False):
-        engines = "classic+crt" if scenario.crt_capable else "classic"
+        # Mirror the run filter: the startup probes ride every lane by name.
+        crt = scenario.crt_capable or scenario.name.startswith("startup_")
+        engines = "classic+crt" if crt else "classic"
         dims = ", ".join(f"{k}={v}" for k, v in scenario.dimensions.items()) or "-"
         print(f"  {scenario.name:24} [{engines}] {dims}")
     print("inprocess scenarios (default scale):")

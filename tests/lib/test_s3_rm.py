@@ -36,18 +36,9 @@ from boto3_s3 import (
     ValidationError,
     rm_filter_root,
 )
+from tests.utils.fakes3 import client_error
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
-
-
-def _client_error(code: str, operation: str, status: int = 404) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "x"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        operation,
-    )
 
 
 class _FakePaginator:
@@ -139,7 +130,9 @@ class TestRmSingleKey:
         results = _rm("s3://b/data/a.txt", client)
         assert client.list_calls == []
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "data/a.txt"}]
-        assert [(r.key, r.outcome) for r in results] == [("data/a.txt", OpOutcome.SUCCEEDED)]
+        # The record's compare_key is relative to the filter root ("data/"); the
+        # full key stays reachable via src_info.key.
+        assert [(r.compare_key, r.outcome) for r in results] == [("a.txt", OpOutcome.SUCCEEDED)]
 
     def test_result_carries_src_info_and_storage(self) -> None:
         # The deleted object rides through on src / src_info / src_storage (aws's
@@ -171,10 +164,12 @@ class TestRmSingleKey:
         results = _rm("s3://b/no-such", client, dryrun=True)
         assert client.delete_object_calls == []
         assert client.list_calls == []
-        assert [(r.key, r.outcome) for r in results] == [("no-such", OpOutcome.DRYRUN)]
+        assert [(r.compare_key, r.outcome) for r in results] == [("no-such", OpOutcome.DRYRUN)]
 
     def test_failure_emits_failed_and_raises_batch_error(self) -> None:
-        client = _FakeS3Client(delete_object_error=_client_error("NoSuchBucket", "DeleteObject"))
+        client = _FakeS3Client(
+            delete_object_error=client_error("NoSuchBucket", 404, "DeleteObject")
+        )
         results: list[OpResult] = []
         storage = S3Storage("s3://b-no-such/k", client=client)
         with pytest.raises(BatchError) as exc_info:
@@ -182,7 +177,7 @@ class TestRmSingleKey:
         assert (exc_info.value.succeeded, exc_info.value.failed) == (0, 1)
         assert isinstance(exc_info.value.__cause__, NotFoundError)
         assert isinstance(exc_info.value.__cause__.__cause__, ClientError)
-        assert [(r.key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
         assert isinstance(results[0].error, NotFoundError)
 
     def test_excluded_by_matcher_is_silent(self) -> None:
@@ -247,9 +242,9 @@ class TestRmRecursive:
                 },
             }
         ]
-        assert [(r.key, r.outcome) for r in results] == [
-            ("data/a", OpOutcome.SUCCEEDED),
-            ("data/b", OpOutcome.SUCCEEDED),
+        assert [(r.compare_key, r.outcome) for r in results] == [
+            ("a", OpOutcome.SUCCEEDED),
+            ("b", OpOutcome.SUCCEEDED),
         ]
 
     def test_prefix_without_slash_is_normalized(self) -> None:
@@ -271,13 +266,13 @@ class TestRmRecursive:
     def test_markers_are_deleted_too(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/m/", 0), _obj("p/a")]}])
         results = _rm("s3://b/p/", client, recursive=True)
-        assert [r.key for r in results] == ["p/m/", "p/a"]
+        assert [r.compare_key for r in results] == ["m/", "a"]
 
     def test_matcher_sees_prefix_relative_key(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("data/a.txt"), _obj("data/sub/x")]}])
         keep = GlobFilter().exclude("sub/*").compile()
         results = _rm("s3://b/data/", client, recursive=True, filter=keep)
-        assert [r.key for r in results] == ["data/a.txt"]
+        assert [r.compare_key for r in results] == ["a.txt"]
 
     def test_interleaved_ordering_is_last_match_wins(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a.txt"), _obj("p/b.bin")]}])
@@ -285,7 +280,7 @@ class TestRmRecursive:
         assert _rm("s3://b/p/", client, recursive=True, filter=keep) == []
         keep = GlobFilter().exclude("*").include("*.txt").compile()
         results = _rm("s3://b/p/", client, recursive=True, filter=keep)
-        assert [r.key for r in results] == ["p/a.txt"]
+        assert [r.compare_key for r in results] == ["a.txt"]
 
     def test_callable_filter_receives_fileinfo(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/big", 10), _obj("p/empty", 0)]}])
@@ -295,16 +290,16 @@ class TestRmRecursive:
             recursive=True,
             filter=lambda info: info.size == 0,
         )
-        assert [r.key for r in results] == ["p/empty"]
+        assert [r.compare_key for r in results] == ["empty"]
 
     def test_dryrun_lists_but_never_deletes(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a"), _obj("p/b")]}])
         results = _rm("s3://b/p/", client, recursive=True, dryrun=True)
         assert len(client.list_calls) == 1
         assert client.delete_objects_calls == []
-        assert [(r.key, r.outcome) for r in results] == [
-            ("p/a", OpOutcome.DRYRUN),
-            ("p/b", OpOutcome.DRYRUN),
+        assert [(r.compare_key, r.outcome) for r in results] == [
+            ("a", OpOutcome.DRYRUN),
+            ("b", OpOutcome.DRYRUN),
         ]
 
     def test_zero_matches_is_a_silent_success(self) -> None:
@@ -316,7 +311,7 @@ class TestRmRecursive:
     def test_listing_failure_propagates_as_category_error(self) -> None:
         # Pre-item failures are "fatal" (aws rc 1): the category error passes
         # through untouched, not wrapped in BatchError.
-        client = _FakeS3Client(list_error=_client_error("NoSuchBucket", "ListObjectsV2"))
+        client = _FakeS3Client(list_error=client_error("NoSuchBucket", 404, "ListObjectsV2"))
         with pytest.raises(NotFoundError):
             _rm("s3://b-no-such/", client, recursive=True)
         assert client.delete_objects_calls == []
@@ -331,8 +326,8 @@ class TestRmRecursive:
         with pytest.raises(BatchError) as exc_info:
             S3().rm(storage, recursive=True, on_result=results.append)
         assert (exc_info.value.succeeded, exc_info.value.failed) == (1, 1)
-        outcomes = {r.key: r.outcome for r in results}
-        assert outcomes == {"p/a": OpOutcome.FAILED, "p/b": OpOutcome.SUCCEEDED}
+        outcomes = {r.compare_key: r.outcome for r in results}
+        assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
 
 
 class TestRmBucketRootSweep:
@@ -344,7 +339,8 @@ class TestRmBucketRootSweep:
         )
         results = _rm("s3://b", client)
         assert client.list_calls[0]["Prefix"] == ""
-        assert [r.key for r in results] == ["m1/", "m2/sub/"]
+        # Bucket-root sweep roots the filter at "": compare_key equals the key.
+        assert [r.compare_key for r in results] == ["m1/", "m2/sub/"]
         assert client.delete_objects_calls[0]["Delete"]["Objects"] == [
             {"Key": "m1/"},
             {"Key": "m2/sub/"},
@@ -353,7 +349,7 @@ class TestRmBucketRootSweep:
     def test_trailing_slash_form_is_equivalent(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("m/", 0), _obj("keep/x", 3)]}])
         results = _rm("s3://b/", client)
-        assert [r.key for r in results] == ["m/"]
+        assert [r.compare_key for r in results] == ["m/"]
 
 
 class TestRmTargetValidation:
@@ -374,7 +370,7 @@ class TestRmTargetValidation:
     def test_filter_none_deletes_everything_listed(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a")]}])
         results = _rm("s3://b/p/", client, recursive=True, filter=None)
-        assert [r.key for r in results] == ["p/a"]
+        assert [r.compare_key for r in results] == ["a"]
 
 
 class TestRmFileInfoOnBlindPath:

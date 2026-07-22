@@ -29,6 +29,8 @@ directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
 stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
+(the routing keys on concrete types, not the ``scheme`` string - that is
+display-only)
 (``opens3`` uploads each ``open("rb")`` to S3, ``s3open`` downloads each S3
 object into an ``open("wb")`` whose ``close`` flushes it) while the S3 side rides
 ``s3transfer``; the custom side is capability-checked up front
@@ -47,15 +49,19 @@ import abc
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import Flag, auto
-from typing import Any, BinaryIO, ClassVar, Literal
+from typing import Any, BinaryIO, ClassVar, Literal, TypeVar
 
 from boto3_s3.concurrency import prefetch
 from boto3_s3.types import CancelToken, FileInfo, ScanOptions
 
+# Preserves a backend's concrete info type through sieve_pages, so a narrowed
+# scan_pages (list[S3FileInfo] pages) stays narrowed after filtering.
+_InfoT = TypeVar("_InfoT", bound="FileInfo")
+
 
 def sieve_pages(
-    pages: Iterator[Sequence[FileInfo]], keep: Callable[[FileInfo], bool]
-) -> Iterator[list[FileInfo]]:
+    pages: Iterator[Sequence[_InfoT]], keep: Callable[[FileInfo], bool]
+) -> Iterator[list[_InfoT]]:
     """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
 
     The building block a ``Storage.scan_pages`` implementation uses to honor
@@ -79,7 +85,9 @@ class StorageCapability(Flag):
     Storage kind implements the operation at all - **not** *permission* (whether a
     particular target is writable / reachable right now); a denied write or a
     missing object stays an execution-time error (an S3 ``403``, a local
-    ``EACCES`` / ``ENOENT``), reported per item like aws-cli, never pre-screened.
+    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the one
+    aws-parity pre-screen is the transfer commands' missing-local-source
+    check, which runs before items flow.
 
     The members mirror the methods one-to-one, because support genuinely differs
     per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
@@ -170,11 +178,12 @@ class Storage(abc.ABC):
     that forgets to filter cannot silently leak excluded entries into ``--exclude``
     / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
     built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
-    ``LocalStorage``'s walk applies it - late, after the aws-cli vetting that still
-    warns on excluded files, or early in a custom ``LocalFileGenerator``'s
-    ``finalize_children``). A backend that filters at its source, or prunes early by
-    calling ``options.filter`` itself, sets ``True`` to skip the redundant re-filter
-    without re-implementing ``scan``.
+    ``LocalStorage``'s walk applies it late, after the aws-cli vetting that still
+    warns on excluded files - a custom ``LocalFileGenerator``'s
+    ``finalize_children`` prunes earlier but by its own rules, never from
+    ``options.filter``). A backend that filters at its source, or applies
+    ``options.filter`` itself in ``scan_pages``, sets ``True`` to skip the
+    redundant re-filter without re-implementing ``scan``.
     """
 
     scheme: ClassVar[str]
@@ -186,15 +195,6 @@ class Storage(abc.ABC):
     # Pages buffered ahead of the consumer by scan()'s prefetch worker (see
     # concurrency.prefetch). Subclasses may override to tune the buffer depth.
     _scan_prefetch_pages: ClassVar[int] = 4
-
-    # Whether scan()'s context exit still waits for the prefetch worker when
-    # the consumer is unwinding on a KeyboardInterrupt/SystemExit. True (the
-    # default) keeps the no-surviving-worker contract for embedders; an app
-    # that treats such an interrupt as process-fatal (the CLI, matching aws's
-    # immediate death on Ctrl-C) sets False - via the built-ins' constructor
-    # kwarg - so an in-flight page pull cannot delay the exit. Every other
-    # exit always waits (concurrency.prefetch).
-    scan_wait_on_interrupt: bool = True
 
     scan_options_type: ClassVar[type[ScanOptions]] = ScanOptions
 
@@ -210,8 +210,10 @@ class Storage(abc.ABC):
         / ``detect_symlink_loops``, ``S3Storage``'s ``page_size`` / ``fetch_owner``)
         - overrides this to seed those held values, so every scan reflects the
         storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
-        paths build from this and overlay only the operation-inherent knobs
-        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix``), which
+        paths build from this and overlay only the run-level knobs
+        (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix`` /
+        ``request_payer``, plus the application's ``wait_on_interrupt``
+        posture), which
         is what lets an app configure the walk through the storage rather than per
         call.
         """
@@ -236,39 +238,46 @@ class Storage(abc.ABC):
         filters at its source or prunes early declares the flag to skip the
         redundant re-filter. Pass ``options`` to control the walk (defaults to
         ``default_scan_options``). To customize the entries, override
-        ``scan_pages``, not this method. Each yielded entry has its
+        ``scan_pages``, not this method. Each entry has its
         ``FileInfo.storage`` set to this backend as a safety net (only when a
-        ``scan_pages`` left it ``None``); the built-ins stamp it during the scan so
-        their filters see it too. Used by ``ls`` and the recursive forms of
+        ``scan_pages`` left it ``None``), ahead of the filter - so a predicate
+        always sees the producing backend, per ``FileInfo``'s contract (the
+        built-ins already stamp it during the scan). Used by ``ls`` and the recursive forms of
         ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
         producer before another page pull without changing entries already
         yielded to the consumer.
         """
         opts = options if options is not None else self.default_scan_options()
-        pages = self.scan_pages(opts)
+
+        def stamped() -> Iterator[Sequence[FileInfo]]:
+            # Safety net: stamp the producing backend so a downstream consumer
+            # (an `options.filter` predicate, sync's content compare via
+            # pair.src.storage, an on_result callback) can reach it even when a
+            # custom scan_pages did not set it. Runs ahead of the filter below,
+            # honoring FileInfo's contract that `storage` is stamped before any
+            # filter runs; the built-ins stamp during the scan, so this only
+            # fills a None left by a bespoke backend.
+            for page in self.scan_pages(opts):
+                for info in page:
+                    if info.storage is None:
+                        info.storage = self
+                yield page
+
+        pages = stamped()
         if opts.filter is not None and not self.scan_pages_filters:
             pages = sieve_pages(pages, opts.filter)
         with prefetch(
             pages,
             queue_size=self._scan_prefetch_pages,
             cancel_token=cancel_token,
-            wait_on_interrupt=self.scan_wait_on_interrupt,
+            wait_on_interrupt=opts.wait_on_interrupt,
         ) as items:
-            for info in items:
-                # Safety net: stamp the producing backend so a downstream consumer
-                # (sync's content compare via pair.src.storage, an on_result
-                # callback) can reach it even when a custom scan_pages did not set
-                # it. The built-ins stamp it during the scan so their filters
-                # already see it; this only fills a None left by a bespoke backend.
-                if info.storage is None:
-                    info.storage = self
-                yield info
+            yield from items
 
-    @abc.abstractmethod
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         """Yield entries one natural I/O page at a time - the producer and override seam.
 
-        This is the abstract method every backend implements and the public point
+        This is the method every listing backend implements and the public point
         to override: ``scan`` wraps it with prefetch and flattens it. Override
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
@@ -294,12 +303,23 @@ class Storage(abc.ABC):
         (``cp`` / ``mv`` / ``ls`` / ``rm``) the backend may yield its cheaper
         natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
-        pages), the local walk sorts for aws parity - so they ignore the flag.
+        pages; S3 Express directory buckets are the exception, and ``sync``
+        rejects them for it), the local walk sorts for aws parity - so they
+        ignore the flag.
         ``key`` itself is the full, ``/``-separated identifier; stamp its relative
         form as ``compare_key`` on every entry this producer yields.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: ``capabilities``
+        is the declarative contract - every declared flag, including one
+        *implied* by a stronger flag (``SCAN`` implies ``GET_FILEINFO``),
+        promises its matching method. The engine's gates check declarations,
+        not implementations, so an honest declaration never reaches this
+        backstop.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement scan_pages (StorageCapability.SCAN)"
+        )
+
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         """Open the object at ``key`` as a binary stream.
 
@@ -310,10 +330,14 @@ class Storage(abc.ABC):
         pre-allocate or choose its write strategy up front. This is
         the generic per-object I/O primitive: built-in S3<->local transfers go
         through ``s3transfer`` instead, so ``open`` is the path a custom backend
-        (and a stream wrapper) transfers through. ``cp`` / ``mv`` call it for the
-        non-built-in side of an open-route transfer (``opens3`` / ``s3open``,
-        transfer.md section 12), handing the returned fileobj to ``s3transfer``
-        and ``close``-ing it when done - a ``"wb"`` ``close`` flushes buffered
+        (and a stream wrapper) transfers through. ``cp`` / ``mv`` / ``sync``
+        call it for the non-built-in side of an open-route transfer
+        (``opens3`` / ``s3open``, transfer.md section 12) **lazily, when the
+        engine first moves that entry's bytes** - not when the entry is
+        enumerated and queued - so an entry whose transfer never starts
+        (failed, cancelled, dry run) is never opened. The returned fileobj is
+        read sequentially / written strictly in order, and ``close``-d when
+        the transfer settles - a ``"wb"`` ``close`` flushes buffered
         writes like any file object (whether the backend persists per write or
         defers to the flush - write-through vs write-back - is its own choice).
         ``LocalStorage`` and the stream Storages (``IOStorage`` /
@@ -322,9 +346,16 @@ class Storage(abc.ABC):
         ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
         unimplemented, since every S3 write rides ``s3transfer`` rather than
         ``open``.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: implement the
+        mode(s) the declared ``OPEN_READ`` / ``OPEN_WRITE`` capabilities
+        promise.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement open "
+            "(StorageCapability.OPEN_READ / OPEN_WRITE)"
+        )
+
     def delete(self, info: FileInfo) -> Mapping[str, Any] | None:
         """Delete the entry ``info`` identifies (``rm`` / ``mv`` source / ``sync --delete``).
 
@@ -337,9 +368,14 @@ class Storage(abc.ABC):
         ``OpResult.extra_info["delete"]`` when the operation runs with
         ``capture_response=True`` - or ``None`` when there is none. A local unlink
         returns ``None``; ``S3Storage`` returns its ``DeleteObject`` response.
-        """
 
-    @abc.abstractmethod
+        The base implementation raises ``NotImplementedError``: implement it
+        when the backend declares ``DELETE``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement delete (StorageCapability.DELETE)"
+        )
+
     def get_fileinfo(
         self,
         key: str = "",
@@ -355,8 +391,10 @@ class Storage(abc.ABC):
         single source/dest the storage points at), a non-empty ``key`` an entry
         beneath it. The outcomes are uniform across backends:
 
-        - present and transferable -> a ``FileInfo`` whose ``compare_key`` is the
-          entry's basename;
+        - present -> a ``FileInfo`` whose ``compare_key`` is the
+          entry's basename (``kind`` reflects the entry: a local directory
+          target resolves as a DIRECTORY-kind entry that a transfer later
+          fails on, like aws);
         - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)
           -> ``None``, no warning;
         - present but not a transferable regular file (a local special device /
@@ -371,7 +409,14 @@ class Storage(abc.ABC):
         by S3). Whether a symlink is followed is the local backend's own
         construction-time config (``LocalStorage(follow_symlinks=...)``), read from
         the storage - not a parameter here.
+
+        The base implementation raises ``NotImplementedError``: implement it
+        when the backend declares ``GET_FILEINFO``.
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_fileinfo "
+            "(StorageCapability.GET_FILEINFO)"
+        )
 
     @abc.abstractmethod
     def as_text(self) -> str:
@@ -403,8 +448,9 @@ class Storage(abc.ABC):
         This default is the ``open``-route rule for a custom backend (aws-cli
         has no counterpart): the root is ``""`` because such a backend
         encapsulates its own location and addresses entries by their
-        relative ``compare_key`` - its ``open`` / ``delete`` receive that key
-        unprefixed. ``use_src_name`` mirrors the S3 rule: a
+        relative ``compare_key`` - its ``open`` receives that key unprefixed,
+        and ``delete`` receives the listing entry itself (a ``FileInfo``)
+        addressed by the entry's own full ``key``. ``use_src_name`` mirrors the S3 rule: a
         ``dir_op`` or an explicit trailing ``/`` on ``as_text`` means the
         destination adopts the source's name.
         """

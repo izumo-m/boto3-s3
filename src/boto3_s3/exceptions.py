@@ -2,13 +2,19 @@
 
 
 class Boto3S3Error(Exception):
-    """Root of every exception raised from boto3-s3 public APIs.
+    """Root of every *classified* failure raised from boto3-s3 public APIs.
 
     Never raised directly for a known failure - every raise site uses one of
-    the subclasses below, so ``except Boto3S3Error`` is the catch-all. Direct
+    the subclasses below, so ``except Boto3S3Error`` is the catch-all for
+    operation failures. Outside the hierarchy, deliberately (docs/exceptions.md
+    section 2): programming bugs (``TypeError`` / ``AssertionError``) pass
+    through on the synchronous paths, ``KeyboardInterrupt`` / ``SystemExit``
+    always pass through, and the explicit-CRT engine selection passes
+    botocore's ``MissingDependencyException`` through boto3-faithfully. Direct
     instances appear only where no classification exists: the error
     translators' last-resort fallbacks (``s3storage.translate_boto_error``,
-    the deleter's per-key unknown-code entries) and the message envelope on
+    the deleter's per-key unknown-code entries, the transfer engine's
+    unclassified task exceptions) and the message envelope on
     WARNED / NOTICE ``OpResult`` records.
     """
 
@@ -59,7 +65,11 @@ class ConfigurationError(Boto3S3Error):
 
     Raised plainly for the failures aws gives dedicated handlers (rc 253):
     unresolvable credentials / region - and for an environment lacking a
-    required capability (an SDK floor, an absent awscrt). A configuration
+    required capability (an SDK floor shortfall; awscrt absence on the paths
+    that translate it, e.g. an MRAP target's SigV4a signing or the CLI's
+    ``[s3]`` crt decision - the library's explicit-CRT engine selection
+    instead passes botocore's ``MissingDependencyException`` through,
+    boto3-faithfully; docs/exceptions.md section 2). A configuration
     that is *present but invalid* is the ``InvalidConfigError``
     refinement below.
     """
@@ -87,8 +97,11 @@ class BatchError(Boto3S3Error):
     ``sync``) when at least one item FAILED.
 
     Carries only rollup counts (O(1) memory regardless of item count); per-item
-    detail is delivered live via the ``on_result`` hook. ``__cause__`` is the
-    first failure encountered (a diagnostic sample, not a list).
+    detail is delivered live via the ``on_result`` hook. ``__cause__`` is a
+    diagnostic sample, not a list: the first per-item failure of the rollup -
+    for ``sync``, sampled from the transfer rollup first and the delete rollup
+    only when no transfer failed, regardless of which failure happened first
+    chronologically.
     """
 
     def __init__(
@@ -109,7 +122,13 @@ class BatchError(Boto3S3Error):
 
     @property
     def total(self) -> int:
-        """Items reaching the operation layer (succeeded + failed + warned + skipped)."""
+        """The rollup sum (succeeded + failed + warned + skipped).
+
+        Not an exact item count: ``warned`` counts warnings, not items
+        (transfer.md section 8), so an item that succeeded with a warning -
+        a download whose mtime stamp failed, say - contributes to two
+        counters.
+        """
         return self.succeeded + self.failed + self.warned + self.skipped
 
 

@@ -48,8 +48,9 @@ once and scanned through its file descriptor, so every per-entry ``stat`` /
 readability probe is ``dir_fd``-relative (``fstatat`` - no kernel path re-walk);
 on Windows those APIs are absent, and the same code path falls back to a
 path-based scan whose ``FindNextFile`` data already supplies the attributes for
-free. The net effect is one ``stat`` per surviving entry (zero for a plain
-directory) plus aws-cli's one readability ``open`` per entry, versus the ~5
+free. The net effect is one ``stat`` per surviving entry (directories
+included - the kind is keyed on that same stat) plus aws-cli's one
+readability ``open`` per entry, versus the ~5
 restats per entry a naive port makes. Every surviving ``LocalFileInfo`` carries
 the stat or lstat used to classify it as ``stat_result``
 and its ``d_type`` symlink flag as
@@ -392,8 +393,10 @@ class LocalFileGenerator:
         directory's files can only surface once its ``os.scandir`` has been read in
         full and sorted (the byte-order sort appends ``os.sep`` to directory names,
         so ``foo.txt`` precedes ``foo/bar``), and they are handed off just before
-        the next descent's scandir. That aligns each page with one directory read,
-        so a consumer - e.g. ``Storage.scan``'s prefetch worker - overlaps the next
+        the next descent's scandir. So a page never spans two directory reads
+        (one scandir hands off a page per descent boundary - several for a
+        directory with interleaved sub-directories), and a consumer -
+        e.g. ``Storage.scan``'s prefetch worker - overlaps the next
         read on a network-mounted path, the reason the walk is paged at all. The
         pages concatenate to ``list_files``'s flat stream. The ``root`` parameter
         is the absolute directory path with a trailing ``os.sep``; each
@@ -930,10 +933,12 @@ class LocalFileGenerator:
     def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
         """Warn-and-skip checks on a *path*, aws-cli order and wording (``triggers_warning``).
 
-        Path-based: the root vetting (``should_ignore_file``) and the
-        ``stat_info`` race fallback. The per-entry hot path checks the same
+        Path-based: the root vetting (``should_ignore_file``), a directory
+        whose scandir establishment failed, and the near-symlink-boundary
+        re-vet. The per-entry hot path checks the same
         conditions from the ``DirEntry``'s cached stat in
-        ``should_ignore_entry``.
+        ``should_ignore_entry``; a mid-scan race (``entry_stat_result`` ->
+        ``None``) is warned in ``classify_child`` directly.
         """
         if not os.path.exists(path):
             notify(f"Skipping file {path}. File does not exist.")
@@ -1028,8 +1033,12 @@ def translate_os_error(
     ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
 
-    Shared by every local-filesystem failure path (this backend, the engines'
-    ``makedirs``, the CLI's destination pre-creation). ``message`` overrides
+    Shared by the local-filesystem failure paths that raise into the taxonomy
+    (this backend's single-entry and I/O operations, the engines'
+    ``makedirs``, the CLI's destination pre-creation). The walk's per-entry
+    handling is separate: it warns-and-skips through the vetting battery, and
+    an ``OSError`` its probes cannot attribute re-raises untranslated rather
+    than dropping a directory silently. ``message`` overrides
     ``str(exc)`` when the caller carries aws-cli wording of its own.
     """
     text = str(exc) if message is None else message
@@ -1098,7 +1107,6 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
-        scan_wait_on_interrupt: bool = True,
     ) -> None:
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
@@ -1116,9 +1124,6 @@ class LocalStorage(Storage):
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
         self._enumerate_all_entries = enumerate_all_entries
-        # The Ctrl-C exit policy for scan()'s prefetch worker
-        # (Storage.scan_wait_on_interrupt).
-        self.scan_wait_on_interrupt = scan_wait_on_interrupt
         # A library-only durability knob for this local backend as a *destination*
         # (default off = aws parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,
@@ -1135,6 +1140,17 @@ class LocalStorage(Storage):
     @property
     def path(self) -> str:
         return self._path
+
+    @property
+    def abspath(self) -> str:
+        """The construction-time absolute form of `path`.
+
+        The anchor every scan, `get_fileinfo`, and transfer plan resolves
+        against (see `__init__`); existence checks and directory creation in
+        the operations use it too, so a relative `path` keeps meaning the same
+        directory even if the process chdir's after construction.
+        """
+        return self._abspath
 
     @property
     def fsync(self) -> bool:
@@ -1187,7 +1203,8 @@ class LocalStorage(Storage):
         ``follow_symlinks`` / ``detect_symlink_loops`` /
         ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
-        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto this.
+        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``, plus
+        the application's ``wait_on_interrupt`` posture) onto this.
         The single-path ``get_fileinfo`` does not build these options - it reads
         ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """
@@ -1198,14 +1215,17 @@ class LocalStorage(Storage):
         )
 
     @override
-    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-        """Yield entries under ``path``, one directory read (``os.scandir``) per page.
+    def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[LocalFileInfo]]:
+        """Yield entries under ``path``, paged on directory-read boundaries.
 
         Recursive enumeration drives the walker's
         ``list_file_pages`` in aws-cli byte order, whose
-        pages fall on directory boundaries (a directory's sorted files handed off
-        just before the walk descends into its next sub-directory) so a page maps
-        to one scandir - the unit a prefetch consumer overlaps.
+        pages fall on directory boundaries: a directory's sorted files
+        accumulated so far are handed off just before each descent into a
+        sub-directory, so one ``os.scandir`` yields one page per descent
+        boundary (several for a directory with interleaved sub-directories)
+        and a page never spans two directory reads - the unit a prefetch
+        consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
         ``options.enumerate_all_entries`` /
         ``options.on_warning`` / ``options.filter`` are threaded into it - a
@@ -1271,7 +1291,7 @@ class LocalStorage(Storage):
             replace(self.default_scan_options(), on_warning=on_warning, storage=self),
         )
 
-    def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[FileInfo]:
+    def _scan_one_level(self, root: str, options: LocalScanOptions) -> Iterator[LocalFileInfo]:
         """Yield immediate entries of scanned ``root`` for non-recursive scanning.
 
         ``root`` is the path being scanned. This is the one-level counterpart to
@@ -1395,6 +1415,9 @@ class LocalStorage(Storage):
             mtime = _EPOCH
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
+            # A directory target carries its real kind (the FileInfo contract;
+            # the transfer routes still hand it through to fail like aws).
+            kind=FileKind.DIRECTORY if stat_module.S_ISDIR(st.st_mode) else FileKind.FILE,
             size=size,
             mtime=mtime,
             stat_result=st,
@@ -1464,7 +1487,9 @@ class LocalStorage(Storage):
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see ``open``).
         Whether a symlink is followed is the storage's own ``follow_symlinks``
-        config (constructor), like every scan this backend makes.
+        config (constructor), like every scan built from
+        ``default_scan_options`` (a caller-supplied ``LocalScanOptions``
+        carries its own settings instead).
         """
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)

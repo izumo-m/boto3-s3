@@ -33,13 +33,18 @@ def _result(
     error: BaseException | None = None,
 ) -> OpResult:
     return OpResult(
-        transfer_type=transfer_type, key=key, outcome=outcome, src=src, dest=dest, error=error
+        transfer_type=transfer_type,
+        compare_key=key,
+        outcome=outcome,
+        src=src,
+        dest=dest,
+        error=error,
     )
 
 
 def _progress(key: str, done: int, total: int | None) -> TransferProgress:
     return TransferProgress(
-        transfer_type=TransferType.UPLOAD, key=key, bytes_done=done, bytes_total=total
+        transfer_type=TransferType.UPLOAD, compare_key=key, bytes_done=done, bytes_total=total
     )
 
 
@@ -95,6 +100,27 @@ class TestResultLines:
             printer.on_result(_result(OpOutcome.SKIPPED))
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
+
+    def test_cancelled_is_silent_and_not_counted_failed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws surfaces only the run's single fatal line for a cancellation
+        # (measured live: a fatal mid-listing prints zero per-item lines for
+        # the cancelled set, and its recorder never counts them as failures).
+        with TransferPrinter() as printer:
+            printer.on_result(_result(OpOutcome.CANCELLED, error=RuntimeError("fatal elsewhere")))
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == ("", "")
+        assert printer.failed == 0
+
+    def test_cancelled_backfills_untransferred_remainder(self) -> None:
+        # A queued-then-cancelled transfer closes its meter share like a
+        # failed one, so the byte progress still reaches the expected total.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 10))  # queued
+            printer.on_result(_result(OpOutcome.CANCELLED, key="a", error=RuntimeError("fatal")))
+        assert printer._done_bytes == printer._expected_bytes == 10
+        assert printer._inflight == {}
 
 
 class TestSuppression:
@@ -183,6 +209,23 @@ class TestCarriageReturnProtocol:
             printer.on_result(_result(OpOutcome.SKIPPED, key="never-queued"))
         assert printer._skipped_files == 0
 
+    def test_delete_results_do_not_underflow_remaining(self) -> None:
+        # sync's deletes ride on_result alone (no queue-time progress signal),
+        # so each terminal joins the expected total as it finishes - the
+        # meter's "remaining" stays non-negative and the file total counts
+        # deletes, as aws's queued delete results do.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("c", 0, 10))  # one real, queued transfer
+            for key in ("d1", "d2", "d3"):
+                printer.on_result(
+                    _result(OpOutcome.SUCCEEDED, transfer_type=TransferType.DELETE, key=key)
+                )
+            expected = printer._expected_files
+            finished = printer._finished_files
+            skipped = printer._skipped_files
+        assert expected == 4  # the transfer plus the three deletes
+        assert expected - finished - skipped == 1  # only the transfer remains
+
     def test_multiline_progress_uses_newlines(self, capsys: pytest.CaptureFixture[str]) -> None:
         with TransferPrinter(multiline=True) as printer:
             printer.on_progress(_progress("a.txt", 0, 1024))
@@ -227,6 +270,24 @@ class TestPrinterThread:
         printer.finish()  # second finish: no thread left, silently a no-op
         assert capsys.readouterr().out == "upload: s3://b/a.txt to s3://b/copy.txt\n"
 
+    def test_callbacks_after_finish_drop_records_instead_of_enqueueing(self) -> None:
+        # finish() joins and discards the drain thread: a late callback (an
+        # abandoned scan worker whose generator keeps warning after a fatal,
+        # long after the run's records were drained) must drop its record
+        # instead of feeding the dead queue - enough blocking puts at the
+        # bound would deadlock the prefetch join at generator close.
+        printer = TransferPrinter()
+        with printer:
+            pass
+        for _ in range(3):
+            printer.on_result(_result(OpOutcome.WARNED, error=RuntimeError("late warning")))
+            assert printer._queue.qsize() == 0
+        printer.on_progress(_progress("a.txt", 5, 10))
+        assert printer._queue.qsize() == 0
+        # The worker-side counters still count (they never depend on the
+        # printer thread), only the rendering records are dropped.
+        assert printer.warned == 3
+
     def test_dead_stream_stops_rendering_but_not_the_counters(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -248,6 +309,9 @@ class TestPrinterThread:
         # the printer as a whole, deliberately.
         assert capsys.readouterr().err == ""
         assert (printer.failed, printer.warned) == (1, 0)
+        # The drain consumed both records even though rendering was dead - a
+        # crashed printer thread would have left them queued.
+        assert printer._queue.qsize() == 0  # pyright: ignore[reportPrivateUsage]
 
     def test_unencodable_key_does_not_silence_the_run(
         self, monkeypatch: pytest.MonkeyPatch

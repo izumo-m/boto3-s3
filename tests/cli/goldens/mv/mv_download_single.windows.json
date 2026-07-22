@@ -4,12 +4,14 @@
     "s3://<BUCKET>/d/a.txt",
     "dest/out.txt"
   ],
-  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": [
     "out.txt:14:ebaee762"
   ],
+  "progress": null,
   "rc": 0,
   "remaining_keys": [],
   "scenario": "mv_download_single",

@@ -6,7 +6,8 @@ import argparse
 import os
 import sys
 
-# Loaded only once mv is determined (stage 2 of the lazy dispatch).
+# Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch) -
+# or up front when auto-prompt builds the full command model.
 from boto3_s3 import (
     S3,
     NotFoundError,
@@ -56,7 +57,9 @@ class MvCommand(Command):
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
         ``--validate-same-s3-paths`` resolution / access-point warning -
         all before any S3 client exists. Resolution failures keep their
-        class: an unresolvable path 252, a failing s3control/sts call 254.
+        class: an unresolvable path 252, a failing s3control/sts call its
+        translated category (a ClientError-caused failure 254, a transport
+        failure 255).
         """
         head = transferargs.classify_paths(args, ctx, operation="mv")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -107,7 +110,9 @@ class MvCommand(Command):
             page_size=page_size,
         )
 
-        item_filter = filters.compile_filter(args.filters)
+        item_filter = filters.compile_filter(
+            args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
+        )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         printer = transferargs.build_printer(args, progress_frequency)
 
@@ -144,8 +149,10 @@ class MvCommand(Command):
         ``build_service_client``, the way aws's ``from_session`` clients
         inherit the session that binds ``--region`` - and every resolved pair
         runs the same guard, still reporting the *original* URIs. When validation
-        is off but a side looks access-point-shaped, aws's standing warning
-        goes to stderr and the move proceeds.
+        is off, the two keys match, and a side looks access-point-shaped,
+        aws's standing warning
+        goes to stderr and the move proceeds (non-matching keys return before
+        the warning branch).
         """
         norm_src = S3Storage.normalize_s3_uri(src)
         norm_dest = S3Storage.normalize_s3_uri(dest)
@@ -159,12 +166,14 @@ class MvCommand(Command):
         )
         if enabled:
             src_resolver = S3PathResolver(
-                ctx.service_client("s3control", args, s3, region=args.source_region),
-                ctx.service_client("sts", args, s3),
+                s3control_client=ctx.service_client(
+                    "s3control", args, s3, region=args.source_region
+                ),
+                sts_client=ctx.service_client("sts", args, s3),
             )
             dest_resolver = S3PathResolver(
-                ctx.service_client("s3control", args, s3, region=args.region),
-                ctx.service_client("sts", args, s3),
+                s3control_client=ctx.service_client("s3control", args, s3, region=args.region),
+                sts_client=ctx.service_client("sts", args, s3),
             )
             src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
             dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)

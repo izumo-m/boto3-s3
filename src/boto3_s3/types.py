@@ -187,7 +187,9 @@ class ScanOptions:
     transfers / lists / deletes independently). A backend declaring
     ``StorageCapability.SORTABLE_SCAN`` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
-    byte-ordered, the local walk sorts for aws parity), so it costs nothing for
+    byte-ordered - except S3 Express directory buckets, whose unordered
+    listings are why ``sync`` rejects them - and the local walk sorts for aws
+    parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
 
@@ -198,12 +200,26 @@ class ScanOptions:
     ``filter`` it runs on the enumeration worker, not the calling thread; and
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
+
+    ``wait_on_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
+    default): the scan's teardown always waits for a page pull already in
+    flight, so no enumeration worker survives it - required for an app that
+    may catch ``KeyboardInterrupt`` and keep using the process. ``False``: a
+    ``KeyboardInterrupt`` unwind abandons the daemon prefetch worker instead
+    of waiting (an in-flight network pull can otherwise hold the exit for a
+    full timeout) - only for an app that treats Ctrl-C as process-fatal. It
+    scopes to the interrupt alone: every other exit, ``SystemExit`` included
+    (``sys.exit()`` requests an orderly termination), reclaims fully. The
+    high-level operations overlay it from ``S3(wait_on_interrupt=...)`` - the
+    application declares the posture once there - so it reaches every scan an
+    operation starts; set it here only when calling ``Storage.scan`` directly.
     """
 
     recursive: bool = False
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
+    wait_on_interrupt: bool = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -213,8 +229,10 @@ class S3ScanOptions(ScanOptions):
     ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
     like aws-cli, they pass through to the service, which decides (``page_size=0``
     lists nothing, negative values fail with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both). ``fetch_owner`` sends ``FetchOwner=True``
-    to populate ``S3FileInfo.owner``.
+    charter requires reproducing both). The default ``None`` sends no
+    ``MaxKeys`` at all, exactly like aws-cli's unset ``--page-size`` (the
+    server pages at its own default, 1000). ``fetch_owner`` sends
+    ``FetchOwner=True`` to populate ``S3FileInfo.owner``.
 
     ``prefix`` overrides the listing anchor: the backend lists under it (as the
     ``Prefix``, relativizing ``compare_key`` to it) instead of the storage's own
@@ -225,7 +243,7 @@ class S3ScanOptions(ScanOptions):
     its ``scan_pages`` override) survives. ``None`` uses the storage's key.
     """
 
-    page_size: int = 1000
+    page_size: int | None = None
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
@@ -299,12 +317,20 @@ class OpOutcome(enum.Enum):
 
     ``SKIPPED`` is an informational, non-warning skip (e.g. sync up-to-date,
     a ``no_overwrite`` rejection) and does not affect the exit code.
-    ``DRYRUN`` reports an item a dry run *would* have acted on - no API call
-    was made and the exit code is unaffected. ``NOTICE`` carries display-only
+    ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
+    API call does not occur (enumeration and the single-object HeadObject
+    still run) and the exit code is unaffected. ``NOTICE`` carries display-only
     text on ``error`` (aws prints some advisories - the case-conflict
     messages - straight to stderr without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
-    real outcome.
+    real outcome. ``CANCELLED`` reports an accepted item revoked before it
+    could complete - a fatal error elsewhere in the run, an immediate cancel,
+    or Ctrl-C shut the engine down; its ``error`` is a `CancelledError`
+    naming the cause. It is distinct from ``FAILED``: nothing is wrong with
+    the item itself, and the run's outcome is carried by the fatal /
+    `CancelledError` the operation raises, not by these records (aws-cli
+    surfaces only the one fatal line and drops its cancelled items from
+    output and counts entirely).
     """
 
     SUCCEEDED = "succeeded"
@@ -313,6 +339,7 @@ class OpOutcome(enum.Enum):
     SKIPPED = "skipped"
     DRYRUN = "dryrun"
     NOTICE = "notice"
+    CANCELLED = "cancelled"
 
 
 class CaseConflictMode(enum.Enum):
@@ -361,7 +388,7 @@ class TransferProgress:
     """Byte-level progress for one in-flight item, passed to ``on_progress``."""
 
     transfer_type: TransferType
-    key: str
+    compare_key: str
     bytes_done: int
     bytes_total: int | None = None
 
@@ -370,9 +397,14 @@ class TransferProgress:
 class OpResult:
     """Per-item completion record passed to the ``on_result`` callback.
 
-    One record per item, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` from a
-    worker thread (keep the callback fast and non-raising). A single type keyed
-    by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
+    A record per event, emitted by ``cp`` / ``mv`` / ``rm`` / ``sync`` -
+    normally one per item, but a ``NOTICE`` may precede the same item's real
+    outcome and a post-success warning (a failed mtime stamp) adds a WARNED
+    record beside the SUCCEEDED one (transfer.md section 8). Submitted
+    transfers emit from the engine's worker threads; non-submitting records -
+    dryrun, skips, notices - emit inline on the calling thread
+    (docs/opresult.md). Keep the callback fast and non-raising either way.
+    A single type keyed by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
     acted on (a transfer's source, or a delete's removed object); the ``dest_*``
     trio the destination side. The fields, the ``src`` / ``dest`` convention, and
     which operation populates which field are documented in docs/opresult.md.
@@ -384,7 +416,7 @@ class OpResult:
     """
 
     transfer_type: TransferType
-    key: str
+    compare_key: str
     outcome: OpOutcome
     bytes_transferred: int = 0
     error: Boto3S3Error | None = None
@@ -421,31 +453,38 @@ class CancelToken:
     """
 
     def __init__(self) -> None:
-        self._event = threading.Event()
         # RLock, not Lock: cancel() is signal-handler-safe by contract, and a
         # CPython signal handler runs on the main thread - it must be able to
         # re-enter while that same thread holds the lock inside mode/cancel.
-        # The monotonic check-then-set stays correct under such re-entry
-        # because every write branch re-reads _mode.
+        # The state is two monotone flags (each only ever written True), never
+        # a check-then-set: a handler interleaving anywhere - even between an
+        # outer cancel()'s test and store - can only add a True that no
+        # resumed frame un-writes, so an escalation is never lost or
+        # downgraded. The flags are plain bools, not threading.Events:
+        # Event.set() takes the Event's own
+        # non-reentrant Condition lock, so a nested signal-handler cancel()
+        # landing inside an outer set() would deadlock the main thread - and
+        # nothing ever wait()s on the flags, so the Event bought nothing.
         self._lock = threading.RLock()
-        self._mode: CancelMode | None = None
+        self._immediate = False
+        self._cancelled = False
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
         with self._lock:
-            if self._mode is CancelMode.IMMEDIATE:
-                return
-            if self._mode is None or mode is CancelMode.IMMEDIATE:
-                self._mode = mode
-                self._event.set()
+            if mode is CancelMode.IMMEDIATE:
+                self._immediate = True
+            self._cancelled = True
 
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        return self._cancelled
 
     @property
     def mode(self) -> CancelMode | None:
         with self._lock:
-            return self._mode
+            if not self._cancelled:
+                return None
+            return CancelMode.IMMEDIATE if self._immediate else CancelMode.GRACEFUL
 
 
 class TransferOptions(TypedDict, total=False):
@@ -453,15 +492,21 @@ class TransferOptions(TypedDict, total=False):
 
     Names are the snake_case form of the corresponding ``aws s3`` options; the
     library translates them to S3 API PascalCase internally. Options that do not
-    apply to a given transfer direction are ignored (aws-cli parity).
+    apply to a given transfer direction are ignored (aws-cli parity). An
+    *unknown* key, by contrast, is rejected eagerly by ``cp`` / ``mv`` /
+    ``sync`` (``ValidationError``): a typo'd option never passes silently.
 
     ``sse_c_key`` is a ``str`` or raw ``bytes``, like botocore's
     ``SSECustomerKey``: ``aws`` passes the CLI string through verbatim (only
     ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
     (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
     ``PreconditionFailed`` becomes a silent skip), and an existence check before
-    downloads. `annotation_copy_mode` affects only multipart S3-to-S3 copies
-    under `copy_props=ALL`; it defaults to `PRELOAD_MEMORY` for aws-cli parity.
+    downloads to a *local* destination - a ``cp`` / ``mv`` download into a
+    custom (open-route) backend has no existence probe and overwrites (the
+    backend owns its key space; ``sync`` still skips destination-present pairs
+    from its listing - docs/transfer.md section 12). `annotation_copy_mode`
+    affects only multipart S3-to-S3 copies under `copy_props=ALL`; it defaults
+    to `PRELOAD_MEMORY` for aws-cli parity.
     """
 
     acl: str
@@ -525,6 +570,7 @@ def strip_response_metadata(
 
 
 __all__ = [
+    "AnnotationCopyMode",
     "CancelMode",
     "CancelToken",
     "CaseConflictMode",

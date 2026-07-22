@@ -1,13 +1,50 @@
-"""Unit tests for boto3_s3_cli.output (``aws s3 ls`` formatting)."""
+"""Unit tests for boto3_s3_cli.output (``aws s3 ls`` formatting, ``uni_write``)."""
 
 from __future__ import annotations
 
 import datetime as dt
+import io
 
 from boto3_s3 import FileKind, S3FileInfo
 from boto3_s3_cli import output
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+
+
+class _StrictAsciiStream(io.StringIO):
+    """StringIO that raises like an ascii-configured console on non-ASCII writes."""
+
+    encoding = "ascii"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes = 0
+
+    def write(self, text: str) -> int:
+        text.encode("ascii")  # raises UnicodeEncodeError on non-ASCII
+        return super().write(text)
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+
+class TestUniWrite:
+    def test_unencodable_text_falls_back_to_replace_and_flushes(self) -> None:
+        # aws-cli's uni_print: a stream whose encoding cannot represent the
+        # text (a non-ASCII key on an ascii console/pipe) is re-tried with
+        # errors='replace' instead of raising - one unencodable key must
+        # never abort a listing or delete run mid-way.
+        stream = _StrictAsciiStream()
+        output.uni_write(stream, "delete: s3://b/名前.txt\n")
+        assert stream.getvalue() == "delete: s3://b/??.txt\n"
+        assert stream.flushes == 1
+
+    def test_encodable_text_is_written_verbatim(self) -> None:
+        stream = _StrictAsciiStream()
+        output.uni_write(stream, "delete: s3://b/plain.txt\n")
+        assert stream.getvalue() == "delete: s3://b/plain.txt\n"
+        assert stream.flushes == 1
 
 
 class TestHumanReadableSize:

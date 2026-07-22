@@ -127,6 +127,20 @@ class TestActiveProfileResolution:
         cfg = AwsConfig.from_session()  # default session honors AWS_PROFILE
         assert cfg.get_str("region") == "eu-west-1"
 
+    def test_installed_default_session_is_reused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3.setup_default_session(profile_name=...) binds boto3.client() -
+        # and so the zero-config S3()'s clients - to that profile; the reader
+        # follows the same installed session, so the client and the config
+        # never resolve different profiles.
+        path = tmp_path / "config"
+        path.write_text(_CONFIG)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(path))
+        monkeypatch.setattr(boto3, "DEFAULT_SESSION", boto3.Session(profile_name="prod"))
+        cfg = AwsConfig.from_session()
+        assert cfg.get_str("region") == "eu-west-1"
+
     def test_set_but_missing_profile_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

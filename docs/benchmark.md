@@ -32,13 +32,15 @@ Useful variants:
 uv run python -m benchmarks run --mode inprocess        # no docker needed
 uv run python -m benchmarks run --engine both           # adds the CRT lane
 uv run python -m benchmarks run --baseline last         # flag regressions vs the previous run
-uv run python -m benchmarks run --quick --samples 2     # harness smoke test (~1/100 sizes)
+uv run python -m benchmarks run --quick --samples 2     # harness smoke test (shrunken corpora)
 uv run python -m benchmarks report [FILE] --baseline REV
 uv run python -m benchmarks list
 ```
 
 Exit codes: 0 clean, 1 when a regression flag fired, 2 on harness or
-environment errors. A missing MinIO stack fails fast with the setup commands.
+environment errors. Missing MinIO *variables* fail fast with the setup
+commands; the endpoint itself is not probed, so an unreachable stack surfaces
+only when the first S3 call fails.
 
 ## Modes
 
@@ -95,9 +97,8 @@ it by default:
 - `net = median(work) - median(startup_minimal)` per side;
   `ratio = net_ours / net_aws`. Ratios and flags use net; raw medians stay in
   the table. `--no-adjust-startup` reverts to raw.
-- A `-` in a net column means the scenario's work did not rise above the
-  startup probe on this host (expected under `--quick`, whose numbers are
-  for exercising the harness, not for judging performance).
+- The two startup-probe rows render `-` in the net columns (a probe has no
+  net of its own; its tracking is the raw-median comparison below).
 - The startup probes themselves are baseline-compared on raw medians:
   startup growth (import bloat) is its own regression class.
 
@@ -111,7 +112,7 @@ it by default:
 | `sync_noop_10k` | `sync` (nothing to do) | 10k files x 1KB | classic |
 | `cp_upload_small_1k` / `cp_download_small_1k` | `cp --recursive` | 1000 x 4KB | classic+crt |
 | `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart) | classic+crt |
-| `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded per run | classic |
+| `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded before every invocation (warmup and each timed side) | classic |
 
 | In-process scenario | Scale |
 |---|---|
@@ -123,8 +124,10 @@ it by default:
 | `inproc_cp_upload_64mb` | 64MB multipart |
 
 Every scenario verifies its warmup output (transfer-line counts, listing
-sizes, no-op emptiness) before anything is timed - a run that silently did no
-work aborts instead of recording fake-fast numbers. `sync` no-op corpora are
+sizes, no-op emptiness) before anything is timed - a scenario that silently
+did no work is skipped and recorded as a verification failure (exit 2 at the
+end; completed scenarios keep their numbers) instead of contributing
+fake-fast ones. `sync` no-op corpora are
 seeded *after* the local tree with past mtimes, so both CLIs deterministically
 judge "nothing to transfer".
 
@@ -132,7 +135,8 @@ judge "nothing to transfer".
 
 `benchmarks/results/{utc}_{mode}_{gitrev}[-dirty].jsonl`: line 1 is a `meta`
 record (git revision + dirty flag, Python/boto3/botocore/s3transfer/awscrt
-versions, `aws --version`, platform, run options), each further line one
+versions, `aws --version` on an E2E run - the in-process meta stores none -
+platform, run options), each further line one
 scenario's samples per side plus the recorded execution order (the A/B
 interleaving is auditable). Results are host-specific timings and stay out
 of git.

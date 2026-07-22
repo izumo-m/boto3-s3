@@ -8,7 +8,8 @@ while the consumer processes the current one.
 
 Backpressure is bounded by a ``queue.Queue``: the worker blocks when the
 queue is full, so a slow consumer throttles a fast producer instead of buffering
-without limit. A worker-side exception surfaces on the consumer's next pull.
+without limit. A worker-side exception surfaces on the consumer's pull once
+the items already queued have drained.
 Cleanup is cooperative -- the worker checks a stop flag between puts. The
 owner must exit the `prefetch` context when it stops consuming; context exit
 drops buffered pages and waits for a page pull already in progress before
@@ -52,8 +53,9 @@ def prefetch(
 
     ``pages`` is an iterable of chunks where pulling the next chunk is slow I/O
     (e.g. an S3 ``ListObjectsV2`` page). The worker overlaps that latency with
-    the consumer's progress, buffering at most ``queue_size`` chunks
-    (~ ``queue_size`` x items-per-chunk in memory).
+    the consumer's progress, buffering at most ``queue_size`` chunks in the
+    queue plus the one it holds in hand while blocked
+    (~ ``(queue_size + 1)`` x items-per-chunk in memory).
 
     Items are flattened from the chunks. A worker-side exception is re-raised on
     the consumer's next pull, after any items already queued. On context exit the
@@ -61,15 +63,16 @@ def prefetch(
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
 
-    ``wait_on_interrupt`` narrows the exit wait for terminal unwinds: when
-    ``False`` and the context is unwinding on a ``KeyboardInterrupt`` /
-    ``SystemExit``, the final join is skipped and the daemon worker is
-    abandoned to die with the process - a page pull already in flight (which
-    can block for a full network timeout) no longer delays the exit, matching
-    ``aws``'s immediate death on Ctrl-C. Only safe when such an interrupt
-    terminates the process: an app that catches the interrupt and continues
-    would leave the worker pulling one more page in the background. Every
-    other exit - normal exhaustion, an early break (``GeneratorExit``), any
+    ``wait_on_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
+    ``False`` and the context is unwinding on a ``KeyboardInterrupt``, the
+    final join is skipped and the daemon worker is abandoned to die with the
+    process - a page pull already in flight (which can block for a full
+    network timeout) no longer delays the exit, matching ``aws``'s immediate
+    death on Ctrl-C. Only safe when the interrupt terminates the process: an
+    app that catches it and continues would leave the worker pulling one more
+    page in the background. Every other exit - normal exhaustion, an early
+    break (``GeneratorExit``), ``SystemExit`` (``sys.exit()`` requests an
+    *orderly* termination, so it reclaims like any exception), any
     ``Exception`` - always joins, keeping the no-surviving-worker contract.
 
     `queue_size` must be positive. `queue.Queue` treats non-positive values as
@@ -133,10 +136,10 @@ def prefetch(
     interrupted = False
     try:
         yield _consume()
-    except (KeyboardInterrupt, SystemExit):
-        # The consumer is unwinding toward process exit; the exit policy below
-        # may abandon the worker instead of waiting. GeneratorExit (an early
-        # break) and ordinary exceptions never take this path.
+    except KeyboardInterrupt:
+        # The consumer is unwinding on Ctrl-C; the exit policy below may
+        # abandon the worker instead of waiting. GeneratorExit (an early
+        # break), SystemExit, and ordinary exceptions never take this path.
         interrupted = True
         raise
     finally:

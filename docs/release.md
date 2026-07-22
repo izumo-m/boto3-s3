@@ -51,6 +51,18 @@ with `cli/pyproject.toml`, `cli/CHANGELOG.md`, and a `boto3-s3-cli-vX.Y.Z` tag.
 A joint release puts both tags on the same merge commit, but pushes them in
 order (see step 3).
 
+**Before cutting the release, confirm CI is green on `develop`.** The latest
+`ci.yml` run on the branch tip must have finished with every job passing - the
+whole matrix, including `windows-latest` and each Python version. This is a hard
+precondition: a red, cancelled, or still-running job on the tip blocks the
+release; fix it, push, and re-confirm before continuing. The release workflow
+reruns the source-quality gates before building, but only on `ubuntu-latest` and
+only after the tag is pushed, so a platform-specific failure (a Windows-only one,
+say) would surface there only by burning a version tag. Verify up front:
+
+    gh run list --branch develop --limit 1   # the tip run and its overall status
+    gh run view <run-id>                     # per-job breakdown; --log-failed for a failure
+
 1. On `develop`, make a single `chore: release X.Y.Z` commit that bumps:
    - `pyproject.toml` `version` to `X.Y.Z`
    - `uv.lock` (run `uv lock` to refresh)
@@ -62,7 +74,12 @@ order (see step 3).
      covers the library version the CLI code actually needs — when the CLI uses
      an API added in the library version being released alongside it, the floor
      **must** be that version (`boto3-s3>=X.Y.Z,<X.Y+1.0`). A stale floor
-     resolves an older library from PyPI and crashes at runtime.
+     resolves an older library from PyPI and crashes at runtime. Between
+     releases, `develop` intentionally keeps the last *released* floor (the
+     workspace resolves the library from source, so development never needs
+     an early bump); updating the range is this step, done at release time —
+     a pre-release audit that sees the older floor on `develop` is looking at
+     the intended state, not a pending action.
 2. Merge into `main`, keeping the merge commit as a clear release boundary:
    ```bash
    git switch main && git merge --no-ff develop
@@ -82,7 +99,17 @@ order (see step 3).
    git tag boto3-s3-cli-vA.B.C
    git push origin boto3-s3-cli-vA.B.C
    ```
-4. Bring `develop` back level with `main` so the two lines stay in sync:
+4. Create the GitHub Release for each pushed tag, using the changelog section
+   released in step 1 as the notes. The library release carries the
+   repository's "Latest" badge; a CLI release never takes it:
+   ```bash
+   gh release create boto3-s3-vX.Y.Z --verify-tag --latest \
+     --title "boto3-s3 X.Y.Z" --notes "<the [X.Y.Z] section of CHANGELOG.md>"
+   # CLI release: notes from cli/CHANGELOG.md
+   gh release create boto3-s3-cli-vA.B.C --verify-tag --latest=false \
+     --title "boto3-s3-cli A.B.C" --notes "<the [A.B.C] section of cli/CHANGELOG.md>"
+   ```
+5. Bring `develop` back level with `main` so the two lines stay in sync:
    ```bash
    git switch develop && git merge --ff-only main && git push origin develop
    ```

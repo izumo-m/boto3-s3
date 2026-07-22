@@ -5,15 +5,17 @@
     "dest",
     "--exact-timestamps"
   ],
-  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Windows/11 exe/AMD64",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Windows/11 exe/AMD64",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": null,
   "local_tree": [
     "same.txt:3:348df4eb"
   ],
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "d/same.txt"
+    "d/same.txt:3:348df4eb"
   ],
   "scenario": "sync_download_exact_timestamps",
   "src_tree": null,

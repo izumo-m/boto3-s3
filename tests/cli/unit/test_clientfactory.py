@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,12 +30,45 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
         args = _parse(["--profile", "bound", "--endpoint-url", "http://localhost:9000"])
 
+        sessions: list[Any] = []
+        real_build_session = clientfactory.build_session
+
+        def counting_build_session(namespace: argparse.Namespace) -> Any:
+            session = real_build_session(namespace)
+            sessions.append(session)
+            return session
+
+        monkeypatch.setattr(clientfactory, "build_session", counting_build_session)
         s3 = clientfactory.build_s3(args)
 
         assert s3.session is not None
         assert s3.session.profile_name == "bound"
         assert s3.client().meta.endpoint_url == "http://localhost:9000"
         assert s3.aws_config().get_str("s3.multipart_threshold") == "17"
+        # "One session": the client and the config read above both came off the
+        # single session build_s3 made - nothing built a second one.
+        assert sessions == [s3.session]
+        # The S3-level endpoint copy feeds the CRT lane's explicit-endpoint
+        # pin (docs/crt.md); it must be the same string build_client applies,
+        # so the Transferrer's meta-equality gate recognizes the CLI client.
+        assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
+
+    def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
+        # Every CLI-built session registers the library's fast_parse_timestamp
+        # on its response-parser factory before any client exists; listing
+        # timestamps then parse at C speed (tests/lib/test_sessions.py pins
+        # the parser's value-equality with botocore).
+        from boto3_s3 import fast_parse_timestamp
+
+        session = clientfactory.build_session(_parse([]))
+        factory = session._session.get_component(  # pyright: ignore[reportPrivateUsage]
+            "response_parser_factory"
+        )
+        parser = factory.create_parser("rest-xml")
+        assert (
+            parser._timestamp_parser  # pyright: ignore[reportPrivateUsage]
+            is fast_parse_timestamp
+        )
 
     def test_region_and_endpoint_applied(self) -> None:
         args = _parse(["--region", "us-west-2", "--endpoint-url", "http://localhost:9000"])
@@ -59,10 +93,39 @@ class TestBuildClient:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The aws default only fills in; the user's env/config still wins.
-        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        monkeypatch.setenv("AWS_RETRY_MODE", "adaptive")
         monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
         client = clientfactory.build_client(_parse([]))
-        assert client.meta.config.retries == {"mode": "legacy", "total_max_attempts": 7}
+        assert client.meta.config.retries == {"mode": "adaptive", "total_max_attempts": 7}
+
+    def test_scalar_s3_section_fails_at_client_build_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `s3 = max_concurrent_requests=1` (a scalar where a section is
+        # expected): both aws v2 and stock botocore die at client construction
+        # (_resolve_use_dualstack_endpoint calls .get on the str) with
+        # AttributeError "'str' object has no attribute 'get'" -> the general
+        # backstop's rc 255 and the same message (measured on the pinned
+        # aws-cli and this CLI, ls and cp alike). Pinned so a future flow
+        # reorder (reading [s3] ahead of the client build) cannot turn the
+        # typo into a silent default.
+        config_file = tmp_path / "config"
+        config_file.write_text("[default]\ns3 = max_concurrent_requests=1\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
+    def test_legacy_retry_mode_rejected_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws v2's bundled botocore restricts retry modes to standard/adaptive;
+        # stock botocore would accept "legacy" (its own valid mode), so the
+        # factory validates with aws's exact wording (measured: rc 255).
+        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        with pytest.raises(
+            InvalidConfigError,
+            match='Invalid value provided to "mode": "legacy" must be one of: '
+            '"standard" or "adaptive"',
+        ):
+            clientfactory.build_client(_parse([]))
 
     def test_empty_retry_env_is_present_and_fatal_like_aws(
         self, monkeypatch: pytest.MonkeyPatch
@@ -166,6 +229,132 @@ class TestBuildClient:
             "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
         )
         assert url.index("X-Amz-Expires=") < url.index("X-Amz-SignedHeaders=")
+
+    def test_mrap_target_lifts_the_pin_to_sigv4a(self) -> None:
+        # An explicit signature_version suppresses botocore's auth-scheme
+        # resolution, and an MRAP endpoint must resolve to asymmetric SigV4a
+        # (region set `*`) - measured against aws 2.36.1, whose MRAP presign
+        # signs AWS4-ECDSA-P256-SHA256. The s3v4 pin stands down when a
+        # positional names an MRAP ARN; the dev environment's awscrt (always
+        # present, docs/testing.md section 4) then signs SigV4a offline.
+        args = _parse(["--region", "us-east-1"])
+        args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
+        assert "X-Amz-Region-Set=" in url
+
+    def test_transfer_positional_list_lifts_the_pin_too(self) -> None:
+        # The transfer family carries a two-item `paths` list; an MRAP ARN on
+        # either side lifts the pin for the command's client.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./local.txt", "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/k"]
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "k"},
+            ExpiresIn=60,
+        )
+        assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
+
+    def test_plain_paths_keep_the_sigv4_pin(self) -> None:
+        # A plain-bucket positional (and a plain access-point ARN) keeps the
+        # always-SigV4 pin - only the MRAP shape needs SigV4a.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = "s3://plain-bucket/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "plain-bucket", "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_plain_access_point_arn_keeps_the_sigv4_pin(self) -> None:
+        # Region-qualified access-point ARN: not the MRAP shape (that one has
+        # an empty region field), so the SigV4 pin stays.
+        arn = "arn:aws:s3:us-east-1:123456789012:accesspoint/plain-ap"
+        args = _parse(["--region", "us-east-1"])
+        args.paths = [f"s3://{arn}/key", "./local.txt"]
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": arn, "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_s3express_target_lifts_the_pin(self) -> None:
+        # A directory bucket must resolve to sigv4-s3express with CreateSession
+        # credentials; an explicit signature_version suppresses that resolution
+        # (s3v4 matches the scheme name up to the first dash) and signs a plain
+        # SigV4 request instead - measured: a pinned express presign scopes
+        # `.../s3/aws4_request` where the unpinned flow dials CreateSession,
+        # like aws v2's bundled botocore. Signing needs that live CreateSession
+        # call, so assert on the exact input botocore's per-request scheme
+        # selection keys on: the requested auth scheme is unset, leaving the
+        # endpoint's `sigv4-s3express` alive. (`meta.config.signature_version`
+        # cannot serve here - botocore backfills it with the *resolved*
+        # version, `s3v4` for S3 with or without the pin.)
+        args = _parse(["--region", "us-east-1"])
+        args.path = "s3://mybkt--use1-az4--x-s3/key"
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_s3express_transfer_positional_lifts_the_pin_too(self) -> None:
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./local.txt", "s3://mybkt--use1-az4--x-s3/k"]
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_s3express_scheme_less_presign_lifts_the_pin(self) -> None:
+        # presign takes its target with or without s3:// (unlike the transfer
+        # family, where scheme-less means local). A scheme-less directory
+        # bucket must still lift the pin so signing dials CreateSession -
+        # otherwise the URL signs plain SigV4 and is unusable. aws resolves the
+        # auth scheme off the final Bucket, so its scheme-less presign works.
+        args = _parse(["--region", "us-east-1"])
+        args.path = "mybkt--use1-az4--x-s3/key"  # no s3:// scheme
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_local_x_s3_suffix_lookalike_keeps_the_pin(self) -> None:
+        # A local path can plausibly end in --x-s3; only the s3:// form names
+        # a directory bucket, so the pin stays.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = ["./backup--x-s3", "s3://plain-bucket/key"]
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+
+    def test_no_sign_request_still_wins_for_s3express(self) -> None:
+        # --no-sign-request overrides to UNSIGNED even for a directory bucket,
+        # exactly as it overrides the s3v4 pin: the bare zonal-endpoint URL.
+        args = _parse(["--no-sign-request", "--region", "us-east-1"])
+        args.path = "s3://mybkt--use1-az4--x-s3/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "mybkt--use1-az4--x-s3", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert url == "https://mybkt--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com/key"
+
+    def test_no_sign_request_still_wins_for_mrap(self) -> None:
+        # --no-sign-request overrides to UNSIGNED even for an MRAP target,
+        # exactly as it overrides the s3v4 pin: aws emits the bare URL.
+        args = _parse(["--no-sign-request", "--region", "us-east-1"])
+        args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "arn:aws:s3::123456789012:accesspoint/test.mrap", "Key": "key"},
+            ExpiresIn=60,
+        )
+        assert url == "https://test.mrap.accesspoint.s3-global.amazonaws.com/key"
 
     def test_no_sign_request_presigns_to_a_bare_url(self) -> None:
         # --no-sign-request must still override to UNSIGNED: aws emits the

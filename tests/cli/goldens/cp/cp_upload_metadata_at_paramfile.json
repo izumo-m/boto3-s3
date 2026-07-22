@@ -6,17 +6,19 @@
     "--metadata",
     "loaded@=file://meta/value.txt"
   ],
-  "aws_version": "aws-cli/2.35.5 Python/3.14.5 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
+  "aws_version": "aws-cli/2.36.1 Python/3.14.6 Linux/6.18.33.1-microsoft-standard-WSL2 exe/x86_64.ubuntu.26",
   "bucket_exists": null,
+  "bucket_tags": null,
   "head_fields": {
     "Metadata": {
       "loaded": "from-paramfile"
     }
   },
   "local_tree": null,
+  "progress": null,
   "rc": 0,
   "remaining_keys": [
-    "up/key.txt"
+    "up/key.txt:19:ca0f9df0"
   ],
   "scenario": "cp_upload_metadata_at_paramfile",
   "src_tree": null,

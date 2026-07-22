@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-# Keep the module-level imports limited to the names used while configuring the
-# command; execution-only storage types are imported in `run()`.
-from boto3_s3 import Boto3S3Error, ValidationError
+# Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
+# the lazy dispatch), after the command is determined.
+from boto3_s3 import Boto3S3Error, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
@@ -30,9 +30,12 @@ class MbCommand(Command):
 
         Exit-code shape (aws-cli MbCommand): usage errors - a non-``s3://``
         path, an S3 Express (``--x-s3``) bucket, a rejected ARN form - exit
-        252 via ``main``; everything after the operation starts is rc 1 with
+        252 via ``main``; every classified (``Boto3S3Error``) failure after the
+        operation starts is rc 1 with
         one ``make_bucket failed:`` line (aws catches every create_bucket
-        exception locally, even request-time credential errors). The key part
+        exception locally, even request-time credential errors; an
+        unclassified exception here falls to the dispatcher's handler chain -
+        the taxonomy classifies the known failures, docs/exceptions.md). The key part
         of the path is silently dropped, exactly like aws. aws builds the client
         before validating the path (``S3Command._run_main``), so a
         client-construction failure (bad ``--profile`` / unresolved credentials /
@@ -46,9 +49,6 @@ class MbCommand(Command):
         globalargs.validate_query(args)
         clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="mb")
-        # Import the library entry point only when this execution path needs it.
-        from boto3_s3 import S3Storage
-
         # Build the client up front, like aws's super()._run_main(), so a
         # construction error precedes the path checks below (it reaches main's
         # exit-code mapping: config -> 253, other botocore -> 255).
@@ -87,5 +87,5 @@ class MbCommand(Command):
         except Boto3S3Error as exc:
             sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
-        sys.stdout.write(output.format_make_bucket(storage.bucket) + "\n")
+        output.uni_write(sys.stdout, output.format_make_bucket(storage.bucket) + "\n")
         return 0

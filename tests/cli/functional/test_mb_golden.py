@@ -17,6 +17,7 @@ from tests.utils.golden import assert_matches_golden, load_golden
 from tests.utils.harness import (
     assert_stderr_tokens,
     capture_bucket_state,
+    capture_bucket_tags,
     normalize_rm_stdout,
     run_cli_in_process,
 )
@@ -36,6 +37,7 @@ def test_mb_matches_golden(scenario: MbScenario, moto_s3: Any) -> None:
     result = run_cli_in_process(resolve_argv(scenario, _MB_BUCKET))
     lines = normalize_rm_stdout(result.stdout, bucket=_MB_BUCKET)
     exists, remaining = capture_bucket_state(moto_s3, _MB_BUCKET)
+    tags = capture_bucket_tags(moto_s3, _MB_BUCKET) if scenario.capture_tags else None
     assert_matches_golden(
         load_golden("mb", scenario.name),
         rc=result.rc,
@@ -44,6 +46,7 @@ def test_mb_matches_golden(scenario: MbScenario, moto_s3: Any) -> None:
         compare_stdout=scenario.compare_stdout,
         remaining_keys=remaining,
         bucket_exists=exists,
+        bucket_tags=tags,
     )
     assert_stderr_tokens(
         scenario.expected_stderr_tokens_ours, result.stderr, side="ours", scenario=scenario.name

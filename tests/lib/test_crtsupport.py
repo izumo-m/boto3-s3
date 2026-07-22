@@ -44,12 +44,13 @@ class FakeClient:
         verify: Any = True,
         unsigned: bool = False,
         creds: Any = None,
+        s3_config: Any = None,
     ) -> None:
         signature_version: Any = UNSIGNED if unsigned else "s3v4"
         self.meta = SimpleNamespace(
             region_name=region,
             endpoint_url=endpoint,
-            config=SimpleNamespace(signature_version=signature_version),
+            config=SimpleNamespace(signature_version=signature_version, s3=s3_config),
         )
         self._endpoint = SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
         self._creds = creds if creds is not None else make_creds()
@@ -212,6 +213,11 @@ class TestCreateCrtTransferManager:
         assert client_kwargs == {
             "region_name": "us-east-1",
             "endpoint_url": "http://127.0.0.1:9000",
+            # The client's own Config rides along so the serializer's nested
+            # client keeps the caller's endpoint/addressing settings (the CLI's
+            # us-east-1 regional pin included - aws v2's bundled botocore is
+            # regional-only there, stock botocore is not).
+            "config": client.meta.config,
         }
         [manager_kwargs] = stubs.manager_kwargs
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client
@@ -310,8 +316,23 @@ class TestCreateCrtTransferManager:
             {"endpoint": "http://127.0.0.1:9000"},
             {"unsigned": True},
             {"creds": make_creds(access_key="OTHER")},
+            # The CRT client bakes in the first client's TLS verify and the
+            # serializer its Config: a later client differing in either must
+            # not silently ride the singleton's settings (verify=False from
+            # another client would disable TLS verification behind its back).
+            {"verify": False},
+            {"verify": "/path/to/ca.pem"},
+            {"s3_config": {"addressing_style": "path"}},
         ],
-        ids=["region", "endpoint", "unsigned", "credentials"],
+        ids=[
+            "region",
+            "endpoint",
+            "unsigned",
+            "credentials",
+            "verify-off",
+            "verify-bundle",
+            "s3-config",
+        ],
     )
     def test_incompatible_second_client_falls_back(
         self, stubs: CrtStubs, mismatch: dict[str, Any]

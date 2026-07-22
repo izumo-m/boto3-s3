@@ -11,8 +11,10 @@ The parse itself is **delegated to botocore** (``Session.full_config`` /
 location, the nested ``s3 =`` subsection syntax, and the active-profile
 resolution all behave exactly like ``aws`` / ``boto3``. botocore keeps every
 value as a **string** (with one level of subsection nesting), validates nothing,
-and preserves unknown sections and keys - which is precisely the lazy,
-string-first model this reader exposes.
+and preserves unknown sections and keys - and within the selectable
+sections (the profile default, ``services`` / ``sso-session``) that lazy,
+string-first model is what this reader exposes (it adds no selector for
+arbitrary top-level sections).
 
 The shape mirrors ``aws configure get``'s feel - the **profile is the default
 context** and ``services`` / ``sso-session`` are explicit selectors - with two
@@ -34,9 +36,10 @@ Resolution rules:
 - a **present** value that does not convert (``get_size("abc")``), or a key that
   points at a whole subsection instead of a value, raises
   ``InvalidConfigError`` (a config typo is surfaced, not silently defaulted) -
-  except ``get_bool``, which follows botocore's ``ensure_boolean``: any value
-  other than ``"true"`` (case-insensitively) reads as ``False`` and never raises,
-  matching how ``aws`` reads config booleans;
+  except ``get_bool``, which follows botocore's ``ensure_boolean``: any
+  *scalar* other than ``"true"`` (case-insensitively) reads as ``False``
+  without raising, matching how ``aws`` reads config booleans (a key that
+  points at a whole subsection still raises, like every getter);
 - the **active profile** is resolved through botocore's ``get_scoped_config``: a
   ``--profile`` / ``AWS_PROFILE`` that is set but missing surfaces as an
   ``InvalidConfigError`` (botocore's ``ProfileNotFound``, converted at the
@@ -46,8 +49,11 @@ Like ``boto3_s3.etagcompare`` this is a standalone, opt-in building block:
 imported by submodule path (``from boto3_s3.awsconfig import AwsConfig``), **not**
 part of the package's lazy root re-export, and SDK-free at import time - boto3 /
 botocore are loaded lazily on the read path, so ``import boto3_s3.awsconfig``
-stays free of the SDK tax (import contract, docs/imports.md). It reads the
-**config file only**, never ``~/.aws/credentials`` (secrets).
+stays free of the SDK tax (import contract, docs/imports.md). The parse is
+botocore's ``full_config``, which merges the credentials file's profile values
+into the map: a key set only in ``~/.aws/credentials`` - secrets included - is
+therefore reachable through these getters, exactly as ``aws configure get``
+reads it.
 
 The aws-cli ``[s3]`` *runtime config* (the ``DEFAULTS`` table, value validation,
 the ``default`` -> ``classic`` alias, and the classic/CRT engine decision) is a
@@ -226,8 +232,12 @@ class AwsConfig:
     def from_session(cls, session: boto3.Session | None = None) -> AwsConfig:
         """Build a reader from a boto3 session (or a default ``AWS_PROFILE``-aware one).
 
-        ``None`` builds ``boto3.Session()`` - the same default/``AWS_PROFILE``
-        resolution the zero-config ``S3()`` uses for its client.
+        ``None`` reuses ``boto3.DEFAULT_SESSION`` when one exists - the session
+        ``boto3.client()``, and therefore the zero-config ``S3()``'s client,
+        actually uses, so a ``boto3.setup_default_session(profile_name=...)``
+        binds this reader and those clients to the same profile - and builds a
+        plain ``boto3.Session()`` otherwise (the same default/``AWS_PROFILE``
+        resolution, without installing a global default as a side effect).
         """
         # Deferred: importing boto3 drags in botocore + s3transfer (~100ms), so
         # only an actual config read pays it (import contract, docs/imports.md).
@@ -241,7 +251,7 @@ class AwsConfig:
             # who passes their own session has already constructed it, so any
             # such error surfaced at their call, not here.
             try:
-                session = boto3.Session()
+                session = boto3.DEFAULT_SESSION or boto3.Session()
             except BotoCoreError as exc:
                 raise InvalidConfigError(str(exc)) from exc
         # aws-cli reads the same botocore session surface (the scoped/full config

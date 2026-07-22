@@ -71,6 +71,13 @@ _SEED_TREE: Mapping[str, bytes] = {
     "d/marker/": b"",
     "d-sibling.txt": b"sibling\n",
 }
+
+# Nested s3->s3 filter cross-application (task #184): the source subtree
+# already contains the destination prefix.
+_SEED_NESTED: Mapping[str, bytes] = {
+    "d/y.txt": b"copy me\n",
+    "d/backup/x1.txt": b"already backed up\n",
+}
 _SEED_SINGLE: Mapping[str, bytes] = {"d/a.txt": b"download body\n"}
 _SEED_PAGED: Mapping[str, bytes] = {f"pg/k{i:02d}": b"p" for i in range(5)}
 _SEED_CASE: Mapping[str, bytes] = {"cc/A.txt": b"upper", "cc/a.txt": b"lower"}
@@ -106,6 +113,9 @@ class CpScenario(BaseScenario):
     # Golden-record HeadObject fields of one probe key.
     head_key: str | None = None
     head_fields: tuple[str, ...] = ()
+    # Golden-record whether any progress line was printed (the observable
+    # effect of --no-progress / --quiet on a piped stdout).
+    compare_progress: bool = False
     # Live per-side assertion: downloaded file mtime == object LastModified.
     mtime_key: tuple[str, str] | None = None  # (s3 key, workdir-relative path)
     # Deterministic local-vs-remote ordering for sync's time judgments:
@@ -210,16 +220,20 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_quiet",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--quiet"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # --quiet prints no progress...
+        stderr_exact_empty=True,  # ...and nothing on stderr on success
     ),
     CpScenario(
         name="cp_upload_only_show_errors",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--only-show-errors"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # a clean run emits no progress under this printer
     ),
     CpScenario(
         name="cp_upload_no_progress",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--no-progress"),
         local_src=_SRC_SINGLE,
+        compare_progress=True,  # the point of the flag: no Completed lines
     ),
     CpScenario(
         name="cp_upload_content_type",
@@ -242,8 +256,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType",),
     ),
     CpScenario(
-        # No head probe: the server-side default content type for an untyped
-        # PUT is endpoint-specific (MinIO vs moto vs AWS).
+        # The .json guess is suppressed, so the object takes the server-side
+        # default for an untyped PUT. That default is endpoint-specific in
+        # general, but moto and MinIO both answer binary/octet-stream, so the
+        # probe both catches a resurrected guess (application/json) and stays
+        # portable across the golden's capture (MinIO) and replay (moto).
         name="cp_upload_no_guess_mime",
         argv=(
             "cp",
@@ -251,6 +268,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
             f"s3://{BUCKET_TOKEN}/up/data.json",
             "--no-guess-mime-type",
         ),
+        head_key="up/data.json",
+        head_fields=("ContentType",),
         local_src=_SRC_JSON,
     ),
     CpScenario(
@@ -643,6 +662,22 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType", "Metadata"),
     ),
     CpScenario(
+        # Nested s3->s3 paths: aws joins every pattern onto BOTH sides, so the
+        # dest-joined "<bucket>/d/backup/x*" excludes the *source* entry
+        # d/backup/x1.txt even though "x*" does not match its source-relative
+        # form (task #184 parity; verified against aws 2.36.1).
+        name="cp_copy_nested_dest_filter_cross",
+        argv=(
+            "cp",
+            f"s3://{BUCKET_TOKEN}/d",
+            f"s3://{BUCKET_TOKEN}/d/backup",
+            "--recursive",
+            "--exclude",
+            "x*",
+        ),
+        seed=_SEED_NESTED,
+    ),
+    CpScenario(
         name="cp_copy_missing_key",
         argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", f"s3://{BUCKET_TOKEN}/cp/x"),
         expected_stderr_tokens_ours=("fatal error", 'Key "no-such-key" does not exist'),
@@ -734,6 +769,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "SHA256",
         ),
         local_src=_SRC_SINGLE,
+        # The stored checksum is a deterministic function of the bytes, so
+        # moto and MinIO agree - probe it to prove the algorithm reached the
+        # PUT (rc/stdout alone never observed the checksum).
+        head_key="up/key.txt",
+        head_fields=("ChecksumSHA256",),
     ),
     CpScenario(
         name="cp_checksum_crc32c",

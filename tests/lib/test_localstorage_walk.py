@@ -980,10 +980,12 @@ class TestGetFileinfo:
 
     def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
         # aws parity: no type check, so a directory source yields a FileInfo and
-        # fails later at open ([Errno 21], rc 1).
+        # fails later at open ([Errno 21], rc 1). Its kind still reflects the
+        # entry (the FileInfo contract), so a filter can tell it apart.
         info = LocalStorage(str(tmp_path)).get_fileinfo()
         assert info is not None
         assert info.key == str(tmp_path).replace(os.sep, "/")
+        assert info.kind is FileKind.DIRECTORY
 
     def test_missing_returns_none_silently(self, tmp_path: Path) -> None:
         # Definitively absent -> None, no warning (the existence-check contract).

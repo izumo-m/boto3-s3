@@ -121,11 +121,17 @@ class TestLocalFileInfo:
 
 class TestS3FileInfo:
     def test_construct_with_required_fields_only(self) -> None:
-        sfi = t.S3FileInfo(key="k", size=10, mtime=DT)
-        assert (sfi.key, sfi.size, sfi.mtime) == ("k", 10, DT)
-        assert sfi.etag is None
-        assert sfi.storage_class is None
-        assert sfi.owner is None
+        # key alone - size and mtime are optional too, so their accidental
+        # promotion to required would fail here.
+        sfi = t.S3FileInfo(key="k")
+        assert sfi.key == "k"
+        assert (sfi.size, sfi.mtime, sfi.etag, sfi.storage_class, sfi.owner) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         assert sfi.head is None
 
     def test_construct_with_all_s3_fields(self) -> None:
@@ -178,8 +184,9 @@ class TestS3ScanOptions:
     def test_defaults_and_inherits_common(self) -> None:
         opts = t.S3ScanOptions()
         assert isinstance(opts, t.ScanOptions)  # a ScanOptions subclass
+        # page_size None sends no MaxKeys (aws-cli's unset --page-size).
         assert (opts.page_size, opts.request_payer, opts.fetch_owner, opts.prefix) == (
-            1000,
+            None,
             None,
             False,
             None,
