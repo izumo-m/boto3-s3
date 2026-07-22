@@ -33,7 +33,11 @@ def _obj(key: str, size: int = 1) -> dict[str, Any]:
 
 
 class _RaisingPaginatorClient:
-    """Fake whose ListObjectsV2 paginator raises on iteration."""
+    """Fake whose ListObjectsV2 page iterator raises on the first page fetch.
+
+    Mirrors the real phase: ``paginate()`` succeeds and the ClientError comes
+    out of iterating the returned pages.
+    """
 
     def __init__(self, error: ClientError) -> None:
         self._error = error
@@ -43,7 +47,11 @@ class _RaisingPaginatorClient:
 
         class _Paginator:
             def paginate(self, **_kwargs: Any) -> Any:
-                raise error
+                def pages() -> Any:
+                    raise error
+                    yield  # pragma: no cover - marks this function as a generator
+
+                return pages()
 
         return _Paginator()
 
@@ -87,12 +95,12 @@ class TestOutputMatrix:
     def test_quiet_silences_failure_lines_but_not_rc(self) -> None:
         # aws --quiet builds no result printer at all: even failure/fatal
         # lines vanish while the rc stays 1.
-        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404))
+        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404, "DeleteObject"))
         result = run_cli_in_process(["rm", "s3://b/k", "--quiet"], ctx=client_ctx(client))
         assert (result.rc, result.stdout, result.stderr) == (1, "", "")
 
     def test_quiet_silences_fatal_lines_but_not_rc(self) -> None:
-        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404))
+        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         result = run_cli_in_process(
             ["rm", "s3://b/", "--recursive", "--quiet"], ctx=client_ctx(client)
         )
@@ -140,7 +148,7 @@ class TestExitCodeShape:
         assert "Invalid argument type" in capsys.readouterr().err
 
     def test_per_key_failure_is_rc_1_with_delete_failed(self) -> None:
-        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404))
+        client = _RaisingDeleteClient(client_error("NoSuchBucket", 404, "DeleteObject"))
         result = run_cli_in_process(["rm", "s3://b-no-such/k"], ctx=client_ctx(client))
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3://b-no-such/k ")
@@ -149,7 +157,7 @@ class TestExitCodeShape:
     def test_listing_failure_is_rc_1_fatal_not_254(self) -> None:
         # ls maps a server ClientError to 254; rm must report rc 1 with a
         # "fatal error:" line instead (aws transfer-command convention).
-        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404))
+        client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         result = run_cli_in_process(
             ["rm", "s3://b-no-such/", "--recursive"], ctx=client_ctx(client)
         )
@@ -290,8 +298,15 @@ class TestAppendFilterAction:
         # rm lists S3 keys, whose bucket/key paths carry no drive / UNC anchor,
         # so an absolute pattern can never match one (os.path.join replaces the
         # base with it, fnmatch misses the anchorless path) - exactly aws-cli.
-        # Only the relative '*' bites here.
         target = S3Storage("s3://b")
+        info = FileInfo(key="anything", compare_key="anything", storage=target)
+        # Alone, the absolute exclude is inert: everything survives.
+        inert = filters.compile_filter(
+            [GlobPattern.exclude("/elsewhere/*")], src=target, dest=target, dir_op=True
+        )
+        assert inert is not None
+        assert inert(info) is True
+        # Combined with a relative '*', only the relative pattern bites.
         keep = filters.compile_filter(
             [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
             src=target,
@@ -299,7 +314,7 @@ class TestAppendFilterAction:
             dir_op=True,
         )
         assert keep is not None
-        assert keep(FileInfo(key="anything", compare_key="anything", storage=target)) is False
+        assert keep(info) is False
 
 
 class TestScanInterruptPolicy:

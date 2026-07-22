@@ -361,6 +361,7 @@ class TestAutoPromptWiring:
         prompter = _FakePrompter(["cp"])
         rc = cli.main(["--cli-auto-prompt"], ctx=Context(auto_prompter=prompter))
         assert rc == 252
+        assert prompter.seen == []  # the prompt ran (empty seed) - the 252 is post-prompt
 
     def test_help_takes_precedence_over_prompt(self, capsys: pytest.CaptureFixture[str]) -> None:
         prompter = _FakePrompter(["--version"])

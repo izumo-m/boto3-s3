@@ -156,9 +156,17 @@ class TestBuildTransferConfig:
         runtime_config = _runtime_config(**scoped)
         config = runtimeconfig.build_transfer_config(scoped, runtime_config, "classic")
         assert config.multipart_threshold == 10 * _MIB
-        # multipart_chunksize was not set -> boto3's UNSET sentinel is kept so
-        # the CRT engine treats it as "use the dynamic part size".
+        # multipart_chunksize keeps boto3's UNSET sentinel - what lets the CRT
+        # engine use its dynamic part size.
         assert config.get_deep_attr("multipart_chunksize") is config.UNSET_DEFAULT
+        # And every other constructor key sits at a fresh constructor's own
+        # default (UNSET where boto3 uses the sentinel, None elsewhere).
+        base = type(config)()
+        ctor_keys = runtimeconfig._TRANSFER_CONFIG_CTOR_KEYS  # pyright: ignore[reportPrivateUsage]
+        for rc_key, ctor_key in ctor_keys.items():
+            if rc_key in scoped:
+                continue
+            assert config.get_deep_attr(ctor_key) == base.get_deep_attr(ctor_key), ctor_key
 
     def test_preferred_transfer_client_carries_the_resolved_engine(self) -> None:
         config = runtimeconfig.build_transfer_config({}, _runtime_config(), "crt")
@@ -224,8 +232,13 @@ class TestBuildTransferConfig:
         # client.
         scoped = {"max_queue_size": "500"}
         config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
-        assert config.max_request_queue_size != 500
-        assert config.max_io_queue_size == 100  # boto3's default, untouched
+        # All four knobs sit at a fresh constructor's own defaults: the scoped
+        # queue size was not applied and the classic pins did not run.
+        base = type(config)()
+        assert config.max_request_queue_size == base.max_request_queue_size
+        assert config.max_in_memory_upload_chunks == base.max_in_memory_upload_chunks
+        assert config.max_in_memory_download_chunks == base.max_in_memory_download_chunks
+        assert config.max_io_queue_size == base.max_io_queue_size
 
 
 class TestResolveTransferConfig:

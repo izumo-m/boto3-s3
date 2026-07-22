@@ -11,6 +11,7 @@ covered end-to-end through `main` too.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ from boto3_s3 import (
 )
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.fakes3 import client_error
+from tests.utils.fakes3 import MTIME, client_error
 
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
@@ -86,7 +87,12 @@ class TestExitCodeFor:
 
 
 class _RaisingClient:
-    """Fake S3 client whose paginator raises a ClientError on iteration."""
+    """Fake S3 client whose page iterator raises a ClientError on iteration.
+
+    The real paginator's ``paginate()`` only builds the iterator; the server
+    error surfaces on the first page fetch, so the fake raises from ``next()``,
+    not from ``paginate()`` itself.
+    """
 
     def __init__(self, error: ClientError) -> None:
         self._error = error
@@ -96,24 +102,22 @@ class _RaisingClient:
 
         class _Paginator:
             def paginate(self, **kwargs: Any) -> Any:
-                raise error
+                def pages() -> Any:
+                    raise error
+                    yield  # pragma: no cover - marks this function as a generator
+
+                return pages()
 
         return _Paginator()
 
 
-class _BrokenPipeClient:
-    """Fake whose ListObjectsV2 paginator raises BrokenPipeError on iteration.
-
-    Models a downstream reader closing the pipe (``... | head``): the library
-    does not translate a BrokenPipeError (``s3_errors`` catches only
-    ClientError / BotoCoreError), so it escapes the command and reaches
-    ``_dispatch``'s dedicated ``except BrokenPipeError`` handler.
-    """
+class _OnePageClient:
+    """Fake whose ListObjectsV2 paginator yields a single canned page."""
 
     def get_paginator(self, name: str) -> Any:
         class _Paginator:
             def paginate(self, **kwargs: Any) -> Any:
-                raise BrokenPipeError
+                yield {"Contents": [{"Key": "p/x", "Size": 1, "LastModified": MTIME}]}
 
         return _Paginator()
 
@@ -236,12 +240,24 @@ class TestMainExitCodes:
             assert "An error occurred (ParamValidation):" in err
         assert "Traceback" not in err
 
-    def test_broken_pipe_from_a_command_exits_0(self) -> None:
+    def test_broken_pipe_from_a_command_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws-cli exits 0 when a downstream reader closes the pipe
-        # (docs/cli.md section 6): a BrokenPipeError escaping the command maps to
-        # 0, not a fatal rc. The library does not translate it, so it reaches
-        # _dispatch's dedicated handler.
-        ctx = Context(client_factory=lambda _args: _BrokenPipeClient())  # pyright: ignore[reportArgumentType]
+        # (docs/cli.md section 6). The real seam is the stdout write: ls has a
+        # line to print and the pipe is gone, so ``uni_write(sys.stdout, ...)``
+        # raises BrokenPipeError. The library does not translate it
+        # (``s3_errors`` catches only ClientError / BotoCoreError), so it
+        # escapes the command and reaches _dispatch's dedicated handler.
+        class _DeadPipe:
+            encoding = "utf-8"
+
+            def write(self, _text: str) -> int:
+                raise BrokenPipeError
+
+            def flush(self) -> None:
+                raise BrokenPipeError
+
+        ctx = Context(client_factory=lambda _args: _OnePageClient())  # pyright: ignore[reportArgumentType]
+        monkeypatch.setattr(sys, "stdout", _DeadPipe())
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
 
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
@@ -671,11 +687,14 @@ class TestParseToValidationOrder:
         # file:// reference on --page-size is its 252, not the int()'s 255.
         assert cli.main(["ls", "s3://b", "--page-size", "file:///no/x"]) == 252
 
-    def test_metadata_fileb_shorthand_value_is_a_usage_error(self) -> None:
-        # a@=fileb://... loads bytes; aws rejects the non-string map value at
-        # parse time (252) - it must not reach the transfer (rc 1).
-        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "a@=fileb:///no/x"])
-        assert rc == 252  # the missing paramfile itself is also a 252
+    def test_metadata_fileb_shorthand_value_is_a_usage_error(self, tmp_path: Path) -> None:
+        # a@=fileb://... loads real bytes; aws rejects the non-string map value
+        # at parse time (252) - it must not reach the transfer (rc 1). The file
+        # exists, so the 252 cannot be the missing-paramfile one.
+        blob = tmp_path / "v.bin"
+        blob.write_bytes(b"\x00\x01")
+        rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@=fileb://{blob}"])
+        assert rc == 252
 
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
         # A whole-value --metadata fileb:// load failure is the paramfile 252.
@@ -700,23 +719,40 @@ class TestParseToValidationOrder:
         )
         assert rc == 252
 
-    def test_query_compile_beats_the_endpoint_and_paramfile(self) -> None:
+    def test_query_compile_beats_the_endpoint_and_paramfile(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # aws resolves --query at top-level-args-parsed, ahead of --endpoint-url
         # and every paramfile: a bad expression is its 252 first. Measured for
         # each transfer command (they share the classify_paths head).
         for command in ("cp", "mv", "sync"):
             rc = cli.main(
-                [command, self._MISSING, "s3://b/k", "--query", "][", "--endpoint-url", "badurl"]
+                [
+                    command,
+                    self._MISSING,
+                    "s3://b/k",
+                    "--query",
+                    "][",
+                    "--endpoint-url",
+                    "badurl",
+                    "--metadata",
+                    "file:///no/x",
+                ]
             )
             assert rc == 252, command
+            err = capsys.readouterr().err
+            # All three failures are 252s; the message proves the query one won.
+            assert "Bad value for --query" in err, command
 
     def test_local_local_stays_252_in_a_regionless_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # aws's client construction cannot fail on a missing region (its
         # bundled botocore defers region resolution to request time), so the
-        # usage error must keep winning in a regionless env - this guards
-        # against ever hoisting the client build above the validations.
+        # usage error must keep winning in a regionless env. A hoisted but
+        # still-succeeding client build would pass this too - the ordering
+        # itself is pinned by the error-precedence tests above; this pins the
+        # observable outcome in the region-free environment.
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")

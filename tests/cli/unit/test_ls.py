@@ -8,6 +8,7 @@ scan -> format path without network and without monkeypatching.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -153,9 +154,15 @@ class TestLsAllBuckets:
         assert "Total Objects: 0" in out
         assert "Total Size: 0" in out
 
-    def test_ignored_globals_are_accepted(self) -> None:
+    def test_ignored_globals_are_accepted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Accepted-and-ignored means the listing itself is untouched: the
+        # output matches a plain run line for line.
+        ctx, _ = _fake_ctx([{"Contents": [_obj("p/a")]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        plain = capsys.readouterr().out
         ctx, _ = _fake_ctx([{"Contents": [_obj("p/a")]}])
         assert cli.main(["ls", "--no-paginate", "--output", "json", "s3://bucket/p/"], ctx=ctx) == 0
+        assert capsys.readouterr().out == plain
 
     def test_invalid_choice_exits_param_validation_rc(
         self, capsys: pytest.CaptureFixture[str]
@@ -254,12 +261,13 @@ class TestParamfileExpansion:
         assert rc == 252
         assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
 
-    def test_bucket_name_prefix_reference_is_expanded(self) -> None:
+    def test_bucket_name_prefix_reference_is_expanded(self, tmp_path: Path) -> None:
+        # aws paramfile-expands --bucket-name-prefix: a file:// reference
+        # forwards the file's contents as the Prefix.
+        ref = tmp_path / "prefix.txt"
+        ref.write_text("al")
         ctx, client = _fake_ctx([{"Buckets": []}])
-        # A readable reference would forward its contents as Prefix; here just
-        # confirm a bare value still forwards (the expand is a no-op without the
-        # prefix, so behavior is unchanged for the common case).
-        assert cli.main(["ls", "--bucket-name-prefix", "al"], ctx=ctx) == 0
+        assert cli.main(["ls", "--bucket-name-prefix", f"file://{ref}"], ctx=ctx) == 0
         assert client.calls[0]["Prefix"] == "al"
 
     def test_positional_missing_fileb_reference_is_252(

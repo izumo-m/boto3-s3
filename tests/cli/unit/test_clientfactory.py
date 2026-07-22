@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,12 +30,24 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
         args = _parse(["--profile", "bound", "--endpoint-url", "http://localhost:9000"])
 
+        sessions: list[Any] = []
+        real_build_session = clientfactory.build_session
+
+        def counting_build_session(namespace: argparse.Namespace) -> Any:
+            session = real_build_session(namespace)
+            sessions.append(session)
+            return session
+
+        monkeypatch.setattr(clientfactory, "build_session", counting_build_session)
         s3 = clientfactory.build_s3(args)
 
         assert s3.session is not None
         assert s3.session.profile_name == "bound"
         assert s3.client().meta.endpoint_url == "http://localhost:9000"
         assert s3.aws_config().get_str("s3.multipart_threshold") == "17"
+        # "One session": the client and the config read above both came off the
+        # single session build_s3 made - nothing built a second one.
+        assert sessions == [s3.session]
         # The S3-level endpoint copy feeds the CRT lane's explicit-endpoint
         # pin (docs/crt.md); it must be the same string build_client applies,
         # so the Transferrer's meta-equality gate recognizes the CLI client.
@@ -256,6 +269,18 @@ class TestBuildClient:
         client = clientfactory.build_client(args)
         url = client.generate_presigned_url(
             "get_object", Params={"Bucket": "plain-bucket", "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_plain_access_point_arn_keeps_the_sigv4_pin(self) -> None:
+        # Region-qualified access-point ARN: not the MRAP shape (that one has
+        # an empty region field), so the SigV4 pin stays.
+        arn = "arn:aws:s3:us-east-1:123456789012:accesspoint/plain-ap"
+        args = _parse(["--region", "us-east-1"])
+        args.paths = [f"s3://{arn}/key", "./local.txt"]
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": arn, "Key": "key"}, ExpiresIn=60
         )
         assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
 

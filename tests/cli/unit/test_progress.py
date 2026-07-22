@@ -309,6 +309,9 @@ class TestPrinterThread:
         # the printer as a whole, deliberately.
         assert capsys.readouterr().err == ""
         assert (printer.failed, printer.warned) == (1, 0)
+        # The drain consumed both records even though rendering was dead - a
+        # crashed printer thread would have left them queued.
+        assert printer._queue.qsize() == 0  # pyright: ignore[reportPrivateUsage]
 
     def test_unencodable_key_does_not_silence_the_run(
         self, monkeypatch: pytest.MonkeyPatch

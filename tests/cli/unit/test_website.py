@@ -49,7 +49,7 @@ class TestWebsite:
         )
         captured = capsys.readouterr()
         assert rc == 0
-        assert captured.out == ""  # aws prints nothing on success
+        assert (captured.out, captured.err) == ("", "")  # aws prints nothing on success
         assert client.calls == [
             {
                 "Bucket": "bucket",

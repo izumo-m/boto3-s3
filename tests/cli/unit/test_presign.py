@@ -84,8 +84,14 @@ class TestPresignExitCodeShape:
         assert rc == 252
         assert "Invalid length for parameter Key" in err
 
-    def test_trailing_slash_is_param_validation_252(self) -> None:
-        assert cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx()) == 252
+    def test_trailing_slash_is_param_validation_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx())
+        assert rc == 252
+        # The same empty-Key client-side validation as the bucket-only form -
+        # not some other usage rejection.
+        assert "Invalid length for parameter Key" in capsys.readouterr().err
 
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["presign", "s3://"], ctx=_real_client_ctx())

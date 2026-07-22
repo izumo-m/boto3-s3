@@ -14,6 +14,22 @@ from boto3_s3_cli import cli
 
 
 class TestCommandTable:
+    def test_table_covers_the_documented_commands(self) -> None:
+        # Literal pin (docs/cli.md section 1): the class-consistency test
+        # below reads the same table it checks, so a silently dropped command
+        # would still pass it.
+        assert sorted(cli._COMMAND_TABLE) == [
+            "cp",
+            "ls",
+            "mb",
+            "mv",
+            "presign",
+            "rb",
+            "rm",
+            "sync",
+            "website",
+        ]
+
     def test_table_matches_command_classes(self) -> None:
         for name, (module_name, class_name, help_text) in cli._COMMAND_TABLE.items():
             command_cls = cli._load_command(name)

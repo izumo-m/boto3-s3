@@ -133,5 +133,5 @@ class TestSyncGlacierOnMoto:
             ["sync", f"s3://{FUNCTIONAL_BUCKET}/cold", "out", "--ignore-glacier-warnings"]
         )
         assert result.rc == 0
-        assert result.stderr == ""
+        assert (result.stdout, result.stderr) == ("", "")  # a silent skip is silent on both
         assert not (tmp_path / "out" / "x.bin").exists()

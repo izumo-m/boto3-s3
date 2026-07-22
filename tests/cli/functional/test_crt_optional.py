@@ -64,13 +64,21 @@ with mock_aws():
 
     # Only the CRT checksum family degrades: an in-pipeline per-item failure
     # (the library's BatchError surfaced as rc 1), not a crash.
-    result = run_cli_in_process(
-        ["cp", str(src), "s3://crt-less-bucket/c.txt", "--checksum-algorithm", "CRC32C"]
-    )
-    assert result.rc == 1, (result.rc, result.stderr)
-    assert "upload failed:" in result.stderr, result.stderr
-    assert "Missing Dependency" in result.stderr, result.stderr
-    assert "botocore[crt]" in result.stderr, result.stderr
+    for algorithm in ("CRC32C", "CRC64NVME"):
+        argv = ["cp", str(src), f"s3://crt-less-bucket/{algorithm}.txt"]
+        result = run_cli_in_process(argv + ["--checksum-algorithm", algorithm])
+        assert result.rc == 1, (algorithm, result.rc, result.stderr)
+        assert "upload failed:" in result.stderr, (algorithm, result.stderr)
+        assert "Missing Dependency" in result.stderr, (algorithm, result.stderr)
+        assert "botocore[crt]" in result.stderr, (algorithm, result.stderr)
+
+    # "Only": the hashlib members of the family keep working without awscrt -
+    # a regression that makes SHA1/SHA256 need the CRT would pass a
+    # CRC32C-only probe.
+    for algorithm in ("SHA1", "SHA256"):
+        argv = ["cp", str(src), f"s3://crt-less-bucket/{algorithm}.txt"]
+        result = run_cli_in_process(argv + ["--checksum-algorithm", algorithm])
+        assert result.rc == 0, (algorithm, result.rc, result.stderr)
 
     # Pure-Python signers are the no-awscrt default: the build_client pin is
     # a no-op and presign keeps aws v2's parameter order.

@@ -29,6 +29,24 @@ class TestRuntimeConfig:
     def test_user_provides_no_config_uses_default(self) -> None:
         assert build_config_with() == runtimeconfig.DEFAULTS
 
+    def test_defaults_are_awscli_defaults_verbatim(self) -> None:
+        # Literal pin of aws-cli's transferconfig DEFAULTS: comparing
+        # build_config() against runtimeconfig.DEFAULTS alone would stay green
+        # if both drifted from aws-cli's table together.
+        assert runtimeconfig.DEFAULTS == {
+            "multipart_threshold": 8 * (1024**2),
+            "multipart_chunksize": 8 * (1024**2),
+            "max_concurrent_requests": 10,
+            "max_queue_size": 1000,
+            "max_bandwidth": None,
+            "preferred_transfer_client": "auto",
+            "target_bandwidth": None,
+            "io_chunksize": 256 * 1024,
+            "should_stream": None,
+            "disk_throughput": None,
+            "direct_io": None,
+        }
+
     def test_user_provides_partial_overrides(self) -> None:
         config_from_user = {
             "max_concurrent_requests": "20",

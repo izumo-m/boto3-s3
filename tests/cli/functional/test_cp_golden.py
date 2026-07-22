@@ -153,5 +153,5 @@ class TestCpGlacierOnMoto:
             ["cp", f"s3://{FUNCTIONAL_BUCKET}/cold/x.bin", "out.bin", "--ignore-glacier-warnings"]
         )
         assert result.rc == 0
-        assert result.stderr == ""
+        assert (result.stdout, result.stderr) == ("", "")  # a silent skip is silent on both
         assert not (tmp_path / "out.bin").exists()

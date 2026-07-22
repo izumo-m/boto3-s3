@@ -24,7 +24,7 @@ from boto3.s3.transfer import TransferConfig
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.fakes3 import client_error
+from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -354,12 +354,19 @@ class TestSourceRegionWiring:
     def _factory_recording_ctx(self) -> tuple[Context, list[argparse.Namespace]]:
         namespaces: list[argparse.Namespace] = []
 
+        # Which client serves which operation depends on --source-region (one
+        # client takes both, or the source client takes the HEAD), so answer
+        # by operation name, each with its real response shape - CopyObject
+        # nests its ETag under CopyObjectResult, unlike HeadObject.
+        shapes: dict[str, dict[str, Any]] = {
+            "HeadObject": {"ContentLength": 1, "ETag": '"e"', "LastModified": MTIME},
+            "CopyObject": {"CopyObjectResult": {"ETag": '"e"', "LastModified": MTIME}},
+        }
+
         def factory(args: argparse.Namespace) -> Any:
             namespaces.append(args)
-            # Generous identical canned lists: whichever of HeadObject /
-            # CopyObject lands on this client finds a workable response
-            # (leftovers are allowed by the recorder).
-            client, _ = make_recording_client([{"ContentLength": 1, "ETag": '"e"'}, {}, {}])
+            client: Any = make_recording_client([])[0]
+            client._make_api_call = lambda operation_name, _params: shapes[operation_name]
             return client
 
         return Context(client_factory=factory, transfer_config=_SYNC), namespaces
@@ -450,6 +457,25 @@ class TestStreaming:
         rc = cli.main(["cp", "-", "s3://bucket/k", "--expected-size", "4"], ctx=ctx)
         assert rc == 0
         assert [c.operation for c in calls] == ["PutObject"]
+
+    def test_expected_size_above_the_threshold_goes_multipart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The hint must reach the engine: a stream cannot be sized up front,
+        # so only --expected-size can push it over the multipart threshold
+        # (default 8 MiB). The actual bytes stay tiny - the decision is made
+        # from the hint alone, exactly aws's use of expected-size.
+        monkeypatch.setattr("sys.stdin", _StdinShim(b"foo\n"))
+        ctx, calls = _recording_ctx([{"UploadId": "u"}, {"ETag": '"p1"'}, {}])
+        rc = cli.main(
+            ["cp", "-", "s3://bucket/k", "--expected-size", str(9 * 1024 * 1024)], ctx=ctx
+        )
+        assert rc == 0
+        assert [c.operation for c in calls] == [
+            "CreateMultipartUpload",
+            "UploadPart",
+            "CompleteMultipartUpload",
+        ]
 
     def test_expected_size_non_integer_is_a_fatal_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -591,12 +617,12 @@ class TestNoOverwrite:
         rc = cli.main(["cp", str(src), "s3://b/k", "--no-overwrite"], ctx=ctx)
         captured = capsys.readouterr()
         assert rc == 0
-        assert captured.err == ""
+        assert (captured.out, captured.err) == ("", "")  # no upload line either
 
     def test_existing_download_destination_is_skipped(self, tmp_path: Path) -> None:
         dest = tmp_path / "out.bin"
         dest.write_bytes(b"keep me")
-        ctx, calls = _recording_ctx([{"ContentLength": 3, "LastModified": None, "ETag": '"e"'}])
+        ctx, calls = _recording_ctx([{"ContentLength": 3, "LastModified": MTIME, "ETag": '"e"'}])
         rc = cli.main(["cp", "s3://b/k", str(dest), "--no-overwrite"], ctx=ctx)
         assert rc == 0
         assert [c.operation for c in calls] == ["HeadObject"]

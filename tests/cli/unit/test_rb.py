@@ -47,7 +47,11 @@ class _ForceFailClient:
 
         class _Paginator:
             def paginate(self, **_kwargs: Any) -> Any:
-                raise error
+                def pages() -> Any:
+                    raise error
+                    yield  # pragma: no cover - marks this function as a generator
+
+                return pages()
 
         return _Paginator()
 
@@ -164,7 +168,7 @@ class TestForce:
         assert result.stdout.endswith("remove_bucket: b\n")
 
     def test_force_failure_is_255_and_skips_delete_bucket(self) -> None:
-        client = _ForceFailClient(client_error("NoSuchBucket", 404, "DeleteBucket"))
+        client = _ForceFailClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         result = run_cli_in_process(["rb", "s3://b", "--force"], ctx=client_ctx(client))
         assert result.rc == 255
         # The inner rm printed its own fatal line, then the fixed sentence goes

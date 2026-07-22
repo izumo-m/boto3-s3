@@ -92,6 +92,11 @@ class TestWebsiteOnMoto:
 
     def test_no_scheme_and_trailing_slash_round_trip(self, moto_s3: Any) -> None:
         assert _run(["website", FUNCTIONAL_BUCKET, "--index-document", "a.html"]).rc == 0
+        # Read back before the second run overwrites it: the no-scheme form
+        # must have applied a real configuration, not no-op'd to rc 0.
+        assert _website_config(moto_s3, FUNCTIONAL_BUCKET) == {
+            "IndexDocument": {"Suffix": "a.html"}
+        }
         assert _run(["website", f"s3://{FUNCTIONAL_BUCKET}/", "--index-document", "b.html"]).rc == 0
         assert _website_config(moto_s3, FUNCTIONAL_BUCKET) == {
             "IndexDocument": {"Suffix": "b.html"}

@@ -63,13 +63,14 @@ class Golden:
     rc: int
     stdout_lines: list[str]
     aws_version: str
-    # Bucket end state after the run (destructive commands only; None = not
-    # captured / not compared, which keeps the ls goldens valid unchanged).
+    # Bucket end state after the run (destructive commands and every cp
+    # replay; None = not captured / not compared, which keeps the ls goldens
+    # valid unchanged).
     remaining_keys: list[str] | None = None
     # Whether the scenario bucket exists after the run (bucket-lifecycle
     # commands only; same None-means-not-compared convention).
     bucket_exists: bool | None = None
-    # Transfer-scenario end states (cp/mv; same convention): the local
+    # Transfer-scenario end states (cp/mv/sync; same convention): the local
     # destination tree (harness.capture_local_tree) and selected HeadObject
     # fields of one probe key (harness.head_object_fields).
     local_tree: list[str] | None = None
