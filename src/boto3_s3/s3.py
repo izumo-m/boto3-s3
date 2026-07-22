@@ -23,9 +23,9 @@ import functools
 import inspect
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec, TypeVar, cast
@@ -2026,20 +2026,28 @@ class S3:
         aws-cli only ever signs ``get_object``; ``put_object`` is this
         library's permissive superset.
 
-        The signature version follows the client's configuration, exactly
-        like boto3: a default client still downgrades presigned URLs to
-        SigV2 in regions that accept it (e.g. us-east-1). For aws-cli v2's
-        always-SigV4 URLs, build the client with
-        ``Config(signature_version="s3v4")`` - the CLI layer does exactly
-        that.
+        The URL is signed with SigV4, matching ``aws s3 presign``. This
+        matters because botocore, left to itself, still downgrades a default
+        us-east-1 client's presigned URL to the deprecated SigV2 - a URL a
+        SigV4-only bucket (or a modern bucket policy) rejects. So for the one
+        signer botocore would pick as SigV2 (the legacy hmacv1 ``"s3"``), the
+        presign is forced to ``"s3v4"`` for this call only, via botocore's
+        per-call ``choose-signer`` seam - no new client is built, and the
+        client's own configuration is otherwise untouched. The auth-scheme
+        signers a directory bucket (``v4-s3express``) or an MRAP ARN
+        (``s3v4a``) resolve to, and an unsigned client, are left as botocore
+        chose them.
         """
         storage = self._resolve_s3_target(target, operation="presign")
+        client = storage.get_client()
+        operation = "GetObject" if method == "get_object" else "PutObject"
         with s3_errors(operation="presign", bucket=storage.bucket, key=storage.key):
-            return storage.get_client().generate_presigned_url(
-                method,
-                Params={"Bucket": storage.bucket, "Key": storage.key},
-                ExpiresIn=expires_in,
-            )
+            with _sigv4_presign(client, operation):
+                return client.generate_presigned_url(
+                    method,
+                    Params={"Bucket": storage.bucket, "Key": storage.key},
+                    ExpiresIn=expires_in,
+                )
 
     def website(
         self,
@@ -2073,6 +2081,48 @@ class S3:
             storage.get_client().put_bucket_website(
                 Bucket=storage.bucket, WebsiteConfiguration=config
             )
+
+
+@contextmanager
+def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
+    """Force a presign onto SigV4 for the duration of one call.
+
+    A default S3 client (no explicit ``signature_version``) resolves the
+    generic ``"v4-query"`` presign signer, which a later botocore
+    choose-signer handler then downgrades to the legacy hmacv1 SigV2 - the
+    URL a SigV4-only bucket rejects. This registers an earlier
+    ``choose-signer.s3.<operation>`` handler that answers ``"s3v4-query"`` for
+    exactly that ``"v4-query"`` input, pre-empting the downgrade (the emitter
+    takes the first non-None response). Every other signer gets ``None`` - a
+    defer - so an already-explicit ``s3v4``, an unsigned
+    (``--no-sign-request``) client, a user's explicit legacy ``s3``, and the
+    ``s3express`` / ``s3v4a`` auth-scheme signers all sign exactly as botocore
+    chose (the unsigned path in particular breaks if this handler answers for
+    it). The CLI, which pins ``s3v4`` on its client, resolves ``"s3v4-query"``
+    and is untouched. ``"v4-query"`` / ``"s3v4-query"`` are botocore-internal
+    signer tokens; if a botocore version renames them this override simply
+    no-ops back to botocore's default (no crash). Scoped to this client and
+    operation, unregistered in a ``finally`` so no shared state leaks and no
+    new client is built.
+
+    A client that does not expose botocore's event seam (a stand-in that only
+    implements ``generate_presigned_url``) is left to its own signing - the
+    override is a best-effort upgrade, never a hard requirement.
+    """
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is None or not hasattr(events, "register"):
+        yield
+        return
+
+    def _choose(signature_version: str, **_kwargs: Any) -> str | None:
+        return "s3v4-query" if signature_version == "v4-query" else None
+
+    event = f"choose-signer.s3.{operation}"
+    events.register(event, _choose)
+    try:
+        yield
+    finally:
+        events.unregister(event, _choose)
 
 
 # -- module-level convenience -------------------------------------------------
