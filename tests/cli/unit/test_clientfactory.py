@@ -35,6 +35,10 @@ class TestBuildClient:
         assert s3.session.profile_name == "bound"
         assert s3.client().meta.endpoint_url == "http://localhost:9000"
         assert s3.aws_config().get_str("s3.multipart_threshold") == "17"
+        # The S3-level endpoint copy feeds the CRT lane's explicit-endpoint
+        # pin (docs/crt.md); it must be the same string build_client applies,
+        # so the Transferrer's meta-equality gate recognizes the CLI client.
+        assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
 
     def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
         # Every CLI-built session registers the library's fast_parse_timestamp

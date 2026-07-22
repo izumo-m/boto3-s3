@@ -153,7 +153,12 @@ def build_s3(args: argparse.Namespace) -> S3:
     # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
     # (aws dies immediately); the library default keeps waiting.
-    return CliS3(session=session, wait_on_interrupt=False)
+    # endpoint_url: build_client already applies it to every client this S3
+    # hands out (the client() override), so the S3-level copy only feeds the
+    # CRT lane's explicit-endpoint pin (docs/crt.md) - without it, an
+    # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
+    # dropped by the host heuristic and the CRT would re-resolve to public S3.
+    return CliS3(session=session, endpoint_url=args.endpoint_url, wait_on_interrupt=False)
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
