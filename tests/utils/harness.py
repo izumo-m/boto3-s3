@@ -236,12 +236,31 @@ def run_cli_in_process_streaming(
     return CliResult(rc, stdout, err.getvalue())
 
 
+def _add_connection_close(request: Any, **_kwargs: Any) -> None:
+    request.headers["Connection"] = "close"
+
+
 def seed_bucket(client: Any, bucket: str, seed: Mapping[str, int | bytes]) -> None:
     """Put one object per entry: an ``int`` means ``b"x" * size``, ``bytes``
-    are the exact body (transfer scenarios compare downloaded content)."""
+    are the exact body (transfer scenarios compare downloaded content).
+
+    A zero-byte PUT to a trailing-slash key (directory marker) leaves MinIO's
+    connection unable to answer the next request on it, which then stalls for
+    the client's full read timeout before a retry on a fresh connection
+    succeeds (observed on both minio/minio and pgsty/minio; real S3 and moto
+    are unaffected). ``Connection: close`` on those PUTs makes the server
+    close the poisoned connection so it is never reused.
+    """
     for key, spec in seed.items():
         body = spec if isinstance(spec, bytes) else b"x" * spec
-        client.put_object(Bucket=bucket, Key=key, Body=body)
+        is_marker = key.endswith("/") and not body
+        if is_marker:
+            client.meta.events.register_first("before-send.s3.PutObject", _add_connection_close)
+        try:
+            client.put_object(Bucket=bucket, Key=key, Body=body)
+        finally:
+            if is_marker:
+                client.meta.events.unregister("before-send.s3.PutObject", _add_connection_close)
 
 
 def delete_keys(client: Any, bucket: str, *keys: str) -> None:
