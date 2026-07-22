@@ -25,7 +25,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
-from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError
+from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -453,6 +453,19 @@ class TestSyncUpload:
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
 
+    def test_directory_bucket_destination_is_rejected(self, tmp_path: Path) -> None:
+        # An S3 Express directory bucket lists in unspecified order, so the
+        # sorted merge-join (and --delete) cannot run on it; the library
+        # rejects with aws-cli's exact wording
+        # (_validate_not_s3_express_bucket_for_sync) before any client call.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
+        assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert calls == []
+
     def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")
@@ -606,6 +619,20 @@ class TestSyncDownload:
         S3().sync(S3Storage("s3://bucket/d", client=client), dest, transfer_config=_SERIAL)
         assert (workdir / "out").is_dir()
         assert not (elsewhere / "out").exists()
+
+    def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
+        self, tmp_path: Path
+    ) -> None:
+        # The rejection guards the source side too, and sits after the s3local
+        # dest-dir creation - aws creates the directory and then fails
+        # validation (measured; sync.md section 6) - but before any listing.
+        out = tmp_path / "out"
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(S3Storage("s3://b--use1-az4--x-s3/p", client=client), str(out))
+        assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert out.is_dir()
+        assert calls == []
 
     def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:
         # The pre-cancel check acts before any side effect - here the

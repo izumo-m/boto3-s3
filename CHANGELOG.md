@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Swept sibling instances of past bug patterns: error translation and source-side attribution close remaining gaps, a pre-cancelled token no longer leaves side effects, and two shutdown/signal hangs are fixed.
 - A missing awscrt where SigV4A signing is required (Multi-Region Access Points) now raises `ConfigurationError` instead of the base error.
 - The Ctrl-C exit posture moved to `S3(wait_on_interrupt=...)` (reaching scans via `ScanOptions`); the per-storage constructor option is gone, and it no longer applies to `SystemExit`.
+- More aws-cli parity: `sync` now rejects S3 Express directory buckets (their listings are unordered, which could mis-pair the merge), and a `mv` download stamps the file mtime before deleting the source; relative local storages also resolve consistently if the process chdir's after construction.
 
 ## [0.7.0] - 2026-07-17
 

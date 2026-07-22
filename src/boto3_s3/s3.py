@@ -1504,7 +1504,10 @@ class S3:
 
         A missing local source directory raises (aws's ``The user-provided
         path ... does not exist.``); a local destination directory is
-        created up front even when nothing transfers. Item failures -
+        created up front even when nothing transfers. An S3 Express
+        directory bucket on either side is then rejected (aws's ``Cannot
+        use sync command with a directory bucket.``): its unordered
+        listings would break the sorted merge-join. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
         rollup counts (first failure as ``__cause__``). `cancel_token` raises
         `CancelledError` after shutdown: graceful mode stops new pair actions
@@ -1538,6 +1541,18 @@ class S3:
                 os.makedirs(dest_storage.abspath)
             except OSError as exc:
                 raise translate_os_error(exc, operation="sync", key=None) from exc
+        # An S3 Express directory bucket lists in unspecified order
+        # (`ListObjectsV2` drops the lexicographic guarantee), which would feed
+        # the sorted merge-join unsorted input - `delete_filter` could then
+        # remove keys that exist on both sides. aws-cli rejects sync outright
+        # on either side (`_validate_not_s3_express_bucket_for_sync`), after
+        # creating the local destination directory as above; so does the CLI
+        # layer, making this the backstop for direct library callers.
+        for side_storage in (src_storage, dest_storage):
+            if isinstance(side_storage, S3Storage) and side_storage.bucket.endswith("--x-s3"):
+                raise ValidationError(
+                    "Cannot use sync command with a directory bucket.", operation="sync"
+                )
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the

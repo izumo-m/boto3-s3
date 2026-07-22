@@ -220,6 +220,14 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   straight through, then each item fails with `[Errno 20]` and gives rc 1.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
+- An S3 Express directory bucket (`--x-s3`) on either side is rejected with
+  aws-cli's `Cannot use sync command with a directory bucket.`
+  (`ValidationError`), after the s3local dest-dir creation above, before any
+  client build or listing: directory buckets drop `ListObjectsV2`'s
+  lexicographic guarantee, so the merge-join could pair keys wrongly and
+  `delete_filter` could remove keys present on both sides. The CLI rejects the
+  same paths at its own validation stage (rc 252); the library guard is the
+  backstop for direct callers.
 - opens3 / s3open (a custom backend on one side, the other always S3 - the open
   route, transfer.md section 12): the custom side must declare `SORTABLE_SCAN`
   (the merge-join needs both listings byte-ordered) plus the route's I/O
