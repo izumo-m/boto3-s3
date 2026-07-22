@@ -57,7 +57,11 @@ def resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
     value = os.environ.get(_AUTO_PROMPT_ENV)
     if value is None:
         value = _read_scoped_cli_auto_prompt(_active_profile(raw_argv))
-    return value.lower() if value else "off"
+    mode = value.lower() if value else "off"
+    # aws's else branch treats any unrecognized value as off; normalize the
+    # *return* too, honoring the documented on / on-partial / off domain
+    # (docs/autoprompt.md) instead of handing callers raw config text.
+    return mode if mode in ("on", "on-partial") else "off"
 
 
 def _active_profile(raw_argv: list[str]) -> str:
