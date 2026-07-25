@@ -33,9 +33,10 @@ The variables read are `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`,
 `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`, and
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS`.
 
-Two parse loosely rather than strictly: the last is honored only when it is
-literally `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on`
-and `on-partial` — anything else counts as off.
+Two parse loosely rather than strictly.
+`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
+`true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
+`on-partial` — anything else counts as off.
 
 ## 3. Transfer tuning: the `[s3]` section
 

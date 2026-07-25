@@ -1,13 +1,12 @@
 # Version-dependent feature availability
 
-[`overview.md`](../design/overview.md) section 2 states the policy: the supported SDK
-floor is roughly three years old, and the installed SDK decides which features
-are available. This document is where that mapping lives - which feature needs
-which `botocore` / `s3transfer` / `awscrt`, and what happens below it.
+Which feature needs which `botocore` / `s3transfer` / `awscrt`, and how one
+behaves when your installation is below it.
 
-The rule behind every entry is the same: boto3-s3 does not emulate newer AWS
-behavior on an older SDK. A feature that depends on a newer S3 model is simply
-unavailable below the version that introduced it.
+boto3-s3 supports SDKs going back roughly three years, and the installed SDK
+decides what is available. Rather than emulate newer AWS behavior on an older
+SDK, a feature that depends on a newer S3 model is simply unavailable below the
+version that introduced it - it never quietly does something different instead.
 
 In practice the choice is coarser than the tables suggest. `boto3` pins
 `s3transfer` to a single minor (1.43.44 requires `>=0.19.0,<0.20.0`) and

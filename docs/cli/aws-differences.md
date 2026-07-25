@@ -32,10 +32,9 @@ reproducible, on either tool.
 
 ## 2. Behavior differences
 
-- **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
-  integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
-  neither changes the result or the exit code. An explicit
-  `--checksum-algorithm` makes the two agree.
+Only the first can leave you with something wrong without saying so. The rest
+are visible, or make no difference to the result.
+
 - **Corrupted ranged downloads are not detected.** For a single-object download
   at or above the multipart threshold, `aws` recombines a per-range checksum and
   fails the download if the assembled object does not match. That check lives in
@@ -43,6 +42,10 @@ reproducible, on either tool.
   TLS and TCP integrity would be reported here as a success. Every neighbouring
   path is unaffected: non-ranged downloads are verified by botocore on both
   sides, and the CRT engine's own validation is identical by construction.
+- **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
+  integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
+  neither changes the result or the exit code. An explicit
+  `--checksum-algorithm` makes the two agree.
 - **`-h` / `--help`.** An option here; `aws` offers `help` as a subcommand.
   `boto3-s3 <command> help` also works.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled

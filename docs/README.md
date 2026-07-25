@@ -1,8 +1,15 @@
 # boto3-s3 user guide
 
-What the two packages promise and how to use them. For how they are built and
-why, see the design documents indexed in [`overview.md`](../design/overview.md)
-section 4.
+Every `aws s3` operation, as a Python library and as a drop-in command.
+
+- **`boto3-s3`** — the library. Run the operations from Python, in your own
+  process, with your own boto3 clients. Results come back as objects instead of
+  console output to parse.
+- **`boto3-s3-cli`** — the command. `boto3-s3` is a command-for-command
+  replacement for `aws s3`: the same invocation behaves the same way.
+
+Either works on its own. The command is a layer on top of the library, so
+using it does not start a subprocess.
 
 ## The command
 
@@ -14,9 +21,6 @@ section 4.
   where behavior differs from `aws s3`.
 - [`cli/configuration.md`](./cli/configuration.md) — the configuration files,
   environment variables and `[s3]` tuning keys the command reads.
-
-What each option does is not repeated here: every option is an `aws s3` option
-and `boto3-s3 <command> --help` describes it.
 
 ## Both packages
 
@@ -50,3 +54,8 @@ the API, and where to look.
   that can be one side of a transfer.
 - [`library/logging.md`](./library/logging.md) — debug logging, and what
   credential masking does and does not guarantee.
+
+---
+
+How the two packages are built, and why, is in the
+[design documents](../design/overview.md).

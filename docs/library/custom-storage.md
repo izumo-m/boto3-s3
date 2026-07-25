@@ -105,7 +105,7 @@ the second naming what is absent.
   parent-directory escape check are local-filesystem concerns, and
   `no_overwrite` does not perform an existence check against a custom
   destination during `cp` — it does still take effect in `sync`.
-- **A zero-byte entry still produces an object.** Writing nothing is not the
+- **A zero-byte entry still produces an object.** Writing zero bytes is not the
   same as writing nothing at all.
 
 ## 5. A minimal example

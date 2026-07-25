@@ -58,19 +58,19 @@ your own `with` block or `close()` finalizes it.
 ## 3. Where a stream may appear
 
 A stream is a single endpoint, not a container: it holds one object's worth of
-bytes and cannot be listed. So it may be
+bytes and cannot be listed. It may be:
 
-- **either side of a non-recursive `cp`**, and
+- **either side of a non-recursive `cp`**
 - **the destination of a non-recursive `mv`** — the bytes are written to the
-  stream, then the S3 source is deleted.
+  stream, then the S3 source is deleted
 
-and it may not be
+It may not be:
 
 - a `mv` **source**, since a move deletes its source and a stream is not
-  something that can be deleted;
-- a recursive `mv` destination;
-- a target of `ls` or `rm`;
-- both sides at once — one side must be S3.
+  something that can be deleted
+- a recursive `mv` destination
+- a target of `ls` or `rm`
+- both sides at once — one side must be S3
 
 `S3.mv` rejects the two `mv` cases with `ValidationError`.
 

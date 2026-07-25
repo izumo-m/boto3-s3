@@ -9,7 +9,7 @@ FileFilter = Callable[[FileInfo], bool]     # True = act on it, False = skip
 ```
 
 A skipped item is skipped silently — no record reaches `on_result`, matching
-`aws s3`. `ls` does not apply `filter=` yet.
+`aws s3`. `ls` does not apply `filter=`.
 
 ## 1. Glob patterns
 
@@ -69,9 +69,9 @@ One caveat: on `rm`'s non-recursive single-key path there is no listing, so only
 `key` and `compare_key` are populated — `size`, `mtime` and `storage_class` are
 `None`. Guard for that if your predicate might run there.
 
-**The predicate runs on a listing prefetch worker thread**, once per page of
-results, so it must be thread-safe and it should be cheap. A slow predicate
-throttles enumeration.
+**The predicate runs on a listing prefetch worker thread**, once per entry as
+each page of results arrives, so it must be thread-safe and it should be cheap.
+A slow predicate throttles enumeration.
 
 ## 4. `filter` in `sync`
 

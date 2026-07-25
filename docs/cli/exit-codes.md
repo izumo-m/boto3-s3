@@ -9,11 +9,11 @@ table below is the contract; the exceptions are listed at the end.
 | code | what it means |
 | --- | --- |
 | 0 | The command succeeded. `--help` and `--version` also exit 0. |
-| 1 | The operation started and did not finish cleanly. |
+| 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
 | 130 | Interrupted with Ctrl-C before the operation started. |
 | 252 | The command line was rejected. Nothing was sent. |
-| 253 | The environment could not supply what the command needs. |
+| 253 | The environment cannot supply what the command needs. |
 | 254 | A request reached S3 and S3 returned an error. |
 | 255 | Any other error. |
 
@@ -81,7 +81,7 @@ branch on it to identify a particular failure.
 ## 2. When more than one thing is wrong
 
 Which code wins is decided the same way `aws s3` decides it, not by a rule of
-our own. Two consequences are worth knowing because they surprise people:
+our own. Two consequences are easy to miss:
 
 - `mb` and `rb` build their client before checking the path, so
   `boto3-s3 mb badpath --profile nosuch` exits 255 for the bad profile rather

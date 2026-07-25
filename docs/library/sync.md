@@ -49,7 +49,7 @@ means the `aws s3` rule. `True` re-copies everything, `False` never overwrites
 ## 2. The default overwrite rule
 
 With `update_filter=None`, an entry present on both sides is copied when **the
-size differs, or the modification times say it is not redundant**. The mtime
+size differs, or the modification times call for it**. The mtime
 rule is not symmetric, and this is the single most surprising thing about
 `sync` — in both tools:
 

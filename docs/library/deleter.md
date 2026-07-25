@@ -31,7 +31,10 @@ surfaces on your thread rather than in the worker.
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
 
-| | |
+Deleting a specific `VersionId` is not provided, as `aws s3 rm` does not offer
+it either.
+
+| member | what it does |
 | --- | --- |
 | `submit(info)` | Buffers one entry; `info.key` is the full object key. Flushes automatically when the buffer reaches `batch_size`. An empty key raises `ValidationError`. Duplicate keys pass through — de-duplicating is yours to do. |
 | `flush()` | Sends what is buffered. Each dispatch first waits for the previous batch, which is where back-pressure happens and where a worker error surfaces. |
@@ -63,6 +66,10 @@ Cancelling through `cancel_token` never discards a batch whose request has
 already started — it completes and delivers its results. Buffered entries not
 yet sent are dropped without records, and immediate mode may also cancel a
 dispatched batch that has not begun.
+
+Nothing is printed. Beyond the result records, the deleter logs to the
+`boto3_s3.deleter` logger — batch dispatches and failures at debug level,
+unattributable responses as warnings.
 
 ## 3. Failures
 
@@ -102,7 +109,3 @@ Two consequences of batching:
   `U+FFFF`) fall back to individual requests, which is what `aws` does for
   every key. The rest of the buffer stays batched.
 
-The library never prints. It logs to the `boto3_s3.deleter` logger — batch
-dispatches and failures at debug level, unattributable responses as warnings.
-
-Deleting a specific `VersionId` is not provided.
