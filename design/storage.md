@@ -360,8 +360,11 @@ The contract:
   `gzip` writer, `sys.stdout`, a pipe — there is nothing to rewind; the bytes
   land wherever the stream sends them (the `.gz` file, the console), and the
   caller's own `with` / `close` finalizes it.
-- **A single endpoint, not a container.** Only `open` is meaningful; `scan` /
-  `get_fileinfo` / `delete` raise, so a stream is a non-recursive `cp` side or
+- **A single endpoint, not a container.** Only `open` is meaningful; the
+  inherited `get_fileinfo` / `delete` raise `NotImplementedError` on the call,
+  and `scan` raises the same on its first iteration rather than on the call
+  (it is a generator, so its body - and the `scan_pages` backstop inside it -
+  runs only once the caller pulls). So a stream is a non-recursive `cp` side or
   a non-recursive `mv` **destination** only — the move writes the bytes to the
   stream and then deletes the S3 source. A stream is never a move *source* (a
   move deletes its source, which a stream cannot be) or a recursive move's

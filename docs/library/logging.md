@@ -59,7 +59,8 @@ instance — is masked completely.
 Covered: access key ids, signatures and the legacy SigV2 authorization header,
 session tokens, SSO bearer tokens and the sso-oidc token bodies, credentials in
 STS and instance-metadata responses, the byte dumps in a
-`SignatureDoesNotMatch` response, web-identity and SAML assertions, SSE-C
+`SignatureDoesNotMatch` response, web-identity and SAML assertions, the MFA
+one-time code in an STS request, SSE-C
 customer keys in both header and parameter form, proxy URL credentials, and
 `Proxy-Authorization`. Exception tracebacks written through the same handler are
 redacted too, so a secret inside an exception message does not escape that way.

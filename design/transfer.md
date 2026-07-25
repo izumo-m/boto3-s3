@@ -320,9 +320,12 @@ The caller's stream is never closed by `IOStorage`.
   (above) and `no_overwrite` on a streaming **download** raise (`no_overwrite is
   not supported for streaming downloads`) - a stream has no existing destination
   to guard, the same combinations aws-cli rejects. An upload stream keeps
-  `no_overwrite` (IfNoneMatch). `filter` is silently ignored on a stream (a single
-  object has nothing to filter; aws rc 0). `expected_size` applies to an upload
-  stream and is ignored elsewhere.
+  `no_overwrite` (IfNoneMatch). `filter` is silently ignored on a **`cp`**
+  stream (a single object has nothing to filter; aws rc 0) - `cp` diverts to
+  the dedicated stream path without it. A `mv` onto a stream keeps the ordinary
+  transfer path (`s3open`), so its `filter` is still applied, to the single
+  source entry. `expected_size` applies to an upload stream and is ignored
+  elsewhere.
 - **`mv` with a stream**: an `IOStorage` may be the **destination** of a
   single-object move - the bytes land on the stream, then the S3 source is
   deleted (section 11) - but never the source (a move deletes its source, which

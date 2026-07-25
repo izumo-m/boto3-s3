@@ -115,9 +115,12 @@ Some details worth knowing:
   still ends in `BatchError`, reported as 1 of 1.
 - Cancelled items are never counted as failures, and a cancelled run raises
   something else entirely (see [`results.md`](./results.md)).
-- `skipped` is informational. It counts skips the operation made — `sync`
-  finding nothing changed, `no_overwrite` declining to replace — but not items
-  dropped during enumeration by a filter, which never reach that layer.
+- `skipped` is informational. It counts skips the operation made — a `cp` or
+  `mv` that `no_overwrite` stopped from replacing an existing object, an
+  archived object passed over under `ignore_glacier_warnings` — but not items
+  dropped during enumeration by a filter, which never reach that layer. `sync`
+  never adds to it: a pair it finds up to date produces no record at all, and
+  `no_overwrite` there simply turns the update lane off.
 
 Not every operation aggregates. `mb` / `rb` / `website` / `presign` act on one
 thing and raise the category exception directly. So does a failure that happens

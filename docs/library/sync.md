@@ -72,7 +72,7 @@ The two `aws s3` tuners are constructor arguments of the strategy object, not
 arguments of `sync`:
 
 ```python
-from boto3_s3.awsclicompare import AwsCliComparison
+from boto3_s3 import AwsCliComparison
 
 s3.sync(src, dest, update_filter=AwsCliComparison(size_only=True))
 s3.sync(src, dest, update_filter=AwsCliComparison(exact_timestamps=True))

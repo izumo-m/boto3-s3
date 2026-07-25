@@ -80,6 +80,9 @@ stream endpoint displays as `-`. See [`results.md`](./results.md).
 
 A few transfer options do not apply. `recursive` is rejected, as is
 `no_overwrite` on a download, since there is no destination to check for
-existence. `filter` is ignored — there is nothing to enumerate. `expected_size`
-applies to uploads only, where it lets multipart be planned in advance for a
-stream whose length is not otherwise knowable.
+existence. `filter` is ignored by a streaming `cp`, which takes a dedicated
+path with nothing to enumerate; a `mv` onto a stream does not take that path,
+so its `filter` still runs — against the one source entry, which it can
+therefore drop. `expected_size` applies to uploads only, where it lets
+multipart be planned in advance for a stream whose length is not otherwise
+knowable.

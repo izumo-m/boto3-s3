@@ -7,8 +7,10 @@ boto3 client lives on the ``S3Storage``; when its client is omitted it falls
 back to ``boto3.client("s3")``. The recommended construction is
 ``S3(session=boto3_s3.session())`` - the tuned session's clients parse
 response timestamps at C speed (`sessions.py`); a zero-config ``S3()``
-deliberately keeps plain ``boto3.client("s3")`` semantics, never consulting
-``boto3.DEFAULT_SESSION`` state to decide anything. To target a custom
+deliberately keeps plain ``boto3.client("s3")`` semantics, riding
+``boto3.DEFAULT_SESSION`` exactly as ``boto3.client`` itself does. What that
+session holds never decides whether the fast timestamp parser is installed:
+that follows only from which session was passed in (`sessions.py`). To target a custom
 endpoint / profile / region (e.g. MinIO) or a second account for S3-to-S3,
 pass an explicit ``S3Storage(uri, client=...)`` instead of a bare string.
 
@@ -658,7 +660,10 @@ class S3:
     concurrently.
 
     ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
-    every operation this instance runs. ``True`` (the default): a
+    every operation this instance starts a scan for - ``ls``, ``rm``, the
+    ``cp`` / ``mv`` transfers and ``sync``. The operations with no enumeration
+    to reclaim (``mb`` / ``rb`` / ``presign`` / ``website``, and the streaming
+    ``cp`` route) never consult it. ``True`` (the default): a
     ``KeyboardInterrupt`` propagates only after the operation has reclaimed
     all of its resources (enumeration workers joined), so an app that catches
     the interrupt can keep calling operations. ``False``: the app treats
@@ -712,7 +717,9 @@ class S3:
         raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
         unresolvable credentials / region, its ``InvalidConfigError``
         refinement for a set-but-unusable ``AWS_PROFILE``, partial
-        credentials, or a malformed ``endpoint_url`` - never the raw botocore
+        credentials, or a malformed ``endpoint_url``, and the base
+        ``Boto3S3Error`` for any other botocore error, which the translator's
+        last clause claims - never the raw botocore
         error (design/exceptions.md section 1).
         """
         # operation=None: no subcommand is in scope at build time.

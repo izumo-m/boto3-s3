@@ -750,9 +750,10 @@ class S3Storage(Storage):
         ``list_buckets()``, where these filters are simply never sent (inert). The
         ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
         1.35.42), so on a paginating botocore that predates them (1.34.162 through
-        1.35.41) passing ``name_prefix`` / ``region`` raises a
-        ``ParamValidationError`` (docs/compatibility.md). Errors surface on the
-        consumer's pull.
+        1.35.41) passing ``name_prefix`` / ``region`` fails botocore's
+        client-side validation; the caller sees the translated
+        ``ValidationError``, since the whole body runs inside ``s3_errors``
+        (docs/compatibility.md). Errors surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()

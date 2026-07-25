@@ -34,9 +34,12 @@ Grouped by what they control:
   ([`streams.md`](./streams.md)). The command has no flag for either.
 
 An option that does not apply to the direction being run is simply ignored
-rather than rejected — passing `acl` on a download changes nothing. The
-exceptions are `checksum_algorithm`, `checksum_mode` and the SSE-C copy-source
-pair, which are rejected on the wrong route.
+rather than rejected — passing `acl` on a download changes nothing, and neither
+does `checksum_mode` on an upload, or the SSE-C copy-source pair on anything
+but a copy. Each option is mapped only into the requests that carry it; the
+rest never see it. The `boto3-s3` command is stricter: it rejects
+`--checksum-algorithm`, `--checksum-mode` and `--sse-c-copy-source` on the
+wrong path format, matching `aws s3`.
 
 ## 1. Multipart and concurrency
 

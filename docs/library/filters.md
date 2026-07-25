@@ -65,14 +65,19 @@ s3.rm("s3://bucket/tmp/", recursive=True, filter=lambda info: info.size == 0)
 s3.sync(src, dest, filter=lambda info: not info.compare_key.startswith("draft/"))
 ```
 
-`FileInfo` carries `key`, `compare_key`, `size`, `mtime` and `storage_class`.
-One caveat: on `rm`'s non-recursive single-key path there is no listing, so only
-`key` and `compare_key` are populated — `size`, `mtime` and `storage_class` are
-`None`. Guard for that if your predicate might run there.
+`FileInfo` carries `key`, `compare_key`, `size`, `mtime`, `storage_class` and
+`storage` — the last being the backend the entry came from, always stamped
+before any filter runs, so a predicate can reach back through it (a
+`HeadObject` for something the listing omits, say). One caveat: on `rm`'s
+non-recursive single-key path there is no listing, so only `key`,
+`compare_key` and `storage` are populated — `size`, `mtime` and
+`storage_class` are `None`. Guard for that if your predicate might run there.
 
-**The predicate runs on a listing prefetch worker thread**, once per entry as
-each page of results arrives, so it must be thread-safe and it should be cheap.
-A slow predicate throttles enumeration.
+**On an enumerating path the predicate runs on a listing prefetch worker
+thread**, once per entry as each page of results arrives, so it must be
+thread-safe and it should be cheap: a slow predicate throttles enumeration. On
+the single-object routes — a non-recursive `cp` / `mv`, `rm` on one key —
+there is no prefetch worker and it runs inline on the calling thread.
 
 ## 4. `filter` in `sync`
 
@@ -104,6 +109,6 @@ m.included("foo.log")   # False
 ```
 
 `Matcher.included(compare_key, full_key=None)` applies the same last-match-wins
-rule; `full_key` is only consulted by absolute patterns. `GlobFilter` and
-`GlobPattern` are also available at the package root; everything else lives in
-`boto3_s3.globsieve`.
+rule; `full_key` is only consulted by absolute patterns. `GlobFilter`,
+`GlobPattern` and `PatternKind` are also available at the package root;
+everything else lives in `boto3_s3.globsieve`.

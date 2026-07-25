@@ -55,7 +55,7 @@ dest listing -- filter (visibility) --+        |
 
 | module | role |
 |---|---|
-| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every key as its `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types and `PairFilter`, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types and `PairFilter`, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
@@ -97,7 +97,7 @@ one side their lane has; `update_filter` is the copy decision over an update
 pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
 
 - The pair types (`MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair`, what
-  `Comparator.compare` yields) tell by type which sides hold the key:
+  `Comparator.compare` yields) tell by type which sides hold the entry:
   `SrcOnlyPair(compare_key, transfer_type, src)` = new (the `create_filter` lane),
   `DestOnlyPair(compare_key, transfer_type, dest)` = orphan (the `delete_filter` lane),
   `SyncPair(compare_key, transfer_type, src, dest)` = update (the `update_filter` lane) -
@@ -108,7 +108,11 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   direction-asymmetric rules without being told the route. The three shapes map
   one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->
   `SrcOnlyPair`, `file_at_src_and_dest` -> `SyncPair`, `file_not_at_src` ->
-  `DestOnlyPair`.
+  `DestOnlyPair`. The merge emits one pair **per entry**, which is one pair per
+  key only while each side's keys are unique. The order guard accepts equal
+  consecutive keys, so a custom `SORTABLE_SCAN` backend that yields a key twice
+  produces a pair per occurrence rather than one merged pair; the built-in
+  local and S3 scans never duplicate a key, so this is a custom-backend concern.
 - `create_filter` is the new (`SrcOnlyPair`) lane: `True` (default) copies every new
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
   source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli
@@ -153,9 +157,10 @@ s3.sync(src, dest,
 
 ## 4. The default decision (ported from aws-cli, pinned by measurement)
 
-`update_filter=None` is `AwsCliComparison()` (`from boto3_s3.awsclicompare
-import AwsCliComparison` - an opt-in submodule import like the section 8-9
-content strategies), the public form of the internal
+`update_filter=None` is `AwsCliComparison()` (`from boto3_s3 import
+AwsCliComparison`, equally reachable as
+`boto3_s3.awsclicompare.AwsCliComparison` - a standalone building block like
+the section 8-9 content strategies), the public form of the internal
 `compare_size_time(pair, *, size_only=False, exact_timestamps=False)` (direction from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
@@ -253,8 +258,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 `update_filter=None` decides by size + mtime. When the decision must follow
 **content**, `boto3_s3.etagcompare.EtagComparison(...)` builds a `update_filter=` strategy that
 compares S3's ETag against the ETag the source would carry. It is a standalone,
-opt-in building block - imported by submodule path, not part of the package root
-re-export:
+opt-in building block - re-exported at the package root and equally reachable by
+submodule path:
 
 ```python
 from boto3_s3.etagcompare import EtagComparison
@@ -301,8 +306,8 @@ so nothing is guessed), and works for **SSE** objects (a checksum is independent
 of encryption). The cost is one `GetObjectAttributes` round-trip per object
 consulted - the S3 side on upload / download, each side on s3->s3 - plus
 follow-up pages when a `COMPOSITE` object's `ObjectParts` listing is truncated.
-Like `EtagComparison` it is a standalone, opt-in building block - imported by submodule
-path, not part of the package root re-export:
+Like `EtagComparison` it is a standalone, opt-in building block - re-exported at
+the package root and equally reachable by submodule path:
 
 ```python
 from boto3_s3.checksumcompare import ChecksumComparison

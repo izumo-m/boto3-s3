@@ -85,10 +85,16 @@ that never reaches it - filtered out during enumeration, or never enumerated
 because the run died first - produces nothing. The delete lane carries one
 carve-out: a cancellation can also discard `S3Deleter`-buffered entries
 (accepted but not yet dispatched) without a record
-([`deleter.md`](./deleter.md) section 2). `WARNED` / `NOTICE` sit outside
-that one-per-item rule: they are advisory records, not tied 1:1 to an item (a
-walk warning has no transfer item at all, and a `NOTICE` may precede the same
-item's real outcome). Aggregate counts always agree with the records: the
+([`deleter.md`](./deleter.md) section 2). Three pre-submission gates carve out
+the other direction: each consumes the item it blocks with an advisory instead
+of an outcome, so that item never reaches the operation layer and gets no
+terminal record - a glacier-blocked source without `ignore_glacier_warnings`
+(WARNED; with the flag it becomes a counted `SKIPPED` instead), a download the
+`case_conflict=SKIP` gate turns away (NOTICE), and a compare key the
+parent-directory-reference guard rejects (WARNED). `WARNED` / `NOTICE` sit
+outside that one-per-item rule: they are advisory records, not tied 1:1 to an
+item (a walk warning has no transfer item at all, and a `NOTICE` may precede
+the same item's real outcome). Aggregate counts always agree with the records: the
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
 
@@ -109,8 +115,10 @@ records arise. A run a cancellation actually cut short always ends by raising
 (the fatal, or `CancelledError`), never by a `BatchError` - so `CANCELLED`
 records appear in no `BatchError` count, and the engine's `cancelled` rollup
 counter is exact once the operation has raised. (A cancel that arrives with
-nothing left to cut - e.g. from the last item's own failure callback - changes
-nothing: the run ends as it would have, a `BatchError` for the failure.) (`rm` / `sync --delete` deletions go
+nothing left to cut - e.g. from the last item's own failure callback - still
+decides the ending: every batch path checks the token before it checks the
+failure rollup, so the run raises `CancelledError` and the `BatchError` the
+failure would have raised never forms.) (`rm` / `sync --delete` deletions go
 through `S3Deleter`, whose own contract is
 [`deleter.md`](./deleter.md) section 2.)
 

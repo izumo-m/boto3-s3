@@ -430,9 +430,11 @@ Key") -> rc 252.
 Output: a single URL line to stdout. With `--no-sign-request`, a bare URL with no
 query (matches aws). The signature format derives from the client
 configuration, and `build_client`'s always-on SigV4 + us-east-1 regional (section 4)
-makes it the same shape as aws v2 - because stock boto3 downgrades a us-east-1
-presign to SigV2, the library layer (`S3.presign`) stays boto3-faithful and
-enforcement is the CLI layer's responsibility.
+makes it the same shape as aws v2. The SigV4 pin here is belt-and-braces: stock
+boto3 downgrades a default client's presign to SigV2, and `S3.presign` already
+pre-empts that downgrade itself for the duration of the one call, so the
+library and the CLI produce the same v4 URL. What the CLI's pinned client
+adds is only that the pin is visible in its own configuration.
 
 rc forms: **0 / 252 / 253 / 255 only** (because the server is never reached, 1 /
 254 cannot occur). Unlike mb / rb there is no local catch - botocore's

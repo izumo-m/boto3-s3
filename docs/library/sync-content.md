@@ -6,11 +6,10 @@ timestamps are not content: a file rewritten with identical bytes gets copied,
 and a same-size object updated only on the S3 side is not downloaded at all.
 
 Two opt-in strategies replace that judgment with a real content comparison. Both
-are `update_filter=` values, imported by submodule path:
+are `update_filter=` values:
 
 ```python
-from boto3_s3.etagcompare import EtagComparison
-from boto3_s3.checksumcompare import ChecksumComparison
+from boto3_s3 import EtagComparison, ChecksumComparison
 ```
 
 They **replace** the default rule; they do not compose with it.

@@ -23,6 +23,12 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 reaches it produces nothing: one excluded by a filter during enumeration, or one
 never enumerated because the run ended first.
 
+Three checks that run *before* an item is submitted turn it away with an
+advisory and nothing else, so those items get no terminal record either: an
+archived object blocked without `ignore_glacier_warnings` (with that option it
+is a counted `SKIPPED` instead), a download stopped by `case_conflict="skip"`,
+and a key whose relative path points outside the destination directory.
+
 `WARNED` and `NOTICE` records sit **outside** that rule. Both are advisories
 rather than outcomes: a `WARNED` record reports a problem that did not fail the
 run — an unreadable file, a directory-walk warning — and a `NOTICE` reports

@@ -43,7 +43,7 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
 +-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
 |                           #   Unrelated to the CancelledError of asyncio / concurrent.futures
-`-- BatchError              # aggregate: a batch operation's failure rollup (counts + first_error; section 4)
+`-- BatchError              # aggregate: a batch operation's failure rollup (counts only; the sample failure rides on __cause__; section 4)
 ```
 
 The two **refining subclasses** exist for the CLI's exit-code parity: aws
@@ -128,7 +128,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | S3 403 / `AccessDenied` | `AccessDeniedError` |
 | S3 404 / `NoSuchKey` / `NoSuchBucket` / `NoSuchVersion` / `NotFound` | `NotFoundError` |
 | S3 `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` (5xx / throttle) | `TransportError` |
-| local `PermissionError` (incl. the post-download utime EPERM) | `AccessDeniedError` |
+| local `PermissionError` | `AccessDeniedError` |
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
 | connection failure / timeout; a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
 | an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
@@ -158,6 +158,14 @@ Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of
 `s3storage.translate_boto_error`): `FileNotFoundError` -> `NotFoundError`,
 `PermissionError` -> `AccessDeniedError`, everything else -> `TransportError`.
+
+One local failure never reaches a category at all: the post-download `utime`
+stamp. `transfer.py` re-words its EPERM into aws's "attempting to modify the
+utime" text, but the caller catches every exception from the stamp (Windows can
+raise `OverflowError` / `ValueError` there too) and folds only the message into
+a WARNED record, whose `error` is a base `Boto3S3Error` like every other
+warning envelope. The category the re-wording built is therefore never
+observable.
 
 An S3 `ClientError` code is matched first against `S3_CODE_CATEGORIES`
 (`s3storage.py`); a code not in the table falls back to HTTP-status widening:
@@ -222,10 +230,15 @@ class BatchError(Boto3S3Error):
   informational value, like `SKIPPED`).
 
 A note on `skipped`: it is an **informational value** whose collectability
-varies with "at which level the skip happened." Op-layer skips (sync unchanged,
-`--no-overwrite`) can be counted, but skips at the enumeration/filter level
-(a symlink under `--no-follow-symlinks`, an `--exclude` exclusion) never reach
-the op layer and are generally not counted.
+varies with "at which level the skip happened." Op-layer skips can be counted -
+`cp` / `mv` declining to overwrite under `no_overwrite` (a download's
+destination-existence check, an upload/copy's `IfNoneMatch` rejection) and a
+glacier-blocked source passed over under `ignore_glacier_warnings` - but skips
+at the enumeration/filter level (a symlink under `--no-follow-symlinks`, an
+`--exclude` exclusion) never reach the op layer and are generally not counted.
+`sync` contributes nothing here: a pair it finds up to date produces no record
+and no counter at all, and its `no_overwrite` is applied by dropping the update
+lane outright rather than by skipping pairs one at a time.
 
 ## 5. exit code mapping (CLI)
 

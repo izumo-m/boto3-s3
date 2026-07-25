@@ -70,10 +70,11 @@ class SyncPair:
     handling. ``compare_key`` is the entry's path relative to its
     side's listing (directory-relative for a local side, ``Prefix``-relative
     for an S3 side), ``/``-separated on every platform - so name-based filters
-    need not care where either side lives. ``transfer_type`` is the sync's
-    transfer direction (UPLOAD / DOWNLOAD / COPY), stamped on every pair so a
-    pair filter can apply the direction-asymmetric rules without being told the
-    route.
+    need not care where either side lives. ``transfer_type`` is whatever the
+    ``Comparator`` was built with, copied onto every pair verbatim -
+    ``S3.sync`` supplies the run's direction (UPLOAD / DOWNLOAD / COPY) there,
+    so a pair filter can apply the direction-asymmetric rules without being
+    told the route.
 
     The backend each side was listed from rides on that side's entry
     (``pair.src.storage`` / ``pair.dest.storage``, stamped by the producing
@@ -118,8 +119,11 @@ class DestOnlyPair:
     dest: FileInfo
 
 
-# What `Comparator.compare` yields: each merge-joined key as exactly one of the
-# three pair shapes, telling by type which side(s) hold it.
+# What `Comparator.compare` yields: each merge-joined entry as exactly one of
+# the three pair shapes, telling by type which side(s) hold it. Per entry, not
+# per key - the order guard admits equal consecutive keys, so a custom backend
+# that yields a key twice gets a pair per occurrence; the built-in scans never
+# duplicate a key.
 MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair
 
 # The update judgment: a predicate over the both-sides pair, `True` = copy.
@@ -210,8 +214,14 @@ class Comparator:
     to match) - and
     the merge itself never compares sizes or times: that is the lane filters'
     job (a ``PairFilter`` for the ``SyncPair``s, ``create_filter`` /
-    ``delete_filter`` for the one-sided shapes). ``transfer_type`` (the run's direction) is
-    stamped onto every emitted pair - context, not a judgment. Each side's backend
+    ``delete_filter`` for the one-sided shapes). Every input entry becomes one
+    pair, which is one pair per key only while each side's keys are unique: the
+    order guard admits equal consecutive keys, so a custom backend repeating a
+    key yields a pair per occurrence (the built-in scans never repeat one).
+    ``transfer_type`` is
+    stamped onto every emitted pair verbatim - context, not a judgment, and
+    neither validated nor interpreted here; ``S3.sync`` puts the run's
+    direction in it. Each side's backend
     already rides on its ``FileInfo`` (``pair.src.storage`` / ``pair.dest.storage``,
     stamped by the producing ``Storage.scan``), so a content ``update_filter=``
     strategy can open the non-S3 side of any pair without the merge threading it.
@@ -224,7 +234,7 @@ class Comparator:
         src_entries: Iterable[tuple[str, FileInfo]],
         dest_entries: Iterable[tuple[str, FileInfo]],
     ) -> Iterator[MergedPair]:
-        """Yield every key on either side as its ``MergedPair`` shape.
+        """Yield every entry on either side as its ``MergedPair`` shape.
 
         An equal key on both sides comes out as a ``SyncPair``, a key with no
         destination match as a ``SrcOnlyPair``, one with no source match as a
