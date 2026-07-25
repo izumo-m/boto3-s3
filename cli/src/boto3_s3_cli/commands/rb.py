@@ -31,8 +31,12 @@ class RbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>")
-        parser.add_argument("--force", action="store_true")
+        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to delete")
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="delete every object in the bucket first",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Delete the bucket and return an ``aws s3 rb``-style exit code.

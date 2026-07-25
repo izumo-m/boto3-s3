@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--help` now describes every option instead of listing bare names.
+
 ## [0.6.1] - 2026-07-23
 
 - Large listings (`ls` / `sync` / `rm` over many objects) got severalfold faster: response timestamps now parse at C speed.

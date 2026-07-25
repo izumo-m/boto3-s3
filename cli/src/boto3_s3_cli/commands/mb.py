@@ -20,10 +20,16 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to create")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
-        parser.add_argument("--tags", action="append", nargs=2, metavar=("KEY", "VALUE"))
+        parser.add_argument(
+            "--tags",
+            action="append",
+            nargs=2,
+            metavar=("KEY", "VALUE"),
+            help="tag to attach to the new bucket; repeatable",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Create the bucket and return an ``aws s3 mb``-style exit code.

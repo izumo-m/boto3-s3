@@ -78,12 +78,24 @@ class RmCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rm``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
-        parser.add_argument("--dryrun", action="store_true")
-        parser.add_argument("--quiet", action="store_true")
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument("paths", metavar="<S3Uri>", help="the object or prefix to delete")
+        parser.add_argument(
+            "--dryrun",
+            action="store_true",
+            help="report what would be deleted without deleting anything",
+        )
+        parser.add_argument(
+            "--quiet", action="store_true", help="do not print per-item result lines"
+        )
+        parser.add_argument(
+            "--recursive", action="store_true", help="delete every object under the prefix"
+        )
         add_request_payer_argument(parser)
-        parser.add_argument("--only-show-errors", action="store_true")
+        parser.add_argument(
+            "--only-show-errors",
+            action="store_true",
+            help="print only errors and warnings, no result lines",
+        )
         filters.add_filter_arguments(parser)
         add_page_size_argument(parser)
 

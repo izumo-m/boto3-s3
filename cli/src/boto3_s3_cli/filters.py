@@ -94,8 +94,20 @@ def add_filter_arguments(parser: argparse.ArgumentParser) -> None:
     One shared ordered ``filters`` dest: the interleaved order carries
     aws-cli's last-match-wins semantics (this module's docstring).
     """
-    parser.add_argument("--exclude", action=AppendFilterAction, dest="filters", metavar="PATTERN")
-    parser.add_argument("--include", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+    parser.add_argument(
+        "--exclude",
+        action=AppendFilterAction,
+        dest="filters",
+        metavar="PATTERN",
+        help="leave out keys matching PATTERN; repeatable, last match wins",
+    )
+    parser.add_argument(
+        "--include",
+        action=AppendFilterAction,
+        dest="filters",
+        metavar="PATTERN",
+        help="bring back keys matching PATTERN; repeatable, last match wins",
+    )
 
 
 def _storage_base(storage: object, dir_op: bool) -> str:

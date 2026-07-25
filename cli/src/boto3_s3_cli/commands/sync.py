@@ -26,9 +26,21 @@ class SyncCommand(Command):
         and has no streaming form - aws rejects both as unknown options),
         plus the strategy flags."""
         transferargs.add_transfer_arguments(parser, include_recursive=False)
-        parser.add_argument("--delete", action="store_true")
-        parser.add_argument("--size-only", action="store_true")
-        parser.add_argument("--exact-timestamps", action="store_true")
+        parser.add_argument(
+            "--delete",
+            action="store_true",
+            help="delete destination entries that are no longer in the source",
+        )
+        parser.add_argument(
+            "--size-only",
+            action="store_true",
+            help="compare by size alone, ignoring modification times",
+        )
+        parser.add_argument(
+            "--exact-timestamps",
+            action="store_true",
+            help="on download, treat any differing timestamp as a change",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Sync and return an ``aws s3 sync``-style exit code.

@@ -116,60 +116,159 @@ def add_transfer_arguments(
     extras all three carry). ``--expected-size`` is cp-only (mv and sync
     reject streams); ``--recursive`` is cp/mv-only (sync is inherently
     recursive, and aws rejects the flag as an unknown option there)."""
-    parser.add_argument("paths", nargs=2, metavar="<path>")
-    parser.add_argument("--dryrun", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("paths", nargs=2, metavar="<path>", help="source and destination location")
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="report what would happen without transferring or deleting anything",
+    )
+    parser.add_argument("--quiet", action="store_true", help="do not print per-item result lines")
     if include_recursive:
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument(
+            "--recursive",
+            action="store_true",
+            help="act on every file or object under the source",
+        )
     filters.add_filter_arguments(parser)
-    parser.add_argument("--acl", choices=_ACL_CHOICES)
     parser.add_argument(
-        "--follow-symlinks", action="store_true", dest="follow_symlinks", default=True
+        "--acl", choices=_ACL_CHOICES, help="canned ACL to apply to the written object"
     )
-    parser.add_argument("--no-follow-symlinks", action="store_false", dest="follow_symlinks")
     parser.add_argument(
-        "--no-guess-mime-type", action="store_false", dest="guess_mime_type", default=True
+        "--follow-symlinks",
+        action="store_true",
+        dest="follow_symlinks",
+        default=True,
+        help="follow symbolic links when walking a local directory (default)",
     )
-    parser.add_argument("--sse", nargs="?", const="AES256", choices=["AES256", "aws:kms"])
-    parser.add_argument("--sse-c", nargs="?", const="AES256", choices=["AES256"])
-    parser.add_argument("--sse-c-key")
-    parser.add_argument("--sse-kms-key-id")
-    parser.add_argument("--sse-c-copy-source", nargs="?", const="AES256", choices=["AES256"])
-    parser.add_argument("--sse-c-copy-source-key")
-    parser.add_argument("--storage-class", choices=_STORAGE_CLASS_CHOICES)
-    parser.add_argument("--grants", nargs="+")
-    parser.add_argument("--website-redirect")
-    parser.add_argument("--content-type")
-    parser.add_argument("--cache-control")
-    parser.add_argument("--content-disposition")
-    parser.add_argument("--content-encoding")
-    parser.add_argument("--content-language")
-    parser.add_argument("--expires")
-    parser.add_argument("--source-region")
-    parser.add_argument("--only-show-errors", action="store_true")
-    parser.add_argument("--no-progress", action="store_false", dest="progress", default=True)
+    parser.add_argument(
+        "--no-follow-symlinks",
+        action="store_false",
+        dest="follow_symlinks",
+        help="do not follow symbolic links when walking a local directory",
+    )
+    parser.add_argument(
+        "--no-guess-mime-type",
+        action="store_false",
+        dest="guess_mime_type",
+        default=True,
+        help="do not infer Content-Type from the file extension on upload",
+    )
+    parser.add_argument(
+        "--sse",
+        nargs="?",
+        const="AES256",
+        choices=["AES256", "aws:kms"],
+        help="server-side encryption for the written object",
+    )
+    parser.add_argument(
+        "--sse-c",
+        nargs="?",
+        const="AES256",
+        choices=["AES256"],
+        help="encrypt the written object with a customer-provided key",
+    )
+    parser.add_argument(
+        "--sse-c-key", help="the customer-provided key; use fileb:// to read raw bytes"
+    )
+    parser.add_argument("--sse-kms-key-id", help="KMS key to use with --sse aws:kms")
+    parser.add_argument(
+        "--sse-c-copy-source",
+        nargs="?",
+        const="AES256",
+        choices=["AES256"],
+        help="the S3 copy source is encrypted with a customer-provided key",
+    )
+    parser.add_argument(
+        "--sse-c-copy-source-key",
+        help="the copy source's customer-provided key; use fileb:// for raw bytes",
+    )
+    parser.add_argument(
+        "--storage-class",
+        choices=_STORAGE_CLASS_CHOICES,
+        help="storage class for the written object",
+    )
+    parser.add_argument(
+        "--grants", nargs="+", help="explicit grants, as Permission=Grantee arguments"
+    )
+    parser.add_argument(
+        "--website-redirect", help="where a website request for the object is redirected"
+    )
+    parser.add_argument("--content-type", help="Content-Type for the written object")
+    parser.add_argument("--cache-control", help="Cache-Control for the written object")
+    parser.add_argument("--content-disposition", help="Content-Disposition for the written object")
+    parser.add_argument("--content-encoding", help="Content-Encoding for the written object")
+    parser.add_argument("--content-language", help="Content-Language for the written object")
+    parser.add_argument("--expires", help="Expires date for the written object")
+    parser.add_argument("--source-region", help="region of the source bucket of an S3-to-S3 copy")
+    parser.add_argument(
+        "--only-show-errors",
+        action="store_true",
+        help="print only errors and warnings, no progress or result lines",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_false",
+        dest="progress",
+        default=True,
+        help="do not display transfer progress",
+    )
     # No type=int (parse_integer_option converts at run() start -> 255
     # like aws's bare int(), not argparse's 252).
-    parser.add_argument("--progress-frequency", default=0)
-    parser.add_argument("--progress-multiline", action="store_true")
-    add_page_size_argument(parser)
-    parser.add_argument("--ignore-glacier-warnings", action="store_true")
-    parser.add_argument("--force-glacier-transfer", action="store_true")
-    add_request_payer_argument(parser)
-    parser.add_argument("--metadata")
     parser.add_argument(
-        "--copy-props", choices=["none", "metadata-directive", "default", "all"], default="default"
+        "--progress-frequency", default=0, help="minimum seconds between progress redraws"
     )
-    parser.add_argument("--metadata-directive", choices=["COPY", "REPLACE"])
+    parser.add_argument(
+        "--progress-multiline",
+        action="store_true",
+        help="print each progress update on its own line instead of redrawing one",
+    )
+    add_page_size_argument(parser)
+    parser.add_argument(
+        "--ignore-glacier-warnings",
+        action="store_true",
+        help="do not warn about objects skipped because they are archived",
+    )
+    parser.add_argument(
+        "--force-glacier-transfer",
+        action="store_true",
+        help="attempt the transfer even for archived objects",
+    )
+    add_request_payer_argument(parser)
+    parser.add_argument("--metadata", help="user metadata for the written object, as JSON")
+    parser.add_argument(
+        "--copy-props",
+        choices=["none", "metadata-directive", "default", "all"],
+        default="default",
+        help="which source properties an S3-to-S3 copy carries over",
+    )
+    parser.add_argument(
+        "--metadata-directive",
+        choices=["COPY", "REPLACE"],
+        help="whether an S3-to-S3 copy keeps or replaces the source metadata",
+    )
     if include_expected_size:
         # No type=int: a non-integer fails the bare int() at submit time like
         # aws (an in-pipeline fatal, rc 1 - not 255).
-        parser.add_argument("--expected-size")
-    parser.add_argument("--no-overwrite", action="store_true")
+        parser.add_argument(
+            "--expected-size",
+            help="size in bytes of a streamed upload, so multipart can be planned",
+        )
     parser.add_argument(
-        "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
+        "--no-overwrite",
+        action="store_true",
+        help="skip, without failing, anything that already exists at the destination",
     )
-    parser.add_argument("--checksum-mode", choices=["ENABLED"])
+    parser.add_argument(
+        "--case-conflict",
+        choices=["ignore", "skip", "warn", "error"],
+        default="ignore",
+        help="what to do when destinations differ only by letter case",
+    )
+    parser.add_argument(
+        "--checksum-mode",
+        choices=["ENABLED"],
+        help="verify the object's stored checksum when downloading",
+    )
     # This set matches the pinned aws-cli's CHECKSUM_ALGORITHM choices verbatim
     # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
     # SHA512 / XXHASH* because that build predates them - a version skew, not a
@@ -188,6 +287,7 @@ def add_transfer_arguments(
             "XXHASH3",
             "XXHASH128",
         ],
+        help="checksum algorithm to compute for the written object",
     )
 
 

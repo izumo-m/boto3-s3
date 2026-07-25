@@ -27,16 +27,36 @@ class LsCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``ls``-specific arguments to its subparser."""
-        parser.add_argument("paths", nargs="?", default="s3://", metavar="<S3Uri>")
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument(
+            "paths",
+            nargs="?",
+            default="s3://",
+            metavar="<S3Uri>",
+            help="prefix to list; omit it to list every bucket",
+        )
+        parser.add_argument(
+            "--recursive", action="store_true", help="list every key under the prefix"
+        )
         add_page_size_argument(parser)
         add_request_payer_argument(parser)
-        parser.add_argument("--human-readable", action="store_true")
-        parser.add_argument("--summarize", action="store_true")
+        parser.add_argument(
+            "--human-readable", action="store_true", help="show sizes in KiB / MiB / GiB"
+        )
+        parser.add_argument(
+            "--summarize", action="store_true", help="append the total object count and size"
+        )
         # Bucket-listing filters (ListBuckets Prefix / BucketRegion); accepted but
         # inert for object listings, like aws-cli.
-        parser.add_argument("--bucket-name-prefix", metavar="PREFIX")
-        parser.add_argument("--bucket-region", metavar="REGION")
+        parser.add_argument(
+            "--bucket-name-prefix",
+            metavar="PREFIX",
+            help="when listing buckets, keep only names starting with PREFIX",
+        )
+        parser.add_argument(
+            "--bucket-region",
+            metavar="REGION",
+            help="when listing buckets, keep only those in REGION",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""

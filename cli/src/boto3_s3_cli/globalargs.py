@@ -157,40 +157,130 @@ def add_common_arguments(
     value = argparse.SUPPRESS if suppress_defaults else None
 
     conn = parser.add_argument_group("connection / auth")
-    conn.add_argument("--profile", metavar="NAME", default=value)
-    conn.add_argument("--region", metavar="REGION", default=value)
-    conn.add_argument("--endpoint-url", metavar="URL", default=value)
-    conn.add_argument("--no-verify-ssl", action="store_true", default=flag)
-    conn.add_argument("--ca-bundle", metavar="PATH", default=value)
-    conn.add_argument("--no-sign-request", action="store_true", default=flag)
+    conn.add_argument(
+        "--profile",
+        metavar="NAME",
+        default=value,
+        help="named profile to read credentials and settings from",
+    )
+    conn.add_argument(
+        "--region", metavar="REGION", default=value, help="region to send requests to"
+    )
+    conn.add_argument(
+        "--endpoint-url",
+        metavar="URL",
+        default=value,
+        help="send requests to this endpoint instead of the AWS one",
+    )
+    conn.add_argument(
+        "--no-verify-ssl",
+        action="store_true",
+        default=flag,
+        help="do not verify the endpoint's TLS certificate",
+    )
+    conn.add_argument(
+        "--ca-bundle",
+        metavar="PATH",
+        default=value,
+        help="CA bundle to verify the endpoint's TLS certificate against",
+    )
+    conn.add_argument(
+        "--no-sign-request",
+        action="store_true",
+        default=flag,
+        help="send requests without credentials",
+    )
     # Not argparse type=int on purpose: aws coerces these in a post-parse session
     # handler (globalargs._resolve_timeout), so a non-integer value raises there
     # and exits 255 - not the parse-time 252 a type=int would give. The dispatch
     # pre-pass coerces both up front at aws's top-level-args-parsed timing (read
     # before connect), and the client builders coerce again when they build.
-    conn.add_argument("--cli-read-timeout", metavar="SECONDS", default=value)
-    conn.add_argument("--cli-connect-timeout", metavar="SECONDS", default=value)
-    conn.add_argument("--debug", action="store_true", default=flag)
+    conn.add_argument(
+        "--cli-read-timeout",
+        metavar="SECONDS",
+        default=value,
+        help="socket read timeout in seconds; 0 means no timeout",
+    )
+    conn.add_argument(
+        "--cli-connect-timeout",
+        metavar="SECONDS",
+        default=value,
+        help="connection timeout in seconds; 0 means no timeout",
+    )
+    conn.add_argument(
+        "--debug",
+        action="store_true",
+        default=flag,
+        help="log wire-level detail to stderr, with credentials masked",
+    )
 
     ignored = parser.add_argument_group("recognized but ignored")
-    ignored.add_argument("--output", choices=_OUTPUT_CHOICES, default=value)
-    ignored.add_argument("--query", default=value)
-    ignored.add_argument("--no-paginate", action="store_true", default=flag)
-    ignored.add_argument("--no-cli-pager", action="store_true", default=flag)
-    ignored.add_argument("--color", choices=_COLOR_CHOICES, default=value)
-    ignored.add_argument("--cli-error-format", choices=_CLI_ERROR_FORMAT_CHOICES, default=value)
-    ignored.add_argument("--no-cli-auto-prompt", action="store_true", default=flag)
+    ignored.add_argument(
+        "--output",
+        choices=_OUTPUT_CHOICES,
+        default=value,
+        help="validated, then ignored: these commands emit no structured output",
+    )
+    ignored.add_argument(
+        "--query",
+        default=value,
+        help="ignored: there is no structured output to filter",
+    )
+    ignored.add_argument(
+        "--no-paginate",
+        action="store_true",
+        default=flag,
+        help="ignored: listings are always paged as the operation needs",
+    )
+    ignored.add_argument(
+        "--no-cli-pager",
+        action="store_true",
+        default=flag,
+        help="ignored: output is never sent to a pager",
+    )
+    ignored.add_argument(
+        "--color",
+        choices=_COLOR_CHOICES,
+        default=value,
+        help="validated, then ignored: output is never colorized",
+    )
+    ignored.add_argument(
+        "--cli-error-format",
+        choices=_CLI_ERROR_FORMAT_CHOICES,
+        default=value,
+        help="validated, then ignored: errors always use the default format",
+    )
+    ignored.add_argument(
+        "--no-cli-auto-prompt",
+        action="store_true",
+        default=flag,
+        help="do not prompt interactively (read from argv before parsing)",
+    )
     # Recognized for parity; consumed by no command - aws s3's own blob
     # argument (cp --sse-c-key) ignores it too (verbatim pass-through with
     # fileb:// file loading; option-handling section 2).
-    ignored.add_argument("--cli-binary-format", choices=_BINARY_FORMAT_CHOICES, default=value)
+    ignored.add_argument(
+        "--cli-binary-format",
+        choices=_BINARY_FORMAT_CHOICES,
+        default=value,
+        help="validated, then ignored: binary values are passed through as given",
+    )
 
     # Prints the multi-component version line and exits 0; works before or after
     # the subcommand. Custom action keeps it to one unwrapped line and defers
     # building it until the flag actually fires (see above).
-    parser.add_argument("--version", action=_VersionAction)
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        help="show the boto3-s3-cli, boto3-s3, Python and SDK versions, then exit",
+    )
 
     # Opt-in interactive UI (section 3, the "autoprompt" extra); the dispatcher
     # resolves it from raw argv before parsing. Listed in --help like its
     # --no-cli-auto-prompt counterpart (aws shows both).
-    parser.add_argument("--cli-auto-prompt", action="store_true", default=flag)
+    parser.add_argument(
+        "--cli-auto-prompt",
+        action="store_true",
+        default=flag,
+        help="prompt interactively for arguments (needs the autoprompt extra)",
+    )

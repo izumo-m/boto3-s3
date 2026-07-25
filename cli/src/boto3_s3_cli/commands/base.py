@@ -279,13 +279,20 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     pages at its own default) - an explicit 1000 here would be a wire
     divergence.
     """
-    parser.add_argument("--page-size", default=None)
+    parser.add_argument(
+        "--page-size", default=None, help="how many keys to request per listing page"
+    )
 
 
 def add_request_payer_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--request-payer`` (optional value; ``requester`` is the only one)."""
     parser.add_argument(
-        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
+        "--request-payer",
+        nargs="?",
+        const="requester",
+        choices=["requester"],
+        default=None,
+        help="confirm you accept the request and data transfer charges",
     )
 
 

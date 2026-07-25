@@ -22,9 +22,15 @@ class WebsiteCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``website``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
-        parser.add_argument("--index-document", metavar="<suffix>")
-        parser.add_argument("--error-document", metavar="<key>")
+        parser.add_argument("paths", metavar="<S3Uri>", help="the bucket to configure")
+        parser.add_argument(
+            "--index-document",
+            metavar="<suffix>",
+            help="file name served for a request that names a directory",
+        )
+        parser.add_argument(
+            "--error-document", metavar="<key>", help="object returned when an error occurs"
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Put the website configuration and return an ``aws s3``-style exit code.

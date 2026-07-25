@@ -46,7 +46,11 @@ class MvCommand(Command):
         ``--validate-same-s3-paths`` (and no ``--expected-size`` - mv has no
         streaming form)."""
         transferargs.add_transfer_arguments(parser)
-        parser.add_argument("--validate-same-s3-paths", action="store_true")
+        parser.add_argument(
+            "--validate-same-s3-paths",
+            action="store_true",
+            help="resolve access points before checking that source and destination differ",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Move and return an ``aws s3 mv``-style exit code.
