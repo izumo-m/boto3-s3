@@ -42,7 +42,7 @@ destination's anchorless key). See ``Anchored``.
 
 This module is a self-contained, stdlib-only building block: everything in
 ``__all__`` is public and reached by submodule path (``boto3_s3.globsieve``,
-as above); ``GlobFilter`` / ``GlobPattern`` are additionally
+as above); ``GlobFilter`` / ``GlobPattern`` / ``PatternKind`` are additionally
 re-exported at the package root. The matcher classes are public so a custom
 tool can assemble its own decision pipeline from the same parts ``compile``
 picks from; ``compile_set_matcher`` builds the shape-specialized

@@ -23,11 +23,11 @@ The two flags mirror ``aws s3 sync``'s ``--size-only`` / ``--exact-timestamps``:
 
 Like its peers ``EtagComparison`` /
 ``ChecksumComparison``, it is a standalone building
-block imported by submodule path
-(``from boto3_s3.awsclicompare import AwsCliComparison``), is **not** part of the
-package's lazy root re-export, and imports no AWS SDK module - so
-``import boto3_s3.awsclicompare`` stays SDK-free. Pass it via ``update_filter=`` to tune
-the default, e.g. ``s3.sync(src, dest, update_filter=AwsCliComparison(size_only=True))``;
+block - re-exported at the package root and equally reachable by submodule path
+(``from boto3_s3.awsclicompare import AwsCliComparison``) - and it imports no AWS
+SDK module, so ``import boto3_s3.awsclicompare`` stays SDK-free. Pass it via
+``update_filter=`` to tune the default, e.g.
+``s3.sync(src, dest, update_filter=AwsCliComparison(size_only=True))``;
 wrap it in ``ParallelFilter`` to decide on a caller's thread pool.
 """
 

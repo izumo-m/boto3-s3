@@ -19,10 +19,10 @@ objects (a checksum is independent of encryption, unlike an ETag). The cost is
 one ``GetObjectAttributes`` round-trip per object compared (plus continuation
 pages only when a many-part COMPOSITE ``ObjectParts`` listing truncates).
 
-This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.checksumcompare import
-ChecksumComparison``), and is **not** part of the package's lazy root re-export. It
-imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
+This is a standalone, opt-in building block: it lives in its own module and is
+reachable either from the package root (``from boto3_s3 import ChecksumComparison``)
+or by submodule path (``from boto3_s3.checksumcompare import ChecksumComparison``).
+It imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
