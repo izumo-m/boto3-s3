@@ -5,7 +5,7 @@ The public surface below is re-exported lazily (PEP 562 module ``__getattr__``):
 (``boto3`` alone drags in ``s3transfer`` via its ``compat`` module, ~80ms).
 Each symbol is imported on first attribute access instead, so a program pays
 only for the operations it actually touches. The contract is pinned by
-``tests/lib/test_import_contract.py``; the policy lives in ``docs/imports.md``.
+``tests/lib/test_import_contract.py``; the policy lives in ``design/imports.md``.
 
 Type checkers resolve the same names through the ``TYPE_CHECKING`` block, so
 the laziness is invisible to them.

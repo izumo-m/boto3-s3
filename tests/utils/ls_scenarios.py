@@ -5,7 +5,7 @@ functional (moto) and e2e (MinIO / real S3) suites exercise **identical
 inputs** - that identity is what makes "golden captured from aws-cli" a valid
 expectation for the moto replay.
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally - there is deliberately no flag to relax it.
 ``compare_stdout`` / ``diff_only`` only relax stdout and golden handling.
 
@@ -84,7 +84,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     # All-buckets listing reflects whatever buckets the endpoint has, which
     # the scenario cannot pin -> live diff only.
     LsScenario("ls_all_buckets", ("ls",), diff_only=True),
-    # Server-side ClientError -> rc 254 on both sides (docs/cli.md section 6). The
+    # Server-side ClientError -> rc 254 on both sides (design/cli.md section 6). The
     # "-no-such" suffix guarantees absence on MinIO/moto; on real S3 a
     # stranger could own the name (AccessDenied instead), in which case the
     # NoSuchBucket tokens fail visibly rather than silently passing.
@@ -119,7 +119,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
-    # Head-order (docs/cli.md 5.7): the --endpoint-url scheme check (252, aws
+    # Head-order (design/cli.md 5.7): the --endpoint-url scheme check (252, aws
     # validates the value at parse time) beats the bare int() coercion (255).
     LsScenario(
         "ls_endpoint_beats_page_size",

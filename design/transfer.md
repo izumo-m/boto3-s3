@@ -31,7 +31,10 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `s3transfer.manager.TransferManager` directly, or, if CRT is chosen,
   `crtsupport.create_crt_transfer_manager` ([`crt.md`](./crt.md)). **COPY
   (s3->s3) is unconditionally classic** - `CRTTransferManager` has no copy, and
-  boto3 / aws-cli likewise pin s3->s3 to classic. `'auto'` faithfully
+  boto3 / aws-cli likewise pin s3->s3 to classic. This bullet is the library
+  layer's engine resolution in full; [`crt.md`](./crt.md) points here rather
+  than restating it, while [`cli.md`](./cli.md) section 8 covers the CLI's
+  separate, earlier resolution (it settles the value before handing it over). `'auto'` faithfully
   reproduces boto3's behavior that "CRT can be auto-selected merely because
   awscrt is importable" (on a machine where `is_optimized_for_system()` is true
   it becomes auto-CRT, just as in boto3 - that fidelity is the whole point). We

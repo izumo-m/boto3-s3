@@ -217,7 +217,7 @@ class TestClientSeam:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A build failure - e.g. AWS_PROFILE naming a missing profile - raises
-        # the translated error (docs/exceptions.md section 3), not the raw
+        # the translated error (design/exceptions.md section 3), not the raw
         # botocore one. ProfileNotFound refines to InvalidConfigError, not the
         # plain ConfigurationError base; pin the exact type because the CLI
         # maps this refinement to rc 255 (vs 253 for the base).
@@ -349,7 +349,7 @@ class TestTransferConfigDefault:
 
 class TestModuleLevelConvenienceSignatures:
     """The module-level wrappers introspect as their method minus ``self``
-    (docs/s3.md): ``functools.wraps`` alone would expose the method's
+    (design/s3.md): ``functools.wraps`` alone would expose the method's
     signature *with* ``self`` through ``__wrapped__``."""
 
     def test_signature_strips_self(self) -> None:

@@ -3,7 +3,7 @@
 Stage 1 renders the top-level ``--help`` and validates the subcommand name
 from ``cli._COMMAND_TABLE`` alone - without importing any command module - so
 the table duplicates each class's ``name`` / ``help`` on purpose
-(docs/imports.md section 2 item 4). These cases import everything and pin the
+(design/imports.md section 2 item 4). These cases import everything and pin the
 two sides against each other, and pin stage 1's rendering against the full
 tree's.
 """
@@ -15,7 +15,7 @@ from boto3_s3_cli import cli
 
 class TestCommandTable:
     def test_table_covers_the_documented_commands(self) -> None:
-        # Literal pin (docs/cli.md section 1): the class-consistency test
+        # Literal pin (design/cli.md section 1): the class-consistency test
         # below reads the same table it checks, so a silently dropped command
         # would still pass it.
         assert sorted(cli._COMMAND_TABLE) == [

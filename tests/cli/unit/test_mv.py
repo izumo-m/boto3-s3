@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 mv`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): mv is
+The rc shape (design/cli.md section 6): mv is
 cp with the onto-itself guard family in front - the local-local pair, any
 ``-`` path, the onto-itself shapes (recursive included), and the
 checksum/path-format pairing are all 252 before any client factory runs;

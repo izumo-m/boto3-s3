@@ -12,7 +12,7 @@ download mtime stamp (``mtime_key``) is asserted live per side, not via
 goldens. stdout is normalized by ``harness.normalize_cp_stdout`` (progress
 segments masked, result lines sorted).
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally. ``diff_only`` marks endpoint-relative outcomes
 (``--sse`` / ``--storage-class GLACIER`` are rejected by MinIO and accepted
 by real S3 - both CLIs always agree, which is exactly the charter assertion;
@@ -429,7 +429,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
-    # -- the measured parse-to-validation head order (docs/cli.md 5.7) -------
+    # -- the measured parse-to-validation head order (design/cli.md 5.7) -------
     CpScenario(
         # A bad --profile (255: aws binds the profile at startup) beats the
         # local-local usage error (252). No server contact on either side.

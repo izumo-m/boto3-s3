@@ -212,7 +212,7 @@ class TestUploadMove:
         self, tmp_path: Path
     ) -> None:
         # aws removes only the moved files, never the directories they leave
-        # empty behind (docs/transfer.md) - a recursive local mv is not rmdir.
+        # empty behind (design/transfer.md) - a recursive local mv is not rmdir.
         src_root = tmp_path / "tree"
         sub = src_root / "sub"
         sub.mkdir(parents=True)
@@ -233,7 +233,7 @@ class TestUploadMove:
 
 class TestDownloadMove:
     def test_progress_reports_the_move_kind(self, tmp_path: Path) -> None:
-        # docs/transfer.md: every reporting channel relabels to MOVE -
+        # design/transfer.md: every reporting channel relabels to MOVE -
         # results/warnings/dryrun are pinned elsewhere; this pins progress.
         client, _ = make_recording_client([head_response(), get_response(), {}])
         progress: list[TransferProgress] = []
@@ -352,7 +352,7 @@ class TestDownloadMove:
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         # The bytes still arrived (aws ditto): only the move failed - and a
-        # non-SUCCEEDED result reports zero bytes regardless (docs/opresult.md).
+        # non-SUCCEEDED result reports zero bytes regardless (design/opresult.md).
         assert results[0].bytes_transferred == 0
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
 

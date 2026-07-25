@@ -137,7 +137,7 @@ class TestUpload:
 
     def test_result_has_no_extra_info(self, tmp_path: Path) -> None:
         # s3transfer discards the PutObject response, so an upload surfaces no
-        # result ETag (docs/transfer.md).
+        # result ETag (design/transfer.md).
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
@@ -943,7 +943,7 @@ class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
     (aws's manager-context behavior, measured live: a mid-listing fatal
     leaves every queued transfer unrun), and each revoked item reports one
-    CANCELLED record naming the fatal (docs/opresult.md)."""
+    CANCELLED record naming the fatal (design/opresult.md)."""
 
     def test_fatal_mid_enumeration_cancels_queued_transfers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1605,7 +1605,7 @@ class TestStreams:
 
 
 class TestEngineSelection:
-    """``preferred_transfer_client`` resolution at the manager seam (docs/crt.md)."""
+    """``preferred_transfer_client`` resolution at the manager seam (design/crt.md)."""
 
     def _transferrer(self, kind: TransferType, config: Any) -> Transferrer:
         client, _ = make_recording_client([])
@@ -1791,7 +1791,7 @@ class TestResponseCaptureExpectGate:
 
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
-        # The module is a documented submodule-path surface (docs/transfer.md):
+        # The module is a documented submodule-path surface (design/transfer.md):
         # the engine pair, the Warner protocol its `warner` seam returns, and
         # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
         # section 4). A symbol added or dropped must be a deliberate
@@ -1885,7 +1885,7 @@ class TestConditionalWriteSupport:
 
 
 class TestAnnotationsCopySupport:
-    """The copy_props=ALL SDK gate (docs/transfer.md section 4).
+    """The copy_props=ALL SDK gate (design/transfer.md section 4).
 
     Annotations need botocore's S3 model (CopyObject.AnnotationDirective,
     1.43.31) and s3transfer's own multipart handling (the directive in
@@ -1975,7 +1975,7 @@ class TestAnnotationsCopySupport:
         # A bad copy_props string fails the enum conversion; the constructor
         # translates it to a Boto3S3Error-family ValidationError rather than
         # leaking the enum's raw ValueError past the public API
-        # (docs/exceptions.md). The CLI never reaches here (choices-validated).
+        # (design/exceptions.md). The CLI never reaches here (choices-validated).
         client = self._capable_client()
         with pytest.raises(ValidationError, match="copy_props"):
             Transferrer(

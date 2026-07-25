@@ -83,7 +83,7 @@ def test_rb_parity(scenario: RbScenario, rb_bucket: str, s3_client: Any) -> None
             )
 
     assert ours_result.rc == aws_result.rc, (
-        f"[{scenario.name}] exit-code parity broken (charter, docs/overview.md section 3):\n"
+        f"[{scenario.name}] exit-code parity broken (charter, design/overview.md section 3):\n"
         f"  ours rc={ours_result.rc} stderr={ours_result.stderr.strip()!r}\n"
         f"  aws  rc={aws_result.rc} stderr={aws_result.stderr.strip()!r}"
     )

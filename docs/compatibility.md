@@ -1,6 +1,6 @@
 # Version-dependent feature availability
 
-[`overview.md`](./overview.md) section 2 states the policy: the supported SDK
+[`overview.md`](../design/overview.md) section 2 states the policy: the supported SDK
 floor is roughly three years old, and the installed SDK decides which features
 are available. This document is where that mapping lives - which feature needs
 which `botocore` / `s3transfer` / `awscrt`, and what happens below it.
@@ -57,7 +57,7 @@ Three shapes, chosen per feature so the caller is never silently wrong:
 independent things - the CRT transfer engine, and the CRT-family checksum
 algorithms, which the classic engine needs it for too. On an installation
 without it only the relevant features fail, and that does not count as an exit
-code mismatch (see [`overview.md`](./overview.md) section 3). The exit code
+code mismatch (see [`overview.md`](../design/overview.md) section 3). The exit code
 charter does apply once the CRT stack is usable: awscrt present and, for the
 transfer engine, an s3transfer with the CRT surface.
 
@@ -75,6 +75,6 @@ signature).
 ## 6. Where the mechanisms are documented
 
 This document records availability. The design behind each gate lives with its
-component: [`transfer.md`](./transfer.md) for conditional writes, copy-props and
-checksums, [`crt.md`](./crt.md) for the CRT engine and its degradation, and
-[`opresult.md`](./opresult.md) for what `extra_info` carries.
+component: [`transfer.md`](../design/transfer.md) for conditional writes, copy-props and
+checksums, [`crt.md`](../design/crt.md) for the CRT engine and its degradation, and
+[`opresult.md`](../design/opresult.md) for what `extra_info` carries.

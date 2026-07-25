@@ -786,7 +786,7 @@ def build_printer(
 
 
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
-    """Run the library call and derive the aws exit code (docs/cli.md section 6).
+    """Run the library call and derive the aws exit code (design/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c

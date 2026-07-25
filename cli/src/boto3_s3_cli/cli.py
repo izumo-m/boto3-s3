@@ -25,7 +25,7 @@ from boto3_s3_cli.commands.base import Command, Context
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
-# docs/masking.md). The library attaches no handler on import. "boto3_s3_cli"
+# design/masking.md). The library attaches no handler on import. "boto3_s3_cli"
 # is the counterpart of aws-cli's own "awscli" logger (clidriver._set_logging),
 # so the CLI's own debug lines (runtimeconfig's alias resolution) surface too.
 # urllib3 is deliberately omitted: it logs no credentials, only
@@ -33,8 +33,8 @@ from boto3_s3_cli.commands.base import Command, Context
 _DEBUG_LOGGERS = ("boto3_s3", "boto3_s3_cli", "botocore", "boto3", "s3transfer")
 
 # aws-cli v2 exit-code conventions (awscli/constants.py). The
-# exit-code charter (docs/overview.md section 3) requires matching them; see
-# docs/cli.md section 6 for the full table.
+# exit-code charter (design/overview.md section 3) requires matching them; see
+# design/cli.md section 6 for the full table.
 _PARAM_VALIDATION_ERROR_RC = 252
 _CONFIGURATION_ERROR_RC = 253
 _CLIENT_ERROR_RC = 254
@@ -43,7 +43,7 @@ _GENERAL_ERROR_RC = 255
 # Every wired subcommand: name -> (defining module, class name, one-line help).
 # Registering here is the only wiring step. The table is the single source for
 # stage 1 of the dispatch (names + help lines, rendered WITHOUT importing any
-# command module - the lazy-dispatch contract, docs/imports.md) and for stage 2
+# command module - the lazy-dispatch contract, design/imports.md) and for stage 2
 # (only the matched module is imported; rb also pulls in rm, its --force
 # engine). The help text is duplicated from each
 # class's `help` ClassVar on purpose - stage 1 must render `--help` without the
@@ -317,7 +317,7 @@ def _debug_handlers_detached() -> Generator[None, None, None]:
 
 
 def exit_code_for(exc: Boto3S3Error) -> int:
-    """Map a library error to the aws-cli v2 exit code (docs/cli.md section 6).
+    """Map a library error to the aws-cli v2 exit code (design/cli.md section 6).
 
     Server-rejected calls carry the botocore ``ClientError`` as ``__cause__``
     (``boto3_s3.s3storage.s3_errors``) and exit 254 like aws-cli regardless of
@@ -356,7 +356,7 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     The common paths are already translated into `Boto3S3Error` (the library's
     `s3_errors` and the CLI's `build_client`); this is the catch-all so no
     path can crash the CLI with a traceback (rc 1), which the exit-code charter
-    forbids (docs/overview.md section 3) - with two deliberate escapes:
+    forbids (design/overview.md section 3) - with two deliberate escapes:
     `AssertionError` (an internal-invariant bug) re-raises loudly instead of
     being masked as a generic rc, and the ``BaseException`` family passes
     (``SystemExit`` honors the requested orderly exit; ``KeyboardInterrupt``
@@ -492,7 +492,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     Stage 1 reads the globals and the subcommand name off the stub tree. Its
     static metadata lets top-level ``--help`` / ``--version`` exit without
     importing a command module or the AWS SDK (import contract,
-    docs/imports.md).
+    design/imports.md).
     Stage 2 imports just the matched command's module (rb also pulls in rm,
     its --force engine), builds its real parser,
     and parses the stub-captured remainder into the stage-1 namespace (the
@@ -630,7 +630,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # Defense in depth: a non-library exception escaping a command (e.g. a
         # raw botocore error from a path that does not translate) maps to
         # aws-cli's handler chain instead of crashing with a traceback + rc 1
-        # (the binding exit-code charter, docs/overview.md section 3).
+        # (the binding exit-code charter, design/overview.md section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
         # they still propagate - a Ctrl-C reaches main's aws-shaped backstop
         # (a bare newline + rc 130, no traceback).

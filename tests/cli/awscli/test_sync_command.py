@@ -37,7 +37,7 @@ Adaptation rules (on top of the cp/mv ports' - see their module docstrings):
 
 - Sync deletions: the aws-cli issues one ``DeleteObject`` per key; ours
   batch through ``DeleteObjects`` (accepted wire-level deviation,
-  docs/deleter.md section 4 - the rm port rule), so per-key expectations become
+  design/deleter.md section 4 - the rm port rule), so per-key expectations become
   one ``DeleteObjects`` carrying the keys with ``Quiet: True``.
 - The per-algorithm checksum matrices are parametrized instead of being
   nine near-identical methods (cp port rule).
@@ -51,7 +51,7 @@ Not ported, with reasons:
 
 - ``TestSyncWithCRTClient`` (5 tests): the CRT data plane bypasses the botocore
   client, so the recording client cannot drive it; CRT parity is enforced by
-  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
+  the e2e CRT lane instead (design/crt.md, design/testing.md).
 - ``TestSyncSourceRegion``: a different aws-cli harness
   (``BaseS3CLIRunnerTest``, endpoint-level assertions); the
   ``--source-region`` client wiring is covered by the cp/mv unit tier

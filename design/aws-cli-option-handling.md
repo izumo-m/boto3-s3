@@ -184,10 +184,15 @@ handling.
 |---|---|
 | `--cli-auto-prompt` (with `prompt_toolkit`) | Launches an interactive prompt with `aws s3`-style completion (usability-tuned, see below), then re-dispatches the completed command. |
 | `--cli-auto-prompt` (without `prompt_toolkit`) | Rejected with an install hint and a non-zero exit code. |
-| `--no-cli-auto-prompt` | Forces the mode **off**: a no-op in the default state, but it explicitly disables an env/config-driven prompt request (matching aws-cli's precedence, `autoprompt.md` section 5). Specifying it together with `--cli-auto-prompt` is a usage error, matching aws-cli. |
-| `AWS_CLI_AUTO_PROMPT=on`, profile `cli_auto_prompt=on` | **Consulted** (env > profile config > off), matching aws-cli's chain. Read SDK-free (env + `configparser`). With `prompt_toolkit` it prompts; without it, config/env-driven prompting silently falls through to normal dispatch (only the explicit flag gives the install hint). |
-| `on-partial` mode | **Supported**: run the command, and only on a usage error (rc 252) fall back to prompting (`autoprompt.md` section 5). |
+| `--no-cli-auto-prompt` | Forces the mode **off**, and pairing it with `--cli-auto-prompt` is a usage error, both matching aws-cli. |
+| `AWS_CLI_AUTO_PROMPT`, profile `cli_auto_prompt` | **Consulted**, matching aws-cli's chain, and read SDK-free. |
+| `on-partial` mode | **Supported.** |
 | Shell completion (the `aws_completer` equivalent) | **Not provided.** |
+
+This table records *which* aws-cli auto-prompt surface is covered. The
+precedence among these inputs, the meaning of each mode, and the behavior when
+`prompt_toolkit` is absent are specified in
+[`autoprompt.md`](./autoprompt.md) section 5.
 
 The exit codes above are **not contractual**: the auto-prompt UI is an
 interactive front-end, exempt from the exit-code charter (charter

@@ -24,12 +24,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The SDK floor (docs/overview.md section 2): the boto3/botocore/s3transfer
+    # The SDK floor (design/overview.md section 2): the boto3/botocore/s3transfer
     # generation of aws-cli 2.13.0 (2023-07) - the oldest aws-cli this floor
-    # corresponds to. Features that need a newer S3 model degrade per the
-    # overview's list.
+    # corresponds to. This is where the floor is enforced; what a feature needs
+    # above it, and how it behaves below, is docs/compatibility.md.
     "boto3>=1.28",
-    # Imported directly (exceptions, config types); floor per docs/overview.md
+    # Imported directly (exceptions, config types); floor per design/overview.md
     # section 2 (boto3 1.28 already requires it, so this is declarative).
     "botocore>=1.31",
     "s3transfer>=0.6.2",
@@ -37,13 +37,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Opt-in CRT support, forwarding to boto3's own boto3[crt] extra (see docs/crt.md).
+# Opt-in CRT support, forwarding to boto3's own boto3[crt] extra (see design/crt.md).
 crt = ["boto3[crt]>=1.28"]
 
 [project.urls]
 Homepage = "https://github.com/izumo-m/boto3-s3"
 Repository = "https://github.com/izumo-m/boto3-s3"
-Documentation = "https://github.com/izumo-m/boto3-s3#readme"
+Documentation = "https://github.com/izumo-m/boto3-s3/blob/main/docs/README.md"
 Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 
@@ -59,9 +59,9 @@ dev = [
     "vermin>=1.6",
     "boto3-stubs-lite[s3]>=1.34",
     "moto[s3]>=5.0",
-    # Keep awscrt present in tests, as aws v2 bundles it (see docs/testing.md).
+    # Keep awscrt present in tests, as aws v2 bundles it (see design/testing.md).
     "botocore[crt]>=1.34",
-    # Keep prompt_toolkit present in tests, as aws v2 bundles it (see docs/testing.md).
+    # Keep prompt_toolkit present in tests, as aws v2 bundles it (see design/testing.md).
     "prompt_toolkit>=3.0",
 ]
 

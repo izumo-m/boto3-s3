@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 website`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): **no local catch** - unlike mb/rb,
+The rc shape (design/cli.md section 6): **no local catch** - unlike mb/rb,
 server rejections keep their ClientError cause and exit 254 through main;
 botocore's client-side parameter validation and aws's
 fold-the-key-into-the-bucket-name rejection are 252; success prints

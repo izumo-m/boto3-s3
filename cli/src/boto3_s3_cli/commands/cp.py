@@ -27,7 +27,7 @@ class CpCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Copy and return an ``aws s3 cp``-style exit code.
 
-        Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
+        Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
         keep their class, in aws's measured head order - the
         ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
         parsing (a readable
@@ -90,7 +90,7 @@ class CpCommand(Command):
         s3 = head.s3
         client = s3.client()
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (docs/overview.md
+        # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
         transferargs.validate_no_overwrite_supported(
             args.no_overwrite, paths_type, client, operation="cp"

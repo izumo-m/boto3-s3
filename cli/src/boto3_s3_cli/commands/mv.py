@@ -55,7 +55,7 @@ class MvCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Move and return an ``aws s3 mv``-style exit code.
 
-        The shape is cp's (docs/cli.md section 6) with mv's own usage errors in
+        The shape is cp's (design/cli.md section 6) with mv's own usage errors in
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
@@ -97,7 +97,7 @@ class MvCommand(Command):
         s3 = head.s3
         client = s3.client()
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (docs/overview.md
+        # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
         transferargs.validate_no_overwrite_supported(
             args.no_overwrite, paths_type, client, operation="mv"

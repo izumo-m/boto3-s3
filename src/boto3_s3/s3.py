@@ -14,7 +14,7 @@ pass an explicit ``S3Storage(uri, client=...)`` instead of a bare string.
 
 This module is SDK-backed by declaration: it imports boto3 at module top.
 Only the package root's lazy re-export keeps a bare ``import boto3_s3``
-SDK-free (docs/imports.md).
+SDK-free (design/imports.md).
 """
 
 from __future__ import annotations
@@ -713,7 +713,7 @@ class S3:
         unresolvable credentials / region, its ``InvalidConfigError``
         refinement for a set-but-unusable ``AWS_PROFILE``, partial
         credentials, or a malformed ``endpoint_url`` - never the raw botocore
-        error (docs/exceptions.md section 1).
+        error (design/exceptions.md section 1).
         """
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
@@ -727,7 +727,7 @@ class S3:
                 # botocore rejects a malformed endpoint_url with a plain
                 # ValueError (not a BotoCoreError), which would leak raw
                 # through s3_errors. A set-but-unusable setting is
-                # InvalidConfigError's definition (docs/exceptions.md).
+                # InvalidConfigError's definition (design/exceptions.md).
                 raise InvalidConfigError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
@@ -945,7 +945,7 @@ class S3:
         Results stream to ``on_result`` from the engine's worker threads for
         submitted transfers; non-submitting records - dryrun, skips, notices,
         and some warnings - are emitted inline on the calling thread
-        (docs/opresult.md). Callbacks must be fast and
+        (design/opresult.md). Callbacks must be fast and
         non-raising. Failures aggregate into ``BatchError`` with
         the first failure as ``__cause__``, warnings alone do not raise (the
         CLI derives exit code 2 from its warned count). Failures *before*
@@ -1767,7 +1767,7 @@ class S3:
           (``"data"`` lists under ``"data/"``, so ``data-sibling.txt`` is not
           touched), folder markers included, deleted in batched
           ``DeleteObjects`` calls via `S3Deleter`; XML-incompatible keys fall
-          back to aws-cli's per-key ``DeleteObject`` route (docs/deleter.md).
+          back to aws-cli's per-key ``DeleteObject`` route (design/deleter.md).
         - **bucket root, non-recursive**: lists the whole bucket but deletes
           only zero-byte ``/``-terminated "folder marker" objects (any depth)
           - aws-cli's manual-folder sweep, not a full wipe.
@@ -1791,7 +1791,7 @@ class S3:
         worker thread on the batched path - keep the callback fast and
         non-raising). Item failures are aggregated: ``BatchError`` with rollup
         counts (first failure as ``__cause__``) once at the end, exit-code
-        model docs/exceptions.md section 4. Failures *before* any item work - e.g.
+        model design/exceptions.md section 4. Failures *before* any item work - e.g.
         the listing rejecting the bucket - raise their category error
         directly. `cancel_token` may be cancelled from `on_result`: graceful
         mode discards the unsent buffer and drains the in-flight delete batch;
@@ -1963,7 +1963,7 @@ class S3:
         and duplicate keys (passed through for the server to reject, which is
         what the CLI's repeated ``--tags`` parity rests on). A single-call
         operation: failures raise their category error directly, never
-        ``BatchError`` (docs/exceptions.md section 4).
+        ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="mb")
         bucket = storage.bucket
@@ -1997,7 +1997,7 @@ class S3:
         and callers compose ``S3.rm(target, recursive=True)`` + ``S3.rb``
         the same way. A single-call operation: failures (``BucketNotEmpty``,
         ``NoSuchBucket``, ...) raise their category error directly, never
-        ``BatchError`` (docs/exceptions.md section 4).
+        ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="rb")
         bucket = storage.bucket
@@ -2069,7 +2069,7 @@ class S3:
         server, exactly like aws. An empty bucket fails botocore's
         client-side parameter validation -> `ValidationError`. A
         single-call operation: failures raise their category error directly,
-        never ``BatchError`` (docs/exceptions.md section 4).
+        never ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="website")
         config: WebsiteConfigurationTypeDef = {}
@@ -2144,7 +2144,7 @@ def _delegate(method: Callable[Concatenate[S3, _P], _R]) -> Callable[_P, _R]:
     # ``inspect.signature`` report the method's signature *with* ``self``. Pin
     # the self-stripped signature explicitly (it wins over ``__wrapped__``) so
     # runtime introspection matches the documented contract - the method's
-    # exact signature minus ``self`` (docs/s3.md) - for help generators and
+    # exact signature minus ``self`` (design/s3.md) - for help generators and
     # ``Signature.bind`` consumers, not just for type checkers.
     method_signature = inspect.signature(method)
     wrapper.__signature__ = method_signature.replace(  # pyright: ignore[reportAttributeAccessIssue]

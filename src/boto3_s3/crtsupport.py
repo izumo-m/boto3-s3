@@ -12,7 +12,7 @@ The shape follows ``boto3/crt.py`` closely (singleton, lock-or-classic,
 same-identity compatibility check, ``MissingDependencyException`` for an
 explicit ``'crt'`` without a usable awscrt). Documented deviations, all
 required by this library's connection model where the caller owns the
-client (docs/crt.md):
+client (design/crt.md):
 
 - **endpoint**: boto3 always passes ``endpoint_url=None`` to the serializer,
   which breaks custom endpoints (MinIO et al). We derive the endpoint from
@@ -33,7 +33,7 @@ client (docs/crt.md):
   classic, same as boto3's region/credentials mismatch.
 
 Nothing here imports awscrt or ``s3transfer.crt`` at module import time; the
-classic path never pays for them (docs/imports.md).
+classic path never pays for them (design/imports.md).
 """
 
 from __future__ import annotations

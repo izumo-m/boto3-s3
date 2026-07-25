@@ -50,7 +50,7 @@ Not ported, with reasons:
 
 - ``TestMvWithCRTClient`` (3 tests): the CRT data plane bypasses the botocore
   client, so the recording client cannot drive it; CRT parity is enforced by
-  the e2e CRT lane instead (docs/crt.md, docs/testing.md).
+  the e2e CRT lane instead (design/crt.md, design/testing.md).
 - ``TestMvRecursiveCaseConflict.test_warn_with_case_conflicts_in_s3`` is an
   aws-cli ``pass`` (their threaded get/delete order is nondeterministic);
   ported here as a real test - the injected NonThreadedExecutor makes the

@@ -16,7 +16,7 @@ No scenario touches objects, so there is no ``seed``; the e2e test calls
 ``delete_bucket_website`` best-effort afterwards for the real-S3 case
 (against MinIO every put failed anyway, and its delete is a no-op).
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally.
 """
 

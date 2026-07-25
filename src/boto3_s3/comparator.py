@@ -140,7 +140,7 @@ class ParallelFilter(Generic[_T]):
     ``decide`` bare, only
     faster (a stateful one can observe the concurrency); what changes is
     ordering: pooled decisions emit their results in
-    completion order rather than compare-key order (sync.md section 10), and
+    completion order rather than compare-key order (design/sync.md section 10), and
     parallelizing ``create_filter`` makes the
     ``--case-conflict`` "first key wins" order non-deterministic (a library-only
     knob, so no ``aws s3`` parity is at stake). The result set and the exit are

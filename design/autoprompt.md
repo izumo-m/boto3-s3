@@ -192,6 +192,11 @@ substance, the UI chrome is not - neither is a contract, section 1).
 
 ## 5. Activation conditions (mode resolution)
 
+This section is the single specification of how the mode is decided.
+[`cli.md`](./cli.md) section 4 covers only the timing at its own layer and
+[`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 3 only
+which surface is covered; both point here rather than restating the chain.
+
 `cli.main` resolves the mode from raw argv + env + profile config **before**
 argparse (to slip past the subcommand-required argparse and fire even on a bare
 `boto3-s3 --cli-auto-prompt`; equivalent to aws-cli `clidriver.py`'s

@@ -3,7 +3,7 @@
 The rm-suite contract applied to bucket lifecycle: each side starts from an
 identical sibling-bucket state (``force_delete_bucket`` + optional
 pre-create), runs, and is compared on rc (unconditionally - exit-code
-charter, docs/overview.md section 3), sorted stdout, the end state
+charter, design/overview.md section 3), sorted stdout, the end state
 ``(bucket_exists, remaining_keys)``, and stable stderr tokens. Goldens
 record the aws side, end state included.
 """
@@ -88,7 +88,7 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
             )
 
     assert ours_result.rc == aws_result.rc, (
-        f"[{scenario.name}] exit-code parity broken (charter, docs/overview.md section 3):\n"
+        f"[{scenario.name}] exit-code parity broken (charter, design/overview.md section 3):\n"
         f"  ours rc={ours_result.rc} stderr={ours_result.stderr.strip()!r}\n"
         f"  aws  rc={aws_result.rc} stderr={aws_result.stderr.strip()!r}"
     )

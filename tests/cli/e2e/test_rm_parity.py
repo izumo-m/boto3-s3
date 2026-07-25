@@ -9,7 +9,7 @@ the bucket is reset and re-seeded for the boto3-s3 run. Assertion layers:
    lines (aws's output order is parallel-completion order, nondeterministic),
    and the end state pins what sorting relaxes.
 2. **Live diff** - exit codes must match for every scenario, unconditionally
-   (exit-code charter, docs/overview.md section 3; note rm's rc-1-on-error shape);
+   (exit-code charter, design/overview.md section 3; note rm's rc-1-on-error shape);
    sorted stdout must match unless ``compare_stdout=False``; the end states
    must match for every scenario; stderr is probed for stable tokens only.
 """
@@ -82,7 +82,7 @@ def test_rm_parity(scenario: RmScenario, bucket: str, s3_client: Any) -> None:
                 )
 
         assert ours_result.rc == aws_result.rc, (
-            f"[{scenario.name}] exit-code parity broken (charter, docs/overview.md section 3):\n"
+            f"[{scenario.name}] exit-code parity broken (charter, design/overview.md section 3):\n"
             f"  ours rc={ours_result.rc} stderr={ours_result.stderr.strip()!r}\n"
             f"  aws  rc={aws_result.rc} stderr={aws_result.stderr.strip()!r}"
         )

@@ -67,7 +67,7 @@ class TestSyncOpens3Upload:
         assert keys == ["dest/orphan.txt"]
 
     def test_custom_listing_is_requested_sorted(self) -> None:
-        # docs/sync.md: the merge-join depends on byte order, so the custom
+        # design/sync.md: the merge-join depends on byte order, so the custom
         # side's scan_pages must receive ScanOptions(sort=True) - declaring
         # SORTABLE_SCAN alone (the gate) is not the same as being asked to
         # sort this scan.
@@ -125,7 +125,7 @@ class TestSyncS3openDownload:
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_no_overwrite_skips_existing_pairs(self) -> None:
-        # docs/transfer.md: sync + no_overwrite on a custom destination skips
+        # design/transfer.md: sync + no_overwrite on a custom destination skips
         # any key that already exists there (the pair never reaches the
         # comparator), and only the genuinely new key transfers.
         store = {"a.txt": b"old"}

@@ -51,7 +51,7 @@ class _DeletePrinter:
         if self._quiet:
             return
         # The printed line needs the full object key; a delete record's
-        # compare_key is the operation-relative form (docs/opresult.md), and
+        # compare_key is the operation-relative form (design/opresult.md), and
         # the listed entry always rides on src_info.
         info = result.src_info
         key = info.key if info is not None else result.compare_key
@@ -107,14 +107,14 @@ class RmCommand(Command):
         every classified (``Boto3S3Error``) failure after the operation
         starts is rc 1 (an unclassified exception falls to the dispatcher's
         handler chain instead - the taxonomy promises classification for the
-        known failures, docs/exceptions.md): per-key failures
+        known failures, design/exceptions.md): per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here.
         """
-        # The aws parse-to-validation order (measured, docs/cli.md section 6):
+        # The aws parse-to-validation order (measured, design/cli.md section 6):
         # the --query compile (252) leads, then the --endpoint-url scheme check
         # (252), then the paramfile expansions (252, positional path and
         # --page-size) beat the integer coercion (255), which beats the session

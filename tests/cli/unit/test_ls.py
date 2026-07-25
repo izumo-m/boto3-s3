@@ -168,7 +168,7 @@ class TestLsAllBuckets:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # argparse exits 2 on a bad choice; main absorbs it and remaps to
-        # aws-cli's 252 (exit-code charter, docs/cli.md section 6).
+        # aws-cli's 252 (exit-code charter, design/cli.md section 6).
         assert cli.main(["ls", "--color", "bogus", "s3://bucket/p/"]) == 252
         assert "--color" in capsys.readouterr().err
 

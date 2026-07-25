@@ -44,7 +44,7 @@ and need no such directory - though several twin cases skip on Windows, whose
 case-insensitive tmp dir makes the twin-download outcome undefined - but only
 under a threaded submit (`max_concurrency=1`, matching the aws-cli functional
 tests' `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
-each twin before the next is judged (docs/transfer.md section "case-conflict
+each twin before the next is judged (design/transfer.md section "case-conflict
 gate").
 
 ## 2. Exit-code charter enforcement
@@ -57,11 +57,10 @@ own rc is racy - the warn-mode note in section 1 - so only `ours.rc == 0` is
 asserted there); no other flag can relax the rc comparison. The scenario sets
 (`tests/utils/<cmd>_scenarios.py`) are the charter's detection surface:
 extend them whenever a subcommand or option is added, including error paths
-(nonexistent bucket, out-of-range values). Note the per-command exit-code
-shapes differ (docs/cli.md section 6): ls maps server errors to 254 while the
-transfer family (rm / cp / mv / sync) reports every post-start error as rc 1,
-with cp / mv / sync adding rc 2 for warnings-only runs (rm has no
-warnings-only path).
+(nonexistent bucket, out-of-range values). Which code a given failure is
+expected to produce differs by command family, so consult
+[`cli.md`](./cli.md) section 6 when adding an error scenario rather than
+assuming the shape of a neighbouring command's.
 
 Charter exceptions map naturally: extension options (e.g. `--help`) cannot
 run on the aws side, so they are unit-tested instead of diffed.
@@ -81,9 +80,11 @@ aws-cli did for one scenario: `{scenario, argv, rc, stdout_lines,
 aws_version}` - plus `remaining_keys` (the bucket end state) for destructive
 commands. Committed to git.
 
-- **Capture** - `UPDATE_GOLDENS=1 uv run pytest tests/cli/e2e` writes goldens
-  from the aws capture. Regenerate only against a clean MinIO (tmpfs state)
-  and review the diff before committing; `aws_version` gives provenance.
+- **Capture** - under `UPDATE_GOLDENS=1` the e2e run writes goldens from what
+  the real aws did. It is only valid against a clean MinIO (tmpfs state), since
+  a golden records an end state as well as an output; `aws_version` gives the
+  provenance. The command and the review step are in
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **Drift check** - without `UPDATE_GOLDENS`, the e2e suite asserts the live
   aws output still matches the committed golden, so an aws-cli upgrade that
   changes behavior fails visibly.
@@ -280,13 +281,11 @@ string alone cannot prove.
 
 ## 4. MinIO dev stack and the e2e gate
 
-```
-scripts/compose-up.sh          # idempotent; waits for bucket init
-scripts/install-awscli.sh      # idempotent; pinned aws-cli -> .venv/bin
-source scripts/minio-env.sh    # exports AWS_* + BOTO3_S3_E2E_BUCKET (no side effects)
-uv run pytest                  # full suite including e2e
-scripts/compose.sh down        # tear down; wraps `docker compose -f scripts/compose.dev.yaml`
-```
+The commands to bring the stack up and run the suite against it are in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md); this section covers why the stack is
+shaped the way it is. One variation worth knowing: with the environment sourced,
+a bare `uv run pytest` runs the whole suite including e2e, rather than only
+`tests/cli/e2e`.
 
 `scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
 `compose-up.sh` matches the exact container name, and its `mc-init` sidecar
@@ -422,7 +421,7 @@ against the positional canned list, and rewrites aws-cli's expected
 default `ChecksumAlgorithm: 'CRC64NVME'` to the `'CRC32'` that pip s3transfer
 injects on upload paths (both engines add a default integrity checksum;
 they just pick different algorithms - an explicit `--checksum-algorithm`
-makes them agree, and docs/transfer.md section 10 has the full wire-deviation
+makes them agree, and design/transfer.md section 10 has the full wire-deviation
 list). Its case-conflict classes guard the existing-local-file variants
 with a live case-insensitivity probe of the test directory (aws-cli's
 `skip_if_case_sensitive`), so they run on macOS/Windows-like filesystems
@@ -499,9 +498,8 @@ representative:
   The aws-cli source is reference-only for the tests - nothing imports from it -
   so excluding it keeps the copy to a few MiB.
 
-- **Sync with `--all-packages`.** A bare `uv sync` installs only the root
-  project; without the `cli` workspace member every `boto3_s3_cli` import
-  fails at collection:
+- **Sync with `--all-packages`**, for the reason
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives — it applies here too:
 
       cd /mnt/c/tmp/boto3-s3-wintest
       uv sync --all-packages

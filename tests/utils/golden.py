@@ -21,7 +21,7 @@ Bucket-lifecycle commands (``mb`` / ``rb``) further record ``bucket_exists``
 - whether the scenario bucket exists after the run; ``remaining_keys`` is
 ``None`` when it does not (a bucket that is gone has no key listing).
 
-Platform variants (docs/testing.md sections 3 and 8): the transfer kinds
+Platform variants (design/testing.md sections 3 and 8): the transfer kinds
 (`WINDOWS_VARIANT_KINDS`) have an OS-dependent local side, so next to the
 POSIX base ``<name>.json`` they may carry a ``<name>.windows.json`` captured
 from ``aws.exe``. Loading on Windows prefers the variant and falls back to
@@ -172,7 +172,7 @@ def write_golden(kind: str, golden: Golden) -> Path | None:
     if not base_path.exists():
         pytest.fail(
             f"golden {base_path} is missing; capture the POSIX baseline first "
-            "(docs/testing.md section 8)"
+            "(design/testing.md section 8)"
         )
     base = json.loads(base_path.read_text())
     captured = asdict(golden)
@@ -225,7 +225,7 @@ def assert_matches_golden(
 
     ``side="ours"`` is the functional replay (boto3-s3 vs recorded aws-cli);
     ``side="aws"`` is the e2e drift check (live aws-cli vs its own recording).
-    rc is always compared (exit-code charter, docs/overview.md section 3);
+    rc is always compared (exit-code charter, design/overview.md section 3);
     *compare_stdout* only relaxes the stdout comparison. Every end-state
     argument (*remaining_keys*, *bucket_exists*, *local_tree*, *head_fields*,
     *src_tree*) is compared only when the golden recorded it.

@@ -512,7 +512,7 @@ class TestScanErrorMapping:
         # A lazily-built default client whose construction fails - e.g.
         # AWS_PROFILE naming a missing profile - surfaces as the documented
         # InvalidConfigError refinement (a set-but-unusable configuration,
-        # docs/exceptions.md section 3), not the raw botocore error.
+        # design/exceptions.md section 3), not the raw botocore error.
         import boto3
 
         def boom(*args: Any, **kwargs: Any) -> Any:
@@ -541,7 +541,7 @@ class TestScanErrorMapping:
     ) -> None:
         # NoCredentials/NoRegion keep the PLAIN ConfigurationError - the CLI
         # maps that to aws's dedicated rc 253, while the InvalidConfigError
-        # refinement maps to the general 255 (docs/exceptions.md section 3).
+        # refinement maps to the general 255 (design/exceptions.md section 3).
         import boto3
         from botocore.exceptions import NoCredentialsError
 
@@ -566,7 +566,7 @@ class TestScanErrorMapping:
     def test_unknown_code_widens_on_http_status(
         self, status: int | None, category: type[Boto3S3Error]
     ) -> None:
-        # docs/exceptions.md section 3: a code not in the table falls back to
+        # design/exceptions.md section 3: a code not in the table falls back to
         # HTTP-status widening - 5xx -> TransportError, no usable status ->
         # the base Boto3S3Error.
         meta: dict[str, Any] = {"HTTPStatusCode": status} if status is not None else {}
@@ -580,7 +580,7 @@ class TestScanErrorMapping:
         assert type(exc_info.value) is category
 
     def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
-        # docs/exceptions.md section 2: KeyboardInterrupt is never wrapped.
+        # design/exceptions.md section 2: KeyboardInterrupt is never wrapped.
         from boto3_s3.s3storage import s3_errors
 
         with pytest.raises(KeyboardInterrupt):

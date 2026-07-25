@@ -11,7 +11,7 @@ S3) suites exercise identical inputs. Two rm-specific differences:
 - rm is destructive, so the e2e diff re-seeds between the aws run and the
   ours run instead of sharing one seeding.
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally - there is deliberately no flag to relax it. Note
 the rm exit-code shape: errors after the operation starts are rc 1 (never
 254; unlike ls), usage errors are 252.

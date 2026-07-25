@@ -258,7 +258,7 @@ def _reveal_access_key(value: str) -> str:
     it applies only to a value shaped like an AWS Access Key ID
     (``_ACCESS_KEY_ID_RE``). Anything else in the same slot - a MinIO
     ``minioadmin``-style key, say - masks entirely (over-masking by design,
-    docs/masking.md section 4)."""
+    design/masking.md section 4)."""
     if _ACCESS_KEY_ID_RE.fullmatch(value):
         return MASK + value[-MASK_REVEAL_LEN:]
     return MASK
@@ -371,7 +371,7 @@ def set_stream_logger(
     are skipped so a stray short
     string cannot blank out swaths of the log).
 
-    Scope (docs/masking.md section 3.3): masking is a property of the handler
+    Scope (design/masking.md section 3.3): masking is a property of the handler
     this attaches - it redacts that handler's output and nothing else. It is
     not a process-wide guarantee: a handler that other code attached to the
     same logger formats each record independently and is not reached (Python

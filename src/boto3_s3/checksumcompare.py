@@ -162,7 +162,7 @@ class ChecksumComparison(ContentComparison):
         self._dest_storage = s3.resolve(dest)
         # Build each S3 side's client now (get_client memoizes): the decides
         # may run on a ParallelFilter pool, and a lazy first build there would
-        # race boto3's non-thread-safe client construction (docs/s3.md). An
+        # race boto3's non-thread-safe client construction (design/s3.md). An
         # eager build here is what keeps the strategy's documented
         # thread-safety true for S3Storage sides passed without a client.
         for side in (self._src_storage, self._dest_storage):
@@ -298,7 +298,7 @@ def _fetch_remote(
         # Transport / credential failures are not a per-object "indeterminate"
         # (swallowing NoCredentialsError would silently copy everything): they
         # abort the sync, translated per the exception contract
-        # (docs/exceptions.md - the public API never leaks a raw botocore error).
+        # (design/exceptions.md - the public API never leaks a raw botocore error).
         raise translate_boto_error(exc, operation="sync", bucket=bucket, key=key) from exc
 
 

@@ -7,7 +7,7 @@ A suite consults only the flags it supports (e.g. the presign suites carry no
 ``diff_only`` scenario and do not filter on it, replaying every scenario as a
 golden).
 
-Charter note (docs/overview.md section 3): the exit code is compared for
+Charter note (design/overview.md section 3): the exit code is compared for
 *every* scenario, unconditionally - ``compare_stdout`` / ``diff_only`` only
 relax stdout and golden handling, never the rc.
 

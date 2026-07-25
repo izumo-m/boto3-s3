@@ -6,7 +6,7 @@ class Boto3S3Error(Exception):
 
     Never raised directly for a known failure - every raise site uses one of
     the subclasses below, so ``except Boto3S3Error`` is the catch-all for
-    operation failures. Outside the hierarchy, deliberately (docs/exceptions.md
+    operation failures. Outside the hierarchy, deliberately (design/exceptions.md
     section 2): programming bugs (``TypeError`` / ``AssertionError``) pass
     through on the synchronous paths, ``KeyboardInterrupt`` / ``SystemExit``
     always pass through, and the explicit-CRT engine selection passes
@@ -69,7 +69,7 @@ class ConfigurationError(Boto3S3Error):
     that translate it, e.g. an MRAP target's SigV4a signing or the CLI's
     ``[s3]`` crt decision - the library's explicit-CRT engine selection
     instead passes botocore's ``MissingDependencyException`` through,
-    boto3-faithfully; docs/exceptions.md section 2). A configuration
+    boto3-faithfully; design/exceptions.md section 2). A configuration
     that is *present but invalid* is the ``InvalidConfigError``
     refinement below.
     """

@@ -36,9 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Opt-in CRT support, forwarding down the stack to boto3-s3[crt] (see docs/crt.md).
+# Opt-in CRT support, forwarding down the stack to boto3-s3[crt] (see design/crt.md).
 crt = ["boto3-s3[crt]"]
-# Opt-in --cli-auto-prompt interactive UI via prompt_toolkit (see docs/autoprompt.md).
+# Opt-in --cli-auto-prompt interactive UI via prompt_toolkit (see design/autoprompt.md).
 autoprompt = ["prompt_toolkit>=3.0"]
 
 [project.scripts]
@@ -47,7 +47,7 @@ boto3-s3 = "boto3_s3_cli.cli:main"
 [project.urls]
 Homepage = "https://github.com/izumo-m/boto3-s3"
 Repository = "https://github.com/izumo-m/boto3-s3"
-Documentation = "https://github.com/izumo-m/boto3-s3/blob/main/cli/README.md"
+Documentation = "https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/README.md"
 Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/cli/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 

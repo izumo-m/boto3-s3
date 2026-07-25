@@ -4,7 +4,7 @@ The library re-exports this subclass of ``boto3.s3.transfer.TransferConfig``
 as its public ``TransferConfig``. The transfer engine honors
 ``preferred_transfer_client`` (``'auto'`` / ``'classic'`` / ``'crt'``) with
 boto3's own semantics (``transfer.py`` / ``crtsupport.py``; design in
-``docs/crt.md``); the constructor forwards it to the base class when that boto3
+``design/crt.md``); the constructor forwards it to the base class when that boto3
 accepts it and otherwise keeps it as a plain attribute (the floor boto3 lacks
 the field - see the signature probe below). The subclass adds the CRT tuning
 knobs aws-cli keeps in its `[s3]` runtime config plus annotation staging:

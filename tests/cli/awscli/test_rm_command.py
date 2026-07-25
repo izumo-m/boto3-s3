@@ -36,7 +36,7 @@ Adaptation rules (on top of the ls port's - see
 
 - ``test_recursive_delete_with_requests`` expects one per-key ``DeleteObject``
   in the aws-cli original; boto3-s3 deletes recursively in batched
-  ``DeleteObjects`` calls (accepted wire-level deviation, docs/deleter.md section 4),
+  ``DeleteObjects`` calls (accepted wire-level deviation, design/deleter.md section 4),
   so the expectation becomes one ``DeleteObjects`` carrying the key with
   ``Quiet: True``. ``RequestPayer`` must still appear on both operations.
 - The aws-cli ``TestRmWithCRTClient`` class (2 tests) cannot use the botocore

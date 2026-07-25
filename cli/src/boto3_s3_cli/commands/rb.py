@@ -53,7 +53,7 @@ class RbCommand(Command):
         client-construction failure (bad ``--profile`` / unresolved credentials /
         region) takes precedence over a path usage error - we build it first.
         """
-        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # Parse-time head (measured, design/cli.md section 6): the --query compile
         # (252), the --endpoint-url scheme check (252), and the positional
         # paramfile expansion (252) all precede the client build - they beat a
         # bad --profile (255) the way aws's parse-time load-cli-arg does.

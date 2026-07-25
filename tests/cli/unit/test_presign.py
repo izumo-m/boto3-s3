@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 presign`` subcommand (dispatch + exit codes).
 
-The rc shape is unlike every other subcommand (docs/cli.md section 6): pure
+The rc shape is unlike every other subcommand (design/cli.md section 6): pure
 client-side computation means 1 and 254 cannot happen - 0 on success, 252 for
 botocore's client-side parameter validation (empty bucket/key) and usage
 errors, 255 for a non-integer ``--expires-in`` (aws's bare ``int()``

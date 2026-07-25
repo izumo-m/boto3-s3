@@ -19,7 +19,7 @@ on both sides (aws's converter has the same unguarded cast).
 ``s3 =`` INI syntax, ``AWS_CONFIG_FILE`` and ``--profile`` all behave like
 aws. The engine decision tree over the parsed config is
 ``resolve_transfer_client`` below (a port of aws-cli
-``TransferManagerFactory._compute_transfer_client_type``; docs/crt.md
+``TransferManagerFactory._compute_transfer_client_type``; design/crt.md
 section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 """
 

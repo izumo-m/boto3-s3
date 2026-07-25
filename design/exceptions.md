@@ -229,46 +229,23 @@ the op layer and are generally not counted.
 
 ## 5. exit code mapping (CLI)
 
-This is a summary; the authoritative, per-subcommand exit-code mapping lives in
-[`cli.md`](./cli.md) section 5 (each subcommand) and section 6 (the rc table and
-the `exit_code_for` rules). The values match aws-cli v2
-(aws-cli's `awscli/constants.py`).
+The CLI turns this hierarchy into aws-compatible exit codes. That mapping is
+specified once, in [`cli.md`](./cli.md) section 6 - the conditions, the
+precedence between them, and the per-command families that bypass
+`exit_code_for` with a local catch. The user-facing statement of the codes is
+[`guide/cli/exit-codes.md`](../docs/cli/exit-codes.md).
 
-| Situation | rc |
-|---|---|
-| Success (also `--help` / `--version` / `BrokenPipeError`) | 0 |
-| Transfer family (`cp` / `mv` / `sync`) completed with warnings only, no failures | 2 |
-| Usage error (unknown option / invalid choice; also the `--cli-auto-prompt` rejection) / client-side `ValidationError` | 252 |
-| `ConfigurationError` (credentials / region unresolved; `[s3]` `preferred_transfer_client=crt` x absent awscrt) | 253 |
-| Server error: a `Boto3S3Error` whose `__cause__` is a botocore `ClientError` | 254 |
-| General error (incl. `TransportError`, `NotFoundError` without a `ClientError` cause, and the refining `InvalidValueError` / `InvalidConfigError`); the rm-stage failure of `rb --force` | 255 |
+Two consequences belong to this document, because they are properties of the
+taxonomy rather than of the mapping:
 
-The mapping is `cli.exit_code_for`: it checks `__cause__` first, so any error
-that reached the server (a botocore `ClientError`) is **254** regardless of the
-library category - even one this taxonomy files under `ValidationError`. Only
-when there is no `ClientError` cause does the library category decide - the
-refining subclasses first (`InvalidValueError` / `InvalidConfigError` -> 255,
-aws's general handler), then the parents (`ValidationError` -> 252,
-`ConfigurationError` -> 253), everything else -> 255.
-
-Two families override this with their own catch and so do **not** reach
-`exit_code_for` (cli.md section 5 / section 6):
-
-- **Transfer family (`cp` / `mv` / `sync`)**: every error after the operation
-  starts is folded to **rc 1** (a `BatchError` after the per-item `... failed:`
-  lines, or any other library error as one `fatal error:` line), even when
-  server-derived. A clean run with only `warned > 0` is **rc 2**. Usage errors
-  before the operation begins are still 252; `mv`'s `--validate-same-s3-paths`
-  resolution failure reaches the server before the operation and stays **254**.
-  `rm` also folds its errors (including a single-key `BatchError`) to **rc 1**.
-- **`mb` / `rb`**: a local catch folds the API-call error to **rc 1** (not 254
-  even when server-derived); client creation is outside the catch, so an
-  unresolved credential / region is still 253. `rb --force`'s rm-stage failure is
-  the documented **rc 255** exception.
-
-`CancelledError` is **not** given a special exit code by the CLI (there is no rc
-130 mapping for it). rc 130 comes from `main()`'s `KeyboardInterrupt` backstop -
-a Ctrl-C outside the transfer pipeline's window (inside it, the CLI reports
-aws's `cancelled: ctrl-c received` line and rc 1 - cli.md section 6) - and from
-a `KeyboardInterrupt` / `EOFError` inside the `--cli-auto-prompt` interactive
-session (the latter outside the exit-code charter).
+- **The class does not decide alone.** `exit_code_for` inspects `__cause__`
+  first, so anything that reached the server (a botocore `ClientError`) is 254
+  whatever this taxonomy calls it - a server-side rejection filed here under
+  `ValidationError` included. The category is consulted only when there is no
+  `ClientError` cause, and then the refining subclasses are matched before their
+  parents, which is why `InvalidValueError` and `InvalidConfigError` do not
+  inherit their parents' codes.
+- **`CancelledError` has no exit code of its own.** rc 130 is not a mapping from
+  it: it comes from `main()`'s `KeyboardInterrupt` backstop, and only outside a
+  running transfer - inside one, cancellation is reported as a failed run
+  instead.

@@ -233,7 +233,7 @@ class TestBatching:
         assert results[0].src_info.key == "prefix/"
 
     def test_immediate_cancel_delivers_the_started_batch_and_drops_the_rest(self) -> None:
-        # docs/deleter.md: IMMEDIATE cannot claw back a batch the worker
+        # design/deleter.md: IMMEDIATE cannot claw back a batch the worker
         # already started - all of its results are delivered - while work not
         # yet dispatched is abandoned without records.
         fake = _FakeS3Client()
@@ -264,7 +264,7 @@ class TestBatching:
         assert deleter.succeeded == 2
 
     def test_duplicate_keys_share_one_capture_slot_last_entry_wins(self) -> None:
-        # docs/deleter.md: capture keys the response entries by object key, so
+        # design/deleter.md: capture keys the response entries by object key, so
         # duplicate submissions share a single slot and the batch response's
         # last entry for that key is what both records carry.
         fake = _FakeS3Client(
@@ -609,7 +609,7 @@ class TestResults:
 
 class TestCaptureSlots:
     def test_batch_slot_strips_key_and_copies_request_charged(self) -> None:
-        # docs/deleter.md: each Deleted[] entry becomes a per-key slot shaped
+        # design/deleter.md: each Deleted[] entry becomes a per-key slot shaped
         # like a single DeleteObject response - the entry minus its Key
         # (already the result's key), plus the batch-wide RequestCharged.
         fake = _FakeS3Client(

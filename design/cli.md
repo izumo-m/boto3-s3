@@ -235,16 +235,12 @@ These implement the policy in
 - **auto-prompt (section 3, design in [`autoprompt.md`](./autoprompt.md))**:
   `--cli-auto-prompt` is an **opt-in extra**. If `prompt_toolkit` is present, it
   launches an interactive prompt with `aws s3`-faithful completion and
-  re-dispatches the edited command. If absent, an explicit flag is rejected with a
-  message and a non-zero code, while a config/env-driven request silently proceeds
-  to normal dispatch (its rc is non-contractual). Mode resolution is done
-  **before** argparse, using the raw argv + the env `AWS_CLI_AUTO_PROMPT` + the
-  profile's `cli_auto_prompt` (an SDK-free read, env > config > off) (so that it
-  can launch even with no subcommand). `on-partial` means "run -> if a usage error
-  (252), prompt". `--no-cli-auto-prompt` forces the mode off - a no-op in the
-  default state, but it explicitly disables an env/config-driven prompt request
-  (matching aws-cli, section 2) - and specifying it together with
-  `--cli-auto-prompt` is a usage error.
+  re-dispatches the edited command. What matters at this layer is the timing:
+  the mode is resolved from the raw argv **before** argparse runs, so the prompt
+  can launch with no subcommand present, and the read stays SDK-free. The
+  resolution chain itself - the flags, `AWS_CLI_AUTO_PROMPT`, the profile's
+  `cli_auto_prompt`, and what happens when `prompt_toolkit` is absent - is
+  specified in [`autoprompt.md`](./autoprompt.md) section 5.
 - **`--debug`**: attaches a stderr handler to the `boto3_s3` / `boto3_s3_cli` /
   `botocore` / `boto3` / `s3transfer` loggers (via the library's
   `boto3_s3.set_stream_logger`, `mask_secrets=True`). `boto3_s3_cli` is the
@@ -790,6 +786,13 @@ sync.md section 6).
 
 Following the charter in [`overview.md`](./overview.md) section 3, these match aws-cli
 v2's convention (aws-cli's `awscli/constants.py`).
+
+This section is the single specification of the exit codes: the conditions, the
+precedence among them, and the per-family rules below. Nothing else restates it -
+[`exceptions.md`](./exceptions.md) section 5 and [`testing.md`](./testing.md)
+section 2 point here, and [`guide/cli/exit-codes.md`](../docs/cli/exit-codes.md)
+states for users what the codes mean, deliberately without the precedence rules.
+A change here needs that page reviewed with it.
 
 | code | condition | the name on the aws-cli side |
 |---|---|---|

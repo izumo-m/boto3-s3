@@ -45,7 +45,7 @@ class SyncCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Sync and return an ``aws s3 sync``-style exit code.
 
-        The shape is cp's (docs/cli.md section 6) with sync's own usage errors in
+        The shape is cp's (design/cli.md section 6) with sync's own usage errors in
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
@@ -53,7 +53,7 @@ class SyncCommand(Command):
         side 252 ("Cannot use sync command with a directory bucket.") - all
         before any S3 client exists. A missing local source exits 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
-        sides (rootless anchoring; sync.md section 1).
+        sides (rootless anchoring; design/sync.md section 1).
         """
         head = transferargs.classify_paths(args, ctx, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -107,7 +107,7 @@ class SyncCommand(Command):
             page_size=page_size,
         )
 
-        # One filter applied to both sides by S3.sync (sync.md section 1),
+        # One filter applied to both sides by S3.sync (design/sync.md section 1),
         # compiled with both sides as its bases: aws joins every pattern onto
         # the source AND destination rootdir and applies both joined forms to
         # every entry, which compile_filter reproduces (delegating to the

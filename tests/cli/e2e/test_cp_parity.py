@@ -4,7 +4,7 @@ Transfers are doubly stateful - bucket *and* local filesystem - so each side
 gets its own workdir (the CLI runs with ``cwd`` set there, making argv and
 result lines workdir-relative) and a fresh remote seeding; the bucket is
 wiped between the sides and at the end. Comparison covers the unconditional
-rc (exit-code charter, docs/overview.md section 3), the masked/sorted stdout, the
+rc (exit-code charter, design/overview.md section 3), the masked/sorted stdout, the
 bucket end state, the local destination tree, the probe object's HeadObject
 fields, and the live per-side download-mtime assertion. ``diff_only``
 scenarios carry outcomes that are endpoint-relative (``--sse``, GLACIER
@@ -154,7 +154,7 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
                 )
 
         assert ours.result.rc == aws.result.rc, (
-            f"[{scenario.name}] exit-code parity broken (charter, docs/overview.md section 3):\n"
+            f"[{scenario.name}] exit-code parity broken (charter, design/overview.md section 3):\n"
             f"  ours rc={ours.result.rc} stderr={ours.result.stderr.strip()!r}\n"
             f"  aws  rc={aws.result.rc} stderr={aws.result.stderr.strip()!r}"
         )

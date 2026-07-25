@@ -2,7 +2,7 @@
 
 The execution half of the global-option surface ``globalargs``
 registers: ``build_client`` turns the connection / auth values into the
-boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
+boto3 S3 client the library consumes (``design/aws-cli-option-handling.md``
 section 5), and ``build_service_client`` builds the non-S3 clients ``mv``'s
 path validation needs (section 5.8). Everything here reaches the AWS SDK.
 """
@@ -155,7 +155,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     # (aws dies immediately); the library default keeps waiting.
     # endpoint_url: build_client already applies it to every client this S3
     # hands out (the client() override), so the S3-level copy only feeds the
-    # CRT lane's explicit-endpoint pin (docs/crt.md) - without it, an
+    # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
     return CliS3(session=session, endpoint_url=args.endpoint_url, wait_on_interrupt=False)

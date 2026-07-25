@@ -60,7 +60,7 @@ def resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
     mode = value.lower() if value else "off"
     # aws's else branch treats any unrecognized value as off; normalize the
     # *return* too, honoring the documented on / on-partial / off domain
-    # (docs/autoprompt.md) instead of handing callers raw config text.
+    # (design/autoprompt.md) instead of handing callers raw config text.
     return mode if mode in ("on", "on-partial") else "off"
 
 
@@ -120,7 +120,7 @@ def _read_scoped_cli_auto_prompt(profile: str) -> str | None:
         # (-> off), matching botocore's configloader (which also catches
         # UnicodeDecodeError); a genuinely broken config still surfaces cleanly
         # when build_client later loads it, instead of crashing this pre-dispatch
-        # resolution with a traceback (exit-code charter, docs/overview.md section 3).
+        # resolution with a traceback (exit-code charter, design/overview.md section 3).
         return None
     section = "default" if profile == "default" else f"profile {profile}"
     if parser.has_option(section, _AUTO_PROMPT_CONFIG_KEY):

@@ -10,7 +10,7 @@ Ports ``CompletionResult`` / ``AutoCompleter`` (``completer.py``),
 - ``FilePathCompleter`` - ``file://`` / ``fileb://`` paths.
 - ``ChoicesCompleter`` - values for any option with fixed ``choices``.
 
-The auto-prompt UI is charter-exempt (``docs/autoprompt.md`` section 1), so these
+The auto-prompt UI is charter-exempt (``design/autoprompt.md`` section 1), so these
 completers favor *usability* over a byte-faithful port. ``ChoicesCompleter``
 completes every choice-bearing option uniformly from the argparse model, where
 aws only completes *global* choices (its command-level path reads
@@ -152,7 +152,7 @@ class ModelIndexCompleter(BaseCompleter):
         # cp/mv/sync take two positional paths but the model has one slot, so a
         # second positional lands in unparsed_items. Offer the option set there
         # whatever it looks like - usability first (the auto-prompt UI is
-        # charter-exempt, docs/autoprompt.md section 2/3): aws drops a bare
+        # charter-exempt, design/autoprompt.md section 2/3): aws drops a bare
         # `outdir` on a path-likeness heuristic, we keep completing, and we never
         # offer less than aws does. We defer only while an option *value* is being
         # typed (current_param), so its value completer fires instead.

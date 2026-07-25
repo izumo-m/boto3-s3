@@ -5,7 +5,7 @@
 # A manual run (workflow_dispatch) targets TestPyPI for a dry run; the
 # production index is reachable only through a tag push, which enforces the
 # tag <-> pyproject version check below.
-# See docs/release.md for the full procedure and one-time setup.
+# See design/release.md for the full procedure and one-time setup.
 name: release
 
 on:
@@ -98,7 +98,7 @@ jobs:
 
       # The CLI wheel depends on the boto3-s3 PyPI package: publishing it
       # before a satisfying library version is live yields an uninstallable
-      # release. Enforce the docs/release.md ordering before anything uploads.
+      # release. Enforce the design/release.md ordering before anything uploads.
       - name: Verify the library dependency is live (CLI releases only)
         if: steps.target.outputs.package == 'boto3-s3-cli'
         env:
@@ -124,14 +124,14 @@ jobs:
                   releases = json.load(resp)["releases"]
           except urllib.error.HTTPError as exc:
               if exc.code == 404:
-                  sys.exit(f"no boto3-s3 project on {host}; publish the library first (docs/release.md)")
+                  sys.exit(f"no boto3-s3 project on {host}; publish the library first (design/release.md)")
               raise
           live = [v for v, files in releases.items() if files and not all(f.get("yanked") for f in files)]
           ok = sorted(req.specifier.filter(live), key=Version)
           if not ok:
               sys.exit(
                   f"no live boto3-s3 on {host} satisfies '{req.specifier}' "
-                  f"(found: {sorted(live, key=Version)}); publish the library first (docs/release.md)"
+                  f"(found: {sorted(live, key=Version)}); publish the library first (design/release.md)"
               )
           print(f"boto3-s3 {ok[-1]} on {host} satisfies '{req.specifier}'")
           EOF

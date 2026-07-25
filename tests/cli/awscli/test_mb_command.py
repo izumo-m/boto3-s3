@@ -40,7 +40,7 @@ Adaptation rules (on top of the rm port's - see
 - ``test_tags_with_three_arguments_fails`` expects ``ParamValidation`` in
   stderr; with argparse the stray third token lands in ``parse_known_args``
   extras -> ``Unknown options: ExtraArg``. The rc (252) is the contract,
-  the message is not (docs/cli.md section 6).
+  the message is not (design/cli.md section 6).
 """
 
 from __future__ import annotations

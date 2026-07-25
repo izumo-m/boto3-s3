@@ -66,15 +66,15 @@ naturally.
 `transfer_config.preferred_transfer_client` (default `'auto'`; config=None is
 also read as `'auto'`) with the same rules as boto3.
 
-- **COPY (s3->s3) is unconditionally classic.** CRTTransferManager has only
-  upload / download / delete and no copy. boto3 likewise drops to
-  `preferred_transfer_client='classic'` for a copy in `inject.py` ("copy is not
-  supported in the CRT"). Same rule as the aws-cli factory's
-  `paths_type=='s3s3' -> classic`.
+- **COPY (s3->s3) is unconditionally classic** - specified with the rest of the
+  engine resolution in [`transfer.md`](./transfer.md) section 2. The boto3
+  fidelity behind it: `CRTTransferManager` has only upload / download / delete,
+  and boto3 drops to `preferred_transfer_client='classic'` for a copy in
+  `inject.py` ("copy is not supported in the CRT").
 - **`should_use_crt`** (a port of boto3's `_should_use_crt`): an explicit
   `'crt'` combined with a missing or too-old awscrt (below 0.19.18) raises a
   `MissingDependencyException` (boto3's wording); an explicit `'crt'` on an
-  s3transfer below 0.8.0 (no CRT surface at the supported floor 0.6.2) also
+  s3transfer below 0.8.0 (the supported floor predates it) also
   raises `MissingDependencyException` - a branch boto3 does not have, with its
   own wording (`'auto'` degrades to classic there instead); CRT is attempted
   when `(is_optimized and 'auto') or 'crt'`.
@@ -197,7 +197,7 @@ A port of aws-cli `TransferManagerFactory._compute_transfer_client_type`.
 | `preferred == 'classic'` | `classic` |
 | `preferred == 'crt'` and awscrt present and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
 | `preferred == 'crt'` and awscrt **absent** | `ConfigurationError` (rc 253, section 6) |
-| `preferred == 'crt'` and s3transfer **< 0.8.0** (no CRT surface at the supported floor 0.6.2) | `ConfigurationError` (rc 253, the same clean degradation) |
+| `preferred == 'crt'` and s3transfer **< 0.8.0** (the supported floor predates it) | `ConfigurationError` (rc 253, the same clean degradation) |
 | `preferred == 'auto'` and `is_optimized_for_system()` and the lock is acquirable | `crt` (an s3transfer without the CRT surface silently resolves `classic`) |
 | otherwise (`auto` with non-optimized / lock contention) | `classic` |
 
@@ -278,14 +278,14 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   engines (proven), so no observable charter is broken - only throughput is
   affected.
 - **fio_options**: unavailable on any pip s3transfer
-  ([`compatibility.md`](./compatibility.md)). `_add_fio_options` probes
+  ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
   `create_s3_crt_client`'s signature rather than a version, so the keys start
   flowing the moment the parameter ships upstream.
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself
   still gets `part_size` / `target_throughput`, passed to
-  `create_s3_crt_client` directly ([`compatibility.md`](./compatibility.md) for
+  `create_s3_crt_client` directly ([`compatibility.md`](../docs/compatibility.md) for
   what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
   past 0.16.

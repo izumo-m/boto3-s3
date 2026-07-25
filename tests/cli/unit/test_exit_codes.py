@@ -1,4 +1,4 @@
-"""Unit tests for the aws-cli exit-code mapping (docs/cli.md section 6).
+"""Unit tests for the aws-cli exit-code mapping (design/cli.md section 6).
 
 `exit_code_for` is exercised directly for each branch, and `main` is
 exercised end-to-end for the paths that do not go through a library error
@@ -226,7 +226,7 @@ class TestMainExitCodes:
         # escapes command.run untranslated must still map through aws-cli's
         # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
         # ClientError 254, else 255) without a traceback (the exit-code charter,
-        # docs/overview.md section 3).
+        # design/overview.md section 3).
         # The client factory raising is the cleanest injection - ls.run calls
         # ctx.client_factory(args) directly, so the raw error escapes run.
         def factory(_args: Any) -> Any:
@@ -242,7 +242,7 @@ class TestMainExitCodes:
 
     def test_broken_pipe_from_a_command_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws-cli exits 0 when a downstream reader closes the pipe
-        # (docs/cli.md section 6). The real seam is the stdout write: ls has a
+        # (design/cli.md section 6). The real seam is the stdout write: ls has a
         # line to print and the pipe is gone, so ``uni_write(sys.stdout, ...)``
         # raises BrokenPipeError. The library does not translate it
         # (``s3_errors`` catches only ClientError / BotoCoreError), so it
@@ -465,7 +465,7 @@ class TestPreParseErrorAttribution:
 
 class TestParseToValidationOrder:
     """The head order aws applies before its path validations (measured
-    against the pinned aws-cli; docs/cli.md section 5.7, table in
+    against the pinned aws-cli; design/cli.md section 5.7, table in
     section 6): the ``--query`` compile (252) -> the ``--endpoint-url`` scheme
     check (252) -> the ``--cli-read-timeout`` / ``--cli-connect-timeout``
     coercions (255, read first; resolved in the dispatch pre-pass, so they

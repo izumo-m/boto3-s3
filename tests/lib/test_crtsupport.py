@@ -4,7 +4,7 @@ Everything runs against monkeypatched ``s3transfer.crt`` / ``awscrt``
 attributes: the CRT cannot be exercised in-process (moto bypasses it), so
 these tests pin the selection matrix, the singleton + lock behavior, and the
 client-derived wiring (endpoint / use_ssl / verify / credentials / part_size)
-that docs/crt.md documents.
+that design/crt.md documents.
 """
 
 from __future__ import annotations
@@ -438,7 +438,7 @@ class TestBotocoreSession:
 
     The serializer must reuse a warm session when one is reachable - a fresh
     botocore session re-parses the S3 model per process, the CRT lane's
-    dominant fixed cost versus aws-cli (docs/crt.md, benchmark-measured).
+    dominant fixed cost versus aws-cli (design/crt.md, benchmark-measured).
     """
 
     def test_prefers_the_callers_session(self) -> None:

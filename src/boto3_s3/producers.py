@@ -1,6 +1,6 @@
 """The per-info transfer producers and gates cp / mv / sync share.
 
-The "producer" half of the transfer design (docs/transfer.md): turn a
+The "producer" half of the transfer design (design/transfer.md): turn a
 ``TransferPlan`` plus listing entries into
 ``TransferItem`` objects, running the aws-cli item
 gates on
@@ -1203,5 +1203,5 @@ def sync_transfer_item(
 
 
 # Package-internal: the shared producer/gate helpers are consumed by s3.py
-# only and carry no documented surface (docs/imports.md).
+# only and carry no documented surface (design/imports.md).
 __all__: list[str] = []

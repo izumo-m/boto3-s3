@@ -285,7 +285,7 @@ class Storage(abc.ABC):
         re-implementing ``scan``. **Apply ``options.filter`` here** and return
         already-filtered pages: whatever this producer omits is simply absent
         downstream (its ``sync`` effect is side-specific - the visibility layer in
-        ``ScanOptions.filter`` / docs/globsieve.md). A backend that cannot push the
+        ``ScanOptions.filter`` / design/globsieve.md). A backend that cannot push the
         predicate to its source wraps its raw pages with ``sieve_pages``; one
         that can (e.g. a REST listing) translates ``options.filter`` into a
         server-side query instead.

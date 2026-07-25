@@ -23,7 +23,7 @@ Engine choices (parity-driven):
 
 - The engine follows ``TransferConfig.preferred_transfer_client`` with
   boto3's own semantics (``'auto'`` default; ``'auto'``/``'crt'`` resolve
-  through ``crtsupport``, docs/crt.md): the classic
+  through ``crtsupport``, design/crt.md): the classic
   ``s3transfer.manager.TransferManager`` unless the CRT manager is selected,
   and unconditionally classic for a copy run - the CRT manager has no copy,
   the same rule boto3 and aws-cli apply to s3->s3. The public
@@ -450,7 +450,7 @@ class _ResponseCapture:
     added - never colliding with another operation's capture or with a handler the
     application put on a shared client. The events engine has no lock, so a capture
     operation needs exclusive use of its client for the operation's span
-    (docs/s3.md).
+    (design/s3.md).
 
     ``_WRITE_OPS`` are the terminal object-writing operations observed - the
     intermediate multipart calls (CreateMultipartUpload / UploadPart /
@@ -627,7 +627,7 @@ class Transferrer:
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
-    the completion win; docs/opresult.md). The rollup counters are
+    the completion win; design/opresult.md). The rollup counters are
     approximate while transfers are in flight and exact after the `with`
     block exits.
 
@@ -706,7 +706,7 @@ class Transferrer:
         # untyped caller ("") hits the invalid-value error below instead of
         # silently running with the default.
         # copy_props=ALL gate: annotations need a capable SDK; every other
-        # mode degrades silently on an old one (docs/transfer.md section 4).
+        # mode degrades silently on an old one (design/transfer.md section 4).
         self._copy_props = CopyPropsMode.DEFAULT
         self._annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
         if transfer_type is TransferType.COPY:
@@ -718,7 +718,7 @@ class Transferrer:
             except ValueError as exc:
                 # A bad value must not leak the enum's raw ValueError past the
                 # public API (the exception model keeps every error in the
-                # Boto3S3Error family, docs/exceptions.md); the CLI never gets
+                # Boto3S3Error family, design/exceptions.md); the CLI never gets
                 # here, having validated copy_props against its choices.
                 raise ValidationError(
                     f"Invalid copy_props value: {copy_props!r}", operation=operation
@@ -1255,7 +1255,7 @@ class Transferrer:
             # Transfer-time breadcrumb: names the engine actually built for
             # this run (CRTTransferManager vs the classic TransferManager),
             # after any CRT->classic fallback. Lets --debug distinguish a real
-            # CRT transfer from a silent classic fallback (docs/testing.md).
+            # CRT transfer from a silent classic fallback (design/testing.md).
             logger.debug("transfer engine: %s", type(manager).__name__)
             if self._capture_response:
                 # Registered once, before the first submit; drained per item by
@@ -1313,7 +1313,7 @@ class Transferrer:
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig
             # options set): a caller-argument problem, kept inside the taxonomy
-            # like the copy_props ValueError above - docs/exceptions.md carves
+            # like the copy_props ValueError above - design/exceptions.md carves
             # out exactly one pass-through (MissingDependencyException), and
             # this is not it.
             raise ValidationError(str(exc), operation=self._operation) from exc
@@ -1333,7 +1333,7 @@ class Transferrer:
         # boto3-faithful (boto3's own TransferManager does the same): we do not
         # restore the client, because it may be shared and unregistering could
         # disrupt a concurrent transfer. Run parallel operations with one client
-        # per thread (docs/s3.md thread-safety note).
+        # per thread (design/s3.md thread-safety note).
         return TransferManager(self._client, config=config, executor_cls=executor_cls)
 
     @property

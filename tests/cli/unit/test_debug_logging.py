@@ -1,4 +1,4 @@
-"""``--debug`` wires the library's masked stream logger (docs/masking.md).
+"""``--debug`` wires the library's masked stream logger (design/masking.md).
 
 These tests pin the wiring end-to-end: the flag attaches a handler carrying a
 ``SecretMaskingFilter`` to each debug logger, and botocore-shaped DEBUG records

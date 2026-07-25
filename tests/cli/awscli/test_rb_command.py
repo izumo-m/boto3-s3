@@ -35,7 +35,7 @@ Adaptation rules (on top of the rm port's - see
 
 - ``test_rb_force_non_empty_bucket`` expects a per-key ``DeleteObject`` in
   the aws-cli original; the inner rm deletes in batched ``DeleteObjects``
-  (accepted wire-level deviation, docs/deleter.md section 4). ``LastModified``
+  (accepted wire-level deviation, design/deleter.md section 4). ``LastModified``
   becomes a real ``datetime`` (recorder bypasses the output parser).
 - The aws-cli ``http_response.status_code = 500`` cases port as a canned
   ``ClientError`` raised by the recorder (Exception passthrough).

@@ -109,7 +109,7 @@ class TestTextAdapter:
 
 class TestCallerStreamPosition:
     def test_download_leaves_the_stream_unrewound_at_the_write_end(self) -> None:
-        # docs/storage.md: the caller's stream is neither closed nor rewound -
+        # design/storage.md: the caller's stream is neither closed nor rewound -
         # after a download it sits at the end of the written bytes, so the
         # caller can keep appending (or must seek(0) themselves to read back).
         buf = io.BytesIO()

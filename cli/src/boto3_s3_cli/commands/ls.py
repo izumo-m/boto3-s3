@@ -60,7 +60,7 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # JMESPath compile (252) leads, then the --endpoint-url scheme check
         # (252), then each option at its own slot in aws's option-table order -
         # the positional, then --page-size (paramfile load 252, then the bare

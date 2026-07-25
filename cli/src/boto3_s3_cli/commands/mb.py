@@ -41,14 +41,14 @@ class MbCommand(Command):
         one ``make_bucket failed:`` line (aws catches every create_bucket
         exception locally, even request-time credential errors; an
         unclassified exception here falls to the dispatcher's handler chain -
-        the taxonomy classifies the known failures, docs/exceptions.md). The key part
+        the taxonomy classifies the known failures, design/exceptions.md). The key part
         of the path is silently dropped, exactly like aws. aws builds the client
         before validating the path (``S3Command._run_main``), so a
         client-construction failure (bad ``--profile`` / unresolved credentials /
         region) takes precedence over a path usage error - we build it first to
         match (253/255 wins over the 252).
         """
-        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # Parse-time head (measured, design/cli.md section 6): the --query compile
         # (252), the --endpoint-url scheme check (252), and the positional
         # paramfile expansion (252) all precede the client build - they beat a
         # bad --profile (255) the way aws's parse-time load-cli-arg does.

@@ -161,7 +161,7 @@ class TestCompletionEngine:
 
 
 # --------------------------------------------------------------------------- #
-# Reachability: usability tuning over the faithful port (docs/autoprompt.md section 2) #
+# Reachability: usability tuning over the faithful port (design/autoprompt.md section 2) #
 # --------------------------------------------------------------------------- #
 
 
@@ -207,7 +207,7 @@ class TestCompletionReachability:
     def test_options_complete_after_a_non_path_like_second_positional(self) -> None:
         # A bare local name as the second positional (no path character)
         # still offers options - aws drops it on a path-likeness heuristic; we
-        # keep completing (usability first, docs/autoprompt.md section 3).
+        # keep completing (usability first, design/autoprompt.md section 3).
         assert _names("cp s3://a outdir --st")[0] == "--storage-class"
         assert _names("sync s3://a outdir --ex")[:2] == ["--exact-timestamps", "--exclude"]
         all_opts = _names("cp s3://a outdir --")
@@ -218,11 +218,11 @@ class TestCompletionReachability:
         assert _names("cp s3://a outdir --storage-class ")[0] == "STANDARD"
 
     def test_unknown_option_among_positionals_still_offers(self) -> None:
-        # Never offer less than aws (docs/autoprompt.md section 1): aws treats a
+        # Never offer less than aws (design/autoprompt.md section 1): aws treats a
         # `--`-containing unparsed token as path-like and offers options, so an
         # unknown --option sitting among the positionals must not suppress the
         # menu (regression guard for the relaxed second-positional gate,
-        # docs/autoprompt.md section 3).
+        # design/autoprompt.md section 3).
         assert "--recursive" in _names("cp s3://a --bogus s3://b --")
 
     def test_bare_command_offers_options(self) -> None:
@@ -289,7 +289,7 @@ class TestModelReflectsParser:
 class TestIntNargsParsing:
     """`_consume_value`'s integer-nargs branch (`mb --tags KEY VALUE`) - a
     deliberate improvement over aws's parser, whose fall-through binds KEY to
-    the path positional while VALUE is still owed (docs/autoprompt.md
+    the path positional while VALUE is still owed (design/autoprompt.md
     section 2). Do not "re-align" these to the aws behavior."""
 
     def test_owed_value_keeps_the_param_context(self) -> None:

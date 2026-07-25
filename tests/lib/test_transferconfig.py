@@ -1,6 +1,6 @@
 """`boto3_s3.TransferConfig` - the boto3 subclass with library settings.
 
-Pins the contract docs/crt.md relies on: boto3's constructor surface is
+Pins the contract design/crt.md relies on: boto3's constructor surface is
 untouched (names, order, defaults, alias attributes, the UNSET sentinel that
 distinguishes "explicit" from "defaulted" values), the extras are keyword-only
 with `None` defaults, and a plain boto3 `TransferConfig` stays accepted by

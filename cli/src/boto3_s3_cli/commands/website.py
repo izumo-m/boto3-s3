@@ -35,7 +35,7 @@ class WebsiteCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Put the website configuration and return an ``aws s3``-style exit code.
 
-        Exit-code shape (docs/cli.md section 6): no local catch - unlike
+        Exit-code shape (design/cli.md section 6): no local catch - unlike
         mb/rb, aws's WebsiteCommand lets PutBucketWebsite exceptions reach
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
@@ -44,7 +44,7 @@ class WebsiteCommand(Command):
         credentials / region is 253 (its other botocore failures - a bad
         ``--profile``, partial credentials - are 255).
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then
         # the paramfile expansions (252) - the positional path and both document
         # options are all expanded at parse time - before the request is built.

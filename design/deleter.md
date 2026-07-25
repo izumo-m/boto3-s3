@@ -79,7 +79,7 @@ the successful `Deleted[]` entries; each is reconstructed into a per-key
 `RequestCharged`) and attached to that key's `OpResult.extra_info["delete"]`.
 The fallback route strips `ResponseMetadata` from its actual `DeleteObject`
 response and uses the same slot, so the caller sees a single-object shape
-regardless of the wire form (docs/opresult.md). Failures are still read from
+regardless of the wire form (design/opresult.md). Failures are still read from
 `Errors[]` as below. One limitation: when the same key was submitted more than
 once in a batch, all of that key's `OpResult`s share a single slot (the
 response's last entry for the key wins). `DeleteObjects` reports per key

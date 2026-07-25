@@ -49,7 +49,7 @@ class TestBuildClient:
         # single session build_s3 made - nothing built a second one.
         assert sessions == [s3.session]
         # The S3-level endpoint copy feeds the CRT lane's explicit-endpoint
-        # pin (docs/crt.md); it must be the same string build_client applies,
+        # pin (design/crt.md); it must be the same string build_client applies,
         # so the Transferrer's meta-equality gate recognizes the CLI client.
         assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
 
@@ -236,7 +236,7 @@ class TestBuildClient:
         # (region set `*`) - measured against aws 2.36.1, whose MRAP presign
         # signs AWS4-ECDSA-P256-SHA256. The s3v4 pin stands down when a
         # positional names an MRAP ARN; the dev environment's awscrt (always
-        # present, docs/testing.md section 4) then signs SigV4a offline.
+        # present, design/testing.md section 4) then signs SigV4a offline.
         args = _parse(["--region", "us-east-1"])
         args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
         client = clientfactory.build_client(args)

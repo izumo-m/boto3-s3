@@ -129,7 +129,7 @@ the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
   to s3transfer; the same as the written object's except for a multipart copy).
 - **download** - the source object's ETag.
 - **upload** - `None`: s3transfer discards the PutObject response, so the
-  written object's ETag is not available by default (docs/transfer.md).
+  written object's ETag is not available by default (design/transfer.md).
 - **delete** / **warning** - `None`.
 
 The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
@@ -170,7 +170,7 @@ present:
   guarantee the `DeleteObject` shape. The batched path
   reconstructs one per key from its `DeleteObjects` `Deleted[]` entry plus the
   shared `RequestCharged`, so the caller sees the same single-object shape
-  regardless of the batch wire form (docs/deleter.md); `rm`'s blind single-key path
+  regardless of the batch wire form (design/deleter.md); `rm`'s blind single-key path
   (a non-recursive exact key) carries the `Storage.delete` response directly. A
   local file unlink returns `None`, so it has no slot.
 
@@ -184,7 +184,7 @@ transfer engine** (a library-only flag with no `aws s3` equivalent, so no parity
 impact).
 It registers handlers on the transfer's client for the operation's span and
 removes them after; run a capture operation with a client not used concurrently
-elsewhere (docs/s3.md thread-safety note). The **`"delete"`** slot rides no
+elsewhere (design/s3.md thread-safety note). The **`"delete"`** slot rides no
 events - the delete calls are issued directly - so it works on any engine.
 
 ## `error`

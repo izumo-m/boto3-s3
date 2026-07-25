@@ -273,7 +273,7 @@ class TestCompileSetSpecialization:
 class TestPublicSurface:
     def test_all_resolves_and_is_public(self) -> None:
         # The module is a documented submodule-path building block
-        # (docs/globsieve.md): __all__ is its public contract.
+        # (design/globsieve.md): __all__ is its public contract.
         for name in globsieve.__all__:
             assert not name.startswith("_"), name
             assert hasattr(globsieve, name), name

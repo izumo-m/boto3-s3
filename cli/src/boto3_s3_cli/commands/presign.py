@@ -39,7 +39,7 @@ class PresignCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Print the presigned URL and return an ``aws s3``-style exit code.
 
-        Exit-code shape (docs/cli.md section 6): pure client-side
+        Exit-code shape (design/cli.md section 6): pure client-side
         computation, so rc 1 cannot happen and no S3 request is sent (a
         deferred credential resolution - an assume-role profile - can still
         dial STS during signing, whose ClientError maps to 254) - 0 on success, 252 for
@@ -51,7 +51,7 @@ class PresignCommand(Command):
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then
         # the paramfile expansions (252, the positional path and --expires-in)
         # precede the bare int() coercion (255).

@@ -78,7 +78,7 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
 # (aws's dedicated rc-253 handlers); the present-but-unusable configuration
 # family below refines to InvalidConfigError (aws's general handler, rc 255) -
-# the same split point as the CLI's clientfactory (docs/exceptions.md section
+# the same split point as the CLI's clientfactory (design/exceptions.md section
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator
 # lists only the known config shapes and keeps anything unlisted at the base.
@@ -119,7 +119,7 @@ S3_CODE_CATEGORIES: dict[str, type[Boto3S3Error]] = {
 
 # Resource types the S3 data plane cannot serve through these operations;
 # ``aws s3`` rejects them at parse time (ParamValidation -> rc 252) and the
-# exit-code charter (docs/overview.md section 3) has us reject them the same way.
+# exit-code charter (design/overview.md section 3) has us reject them the same way.
 _S3_OBJECT_LAMBDA_ARN_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3-object-lambda:[a-z\-0-9]+:[0-9]{12}:"
     r"accesspoint[/:][a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
@@ -163,7 +163,7 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     The strict checks - the
     unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
     parse-time 252), and a key with
-    no bucket (whose aws handling varies per command - docs/cli.md) - are
+    no bucket (whose aws handling varies per command - design/cli.md) - are
     deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
@@ -624,7 +624,7 @@ class S3Storage(Storage):
         ``ConfigurationError`` for unresolvable credentials / region, its
         ``InvalidConfigError`` refinement for a set-but-unusable
         ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
-        botocore error (docs/exceptions.md
+        botocore error (design/exceptions.md
         section 1).
         """
         if self._client is None:
@@ -636,7 +636,7 @@ class S3Storage(Storage):
                     # A malformed endpoint from the environment
                     # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
                     # BotoCoreError - the same hole S3.client() plugs
-                    # (docs/exceptions.md).
+                    # (design/exceptions.md).
                     raise InvalidConfigError(str(exc)) from exc
         return self._client
 
@@ -784,8 +784,9 @@ class S3Storage(Storage):
         uniformly (``LocalStorage`` resolves an absolute ``info.key`` to its
         file), and a typical custom backend's too (its ``key`` equals
         ``compare_key`` - the relative address its ``open`` is
-        required to resolve; docs/storage.md section 2). The body is **read-only and forward-only**
-        (no ``seek``); it supports the context-manager / ``read`` / ``close``
+        required to resolve; design/storage.md section 2). The body is
+        **read-only and forward-only** (no ``seek``); it supports the
+        context-manager / ``read`` / ``close``
         protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a
         missing key, denied access) translate to the library taxonomy; an error
         raised *later* while reading the streamed body (a read timeout, a broken

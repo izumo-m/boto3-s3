@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 cp`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): pre-pipeline errors
+The rc shape (design/cli.md section 6): pre-pipeline errors
 keep their class - usage errors 252 (path types, SSE-C pairing, streaming
 with --recursive / --no-overwrite, ``--metadata`` parsing, blob decoding,
 the S3 Express case-conflict rejection), the bare integer conversion and

@@ -55,7 +55,7 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   (``_allow_inline_mpu_tagging``), realigning with aws-cli's bundled table.
 - ``--copy-props all``'s multipart annotation carryover rides upstream
   s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
-  SetAnnotationsSubscriber (docs/transfer.md section 4), so the
+  SetAnnotationsSubscriber (design/transfer.md section 4), so the
   TestCopyPropsAllCpCommand port adapts the canned order: the annotation reads run
   *after* CompleteMultipartUpload (aws-cli reads them before creating the
   upload), gets and puts interleave per annotation, the listing is a single
@@ -1490,7 +1490,7 @@ class TestCopyPropsDefaultCpCommand:
 
 def _annotations_sdk_supported() -> bool:
     # --copy-props all needs the annotations SDK (the engine refuses it up
-    # front otherwise, docs/transfer.md section 4): botocore's CopyObject must
+    # front otherwise, design/transfer.md section 4): botocore's CopyObject must
     # know AnnotationDirective and s3transfer must handle it on multipart.
     import botocore.session
 
@@ -1509,7 +1509,7 @@ class TestCopyPropsAllCpCommand:
     # aws-cli: TestCopyPropsAllCpCommand. The multipart carryover rides
     # s3transfer's native _apply_annotations here - the canned order and the
     # missing source-VersionId pin follow the module docstring's adaptation
-    # rule (docs/transfer.md section 4 records the deviations).
+    # rule (design/transfer.md section 4 records the deviations).
     DEST_ETAG = '"dest-etag"'
     DEST_VERSION_ID = "dest-version-id"
     PAYLOAD = b"annotation-payload"

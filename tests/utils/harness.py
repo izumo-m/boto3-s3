@@ -458,7 +458,7 @@ def presign_scope_mask_region(argv: Sequence[str]) -> str | None:
     The scope carries whatever region botocore signed with: the environment
     default (``AWS_REGION`` / ``AWS_DEFAULT_REGION``) unless *argv* passes an
     explicit ``--region``. Masking the environment default keeps a golden
-    stable across e2e runs in any region (docs/testing.md endpoint policy
+    stable across e2e runs in any region (design/testing.md endpoint policy
     step 1), while an explicit ``--region`` stays raw so its region is still
     compared verbatim (that region is the point of the scenario). When the
     two coincide the explicit one wins - nothing is masked - so the

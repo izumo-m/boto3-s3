@@ -1,6 +1,6 @@
 """Unit tests for the ``rm`` subcommand: output matrix, exit-code shape, filters.
 
-The rm exit-code shape differs from ls (docs/cli.md section 6): usage errors
+The rm exit-code shape differs from ls (design/cli.md section 6): usage errors
 (non-s3 path, rejected ARNs) are 252, but every error after the operation
 starts is rc 1 - per-key failures as ``delete failed:`` lines, run-killing
 errors as one ``fatal error:`` line - never 254.

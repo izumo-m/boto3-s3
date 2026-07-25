@@ -290,7 +290,7 @@ class TestSyncUpload:
         assert copied[0].dest_info is not None and copied[0].dest_info.key == "p/a.txt"
 
     def test_copy_new_result_has_no_dest_info(self, tmp_path: Path) -> None:
-        # docs/opresult.md: only an update pairs with a pre-existing
+        # design/opresult.md: only an update pairs with a pre-existing
         # destination entry; a new-file record carries dest_info=None.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx")
@@ -656,7 +656,7 @@ class TestSyncDownload:
     ) -> None:
         # The rejection guards the source side too, and sits after the s3local
         # dest-dir creation - aws creates the directory and then fails
-        # validation (measured; sync.md section 6) - but before any listing.
+        # validation (measured; design/sync.md section 6) - but before any listing.
         out = tmp_path / "out"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
@@ -835,7 +835,7 @@ class TestParallelFilter:
         assert _pool_window(cast("Executor", object())) == 16
 
     def test_cancel_token_aborts_the_pooled_path(self, tmp_path: Path) -> None:
-        # docs/sync.md: cancel_token is polled between pairs on the pooled dispatch
+        # design/sync.md: cancel_token is polled between pairs on the pooled dispatch
         # too, not only on the serial loop.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")

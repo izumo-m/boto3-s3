@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 sync`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): the local-local pair, any ``-`` path,
+The rc shape (design/cli.md section 6): the local-local pair, any ``-`` path,
 the checksum/path-format pairing, and an
 S3 Express directory bucket on either side are all 252 before any client
 factory runs; a missing local source is 255; ``--recursive`` and
@@ -261,9 +261,9 @@ class TestOutputShapes:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The single source-root filter is applied to the destination stream
-        # too (sync.md section 1), shielding excluded objects from --delete.
+        # too (design/sync.md section 1), shielding excluded objects from --delete.
         # For this relative pattern that matches aws-cli's per-root filtering
-        # (sync.md section 7 records the absolute-pattern edge as the only
+        # (design/sync.md section 7 records the absolute-pattern edge as the only
         # divergence).
         src = tmp_path / "src"
         src.mkdir()
