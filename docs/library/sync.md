@@ -84,7 +84,7 @@ wins — matching `aws s3`.
 
 They live on the strategy rather than on `sync` because a content strategy
 replaces the judgment wholesale, leaving nothing for them to tune. The
-combination is therefore not expressible, which is intended.
+combination is therefore not expressible.
 
 ## 3. `filter` narrows what participates
 

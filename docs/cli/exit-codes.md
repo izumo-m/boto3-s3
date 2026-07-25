@@ -1,8 +1,7 @@
 # Exit codes
 
 `boto3-s3` uses the same exit codes as `aws s3`, with the same meanings, so a
-script that already branches on `aws s3`'s codes keeps working unchanged. The
-table below is the contract; the exceptions are listed at the end.
+script that already branches on `aws s3`'s codes keeps working unchanged.
 
 ## 1. The codes
 
