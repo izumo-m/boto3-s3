@@ -45,16 +45,16 @@ maintaining high functional compatibility (parity).
 
 - **Python**: 3.10 and later.
 - **OS**: Linux / macOS / **Windows**.
-- **AWS SDK floor**: the oldest SDKs supported are roughly three years old -
-  currently `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2, the SDK
-  generation of aws-cli 2.13.0 (2023-07). A future release may raise the floor
-  (when it does, the back-compat shims that carry a comment to that effect can
-  be removed).
+- **AWS SDK floor**: the oldest SDKs supported are roughly three years old. The
+  numbers themselves live in each package's `pyproject.toml`, which is what
+  enforces them and is where they are read from; this states only the policy
+  behind them. A future release may raise the floor (when it does, the
+  back-compat shims that carry a comment to that effect can be removed).
 - **The installed SDK decides the feature set**: rather than emulate newer AWS
   behavior on an older SDK, features that depend on a newer S3 model are simply
   unavailable below the version that introduced them - on a par with the awscrt
   extra. Which feature needs which version, and how an unavailable one behaves,
-  is recorded in [`compatibility.md`](./compatibility.md). Everything else works
+  is recorded in [`compatibility.md`](../docs/compatibility.md). Everything else works
   at the floor.
 
 ## 3. Design policy
@@ -101,7 +101,7 @@ maintaining high functional compatibility (parity).
   the same terms (design in [`crt.md`](./crt.md); enforced by the e2e CRT lane).
   Where the stack is not usable only the relevant features fail, and that is not
   a mismatch. What "usable" requires is in
-  [`compatibility.md`](./compatibility.md).
+  [`compatibility.md`](../docs/compatibility.md).
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
@@ -117,11 +117,30 @@ maintaining high functional compatibility (parity).
 
 ## 4. Documentation index
 
-`docs/` is the single source of truth for the design. Only solidified design is
-written here.
+Documentation is split by who it promises things to, and each half is the
+single source of truth for its own half:
+
+- **[`docs/`](../docs/README.md)** - what the library and the command promise,
+  and how to use them. A change here is a change to what users may depend on, so
+  it travels with a CHANGELOG line.
+- **`design/`** - how it is built and why. Only solidified design is written
+  here, and it may change without notice to users as long as the promises above
+  hold.
+
+The two must not restate each other. Where the design documents describe
+behavior a user depends on, `docs/` states the promise and the design document
+keeps the mechanism, each linking to the other - `design/cli.md` section 6 and
+[`docs/cli/exit-codes.md`](../docs/cli/exit-codes.md) are the worked example.
+
+Because the halves have files of the same name (`sync.md`, `README.md`), a
+reference from code - where there is no relative path to resolve against - must
+carry the directory: `design/sync.md section 10`, not `sync.md section 10`.
+Markdown links inside each half resolve relatively and need no prefix.
+
+### Design documents
 
 - [`glossary.md`](./glossary.md) - glossary.
-- [`compatibility.md`](./compatibility.md) - which feature needs which
+- [`compatibility.md`](../docs/compatibility.md) - which feature needs which
   `botocore` / `s3transfer` / `awscrt`, and how an unavailable one behaves.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
@@ -156,6 +175,11 @@ written here.
 - [`cli.md`](./cli.md) - the design of the CLI layer (`boto3-s3-cli`).
   Implemented subcommands (currently `cp` / `ls` / `mv` / `rm` / `mb` / `rb` /
   `presign` / `sync` / `website` - all `aws s3` subcommands).
+### Developer runbooks
+
+Neither design nor promises to users - how to work on the project. Read with
+[`CONTRIBUTING.md`](../CONTRIBUTING.md), which is the entry point.
+
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
   contracts, e2e gate, enforcement of the exit code charter).
 - [`benchmark.md`](./benchmark.md) - the local performance benchmarks

@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added a user guide covering both packages under `docs/`; the design documents moved to `design/`.
+
 ## [0.8.0] - 2026-07-23
 
 - Added `session()` / `fast_parse_timestamp`: a boto3 `Session` factory whose clients parse response timestamps at C speed, making large listings severalfold faster - `S3(session=boto3_s3.session())` is now the recommended construction.
