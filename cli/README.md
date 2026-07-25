@@ -158,12 +158,15 @@ boto3-s3 ls s3://my-bucket --profile prod --region eu-west-1
 ```
 
 Transfer tuning comes from the profile's `[s3]` section in `~/.aws/config`,
-read as `aws s3` reads it — see
-[the AWS CLI's `s3-config` topic](https://docs.aws.amazon.com/cli/latest/topic/s3-config.html)
-for the keys and their value formats. One caveat: `should_stream`,
-`disk_throughput` and `direct_io` are accepted and validated but have no
-effect, because no released s3transfer takes the file-I/O options that carry
-them (`aws` bundles a fork that does).
+read as `aws s3` reads it (`max_concurrent_requests`, `multipart_threshold`,
+`multipart_chunksize`, `max_queue_size`, `max_bandwidth`, `io_chunksize`,
+`preferred_transfer_client`, plus the CRT-mode keys `target_bandwidth`,
+`should_stream`, `disk_throughput`, and `direct_io`); botocore's own
+`addressing_style`, `use_accelerate_endpoint`, `use_dualstack_endpoint` and
+`payload_signing_enabled` are honored from the same section. One caveat:
+`should_stream`, `disk_throughput` and `direct_io` are accepted and validated
+but have no effect, because no released s3transfer takes the file-I/O options
+that carry them (`aws` bundles a fork that does).
 
 `--debug` turns on wire-level logging with credentials (signatures, access-key
 ids, session tokens) masked by default.
