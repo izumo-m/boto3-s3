@@ -71,4 +71,8 @@ every operation shares.
 - [`compatibility.md`](../compatibility.md) — which `boto3` release each feature
   needs.
 
+These pages explain and show; they do not enumerate. For the full contract of
+one symbol — every parameter, every field, every exception it raises — look it
+up in the API reference, [`../reference/README.md`](../reference/README.md).
+
 The [README](../../README.md) introduces the project as a whole.

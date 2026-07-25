@@ -56,6 +56,13 @@ the API, and where to look.
 - [`library/logging.md`](./library/logging.md) — debug logging, and what
   credential masking does and does not guarantee.
 
+## The library, symbol by symbol
+
+[`reference/README.md`](./reference/README.md) — the API reference: what every
+public class, function and enum accepts, guarantees and raises. One entry per
+name importable from `boto3_s3`, for looking things up rather than reading
+through.
+
 ## Both packages
 
 - [`compatibility.md`](./compatibility.md) — which `boto3` release each feature
