@@ -751,7 +751,7 @@ class S3Storage(Storage):
         ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
         1.35.42), so on a paginating botocore that predates them (1.34.162 through
         1.35.41) passing ``name_prefix`` / ``region`` raises a
-        ``ParamValidationError`` (docs/overview.md section 2). Errors surface on the
+        ``ParamValidationError`` (docs/compatibility.md). Errors surface on the
         consumer's pull.
         """
         with s3_errors(operation="ls"):

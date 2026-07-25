@@ -45,72 +45,17 @@ maintaining high functional compatibility (parity).
 
 - **Python**: 3.10 and later.
 - **OS**: Linux / macOS / **Windows**.
-- **AWS SDK floor**: `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2
-  (a roughly 3-year window - the SDK generation of aws-cli 2.13.0, 2023-07,
-  the oldest aws-cli this floor corresponds to). These are the oldest versions
-  the library and CLI are supported against; a future release may raise the
-  floor (when it does, the back-compat shims that carry a comment to that
-  effect can be removed).
-- **Feature-level degradation on old SDKs**: rather than emulate newer AWS
-  behavior, features that depend on a newer S3 model are simply unavailable
-  below the SDK version that introduced them - on a par with the awscrt extra
-  (transfer.md section 9 / crt.md section 6). Specifically:
-  - `--no-overwrite` (conditional writes / `IfNoneMatch`, GA 2024-11): uploads
-    need botocore >= 1.35.16 plus s3transfer >= 0.11.0 (its create-multipart
-    blocklist), copies need botocore >= 1.41.0; below those it is rejected up
-    front.
-  - `--checksum-algorithm` accepts the pinned aws-cli's full choice list, but
-    an algorithm the installed botocore does not register is unavailable: the
-    floor registers only `CRC32` / `SHA1` / `SHA256` (plus `CRC32C` with
-    awscrt); `CRC64NVME`, `SHA512` and the `XXHASH` family need a newer
-    botocore (the CRT-backed ones awscrt as well).
-  - The bucket-listing filters `ls --bucket-name-prefix` / `--bucket-region`
-    need the paginated `ListBuckets` (late 2024 / botocore 1.34.162); below it,
-    `ls` still works, falling back to an unpaginated `ListBuckets` where the
-    filters are silently inert. Their `Prefix` / `BucketRegion` request
-    parameters landed later still (botocore 1.35.42), so on a paginating
-    botocore that predates them (1.34.162 through 1.35.41) passing the filters
-    raises a clean `ValidationError` (botocore's client-side
-    `ParamValidationError`, translated at the API boundary) rather than being
-    inert.
-  - The newer CreateBucket parameters `mb` can send - `--tags`'s
-    `CreateBucketConfiguration.Tags`, and the `BucketNamespace` an `-an`
-    account-regional namespace bucket selects - fail client-side with a clean
-    `ValidationError` (botocore's `ParamValidationError` translated at the API
-    boundary) on a botocore that predates them.
-  - Without a modern s3transfer, the engine cannot pre-provide the
-    copy/download source ETag (`provide_object_etag`, guarded by hasattr):
-    `OpResult.extra_info`'s `{"ETag": ...}` is `None` there unless
-    `capture_response=True` supplies it from the captured response, and
-    s3transfer's own `CopySourceIfMatch` consistency pin on copies is absent.
-  - S3 object annotations (GA 2026-06) follow the same rule: on a botocore
-    without the annotations model, copies silently stop sending
-    `AnnotationDirective=EXCLUDE` (behaving like pre-annotations aws-cli), and
-    `copy_props=ALL` / `--copy-props all` - which needs botocore >= 1.43.31 and
-    s3transfer >= 0.19 - is refused up front with a `ConfigurationError`
-    (transfer.md section 4). On capable SDKs, multipart `copy_props=ALL`
-    preloads annotations in memory by default for aws-cli failure-state parity;
-    the library also offers temporary-file preload and deferred post-copy
-    reads.
-  - S3 Express directory buckets (`--x-s3`) need a botocore that models them
-    (their endpoint rules and `v4-s3express` signing); the floor predates
-    directory buckets, so requests against them fail.
-  - The CRT transfer engine tracks s3transfer's CRT surface, so which `[s3]`
-    tuning actually reaches it depends on the installed version. The engine
-    needs s3transfer >= 0.8.0 at all: below it the CRT lock and credentials
-    surface are absent, so an explicit `preferred_transfer_client = crt` is
-    refused up front (`auto` falls back to classic silently). Between 0.8.0 and
-    0.16.0 the engine runs but `CRTTransferManager` has no `config` kwarg, so
-    manager-level tuning is dropped with boto3's own warning while `part_size`
-    and `target_throughput` still reach the CRT client directly. The file-I/O
-    keys `should_stream` / `disk_throughput` / `direct_io` are parsed and
-    validated but reach no released pip s3transfer, whose
-    `create_s3_crt_client` has no `fio_options` parameter (still absent at
-    0.19.0); aws-cli bundles a fork that has it, so `aws` honors these three
-    where a pip install cannot. They start working with no code change once the
-    parameter ships.
-
-  Everything else works at the floor.
+- **AWS SDK floor**: the oldest SDKs supported are roughly three years old -
+  currently `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2, the SDK
+  generation of aws-cli 2.13.0 (2023-07). A future release may raise the floor
+  (when it does, the back-compat shims that carry a comment to that effect can
+  be removed).
+- **The installed SDK decides the feature set**: rather than emulate newer AWS
+  behavior on an older SDK, features that depend on a newer S3 model are simply
+  unavailable below the version that introduced them - on a par with the awscrt
+  extra. Which feature needs which version, and how an unavailable one behaves,
+  is recorded in [`compatibility.md`](./compatibility.md). Everything else works
+  at the floor.
 
 ## 3. Design policy
 
@@ -150,15 +95,13 @@ maintaining high functional compatibility (parity).
      interactive UI)
 
   awscrt-dependent features (the CRT transfer engine, CRT-family checksums,
-  SigV4a signing) are subject to this charter when the CRT stack is usable -
-  awscrt present and, for the transfer engine, an s3transfer with the CRT
-  surface (>= 0.8; crt.md section 6) - and a mismatch there is a bug. The
-  **CRT transfer engine** (`[s3] preferred_transfer_client`) likewise takes
-  parity against "aws's CRT mode" under the same condition (design
-  in [`crt.md`](./crt.md); enforced by the e2e CRT lane). awscrt is not a
-  default dependency but an opt-in extra (`crt`); on an installation without it,
-  only the relevant features fail - this does not count as a mismatch
-  (degradation is covered in transfer.md section 9 / crt.md section 6).
+  SigV4a signing) are subject to this charter whenever the CRT stack is usable,
+  and a mismatch there is a bug; the **CRT transfer engine**
+  (`[s3] preferred_transfer_client`) takes parity against "aws's CRT mode" on
+  the same terms (design in [`crt.md`](./crt.md); enforced by the e2e CRT lane).
+  Where the stack is not usable only the relevant features fail, and that is not
+  a mismatch. What "usable" requires is in
+  [`compatibility.md`](./compatibility.md).
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
@@ -178,6 +121,8 @@ maintaining high functional compatibility (parity).
 written here.
 
 - [`glossary.md`](./glossary.md) - glossary.
+- [`compatibility.md`](./compatibility.md) - which feature needs which
+  `botocore` / `s3transfer` / `awscrt`, and how an unavailable one behaves.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
   callback): the fields, the `src` / `dest` convention, and which operation

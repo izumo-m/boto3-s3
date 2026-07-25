@@ -38,7 +38,7 @@ from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 __all__ = ["TransferConfig"]
 
-# Back-compat (floor boto3 1.28, docs/overview.md section 2): boto3's CRT
+# Back-compat (floor boto3 1.28, docs/compatibility.md): boto3's CRT
 # support added the ``preferred_transfer_client`` constructor parameter only in
 # boto3 ~1.33; the declared floor's base ctor does not accept it. Forwarding it
 # unconditionally raises TypeError on the floor (breaking every cp/mv/sync,

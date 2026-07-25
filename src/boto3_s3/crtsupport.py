@@ -275,7 +275,7 @@ def create_crt_transfer_manager(
         "crt_s3_client": crt_s3_client.crt_client,
         "crt_request_serializer": _crt_serializer,
     }
-    # Back-compat shim (floor s3transfer 0.6.2, docs/overview.md section 2):
+    # Back-compat shim (floor s3transfer 0.6.2, docs/compatibility.md):
     # CRTTransferManager grew its ``config`` kwarg only in s3transfer 0.16.0, so
     # passing it to an older one raises TypeError. boto3 gates this on
     # ``TRANSFER_CONFIG_SUPPORTS_CRT = hasattr(TransferConfig, "UNSET_DEFAULT")``;

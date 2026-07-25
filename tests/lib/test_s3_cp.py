@@ -537,7 +537,7 @@ class TestDownloadRoute:
         # predates the knob entirely and the getattr guard reads that as None
         # - patched here, since the current botocore always carries the
         # attribute. The HEAD must go out without ChecksumMode (the
-        # era-appropriate wire shape, docs/overview.md section 2), not raise.
+        # era-appropriate wire shape, docs/compatibility.md), not raise.
         client, calls = make_recording_client([head_response(), get_response()])
         monkeypatch.setattr(client.meta.config, "response_checksum_validation", None, raising=False)
         S3().cp(

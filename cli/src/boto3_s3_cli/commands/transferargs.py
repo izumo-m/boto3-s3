@@ -546,7 +546,7 @@ def validate_no_overwrite_supported(
     conditional-write parameter for this route - the upload/copy parallel of the
     streaming rejection. Only ``locals3`` (upload) and ``s3s3`` (copy) send
     ``IfNoneMatch``; ``s3local`` (download) and ``sync`` never do, so they stay
-    usable on an old botocore (back-compat floor, docs/overview.md section 2)."""
+    usable on an old botocore (back-compat floor, docs/compatibility.md)."""
     if not no_overwrite or paths_type not in ("locals3", "s3s3"):
         return
     reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")

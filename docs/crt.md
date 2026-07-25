@@ -277,17 +277,17 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   faithful silent classic fallback. The output and rc are identical for both
   engines (proven), so no observable charter is broken - only throughput is
   affected.
-- **fio_options**: absent from every released pip s3transfer (still so at
-  0.19.0); only parsed and validated, with no effect (forward-compatible via the
-  signature check).
-- **TransferConfig on old s3transfer**: `CRTTransferManager` grew its `config`
-  kwarg only in s3transfer 0.16.0, but the floor is 0.6.2 (overview.md section
-  2). Below 0.16 the config cannot reach the manager, so boto3-s3 drops it and
-  logs boto3's own warning (`configured values will be ignored`),
-  boto3-faithfully. The CRT client itself still gets `part_size` /
-  `target_throughput` (passed to `create_s3_crt_client` directly), so only the
-  manager-level config is lost. The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT`
-  = `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
+- **fio_options**: unavailable on any pip s3transfer
+  ([`compatibility.md`](./compatibility.md)). `_add_fio_options` probes
+  `create_s3_crt_client`'s signature rather than a version, so the keys start
+  flowing the moment the parameter ships upstream.
+- **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
+  cannot reach `CRTTransferManager` and is dropped with boto3's own warning
+  (`configured values will be ignored`), boto3-faithfully; the CRT client itself
+  still gets `part_size` / `target_throughput`, passed to
+  `create_s3_crt_client` directly ([`compatibility.md`](./compatibility.md) for
+  what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
+  `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
   past 0.16.
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible

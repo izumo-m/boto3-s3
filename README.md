@@ -471,7 +471,7 @@ set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
   paginated bucket filters, newer `mb` tags / account-regional namespace
   fields, S3 object annotations, `copy_props="all"`, and source-ETag response
   extras. CRT features need the `crt` extra. See
-  [`docs/overview.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/overview.md#2-supported-scope)
+  [`docs/compatibility.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/compatibility.md)
   for the authoritative version requirements and degradation behavior.
 
 ## In short

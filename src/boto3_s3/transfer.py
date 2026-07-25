@@ -268,7 +268,7 @@ def _allow_if_none_match() -> None:
         copy_cls.COMPLETE_MULTIPART_ARGS.append("IfNoneMatch")
 
 
-# Back-compat (supported floor botocore 1.31, docs/overview.md section 2):
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md):
 # IfNoneMatch reached the S3 write ops only in later botocore - PutObject and
 # CompleteMultipartUpload in 1.35.16, CopyObject in 1.41.0. Below those,
 # --no-overwrite is rejected up front (here for the library, and in the CLI for
@@ -318,7 +318,7 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
     return None
 
 
-# Feature-level degradation (docs/overview.md section 2): S3 object
+# Feature-level degradation (docs/compatibility.md): S3 object
 # annotations reached botocore's S3 model in 1.43.31 and upstream s3transfer's
 # copy handling in 0.19. Both are introspected by member presence
 # (version-agnostic); the versions below only name the hint in the refusal
@@ -1900,7 +1900,7 @@ class _ExcludeAnnotationDirective:
     - a botocore whose CopyObject lacks ``AnnotationDirective`` cannot send
       the parameter at all - the injection is skipped silently and copies
       behave like pre-annotations aws-cli (feature-level degradation,
-      docs/overview.md section 2);
+      docs/compatibility.md);
     - on a multipart copy, an s3transfer without the directive in its create
       blacklist would forward it to CreateMultipartUpload (no such member)
       and fail - the multipart path does not carry annotations anyway, so the

@@ -207,7 +207,7 @@ chain:
   on the CopyObject so annotations are *not* carried (the server default is
   COPY). Two member-presence guards adapt what aws-cli does unconditionally:
   a botocore whose CopyObject lacks the parameter skips the injection
-  silently (feature-level degradation, overview.md section 2 - copies behave
+  silently (feature-level degradation, compatibility.md - copies behave
   like pre-annotations aws-cli), and a multipart copy skips it unless
   s3transfer blacklists the directive from CreateMultipartUpload (an older
   s3transfer would forward it there and fail; the multipart path carries no
@@ -372,7 +372,7 @@ dest-existence check for download. We ported the same three faces:
   **idempotently appends** it to `ALLOWED_UPLOAD_ARGS` / `ALLOWED_COPY_ARGS` /
   the multipart blocklist / the COMPLETE list (harmless even if a future
   s3transfer adds native support).
-- **SDK floor gate** (the overview.md section 2 degradation): the write op's S3
+- **SDK floor gate** (the compatibility.md degradation): the write op's S3
   model must define the `IfNoneMatch` input member (PutObject for uploads -
   CompleteMultipartUpload ships in the same botocore generation, so only
   PutObject is probed - and CopyObject for copies), which older botocore lacks - and an **upload** additionally needs s3transfer's
