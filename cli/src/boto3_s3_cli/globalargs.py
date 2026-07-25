@@ -144,8 +144,8 @@ class _VersionAction(argparse.Action):
 def add_common_arguments(
     parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
 ) -> None:
-    """Register the connection/auth (effective) and presentation globals
-    (ignored, except the auto-prompt pair the dispatcher reads off raw argv).
+    """Register the effective globals (connection/auth and the auto-prompt pair
+    the dispatcher reads off raw argv) and the ignored presentation globals.
 
     Added to BOTH the top-level parser (with real defaults) and each subparser
     (``suppress_defaults=True``). Suppressing the subparser-side defaults stops an
@@ -224,7 +224,7 @@ def add_common_arguments(
     ignored.add_argument(
         "--query",
         default=value,
-        help="ignored: there is no structured output to filter",
+        help="validated, then ignored: there is no structured output to filter",
     )
     ignored.add_argument(
         "--no-paginate",
@@ -250,12 +250,6 @@ def add_common_arguments(
         default=value,
         help="validated, then ignored: errors always use the default format",
     )
-    ignored.add_argument(
-        "--no-cli-auto-prompt",
-        action="store_true",
-        default=flag,
-        help="do not prompt interactively (read from argv before parsing)",
-    )
     # Recognized for parity; consumed by no command - aws s3's own blob
     # argument (cp --sse-c-key) ignores it too (verbatim pass-through with
     # fileb:// file loading; option-handling section 2).
@@ -275,12 +269,19 @@ def add_common_arguments(
         help="show the boto3-s3-cli, boto3-s3, Python and SDK versions, then exit",
     )
 
-    # Opt-in interactive UI (section 3, the "autoprompt" extra); the dispatcher
-    # resolves it from raw argv before parsing. Listed in --help like its
-    # --no-cli-auto-prompt counterpart (aws shows both).
+    # Opt-in interactive UI (section 3, the "autoprompt" extra). Both are
+    # resolved from raw argv before parsing, so they are effective options, not
+    # members of the ignored group; argparse still has to declare them so they
+    # parse and reach --help (aws shows both).
     parser.add_argument(
         "--cli-auto-prompt",
         action="store_true",
         default=flag,
         help="prompt interactively for arguments (needs the autoprompt extra)",
+    )
+    parser.add_argument(
+        "--no-cli-auto-prompt",
+        action="store_true",
+        default=flag,
+        help="do not prompt interactively, whatever the environment or profile asks for",
     )
