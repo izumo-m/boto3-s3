@@ -82,9 +82,8 @@ s3.sync(src, dest, update_filter=AwsCliComparison(exact_timestamps=True))
 so any difference in timestamp counts. If you set both, `exact_timestamps`
 wins — matching `aws s3`.
 
-They live on the strategy rather than on `sync` because a content strategy
-replaces the judgment wholesale, leaving nothing for them to tune. The
-combination is therefore not expressible.
+Both belong to the default rule only. A content strategy replaces that rule
+entirely, so it takes neither.
 
 ## 3. `filter` narrows what participates
 

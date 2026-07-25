@@ -9,7 +9,7 @@ FileFilter = Callable[[FileInfo], bool]     # True = act on it, False = skip
 ```
 
 A skipped item is skipped silently — no record reaches `on_result`, matching
-`aws s3`. `ls` does not apply `filter=`.
+`aws s3`. `ls` takes no `filter=` argument.
 
 ## 1. Glob patterns
 
@@ -42,8 +42,10 @@ the root the operation is enumerating. For a recursive `rm s3://bucket/logs/`,
 an object at `logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*`
 matches it and `logs/*` does not.
 
-An **absolute** pattern matches the entry's full key instead. Since an S3 key
-normally has no leading `/`, an absolute pattern is inert against S3 entries;
+A pattern is **absolute** when it starts with `/` — on Windows, a drive letter
+or a leading `\` counts too. An absolute pattern matches the entry's full key
+instead. Since an S3 key normally has no leading `/`, one is inert against S3
+entries;
 against local paths it works as written. This is what allows one `filter` to
 prune the two sides of a `sync` asymmetrically — a pattern rooted at the local
 source matches there and not on the S3 side. Relative patterns are symmetric
@@ -103,10 +105,7 @@ m.included("foo.log")   # False
 ```
 
 `Matcher.included(compare_key, full_key=None)` applies the same last-match-wins
-rule. `full_key` is only consulted by absolute patterns; a list containing none
-ignores it. The module depends on nothing outside the standard library, and
-everything in its `__all__` is public — `compile`, `GlobPattern`, `GlobFilter`,
-`PatternKind`, the `Matcher` and `SetMatcher` protocols, the matcher classes,
-`compile_set_matcher` and `is_anchored`. Only `GlobFilter` and `GlobPattern` are
-re-exported at the package root; reach the rest through
-`boto3_s3.globsieve`.
+rule; `full_key` is only consulted by absolute patterns. `GlobFilter` and
+`GlobPattern` are also available at the package root — everything else, the
+matcher classes and `PatternKind` / `compile_set_matcher` / `is_anchored` among
+them, comes from `boto3_s3.globsieve` itself.

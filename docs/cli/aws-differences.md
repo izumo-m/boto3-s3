@@ -39,9 +39,9 @@ are visible, or make no difference to the result.
   at or above the multipart threshold, `aws` recombines a per-range checksum and
   fails the download if the assembled object does not match. That check lives in
   a variant of s3transfer that is not published, so a corruption that got past
-  TLS and TCP integrity would be reported here as a success. Every neighbouring
-  path is unaffected: non-ranged downloads are verified by botocore on both
-  sides, and the CRT engine's own validation is identical by construction.
+  TLS and TCP integrity would be reported here as a success. Nothing else is
+  affected: downloads below the threshold are verified by botocore on both
+  tools, and the CRT engine does the same validation `aws` does.
 - **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
   integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
   neither changes the result or the exit code. An explicit

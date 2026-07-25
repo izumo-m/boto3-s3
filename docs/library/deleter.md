@@ -96,9 +96,9 @@ batch, both records share a single slot.
 
 ## 4. Differences from `aws s3`
 
-`aws s3` deletes one key per request. This batches them, which is
-observationally equivalent for ordinary keys — deleting a key that does not
-exist succeeds on both sides, and per-key success and failure are preserved.
+`aws s3` deletes one key per request. This batches them, and for ordinary keys
+you cannot tell the difference: deleting a key that does not exist succeeds
+either way, and per-key success and failure are preserved.
 
 Two consequences of batching:
 

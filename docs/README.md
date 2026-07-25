@@ -2,14 +2,15 @@
 
 Every `aws s3` operation, as a Python library and as a drop-in command.
 
-- **`boto3-s3`** — the library. Run the operations from Python, in your own
-  process, with your own boto3 clients. Results come back as objects instead of
-  console output to parse.
-- **`boto3-s3-cli`** — the command. `boto3-s3` is a command-for-command
-  replacement for `aws s3`: the same invocation behaves the same way.
+- **`boto3-s3`** — the package for the library. Run the operations from Python,
+  in your own process, with your own boto3 clients. Results come back as objects
+  instead of console output to parse.
+- **`boto3-s3-cli`** — the package that installs the **`boto3-s3` command**, a
+  command-for-command replacement for `aws s3`: the same invocation behaves the
+  same way.
 
-Either works on its own. The command is a layer on top of the library, so
-using it does not start a subprocess.
+Either works on its own. The command is built on the library, not the other way
+round, so the library never shells out and needs no command on `PATH`.
 
 ## The command
 

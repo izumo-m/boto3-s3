@@ -67,6 +67,4 @@ every operation shares.
 - [`compatibility.md`](../compatibility.md) — which feature needs which
   `botocore` / `s3transfer` / `awscrt`.
 
-The [README](../../README.md) introduces the project as a whole, and the design
-documents indexed in [`overview.md`](../../design/overview.md) section 4 explain
-how the pieces are built.
+The [README](../../README.md) introduces the project as a whole.

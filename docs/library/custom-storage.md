@@ -53,7 +53,7 @@ it if you do not.
 ### Filtering
 
 `options.filter` is applied by `scan()` as a safety net, so forgetting it in
-`scan_pages` cannot leak excluded entries into a `sync --delete` and destroy
+`scan_pages` cannot leak excluded entries into a `sync` with `delete_filter=True` and destroy
 data. If your backend can filter at its source, apply it in `scan_pages` and set
 `scan_pages_filters = True` to skip the redundant second pass.
 
@@ -73,9 +73,9 @@ part-way through.
 | `GET_FILEINFO` | `get_fileinfo` | a single-entry source, or an existence check |
 | `SCAN` | `scan_pages` | a recursive **source** |
 | `SORTABLE_SCAN` | a byte-ordered recursive listing | **any** side of a `sync` |
-| `DELETE` | `delete` | an `mv` source, or a `sync --delete` destination |
+| `DELETE` | `delete` | an `mv` source, or a `sync` destination with `delete_filter=True` |
 
-The reading flags form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
+The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. Declaring the strongest one promises the weaker methods too.
 
 **`SORTABLE_SCAN` is not optional for `sync`.** Its pairing walks both listings

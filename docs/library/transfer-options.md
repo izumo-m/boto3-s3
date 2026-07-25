@@ -26,7 +26,8 @@ Grouped by what they control:
 - **Integrity and write control** — `checksum_algorithm`, `checksum_mode`,
   `no_overwrite`, `case_conflict`
 - **Archived objects** — `force_glacier_transfer`, `ignore_glacier_warnings`
-- **Library-only** — `annotation_copy_mode`
+- **Library-only** — `annotation_copy_mode`, and `cp`'s `expected_size`, a size
+  hint for uploading from a stream ([`streams.md`](./streams.md))
 
 An option that does not apply to the direction being run is simply ignored
 rather than rejected — passing `acl` on a download changes nothing. The
@@ -89,10 +90,14 @@ best-effort basis and the item is reported as failed. There is one corner where
 that cleanup itself fails: the item is then reported **successful** with the
 destination left carrying no tags, which is `aws s3`'s behavior as well.
 
-`annotation_copy_mode` tunes how a multipart copy under `copy_props="all"`
-stages annotations — in memory by default, matching the command's failure
-timing; a temporary file, or deferred reads for lower overhead. The `boto3-s3`
-command deliberately exposes no flag for it.
+`annotation_copy_mode` chooses how a multipart copy under `copy_props="all"`
+stages the source annotations:
+
+| value | what it does |
+| --- | --- |
+| `AnnotationCopyMode.PRELOAD_MEMORY` | the default — reads every payload into memory before the copy starts |
+| `AnnotationCopyMode.PRELOAD_TEMPFILE` | same timing, but stages the payloads in a temporary file |
+| `AnnotationCopyMode.DEFERRED` | reads them as the copy proceeds, for the lowest overhead |
 
 ## 4. Archived objects
 
@@ -108,8 +113,15 @@ does not appear in a listing, and a recursive run decides from the listing, so
 ## 5. Case conflicts
 
 On a case-insensitive destination — Windows, or a macOS volume — two keys
-differing only in case collide. `case_conflict` chooses what happens: `ignore`
-(the default), `skip`, `warn`, or `error`, which fails the run.
+differing only in case collide. `case_conflict` chooses what a recursive
+download does about it:
+
+| value | what happens |
+| --- | --- |
+| `ignore` | the default — no check runs, so the later object overwrites the earlier file |
+| `skip` | the colliding entry is skipped, with a warning |
+| `warn` | it is transferred anyway, with a warning |
+| `error` | the run fails |
 
 ## 6. Warnings are counted separately from failures
 

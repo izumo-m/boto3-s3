@@ -13,9 +13,7 @@ from boto3_s3.etagcompare import EtagComparison
 from boto3_s3.checksumcompare import ChecksumComparison
 ```
 
-They **replace** the default rather than compose with it. Combining them with
-size + mtime would defeat the point: the timestamp rule would still copy
-everything it copies today, and the content check would only ever add more.
+They **replace** the default rule; they do not compose with it.
 
 Both apply to entries present on both sides. New entries are still created and
 orphans still deleted by their own filters.

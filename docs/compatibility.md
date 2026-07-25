@@ -11,38 +11,32 @@ print(boto3.__version__)
 ```
 
 **The short answer:** `boto3` 1.43.31 or newer has everything below. Four of the
-entries additionally need the `crt` extra, and one waits on an s3transfer
-release that has not happened yet.
-
-boto3-s3 supports SDKs going back roughly three years, and the installed one
-decides what is available. Rather than emulate newer AWS behavior on an older
-SDK, a feature that depends on a newer S3 model is simply unavailable.
+entries additionally need the `crt` extra.
 
 **Upgrading `boto3` is the one move that matters.** It pins `botocore` and
 `s3transfer` to matching releases, so its version settles all three; raising
-either of the other two on its own is not a supported move. boto3-s3 declares
-only floors and no ceiling, and detects each capability instead of comparing
-version numbers, so a newer SDK starts being used with no change here.
+either of the other two on its own is not a supported move. There is no upper
+bound, so a newer `boto3` is picked up as it is.
 
 ## 1. Features by required version
 
 | Feature | Needs |
 | --- | --- |
 | the CRT transfer engine | boto3 >= 1.29.7, plus the `crt` extra |
-| S3 Express directory buckets (`--x-s3`) | boto3 >= 1.33.2 |
+| S3 Express directory buckets (a bucket name ending `--x-s3`) | boto3 >= 1.33.2 |
 | `ls --bucket-name-prefix` / `--bucket-region` | boto3 >= 1.35.42 |
 | `no_overwrite` / `--no-overwrite` on upload | boto3 >= 1.36.0 |
 | `checksum_algorithm` = `CRC64NVME` | boto3 >= 1.36.0, plus the `crt` extra |
 | `mb --tags` (`CreateBucketConfiguration.Tags`) | boto3 >= 1.39.2 |
 | `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.41.0 |
 | `[s3]` tuning reaching the CRT transfer manager | boto3 >= 1.42.0 |
-| the `-an` namespace bucket's `BucketNamespace` | boto3 >= 1.42.67 |
+| `mb` on an account-regional bucket (a name ending `-an`) | boto3 >= 1.42.67 |
 | `checksum_algorithm` = `MD5` / `SHA512` | boto3 >= 1.42.94 |
 | `checksum_algorithm` = the `XXHASH` family | boto3 >= 1.42.94, plus the `crt` extra |
 | S3 object annotations (GA 2026-06) | boto3 >= 1.43.31 |
 | `copy_props=ALL` / `--copy-props all` | boto3 >= 1.43.31 |
 | `checksum_algorithm` = `CRC32C` | any supported boto3, plus the `crt` extra |
-| the source ETag in `OpResult.extra_info` | an s3transfer release that exposes it - none so far |
+| the source ETag in `OpResult.extra_info` on a copy or download | boto3 >= 1.43.31 |
 
 `CRC32`, `SHA1` and `SHA256` are available on every supported installation and
 are not listed.
@@ -51,21 +45,17 @@ are not listed.
 
 `awscrt` is not a default dependency but an opt-in extra (`crt`). It gates two
 independent things: the CRT transfer engine, and the checksum algorithms
-botocore can only compute through it - **`CRC32C`, `CRC64NVME`, and the
+botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 `XXHASH` family**. The classic engine needs it for those too. `CRC32`, `SHA1`,
 `SHA256` and `SHA512` are pure Python and never need it.
 
 Missing awscrt fails only the features that need it, and nothing else changes.
 The `boto3-s3` command reports 253 for those; `aws` v2 bundles awscrt, so the
-situation cannot arise there, which
-[`exit-codes.md`](./cli/exit-codes.md) records as a deliberate difference.
+situation cannot arise there (see [`exit-codes.md`](./cli/exit-codes.md)).
 
-## 3. Not a version gap: the aws-cli s3transfer fork
+## 3. Three `[s3]` keys that never take effect
 
-The `[s3]` file-I/O keys `should_stream` / `disk_throughput` / `direct_io` are
-parsed and validated but have no effect, because no released pip `s3transfer`
-takes them. aws-cli v2 is a self-contained distribution bundling a fork that
-does, so `aws` honors these three where a pip install cannot. No newer pip
-release fixes this; it needs the parameter to ship upstream, after which the
-keys start working here with no change.
+`should_stream`, `disk_throughput` and `direct_io` are accepted and validated
+but do nothing, at every `boto3` version. `aws` honors them because `aws` v2
+ships its own build of `s3transfer`; a pip install cannot.
 

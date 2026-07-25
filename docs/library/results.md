@@ -76,21 +76,21 @@ if isinstance(storage, S3Storage) and info is not None:
 ```
 
 Narrow with `isinstance` first: the backend is not always S3 — an upload's
-source is local, and `sync --delete` onto a local destination deletes there. And
-pick a side that still exists: a delete record's `src_info` names the object the
-run just removed, so a HEAD on it can only 404.
+source is local, and a `sync` with `delete_filter=True` onto a local destination
+deletes there. And pick a side that still exists: a delete record's `src_info`
+names the object the run just removed, so a HEAD on it can only 404.
 
 A streaming `cp` lists nothing, so both `src_info` and `dest_info` are `None`
 and the stream endpoint displays as `-`.
 
 ## 3. Response metadata
 
-`extra_info` carries the affected object's S3 response metadata. By default that
-is just the ETag, in S3's raw quoted form:
+`extra_info` is a mapping carrying the affected object's S3 response metadata.
+By default it holds a single `"ETag"` key, in S3's raw quoted form:
 
 - **copy** and **download** — the source object's ETag.
-- **upload** — `None`. `s3transfer` discards the write response, so the written
-  object's ETag is not available by default.
+- **upload** — `None`. Pass `capture_response=True` when you need the written
+  object's ETag.
 - **delete** and advisories — `None`.
 
 Pass **`capture_response=True`** to `cp` / `mv` / `rm` / `sync` to get the full
@@ -100,10 +100,9 @@ between two S3 locations carries both `"write"` and `"delete"`. Failed and
 cancelled records keep `extra_info=None`.
 
 Two things to know before turning it on. It **forces the classic transfer
-engine**, because the capture rides botocore's event stream and the CRT data
-plane bypasses it. And it registers handlers on the transfer's client for the
-duration, so do not run a capturing operation with a client that is being used
-concurrently elsewhere.
+engine**, so a run that would have used the CRT engine no longer does. And it
+attaches to the transfer's client for the duration, so do not run a capturing
+operation with a client that is in use elsewhere at the same time.
 
 ## 4. Progress and dry runs
 

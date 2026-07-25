@@ -11,15 +11,17 @@ script that already branches on `aws s3`'s codes keeps working unchanged.
 | 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
 | 130 | Interrupted with Ctrl-C before the operation started. |
-| 252 | The command line was rejected. Nothing was sent. |
+| 252 | The command line was rejected. |
 | 253 | The environment cannot supply what the command needs. |
 | 254 | A request reached S3 and S3 returned an error. |
 | 255 | Any other error. |
 
 ### 0 — success
 
-`--help` and `--version` exit 0 as well, as does a run whose output pipe was
-closed early by the reader (`| head`).
+`--help` and `--version` exit 0 as well. Piping into a reader that closes early
+(`ls | head`) is a special case: the command itself succeeds, but the process
+usually ends with 120, once Python fails to flush to the closed pipe. `aws` does
+the same, so do not branch on it.
 
 ### 1 — the operation failed after it started
 
@@ -52,7 +54,7 @@ interactive prompt's own Ctrl-C and end-of-input also exit 130.
 
 An unknown option, an invalid choice or value, a path that is not a usable S3
 URI, or an option that does not apply to the direction being run (for example
-`--checksum-algorithm` on a download). The command never contacted S3. The
+`--checksum-algorithm` on a download). No transfer request was sent. The
 message uses the same envelope as `aws`:
 `An error occurred (ParamValidation): <message>`.
 
@@ -98,8 +100,8 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the client is built before the path is checked |
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | numbers are converted before the path is checked |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream, 0 otherwise | the value is read only on the streaming route |
-| `rb --force` whose object deletion fails | 255 | |
-| `mv --validate-same-s3-paths` whose lookup fails | 254 | that lookup reaches S3 before the move begins |
+| `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
+| `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 
 All of this matches `aws s3`, including the orderings above.
 

@@ -28,12 +28,17 @@ this command does from the same environment.
 
 ## 2. Environment variables
 
-The variables read are `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`,
-`AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`, `AWS_MAX_ATTEMPTS`,
-`AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`, and
-`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS`.
+Every standard AWS variable works, because credentials and endpoints resolve
+through botocore exactly as they do for `aws` — `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SHARED_CREDENTIALS_FILE`,
+`AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL_S3` and the rest.
 
-Two parse loosely rather than strictly.
+On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
+`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING` and
+`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
+
+Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
 `on-partial` — anything else counts as off.
@@ -75,12 +80,18 @@ the only way to set it, as in `aws s3`.
 - `crt` — the AWS Common Runtime engine. Requires the `crt` extra **and** an
   `s3transfer` new enough to expose it; if either is missing the command fails
   rather than falling back silently.
-- `auto` — CRT when the machine is one it is optimized for, otherwise classic.
-  An `s3transfer` without CRT support resolves to classic quietly here.
+- `auto` — CRT when the `crt` extra is installed, your `s3transfer` supports it,
+  and the machine is one the CRT is optimized for. Otherwise classic, and always
+  quietly. Only one process per host drives the CRT engine at a time, so a
+  concurrent run also falls back.
 
 S3-to-S3 copies always use the classic engine, whatever this is set to.
 Which features need which versions is in
 [`compatibility.md`](../compatibility.md).
+
+To see which engine a run actually used, pass `--debug`. Set
+`preferred_transfer_client = crt` when you need to be sure: that form fails
+rather than falling back.
 
 ## 4. Reading a value from a file
 

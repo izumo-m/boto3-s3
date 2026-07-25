@@ -11,10 +11,10 @@ It takes the same arguments and global options, reads the same `~/.aws`
 configuration, and returns the same exit codes. In most cases an existing script
 works by replacing the `aws s3` prefix with `boto3-s3`.
 
-It runs on your own Python interpreter and reuses an installed boto3 rather than
-bundling a runtime, which is what makes it small enough to drop into a Lambda
-deployment package. See the package README for the size and startup
-measurements.
+It runs on your own Python interpreter and reuses your installed boto3, so it is
+small enough to drop into a Lambda deployment package. The
+[package page](https://pypi.org/project/boto3-s3-cli/) carries the size and
+startup measurements.
 
 ## 1. Installing
 
@@ -30,12 +30,11 @@ pip install "boto3-s3-cli[crt]"          # the AWS Common Runtime transfer engin
 pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive completion
 ```
 
-The `crt` extra covers two independent things: it enables the CRT transfer
-engine, and it is what lets the classic engine compute the CRT-family checksum
-algorithms (`CRC64NVME`, `CRC32C`, the `XXHASH` family). Installing it also
-changes the default engine selection, because the default
-`preferred_transfer_client = auto` switches to CRT on a host the CRT is tuned
-for.
+The `crt` extra does two things: it enables the CRT transfer engine, and it lets
+the classic engine compute the CRT-family checksum algorithms (`CRC64NVME`,
+`CRC32C`, the `XXHASH` family). Installing it therefore also changes which
+engine runs by default, since `preferred_transfer_client = auto` can then
+resolve to CRT.
 
 ## 2. Replacing `aws s3`
 

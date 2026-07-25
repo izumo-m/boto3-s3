@@ -84,10 +84,9 @@ them — there is no per-call `page_size=` argument.
 
 ## 3. Running operations across threads
 
-The `S3` object's own state is safe to share. Its clients are not, on two
-counts: building a client is not safe to do concurrently (boto3's session
-construction is not thread-safe), and `s3transfer`'s per-transfer setup is not
-safe on a client shared by concurrent operations.
+The `S3` object's own state is safe to share. Its clients are not: neither
+building a client concurrently nor sharing one across concurrent operations is
+safe, and both limits come from boto3 and `s3transfer` rather than from here.
 
 So: **build the clients sequentially, up front, then give each concurrent
 operation its own** through `S3Storage`.
@@ -155,8 +154,10 @@ transfer, with the other side always S3**.
 
 ## 6. Reading the AWS config file
 
-Operations never read `~/.aws/config` on their own — there is no hidden
-dependence on ambient configuration. When you want a value from it, ask:
+Operations never read the `[s3]` tuning section of `~/.aws/config` on their own:
+transfer settings come from arguments, never from ambient configuration.
+Credentials, region and profile still resolve through boto3's usual chain, which
+does read the file. When you want a value from it yourself, ask:
 
 ```python
 cfg = s3.aws_config()

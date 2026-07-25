@@ -13,8 +13,9 @@ except Boto3S3Error as exc:
     ...
 ```
 
-Catching the root is a genuine catch-all: nothing raises it directly for a known
-failure, so every real error is one of the categories below.
+Catching the root is a genuine catch-all. Nearly every failure arrives as one of
+the categories below; the base class itself appears only for a per-key failure
+inside a batched delete whose S3 error code matches no category.
 
 ## 1. The hierarchy
 
@@ -50,16 +51,16 @@ Two things are stable across releases: **the class** and the **structured
 attributes**.
 
 Every `Boto3S3Error` carries `operation`, `bucket` and `key`. `BatchError` adds
-its counters. Message strings are **display only** — they track `aws s3`'s
-wording and change whenever parity requires it, so branch on the class and read
-the attributes, and never parse `str(exc)`.
+its counters and leaves `bucket` and `key` empty — it stands for a whole run
+rather than one entry. Message strings are **display only** — they track
+`aws s3`'s wording and change whenever parity requires it, so branch on the
+class and read the attributes, and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
-rather than a gap: it means no single subcommand was in scope, which is the case
-during client construction and in the shared listing path that every recursive
-scan rides. And `key` names the failing entry in whichever address space it came
-from, so a locally-originating error puts a filesystem path there, with no
-`bucket`.
+rather than a gap: it means no single operation was in scope — while a client is
+being built, or while a recursive run is listing entries. And `key` names the
+failing entry in whichever address space it came from, so a locally-originating
+error puts a filesystem path there, with no `bucket`.
 
 ### Reaching the original exception
 
@@ -90,8 +91,8 @@ above, 5xx to `TransportError`, other 4xx to `ValidationError`.
 
 ## 4. When a batch partly fails
 
-`cp -r` / `mv -r` / `rm -r` / `sync` **attempt every item**. If any of them
-failed, the call raises `BatchError` once, at the end.
+`cp` / `mv` / `rm` with `recursive=True`, and `sync`, **attempt every item**. If
+any of them failed, the call raises `BatchError` once, at the end.
 
 ```python
 from boto3_s3 import BatchError

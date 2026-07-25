@@ -11,9 +11,11 @@ set_stream_logger("botocore")           # masked
 set_stream_logger("botocore", mask_secrets=False)   # not masked
 ```
 
-The first three arguments are boto3's, with the same defaults — the same format
-string and `sys.stderr`. The extra arguments are keyword-only and come after, so
-existing calls port over unchanged. Masking is on unless you turn it off.
+The first three arguments are boto3's — `name`, `level`, `format_string` — with
+the same format string and `sys.stderr`. One default differs: `name` is
+`"boto3_s3"` here, where boto3's is `"boto3"`, so pass the logger you mean. The
+extra arguments are keyword-only and come after. Masking is on unless you turn
+it off.
 
 Neither `boto3` nor `aws s3` masks anything; this is an addition, not a parity
 feature.
@@ -24,9 +26,8 @@ feature.
 `set_stream_logger` installs, and the one the `boto3-s3` command installs for
 `--debug`. Everything that handler writes is redacted.
 
-**It is not a process-wide guarantee.** Python delivers each log record to every
-handler on the chain independently, and a filter on one handler only rewrites
-that handler's copy. So:
+**It is not a process-wide guarantee.** Masking applies to that handler's output
+only, so:
 
 - A handler **other code attached** to `boto3` / `botocore` / `s3transfer`
   formats the record itself, unmasked. Nothing here can reach it.
