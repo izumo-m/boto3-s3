@@ -86,7 +86,7 @@ them — there is no per-call `page_size=` argument.
 
 The `S3` object's own state is safe to share. Its clients are not: neither
 building a client concurrently nor sharing one across concurrent operations is
-safe, and both limits come from boto3 and `s3transfer` rather than from here.
+safe.
 
 So: **build the clients sequentially, up front, then give each concurrent
 operation its own** through `S3Storage`.

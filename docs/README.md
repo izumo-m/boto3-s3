@@ -23,11 +23,6 @@ round, so the library never shells out and needs no command on `PATH`.
 - [`cli/configuration.md`](./cli/configuration.md) — the configuration files,
   environment variables and `[s3]` tuning keys the command reads.
 
-## Both packages
-
-- [`compatibility.md`](./compatibility.md) — which feature needs which
-  `botocore` / `s3transfer` / `awscrt`, and how an unavailable one behaves.
-
 ## The library
 
 [`library/README.md`](./library/README.md) — installing `boto3-s3`, the shape of
@@ -55,6 +50,11 @@ the API, and where to look.
   that can be one side of a transfer.
 - [`library/logging.md`](./library/logging.md) — debug logging, and what
   credential masking does and does not guarantee.
+
+## Both packages
+
+- [`compatibility.md`](./compatibility.md) — which `boto3` release each feature
+  needs, and which ones also need the `crt` extra.
 
 ---
 

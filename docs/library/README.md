@@ -64,7 +64,7 @@ every operation shares.
 - [`custom-storage.md`](./custom-storage.md) — using a `Storage` as one side of
   a transfer.
 - [`logging.md`](./logging.md) — debug output and credential masking.
-- [`compatibility.md`](../compatibility.md) — which feature needs which
-  `botocore` / `s3transfer` / `awscrt`.
+- [`compatibility.md`](../compatibility.md) — which `boto3` release each feature
+  needs.
 
 The [README](../../README.md) introduces the project as a whole.
