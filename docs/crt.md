@@ -155,10 +155,10 @@ also read as `'auto'`) with the same rules as boto3.
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
     sentinel (a faithful version of the same rule as the aws-cli factory)
   - target_throughput = `getattr(config, "target_bandwidth", None)`
-  - the fio family (should_stream / disk_throughput / direct_io): because pip
-    s3transfer 0.17's `create_s3_crt_client` does not accept `fio_options`, they
-    are passed only when the signature check accepts them (forward-compatible;
-    the fork bundled with aws-cli supports them)
+  - the fio family (should_stream / disk_throughput / direct_io): no released
+    pip s3transfer's `create_s3_crt_client` accepts `fio_options` (still absent
+    at 0.19.0), so they are passed only when the signature check accepts them
+    (forward-compatible; the fork bundled with aws-cli supports them)
 
 ### subscriber compatibility
 
@@ -277,8 +277,9 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   faithful silent classic fallback. The output and rc are identical for both
   engines (proven), so no observable charter is broken - only throughput is
   affected.
-- **fio_options**: not in pip s3transfer 0.17; only parsed and validated, with no
-  effect (forward-compatible via the signature check).
+- **fio_options**: absent from every released pip s3transfer (still so at
+  0.19.0); only parsed and validated, with no effect (forward-compatible via the
+  signature check).
 - **TransferConfig on old s3transfer**: `CRTTransferManager` grew its `config`
   kwarg only in s3transfer 0.16.0, but the floor is 0.6.2 (overview.md section
   2). Below 0.16 the config cannot reach the manager, so boto3-s3 drops it and

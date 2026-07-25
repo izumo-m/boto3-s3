@@ -591,10 +591,10 @@ def _explicit_chunksize(config: Any | None) -> int | None:
 def _add_fio_options(kwargs: dict[str, Any], config: Any | None, create_fn: Any) -> None:
     """aws-cli's file-I/O options, applied only once s3transfer can take them.
 
-    pip s3transfer (<=0.17) has no ``fio_options`` parameter; the settings are
-    accepted on the config today and start flowing automatically when the
-    installed s3transfer grows the parameter (aws-cli's bundled fork already
-    has it).
+    No released pip s3transfer has a ``fio_options`` parameter (still absent at
+    0.19.0); the settings are accepted on the config today and start flowing
+    automatically when the installed s3transfer grows the parameter (aws-cli's
+    bundled fork already has it).
     """
     import inspect
 

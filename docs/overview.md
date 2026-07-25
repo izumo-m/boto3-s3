@@ -95,6 +95,20 @@ maintaining high functional compatibility (parity).
   - S3 Express directory buckets (`--x-s3`) need a botocore that models them
     (their endpoint rules and `v4-s3express` signing); the floor predates
     directory buckets, so requests against them fail.
+  - The CRT transfer engine tracks s3transfer's CRT surface, so which `[s3]`
+    tuning actually reaches it depends on the installed version. The engine
+    needs s3transfer >= 0.8.0 at all: below it the CRT lock and credentials
+    surface are absent, so an explicit `preferred_transfer_client = crt` is
+    refused up front (`auto` falls back to classic silently). Between 0.8.0 and
+    0.16.0 the engine runs but `CRTTransferManager` has no `config` kwarg, so
+    manager-level tuning is dropped with boto3's own warning while `part_size`
+    and `target_throughput` still reach the CRT client directly. The file-I/O
+    keys `should_stream` / `disk_throughput` / `direct_io` are parsed and
+    validated but reach no released pip s3transfer, whose
+    `create_s3_crt_client` has no `fio_options` parameter (still absent at
+    0.19.0); aws-cli bundles a fork that has it, so `aws` honors these three
+    where a pip install cannot. They start working with no code change once the
+    parameter ships.
 
   Everything else works at the floor.
 
