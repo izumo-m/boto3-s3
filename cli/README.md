@@ -40,7 +40,9 @@ cp   ls   mb   mv   presign   rb   rm   sync   website
 It takes the `aws s3` arguments and global options, reads the same `~/.aws`
 configuration, and treats an exit-code mismatch as a bug. Existing commands and
 scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
-handling, resulting S3 state, and exit codes are tested against `aws s3`.
+handling, resulting S3 state, and exit codes are tested against `aws s3`. The
+codes a script can branch on are listed in
+[`docs/cli/exit-codes.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/exit-codes.md).
 
 This CLI is the strict compatibility layer over the more permissive Python
 library. It applies aws-compatible path validation, configuration resolution,

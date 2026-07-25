@@ -76,8 +76,8 @@ pip install "boto3-s3[crt]"
 
 Create the `S3` object once — it holds no connection of its own and needs no
 cleanup — then call what you need. Its own state is safe to share, but parallel
-operations require separate, prebuilt clients — see
-[Running operations across threads](#running-operations-across-threads).
+operations need separate, prebuilt clients — see
+[running operations across threads](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/s3-object.md#3-running-operations-across-threads).
 
 ```python
 import boto3_s3
@@ -114,101 +114,37 @@ local-to-local pair is rejected, like `aws s3`.
 
 ## Sync
 
-`sync` is the heart of the library: its default pipeline is designed as an
-in-process replacement for `aws s3 sync`, in every direction:
+`sync` is the heart of the library — an in-process replacement for
+`aws s3 sync`, in every direction, making the same default decisions.
 
 ```python
-s3.sync("./site", "s3://my-bucket/site/")       # upload
-s3.sync("s3://my-bucket/site/", "./site")       # download
+s3.sync("./site", "s3://my-bucket/site/")        # upload
+s3.sync("s3://my-bucket/site/", "./site")        # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
+
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)   # aws's --delete
 ```
 
-Unlike `aws s3 sync`, boto3-s3 can decide updates by content instead of size +
-mtime. Pass `EtagComparison` as the update strategy to copy changed content and
-skip unchanged content even when timestamps differ:
+It asks one question per entry, and each has its own argument: create an entry
+that is new (`create_filter`), overwrite one present on both sides
+(`update_filter`), delete one the source no longer has (`delete_filter`). The
+defaults are exactly `aws s3 sync`, and `create_filter` is a knob aws does not
+expose.
+
+Unlike `aws s3 sync`, updates can be decided by **content** rather than size and
+timestamp — either against S3's ETag or against the checksum S3 already stores:
 
 ```python
-from boto3_s3.etagcompare import EtagComparison
+from boto3_s3.checksumcompare import ChecksumComparison
 
-s3.sync(
-    "./site",
-    "s3://my-bucket/site/",
-    update_filter=EtagComparison(s3),
-)
+s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
 ```
 
-For S3-to-S3 sync this compares the ETags already returned by the listings,
-without reading object bodies. For upload and download it reads the non-S3 side
-and reconstructs its S3-style ETag. When many existing files need that work,
-run the comparison decisions concurrently on a caller-owned thread pool:
+Because it runs in-process, results come back as objects rather than console
+output to parse:
 
 ```python
-from concurrent.futures import ThreadPoolExecutor
-
-from boto3_s3 import ParallelFilter
-
-with ThreadPoolExecutor(max_workers=16, thread_name_prefix="sync-etag") as pool:
-    s3.sync(
-        "./site",
-        "s3://my-bucket/site/",
-        update_filter=ParallelFilter(EtagComparison(s3), executor=pool),
-    )
-```
-
-`ParallelFilter` parallelizes only the update decisions; transfers continue to
-use the transfer engine's own concurrency. Multipart part size and server-side
-encryption affect when ETags are content-comparable; see the
-[ETag comparison details](https://github.com/izumo-m/boto3-s3/blob/main/docs/sync.md#8-etag-content-comparison-etagcomparison-opt-in).
-
-`sync` makes one of three decisions per entry — the same three cases as
-`aws s3 sync`, each with its own filter:
-
-- **`create_filter`** — whether to **create** an entry that is new (in the
-  source, not yet at the destination). `True` (default) creates every new
-  entry; `False` creates none; a predicate creates the entries it returns
-  `True` for. aws always creates — this is the knob aws does not expose.
-- **`update_filter`** — whether to **overwrite** an entry that is present on
-  both sides. `None` (default) decides by size + mtime — the `aws s3 sync`
-  rule, equivalent to `AwsCliComparison()`. `True` always overwrites; `False`
-  never overwrites. A strategy object replaces the default rule:
-  `AwsCliComparison(size_only=True)` or `AwsCliComparison(exact_timestamps=True)`
-  tunes the aws decision, while `EtagComparison(s3)` and
-  `ChecksumComparison(s3, src, dest)` compare content.
-- **`delete_filter`** — whether to **delete** an orphan (at the destination, no
-  longer in the source). `False` (default) keeps every orphan; `True` deletes
-  them all (`aws s3 sync --delete`); a predicate deletes the orphans it returns
-  `True` for. Orphans hidden by `filter` are never deleted, exactly like
-  `aws s3 sync`.
-
-Any of the three filters can be wrapped in `ParallelFilter(fn, executor=pool)`
-to run its per-entry decisions on a caller-supplied thread pool. `filter=` is
-separate from these three: it decides which entries are **visible** at all,
-pruning both sides symmetrically like `--exclude` / `--include`. **`dryrun=True`**
-previews every transfer and deletion without performing it.
-
-```python
-# Full mirror: create new, overwrite changed, delete removed.
-s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
-
-# Update-only mirror: refresh existing files and prune deleted ones,
-# but never publish brand-new files.
-s3.sync("./site", "s3://my-bucket/site/", create_filter=False, delete_filter=True)
-```
-
-The content strategies are opt-in submodule imports —
-`from boto3_s3.etagcompare import EtagComparison` /
-`from boto3_s3.checksumcompare import ChecksumComparison` (and
-`from boto3_s3.awsclicompare import AwsCliComparison` to tune the default).
-`ParallelFilter` imports from `boto3_s3` itself.
-
-Because it runs in-process, sync provides **structured results without parsing
-console output**. `on_result` receives terminal item outcomes as the run
-proceeds, plus any additional warning or notice records. Each result carries a
-`transfer_type` (upload / download / copy / move / delete) and an `outcome`
-(succeeded / failed / warned / skipped / dryrun / cancelled / notice):
-
-```python
-from boto3_s3 import TransferType, OpOutcome
+from boto3_s3 import OpOutcome, TransferType
 
 uploaded = []
 
@@ -220,264 +156,93 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 print(f"{len(uploaded)} files uploaded")
 ```
 
+See the [sync guide](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync.md)
+for the three decisions and the default rule's one asymmetry, and
+[deciding by content](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync-content.md)
+for choosing between the two strategies and running their decisions in
+parallel.
+
 ## Operations
 
 `S3` is the entry point: create one with `s3 = S3()`, then call the methods
 below — each mirrors an `aws s3` subcommand.
 
-| Method | `aws s3` | What it does |
-| --- | --- | --- |
-| `ls(target="s3://", *, on_entry, recursive, request_payer, bucket_name_prefix, bucket_region, cancel_token)` | `ls` | List objects and common prefixes under an S3 target — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_entry`. The listing page size is the `S3Storage`'s own `page_size` config. |
-| `cp(src, dest, *, recursive, filter, dryrun, …, **options)` | `cp` | Copy bytes (upload / download / S3-to-S3 copy). `src` / `dest` may be a path/URI or a stream wrapped in `IOStorage` / `StdioStorage`. |
-| `mv(src, dest, *, recursive, …, **options)` | `mv` | `cp`, then delete each source once its copy succeeds. |
-| `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …, **options)` | `sync` | Recursively synchronize `src` into `dest`. |
-| `rm(target, *, recursive, filter, dryrun, request_payer, …)` | `rm` | Delete objects (a single key, a recursive prefix, or the folder-marker sweep). |
-| `mb(target, *, tags)` | `mb` | Create the bucket of `target`. |
-| `rb(target)` | `rb` | Delete the (empty) bucket of `target`. |
-| `presign(target, *, expires_in=3600, method="get_object")` | `presign` | Return a presigned URL. No request is sent. |
-| `website(target, *, index_document, error_document)` | `website` | Set the bucket website configuration. |
+| Method | What it does |
+| --- | --- |
+| `ls(target, *, on_entry, recursive, …)` | List objects and common prefixes — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_entry`. |
+| `cp(src, dest, *, recursive, filter, dryrun, …)` | Copy bytes: upload, download, or S3-to-S3. Either side may be a stream. |
+| `mv(src, dest, *, recursive, …)` | `cp`, then delete each source once its copy succeeds. |
+| `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …)` | Recursively synchronize `src` into `dest`. |
+| `rm(target, *, recursive, filter, dryrun, …)` | Delete objects: a single key, a recursive prefix, or the folder-marker sweep. |
+| `mb(target, *, tags)` | Create the bucket of `target`. |
+| `rb(target)` | Delete the (empty) bucket of `target`. |
+| `presign(target, *, expires_in=3600, method="get_object")` | Return a presigned URL. No request is sent. |
+| `website(target, *, index_document, error_document)` | Set the bucket website configuration. |
 
-## Choosing the client (profile, region, endpoint, cross-account)
+Each takes the `aws s3` transfer options as snake_case keyword arguments. The
+direction of `cp` / `mv` / `sync` is inferred from the two endpoints.
 
-A path argument is a `str`, an `os.PathLike`, or an `S3Storage`. A bare
-`"s3://..."` string uses the client the `S3` instance builds from its own
-defaults — `boto3.client("s3")` for a zero-config `S3()`.
+## Configuring the client
 
-For a specific **profile, region, or endpoint**, hand the `S3` object a
-`boto3.Session` (and/or an `endpoint_url` / `config`); every bare `"s3://..."`
-string then inherits it:
+A bare `"s3://..."` string uses the client the `S3` instance builds from its own
+defaults. Give the object a session for a specific profile, region or endpoint,
+and every bare string inherits it:
 
 ```python
 import boto3_s3
-from boto3_s3 import S3, S3Storage
+from boto3_s3 import S3
 
-session = boto3_s3.session(profile_name="prod", region_name="eu-west-1")
-s3 = S3(session=session)
+s3 = S3(session=boto3_s3.session(profile_name="prod", region_name="eu-west-1"))
 s3.cp("./artifact.tar.gz", "s3://prod-bucket/artifacts/")
 ```
 
-`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session(**kwargs)` — minus
-`botocore_session=`, since the factory builds and owns the botocore session
-the fast parser is installed on — whose clients parse S3 response timestamps
-at C speed. The difference on a large `ls` / `sync` / `rm` is severalfold, and
-aws-cli has no equivalent. A plain `boto3.Session` works identically apart
-from that speed (and the parsed timestamps' `tzinfo` class: `timezone.utc`
-instead of dateutil's `tzutc` — equal values, different type); a session you pass
-is always used as-is (`boto3_s3.fast_parse_timestamp` is exported for wiring
-the parser into a botocore session you manage yourself).
+`boto3_s3.session(**kwargs)` is a drop-in `boto3.Session` whose clients parse S3
+response timestamps at C speed — severalfold faster on a large `ls` / `sync` /
+`rm`, with no aws-cli equivalent. A plain `boto3.Session` works identically
+apart from that.
 
-When a single operation needs **more than one client** — a cross-account
-S3-to-S3 copy is the clearest case — the instance default can't express it.
-Build each client yourself and wrap the URL in an `S3Storage`, which is used
-verbatim with its own client:
+When one operation needs **two** clients — a cross-account S3-to-S3 copy — wrap
+each URL in an `S3Storage` carrying its own client. The same object configures
+how a side is read (`page_size`, `follow_symlinks`, …). An S3-compatible
+endpoint such as MinIO is just a differently-built client.
 
-```python
-s3.cp(
-    S3Storage("s3://src-bucket/data/", client=src_client),
-    S3Storage("s3://dest-bucket/data/", client=dest_client),
-    recursive=True,
-)
-```
+## Documentation
 
-An S3-compatible endpoint such as MinIO is just a differently-built client.
-Build the `S3` object with that endpoint to use it for every location, or pass
-`S3Storage(uri, client=minio)` when only one side needs it:
+The [user guide](https://github.com/izumo-m/boto3-s3/blob/main/docs/README.md) covers both packages.
 
-```python
-import boto3
-
-minio = boto3.client(
-    "s3",
-    endpoint_url="http://localhost:9000",
-    aws_access_key_id="minioadmin",
-    aws_secret_access_key="minioadmin",
-)
-S3().ls(
-    S3Storage("s3://bucket/", client=minio),
-    on_entry=lambda info: print(info.key),
-)
-```
-
-The bucket part of an S3 URI may also be an access-point ARN (plain or
-Outposts), passed through as the `Bucket`, like `aws s3`.
-
-## Running operations across threads
-
-An `S3` object's own state is safe to share across threads, but parallel
-operations need care on two fronts: boto3 sessions are not safe for concurrent
-client construction, and s3transfer's per-transfer setup is not safe on a
-client shared by concurrent operations. Build the clients sequentially before
-starting the workers, then give each concurrent operation its own client through
-`S3Storage`:
-
-```python
-import concurrent.futures
-import boto3
-from boto3_s3 import S3, S3Storage
-
-s3 = S3()
-session = boto3.Session(profile_name="prod", region_name="eu-west-1")
-jobs = [
-    (
-        path,
-        S3Storage(
-            f"s3://prod-bucket/{path.name}",
-            client=session.client("s3"),
-        ),
-    )
-    for path in paths
-]
-
-with concurrent.futures.ThreadPoolExecutor() as pool:
-    for path, dest in jobs:
-        pool.submit(s3.cp, str(path), dest)
-```
-
-Do not use bare `"s3://..."` arguments for this pattern: they call `client()`
-inside each operation and would build clients concurrently.
-
-## Options
-
-`cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
-arguments plus documented library extensions, grouped here by what they control:
-
-- **Metadata & headers:** `metadata`, `metadata_directive`, `copy_props`,
-  `cache_control`, `content_type` / `content_disposition` / `content_encoding` /
-  `content_language`, `expires`, `website_redirect`, `guess_mime_type`
-- **Access & storage class:** `acl`, `grants`, `storage_class`, `request_payer`
-- **Encryption:** `sse`, `sse_kms_key_id`, `sse_c` / `sse_c_key` (and the
-  copy-source pair)
-- **Integrity & write control:** `checksum_algorithm`, `checksum_mode`,
-  `no_overwrite`, `case_conflict`
-- **Glacier:** `force_glacier_transfer` / `ignore_glacier_warnings`
-- **Annotation staging (library-only):** `annotation_copy_mode`
-
-```python
-s3.cp(
-    "./photo.jpg",
-    "s3://my-bucket/photo.jpg",
-    storage_class="STANDARD_IA",
-    content_type="image/jpeg",
-    metadata={"reviewed": "yes"},
-    acl="bucket-owner-full-control",
-)
-```
-
-Multipart tuning (thresholds, concurrency, bandwidth, the classic/CRT engine
-choice) is a `TransferConfig` passed as `transfer_config=`; its defaults match
-`aws s3`. For multipart S3-to-S3 copies under `copy_props=ALL`, annotations are
-preloaded in memory by default to match aws-cli's failure timing. Library
-callers can select `AnnotationCopyMode.PRELOAD_TEMPFILE` (configured by
-`TransferConfig(annotation_temp_dir=...)`) or the lower-overhead
-`AnnotationCopyMode.DEFERRED`; the CLI deliberately exposes no corresponding
-flag.
-
-## Filtering
-
-`cp` / `mv` / `rm` / `sync` take a `filter=` that decides which items stay in the
-operation. The common form is an `aws s3`-style include/exclude matcher (last
-match wins, default-include):
-
-```python
-from boto3_s3 import GlobFilter
-
-keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
-s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
-```
-
-`filter=` also accepts a plain `Callable[[FileInfo], bool]` for arbitrary
-per-item gating. `sync` adds one filter per decision — `create_filter=` (create a
-new entry?), `update_filter=` (overwrite one on both sides?), `delete_filter=`
-(delete an orphan?). They answer different questions from `filter=`: `filter=`
-decides **which items take part at all** (visible on either side), while the
-three lane filters decide **what to do** with the entries that do — create,
-overwrite, delete.
-
-## Progress, results, cancellation, dry run
-
-Batch operations stream item records instead of returning a list:
-
-- `on_result(OpResult)` — receives each terminal item outcome as the run
-  proceeds. An item may also emit a `WARNED` or `NOTICE` record, so callers must
-  not assume exactly one callback per key. Callbacks may come from the calling
-  thread or worker threads, and may be concurrent; keep them thread-safe, fast,
-  and non-raising.
-- `on_progress(TransferProgress)` — byte-level transfer progress
-  (`cp` / `mv` / `sync`; `rm` moves no bytes).
-- `S3.ls(..., on_entry=...)` — receives each listed `FileInfo`, in listing
-  order on the calling thread.
-- `cancel_token` — a `CancelToken` whose `cancel()` stops new work and drains
-  accepted work (`ls` / `cp` / `mv` / `rm` / `sync`). Pass
-  `mode=CancelMode.IMMEDIATE` to additionally request best-effort cancellation
-  of pending and in-flight work. A later immediate request upgrades an earlier
-  graceful request; cancellation never downgrades.
-- `dryrun=True` — reports every would-be action without any mutating S3 call
-  (like aws, a recursive download / `sync` still pre-creates the local
-  destination directory).
-
-## Custom backends
-
-`cp` / `mv` / `sync` aren't limited to local paths and S3: a custom `Storage`
-subclass — an HTTP service, an archive, an in-memory store — can be **one side of
-a transfer, the other side always S3** (the built-in `IOStorage` /
-`StdioStorage` stream wrappers use this same extension point). A backend
-declares its `capabilities`; a transfer checks them up front and fails fast
-when it needs more.
-
-See **[`docs/storage.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/storage.md)**
-for the `Storage` contract, capabilities, and a worked example.
-
-## Errors
-
-Recognized operational failures use the `Boto3S3Error` hierarchy, so catching
-the root handles the library's translated S3, filesystem, validation, and
-configuration errors. Programming errors and a small number of documented
-dependency pass-throughs are not wrapped.
-
-| Exception | Raised when |
+| | |
 | --- | --- |
-| `Boto3S3Error` | Root of the hierarchy. Carries `operation` / `bucket` / `key`. |
-| `ValidationError` | A supplied value, precondition, or path is invalid. |
-| `ConfigurationError` | Credentials / region missing or unresolvable (an unreachable endpoint is `TransportError`; a present-but-unusable config raises the refining `InvalidConfigError`). |
-| `NotFoundError` | The target does not exist (S3 404, local `FileNotFoundError`). |
-| `AccessDeniedError` | Permission denied (S3 403, local `PermissionError`). |
-| `TransportError` | Network or local I/O failure (connection, timeout, `OSError`). |
-| `CancelledError` | Cancelled via `CancelToken`. |
-| `BatchError` | Raised once at the end of a `cp` / `mv` / `rm` / `sync` run when at least one item failed — single-item runs included; an error before the run starts (validation, resolution) raises its category error directly. |
+| [The `S3` object](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/s3-object.md) | creating it, choosing clients, threads, subclassing |
+| [Results](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/results.md) | `on_result`, progress, dry runs, cancellation |
+| [Errors](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/errors.md) | the exception hierarchy and partial failure |
+| [Sync](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync.md) · [by content](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync-content.md) | the three decisions, and content comparison |
+| [Filtering](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/filters.md) | `filter=`, glob patterns, which key they match |
+| [Transfer options](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/transfer-options.md) | the `cp` / `mv` / `sync` options and multipart tuning |
+| [Streams](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/streams.md) | `IOStorage` / `StdioStorage` |
+| [`S3Deleter`](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/deleter.md) | driving batch deletion yourself |
+| [Custom backends](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/custom-storage.md) | a `Storage` as one side of a transfer |
+| [Logging](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/logging.md) | debug output and credential masking |
 
-`BatchError` carries summary counts (`succeeded` / `failed` / `warned` /
-`skipped` / `total`); the per-item detail arrives live through `on_result`.
+Debug logs are masked by default: `set_stream_logger` mirrors
+`boto3.set_stream_logger` but redacts signatures, session tokens and keys.
 
-## Debug logging
+For the `boto3-s3` command, see its
+[guide](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/README.md) —
+what differs from `aws s3`, the exit codes, and the configuration it reads.
 
-`boto3` / `botocore` debug logs leak signed headers, signatures, and session
-tokens. `set_stream_logger` mirrors `boto3.set_stream_logger` but redacts those
-by default:
-
-```python
-from boto3_s3 import set_stream_logger
-
-set_stream_logger("botocore")  # credentials masked unless mask_secrets=False
-```
+The design documents behind all of this are indexed in
+[`design/overview.md`](https://github.com/izumo-m/boto3-s3/blob/main/design/overview.md).
 
 ## Compatibility
 
 - **Python:** 3.10 and later.
 - **OS:** Linux, macOS, Windows (path-separator and case-sensitivity behavior is
   matched to `aws s3` on each).
-- **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2.
-  When the installed SDK predates a feature, boto3-s3 degrades gracefully
-  rather than emulating it. Notable examples include conditional writes (`no_overwrite`), `CRC64NVME`,
-  paginated bucket filters, newer `mb` tags / account-regional namespace
-  fields, S3 object annotations, `copy_props="all"`, and source-ETag response
-  extras. CRT features need the `crt` extra. See
-  [`docs/compatibility.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/compatibility.md)
-  for the authoritative version requirements and degradation behavior.
-
-## In short
-
-Every `aws s3` operation as an in-process Python call — no `subprocess`, no
-stdout to scrape, structured per-item results back.
+- **AWS SDK:** `boto3` >= 1.28, `botocore` >= 1.31, `s3transfer` >= 0.6.2 —
+  roughly three years old. Rather than emulate a newer S3 model on an older SDK,
+  a feature that needs one is simply unavailable below it. Which feature needs
+  which version, and how an unavailable one behaves, is in
+  [`docs/compatibility.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/compatibility.md).
 
 ## Contributing
 
