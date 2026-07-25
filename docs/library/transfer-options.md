@@ -1,7 +1,10 @@
 # Transfer options
 
 `cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
-arguments, plus a few the command has no flag for.
+arguments, plus a few the command has no flag for. Each accepts the same values
+as the `aws s3` option of the same name, so `aws`'s own reference — or
+`boto3-s3 cp --help`, if you installed the command — says what any one of them
+means.
 
 ```python
 s3.cp(
@@ -26,8 +29,9 @@ Grouped by what they control:
 - **Integrity and write control** — `checksum_algorithm`, `checksum_mode`,
   `no_overwrite`, `case_conflict`
 - **Archived objects** — `force_glacier_transfer`, `ignore_glacier_warnings`
-- **Library-only** — `annotation_copy_mode`, and `cp`'s `expected_size`, a size
-  hint for uploading from a stream ([`streams.md`](./streams.md))
+- **Streams and annotations** — `annotation_copy_mode`, and `cp`'s
+  `expected_size`, a size hint for uploading from a stream
+  ([`streams.md`](./streams.md)). The command has no flag for either.
 
 An option that does not apply to the direction being run is simply ignored
 rather than rejected — passing `acl` on a download changes nothing. The
@@ -48,6 +52,11 @@ s3.cp(src, dest, transfer_config=TransferConfig(multipart_chunksize=16 * 1024**2
 Its defaults match `aws s3`: an 8 MiB threshold, 8 MiB parts, 10 concurrent
 requests. Set it once on the `S3` object to apply everywhere, and per call to
 override.
+
+**Unlike `aws s3`, the library never reads the `[s3]` section of
+`~/.aws/config`** — tuning comes only from `TransferConfig`. To reuse the values
+already in your config file, read them with `s3.aws_config()` and pass them in;
+see [`s3-object.md`](./s3-object.md).
 
 `preferred_transfer_client` selects the engine — `"auto"` (the default),
 `"classic"`, or `"crt"`. S3-to-S3 copies always use the classic engine, since

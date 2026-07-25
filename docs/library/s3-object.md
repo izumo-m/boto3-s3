@@ -25,12 +25,12 @@ S3(session=None, *, endpoint_url=None, config=None,
   S3-compatible endpoint or a `botocore.config.Config`.
 - **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`.
   Any call can override it.
-- **`wait_on_interrupt`** — what Ctrl-C should cost. `True` (the default)
-  re-raises `KeyboardInterrupt` only after every resource has been reclaimed, so
-  the next operation still works. `False` treats Ctrl-C as fatal to the process
-  and lets the unwind abandon an in-flight listing page. Either way the
-  interrupt is re-raised, never swallowed, and only `KeyboardInterrupt` is
-  affected — every other exception reclaims fully.
+- **`wait_on_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
+  `True` (the default) re-raises `KeyboardInterrupt` only after every resource
+  has been reclaimed, so the next operation still works. `False` treats Ctrl-C
+  as fatal to the process and lets the unwind abandon an in-flight listing page.
+  Either way the interrupt is re-raised, never swallowed, and only
+  `KeyboardInterrupt` is affected — every other exception reclaims fully.
 
 ## 2. Which client a location uses
 
@@ -142,8 +142,8 @@ class MyS3(S3):
 
 - **`client()`** builds a fresh client each time, owned by the caller. Override
   it to change credentials, to return a test double, or to memoize. Note that a
-  memoizing override makes your subclass own a connection, and with it the
-  cleanup — the base class keeps none precisely so it stays lifecycle-free.
+  memoizing override makes your subclass own a connection: closing it becomes
+  your responsibility.
 - **`resolve(loc)`** decides what a path argument means. Override it to add a
   scheme, deferring everything else to `super()`.
 
@@ -176,5 +176,5 @@ sizes and rates are 1024-based, matching `aws s3`) and take your own default.
 A missing key returns that default; a value that will not convert raises
 `InvalidConfigError`, which `except ConfigurationError` catches.
 
-Interpreting the `[s3]` section the way `aws s3` does — its defaults, its
-validation, the transfer-engine decision — is the CLI's job, not the library's.
+If you want `aws s3`'s own interpretation of `[s3]` — its defaults, its
+validation, its engine choice — use the `boto3-s3` command.

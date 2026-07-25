@@ -11,10 +11,9 @@ It takes the same arguments and global options, reads the same `~/.aws`
 configuration, and returns the same exit codes. In most cases an existing script
 works by replacing the `aws s3` prefix with `boto3-s3`.
 
-It runs on your own Python interpreter and reuses your installed boto3, so it is
-small enough to drop into a Lambda deployment package. The
-[package page](https://pypi.org/project/boto3-s3-cli/) carries the size and
-startup measurements.
+It runs on your own Python interpreter and reuses your installed boto3, so the
+package stays small enough to drop into a Lambda deployment package alongside
+the runtime SDK.
 
 ## 1. Installing
 
@@ -30,11 +29,12 @@ pip install "boto3-s3-cli[crt]"          # the AWS Common Runtime transfer engin
 pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive completion
 ```
 
-The `crt` extra does two things: it enables the CRT transfer engine, and it lets
-the classic engine compute the CRT-family checksum algorithms (`CRC64NVME`,
-`CRC32C`, the `XXHASH` family). Installing it therefore also changes which
-engine runs by default, since `preferred_transfer_client = auto` can then
-resolve to CRT.
+Not sure whether you need them? Start without either — the command is complete
+on its own. Install `crt` if you want the AWS Common Runtime transfer engine,
+typically faster on large transfers, or a `--checksum-algorithm` that needs it
+(`CRC64NVME`, `CRC32C`, the `XXHASH` family). Installing it can also change
+which engine runs by default; see
+[choosing the transfer engine](./configuration.md#choosing-the-transfer-engine).
 
 ## 2. Replacing `aws s3`
 
@@ -77,14 +77,7 @@ but some are silent.
   reads** — [`configuration.md`](./configuration.md).
 - **What changes with the installed dependencies** —
   [`compatibility.md`](../compatibility.md).
-
-## 4. What is not part of the interface
-
-Installing the package also makes a `boto3_s3_cli` Python package importable,
-but that is an implementation detail with no API guarantee. The supported
-interface is the `boto3-s3` command.
-
-For a Python API, use the [`boto3-s3`](https://pypi.org/project/boto3-s3/)
-library instead. It is not a wrapper around this command — the command is a
-layer on top of the library — so calling it does not start a subprocess or
-require this package at all.
+- **A Python API instead** — the
+  [`boto3-s3`](https://pypi.org/project/boto3-s3/) library. The command is a
+  layer on top of it, so the library starts no subprocess and does not need this
+  package installed.

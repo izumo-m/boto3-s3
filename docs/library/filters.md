@@ -25,9 +25,8 @@ s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
 ```
 
 `exclude()` and `include()` each take one or more patterns and return the filter,
-so they chain. `compile()` builds the matcher and returns the filter; it is the
-recommended form but not required — an uncompiled filter compiles itself on
-first use, and adding a rule afterwards invalidates it again.
+so they chain. Call `compile()` when you are done adding rules; it is optional —
+an uncompiled filter compiles itself on first use.
 
 Patterns are `fnmatch` form, in which `*` is greedy and crosses `/`.
 
@@ -45,8 +44,8 @@ matches it and `logs/*` does not.
 A pattern is **absolute** when it starts with `/` — on Windows, a drive letter
 or a leading `\` counts too. An absolute pattern matches the entry's full key
 instead. Since an S3 key normally has no leading `/`, one is inert against S3
-entries;
-against local paths it works as written. This is what allows one `filter` to
+entries; against local paths it works as written. This is what allows one
+`filter` to
 prune the two sides of a `sync` asymmetrically — a pattern rooted at the local
 source matches there and not on the S3 side. Relative patterns are symmetric
 across sides.
@@ -83,7 +82,7 @@ destination that `filter` hides is invisible to the run, so **`delete_filter`
 never deletes it**. This reproduces `aws s3 sync`'s rule that files excluded by
 filters are excluded from deletion.
 
-`filter` is a different question from `sync`'s three lane filters. `filter`
+`filter` is a different question from `sync`'s three decision filters. `filter`
 decides *which entries take part at all*; `create_filter`, `update_filter` and
 `delete_filter` decide *what to do* with the entries that did. See
 [`sync.md`](./sync.md).
@@ -106,6 +105,5 @@ m.included("foo.log")   # False
 
 `Matcher.included(compare_key, full_key=None)` applies the same last-match-wins
 rule; `full_key` is only consulted by absolute patterns. `GlobFilter` and
-`GlobPattern` are also available at the package root — everything else, the
-matcher classes and `PatternKind` / `compile_set_matcher` / `is_anchored` among
-them, comes from `boto3_s3.globsieve` itself.
+`GlobPattern` are also available at the package root; everything else lives in
+`boto3_s3.globsieve`.

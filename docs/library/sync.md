@@ -60,8 +60,8 @@ rule is not symmetric, and this is the single most surprising thing about
   unchanged size that was updated only on the S3 side is *not* pulled down by
   default.
 
-That asymmetry is `aws s3 sync`'s, reproduced deliberately. If you need updates
-to follow content rather than timestamps, use a content strategy —
+If you need updates to follow content rather than timestamps, use a content
+strategy —
 [`sync-content.md`](./sync-content.md).
 
 An entry missing either a size or an mtime is treated as differing, and copied.
@@ -100,8 +100,8 @@ s3.sync(src, dest, filter=only_html, delete_filter=True)
 
 The distinction matters when deleting. An orphan hidden by `filter` is not
 visible, so it is **never deleted** — exactly as `aws s3 sync` behaves. `filter`
-decides *who takes part*; the three lane filters decide *what to do* with those
-who did.
+decides *who takes part*; `create_filter`, `update_filter` and `delete_filter`
+decide *what to do* with those who did.
 
 ## 4. Refusing to overwrite
 
@@ -113,7 +113,7 @@ Unlike `cp` and `mv`, `sync` keeps this decision-only — it does not send a
 conditional-write header, so it works against older SDKs where `cp` would be
 refused. See [`compatibility.md`](../compatibility.md).
 
-## 5. What happens before the scan
+## 5. Before anything is transferred
 
 - **Downloading** creates the destination directory before scanning, so it
   exists even if the sync transfers nothing. If a *file* already exists at that
@@ -123,9 +123,9 @@ refused. See [`compatibility.md`](../compatibility.md).
   failing — `sync` is a directory operation.
 - **Syncing a path onto itself** does nothing and succeeds silently; there is no
   self-reference guard like `mv`'s.
-- **S3 Express directory buckets** are rejected on either side. Their listings
-  are not lexicographically ordered, so pairing could match the wrong keys and
-  `delete_filter` could remove keys that exist on both sides.
+- **S3 Express directory buckets** are rejected on either side, because their
+  listings are not ordered the way `sync` needs to pair them. Use a recursive
+  `cp` instead.
 
 ## 6. Results and failure
 

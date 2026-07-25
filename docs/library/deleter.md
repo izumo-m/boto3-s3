@@ -1,9 +1,8 @@
 # `S3Deleter` — batch deletion
 
-`S3.rm` and `sync(delete_filter=True)` are built on `S3Deleter`, and you can use
-it directly when you want to drive the enumeration yourself. It buffers entries
-and hands a batch to a background worker each time the buffer fills, so you can
-keep listing while deletions proceed.
+Delete many objects while you are still enumerating them. `S3Deleter` buffers
+the keys you submit and hands each full batch to a background worker, so listing
+and deleting overlap. `S3.rm` and `sync(delete_filter=True)` use it internally.
 
 ```python
 from boto3_s3 import S3Deleter, S3ScanOptions
@@ -86,8 +85,8 @@ name fails everything, and the counts show it.
 Anything outside that — a genuine programming error — is not turned into per-key
 results. It is re-raised to you on the next non-empty `flush()` or `close()`.
 
-`S3Deleter` does not raise `BatchError` itself. Its callers assemble one from
-the counts; do the same if you want that behavior.
+`S3Deleter` never raises `BatchError`. If you want one, build it from
+`succeeded` / `failed` after `close()`.
 
 With `capture_response=True`, each successful key's `OpResult.extra_info` gains
 a `"delete"` slot holding a single-object-shaped response, regardless of which

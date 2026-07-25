@@ -13,9 +13,7 @@ except Boto3S3Error as exc:
     ...
 ```
 
-Catching the root is a genuine catch-all. Nearly every failure arrives as one of
-the categories below; the base class itself appears only for a per-key failure
-inside a batched delete whose S3 error code matches no category.
+Catching the root catches everything the library raises.
 
 ## 1. The hierarchy
 
@@ -32,9 +30,8 @@ Boto3S3Error                 the root; catch this to catch everything
 └── BatchError               a batch run's failure rollup
 ```
 
-The classification cuts across S3 and the local filesystem on purpose: an S3 403
-and a local `PermissionError` are the same category, because to your application
-they usually mean the same thing.
+An S3 403 and a local `PermissionError` arrive as the same class, so one
+`except AccessDeniedError` covers both sides of a transfer.
 
 Catch the parent — `ValidationError` also catches `InvalidValueError`, and
 `ConfigurationError` also catches `InvalidConfigError`.

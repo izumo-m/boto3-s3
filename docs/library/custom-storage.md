@@ -4,8 +4,8 @@
 — an HTTP service, an archive, an in-memory store — can be one side of a
 transfer, and its bytes move through the same engine.
 
-The built-in [`IOStorage` and `StdioStorage`](./streams.md) use this same seam; a
-stream is just a backend holding a single entry.
+[`IOStorage`](./streams.md) is a backend written against this same interface — a
+working example to read before you write your own.
 
 ## 1. What a custom backend can be
 
@@ -53,9 +53,10 @@ it if you do not.
 ### Filtering
 
 `options.filter` is applied by `scan()` as a safety net, so forgetting it in
-`scan_pages` cannot leak excluded entries into a `sync` with `delete_filter=True` and destroy
-data. If your backend can filter at its source, apply it in `scan_pages` and set
-`scan_pages_filters = True` to skip the redundant second pass.
+`scan_pages` cannot leak excluded entries into a `sync` with
+`delete_filter=True` and destroy data. If your backend can filter at its source,
+apply it in `scan_pages` and set `scan_pages_filters = True` to skip the
+redundant second pass.
 
 The predicate runs on the prefetch worker thread. Keep that in mind if your
 implementation shares state.
@@ -73,7 +74,7 @@ part-way through.
 | `GET_FILEINFO` | `get_fileinfo` | a single-entry source, or an existence check |
 | `SCAN` | `scan_pages` | a recursive **source** |
 | `SORTABLE_SCAN` | a byte-ordered recursive listing | **any** side of a `sync` |
-| `DELETE` | `delete` | an `mv` source, or a `sync` destination with `delete_filter=True` |
+| `DELETE` | `delete` | an `mv` source, or a `sync` destination with deletes on |
 
 The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. Declaring the strongest one promises the weaker methods too.
@@ -94,8 +95,7 @@ the second naming what is absent.
 - **Errors.** Map your backend's failures onto the library taxonomy described in
   [`errors.md`](./errors.md). An exception that is not already a `Boto3S3Error`
   is wrapped in the base class when it surfaces as a per-item failure, but one
-  raised during enumeration propagates as-is. The library assumes a well-behaved
-  backend.
+  raised during enumeration reaches your caller unchanged, so map those yourself.
 - **Streams are opened late.** `open` is not called until bytes actually need to
   move, so a dry run never opens anything, and an item that fails before its
   first byte leaves your backend untouched.
@@ -128,7 +128,15 @@ class DictStorage(Storage):
     def open(self, key, mode, *, size=None):
         if mode == "rb":
             return io.BytesIO(self.data[key])
-        return _Writer(self.data, key)     # writes back on close()
+
+        data = self.data
+
+        class _Writer(io.BytesIO):
+            def close(self) -> None:
+                data[key] = self.getvalue()
+                super().close()
+
+        return _Writer()
 ```
 
 Declaring only the two `OPEN_*` flags makes this usable as a single-entry `cp`

@@ -48,8 +48,7 @@ ETag S3 would have stored, then compares.
 every multipart object reconstructs to a different ETag and is copied every
 time. Passing the `S3` object reads it from that instance's active profile
 (`[s3] multipart_chunksize`, defaulting to 8 MiB); passing `part_size=`
-explicitly wins over both. This is one of the very few places the library reads
-your AWS config, and it does so only because you asked by passing `s3`.
+explicitly wins over both.
 
 `check_size` (on by default) treats a known size difference as differing before
 any ETag work — a shortcut, and on S3-to-S3 also a guard against two different
@@ -102,8 +101,8 @@ as indeterminate and copied. The default, `None`, never caps. Installing the
 ## 4. Running the decisions in parallel
 
 Both strategies do I/O per pair, and `sync` decides one entry at a time on the
-calling thread. Wrap a filter in `ParallelFilter` to run that lane's decisions
-on a thread pool you own:
+calling thread. Wrap a filter in `ParallelFilter` to run its decisions on a
+thread pool you own:
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -117,7 +116,7 @@ with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
     )
 ```
 
-It works on **any of the three lanes**, not just updates, and one pool can serve
+It works on **any of the three filters**, not just updates, and one pool can serve
 several — pass the same executor to each.
 
 **The pool is yours.** It is required, and `sync` neither creates nor shuts it
@@ -135,7 +134,7 @@ same outcome is reached. Two visible side effects are worth knowing:
   key order.
 - **Case conflicts.** Parallelizing `create_filter` makes which entry wins a
   case-insensitive collision non-deterministic, because that check depends on
-  the order entries arrive in. The update lane never touches it.
+  the order entries arrive in. `update_filter` never touches it.
 
 If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.

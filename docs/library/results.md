@@ -23,18 +23,20 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 reaches it produces nothing: one excluded by a filter during enumeration, or one
 never enumerated because the run ended first.
 
-`WARNED` and `NOTICE` records sit **outside** that rule. They are advisories, not
-tied to an item — a directory-walk warning belongs to no transfer at all, and a
-notice can precede the same item's real outcome. So do not assume one callback
-per key.
+`WARNED` and `NOTICE` records sit **outside** that rule. Both are advisories
+rather than outcomes: a `WARNED` record reports a problem that did not fail the
+run — an unreadable file, a directory-walk warning — and a `NOTICE` reports
+context, such as a name collision found during a recursive download onto a
+case-insensitive filesystem. Neither counts as a failure, and a notice can
+precede the same item's real outcome, so do not assume one callback per key.
 
 The callback may run **on a worker thread**, and several may run at once:
 transfers report from `s3transfer`'s threads and batched deletes from the
 deleter's, while dry runs, single-key `rm` and local deletes report inline on
 your own thread. Keep it fast, keep it thread-safe, and do not let it raise.
 
-Counts always agree with the records — the totals in the final error are the
-per-outcome record counts, not a separate tally.
+The counts on the final error are exactly the records you received, so you can
+reconcile the two.
 
 ## 2. What a record carries
 
@@ -144,8 +146,8 @@ records resolve like this:
   cannot be safely interrupted, and if its bytes landed, that is the truth;
 - never accepted — no record at all.
 
-Cancellation is monotonic and idempotent: an immediate request upgrades a
-graceful one, and nothing ever downgrades it.
+Cancelling twice is safe, and an immediate request upgrades a graceful one.
+Nothing ever downgrades it.
 
 A run that a cancellation actually cut short **always ends by raising** — the
 triggering error, or `CancelledError`. It never ends with the partial-failure

@@ -1,13 +1,13 @@
 # Configuration
 
-The inputs that are not command-line options, and so have no `--help` entry:
-the AWS configuration files, the environment, and the `[s3]` tuning section.
-Command-line options themselves are described by `boto3-s3 <command> --help` —
-every one of them is an `aws s3` option.
+Where credentials, region and transfer tuning come from — the `~/.aws` files and
+the environment. All of it resolves exactly as it does for `aws s3`, so an
+environment already set up for `aws` needs no changes.
 
-Credentials and connection settings come from the standard AWS sources, chosen
-with the same global flags as `aws s3`. A global flag may appear **before or
-after** the subcommand.
+For what an individual option does, run `boto3-s3 <command> --help`.
+
+The same global flags as `aws s3` override any of it, and a global flag may
+appear **before or after** the subcommand.
 
 ## 1. Region, profile, and retries
 

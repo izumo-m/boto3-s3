@@ -17,8 +17,8 @@ the same format string and `sys.stderr`. One default differs: `name` is
 extra arguments are keyword-only and come after. Masking is on unless you turn
 it off.
 
-Neither `boto3` nor `aws s3` masks anything; this is an addition, not a parity
-feature.
+Neither `boto3` nor `aws s3` masks anything — this is extra protection the
+library adds.
 
 ## 1. What is guaranteed, and what is not
 

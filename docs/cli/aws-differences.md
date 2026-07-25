@@ -1,8 +1,8 @@
 # Differences from `aws s3`
 
-`boto3-s3` aims to be a command-for-command replacement for `aws s3`. This page
-records where that aim stops: what parity covers, and where behavior
-deliberately differs.
+Read this before you switch a script over. Most `aws s3` invocations behave
+identically; the handful that do not are listed below, and one of them is
+silent.
 
 For what each option does, run `boto3-s3 <command> --help`; every option is an
 `aws s3` option and is described there. For exit codes see
@@ -10,38 +10,35 @@ For what each option does, run `boto3-s3 <command> --help`; every option is an
 variables and `[s3]` tuning keys the command reads see
 [`configuration.md`](./configuration.md).
 
-## 1. What parity covers
+## 1. What you can rely on
 
-Parity is defined on **the resulting S3 state, the values returned, the error
-conditions, and the exit code**, under the same arguments and configuration. An
-exit-code mismatch is treated as a bug.
+Under the same arguments and configuration you get **the same resulting S3
+state, the same returned values, the same error conditions, and the same exit
+code**. A mismatch in any of those is a bug worth reporting.
 
-Parity is **not** defined on console output. Error and warning wording, progress
-lines, `--debug` traces and `--help` text may differ from `aws`, and may change
-between `boto3-s3-cli` releases. Do not parse them. Two specifics:
+**Do not parse the console output.** Error and warning wording, progress lines,
+`--debug` traces and `--help` text differ from `aws` and change between
+releases (the error prefix is `boto3-s3:`, not `aws:`). One exception is worth
+knowing: parameter-validation errors do use aws's envelope,
+`An error occurred (ParamValidation): <message>`, and `--cli-error-format` does
+not change it.
 
-- The program name differs, so usage lines and the `boto3-s3: [ERROR]:` prefix
-  differ from `aws: [ERROR]:` by construction.
-- Parameter-validation errors do use aws's default envelope,
-  `An error occurred (ParamValidation): <message>`. Selecting a different
-  `--cli-error-format` does not change the rendering.
-
-Ordering is not guaranteed either: with concurrent transfers, the order of
-result lines — and of `delete:` lines against transfer lines — is not
-reproducible, on either tool.
+Ordering is not reproducible either: with concurrent transfers, result lines —
+and `delete:` lines against transfer lines — interleave freely, on either tool.
 
 ## 2. Behavior differences
 
 Only the first can leave you with something wrong without saying so. The rest
 are visible, or make no difference to the result.
 
-- **Corrupted ranged downloads are not detected.** For a single-object download
-  at or above the multipart threshold, `aws` recombines a per-range checksum and
-  fails the download if the assembled object does not match. That check lives in
-  a variant of s3transfer that is not published, so a corruption that got past
-  TLS and TCP integrity would be reported here as a success. Nothing else is
-  affected: downloads below the threshold are verified by botocore on both
-  tools, and the CRT engine does the same validation `aws` does.
+- **Corrupted ranged downloads are not detected by the classic engine.** For a
+  single-object download at or above the multipart threshold, `aws` verifies the
+  reassembled object and fails on a mismatch; here such a corruption — one that
+  got past TLS and TCP integrity — would be reported as a success. **If that
+  matters to you, install the `crt` extra and set
+  `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
+  Downloads below the threshold are verified on both tools, so only large
+  single-object downloads are affected.
 - **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
   integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
   neither changes the result or the exit code. An explicit

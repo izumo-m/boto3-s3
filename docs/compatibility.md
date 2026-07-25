@@ -1,17 +1,11 @@
-# Version-dependent feature availability
+# Which `boto3` version each feature needs
 
-Which `boto3` release each feature needs. Below the version listed, that feature
-is not supported.
+**`boto3` 1.43.31 or newer has everything.** Four of the entries below
+additionally need the `crt` extra.
 
-**What you have** is printed by `boto3-s3 --version`, or from Python:
-
-```python
-import boto3
-print(boto3.__version__)
-```
-
-**The short answer:** `boto3` 1.43.31 or newer has everything below. Four of the
-entries additionally need the `crt` extra.
+If you cannot upgrade, the table says what each feature needs; below the version
+listed, that feature is not supported. Check what you have with
+`boto3-s3 --version`, or `python -c "import boto3; print(boto3.__version__)"`.
 
 **Upgrading `boto3` is the one move that matters.** It pins `botocore` and
 `s3transfer` to matching releases, so its version settles all three; raising
@@ -56,6 +50,6 @@ situation cannot arise there (see [`exit-codes.md`](./cli/exit-codes.md)).
 ## 3. Three `[s3]` keys that never take effect
 
 `should_stream`, `disk_throughput` and `direct_io` are accepted and validated
-but do nothing, at every `boto3` version. `aws` honors them because `aws` v2
-ships its own build of `s3transfer`; a pip install cannot.
+but do nothing, at every `boto3` version. See
+[`cli/configuration.md`](./cli/configuration.md).
 

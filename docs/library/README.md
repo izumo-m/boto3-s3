@@ -9,15 +9,18 @@ pip install boto3-s3
 ```
 
 ```python
-import boto3_s3
 from boto3_s3 import S3
 
-s3 = S3(session=boto3_s3.session())
+s3 = S3()
 
 s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)
 s3.cp("./report.csv", "s3://my-bucket/report.csv")
 s3.rm("s3://my-bucket/tmp/", recursive=True)
 ```
+
+`S3()` uses your default AWS credentials, exactly as `boto3.Session()` would.
+For a profile, a region, an S3-compatible endpoint, or faster listings, see
+[`s3-object.md`](./s3-object.md).
 
 ## 1. The shape of the API
 
@@ -31,9 +34,10 @@ item to an `on_result` callback as the run proceeds, and raise at the end if
 anything failed. That is the one structural difference from most Python APIs,
 and [`results.md`](./results.md) covers it.
 
-The library is deliberately **more permissive than `aws s3`**. It accepts input
-the command would reject — `"bucket/key"` without the `s3://` prefix, for
-instance. The strict validation and the exit codes belong to the
+The library is **more permissive than `aws s3`**. It accepts input the command
+would reject — the S3-only operations (`ls` / `rm` / `mb` / `rb` / `presign` /
+`website`) take `"bucket/key"` without the `s3://` prefix, for instance. The
+strict validation and the exit codes belong to the
 [`boto3-s3-cli`](../cli/README.md) command that sits on top of it. If you need
 `aws s3`'s exact rejections, use the command; if you are writing an application,
 the library's leniency is usually what you want.

@@ -81,8 +81,6 @@ branch on it to identify a particular failure.
 
 ## 2. When more than one thing is wrong
 
-Two rules settle most cases, and a handful of orderings settle the rest.
-
 **Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`
 / `sync` report 1 after they begin — including errors S3 itself returned. That
 is why 254 is narrower than it looks. A usage error caught *before* the
@@ -97,8 +95,8 @@ The orderings worth knowing, because the answer is not the one you would guess:
 
 | You run | You get | Because |
 | --- | --- | --- |
-| `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the client is built before the path is checked |
-| a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | numbers are converted before the path is checked |
+| `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
+| a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream, 0 otherwise | the value is read only on the streaming route |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
@@ -113,10 +111,8 @@ Three cases where the codes are deliberately not identical:
   instead. An extension that `aws s3` does not have cannot match it.
 - **Features needing `awscrt`** exit 253 when the `crt` extra is not installed.
   `aws` v2 bundles awscrt, so this situation cannot arise there.
-- **A corrupted ranged download** is reported as success by the classic
-  transfer engine, where `aws` exits 1. `aws` validates the reassembled object
-  against its full-object checksum using a variant of s3transfer that is not
-  published; the CRT engine is unaffected.
+- **A corrupted ranged download** exits 0 here and 1 under `aws`. See
+  [`aws-differences.md`](./aws-differences.md) for how to get that check back.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.
