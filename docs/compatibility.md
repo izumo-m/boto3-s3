@@ -17,7 +17,7 @@ floors and no ceiling, and gates on capability rather than version number
 (`hasattr` / signature checks), so a newer SDK starts being used with no code
 change here.
 
-## How an unavailable feature behaves
+## 1. How an unavailable feature behaves
 
 Three shapes, chosen per feature so the caller is never silently wrong:
 
@@ -28,7 +28,7 @@ Three shapes, chosen per feature so the caller is never silently wrong:
 - **Silently inert** - the operation still works, the newer refinement just does
   not apply. Used only where the coarser result is still correct.
 
-## botocore-gated
+## 2. botocore-gated
 
 | Feature | Needs | Below it |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ Three shapes, chosen per feature so the caller is never silently wrong:
 | `copy_props=ALL` / `--copy-props all` | botocore >= 1.43.31 and s3transfer >= 0.19 | refused up front |
 | S3 Express directory buckets (`--x-s3`) | a botocore with their endpoint rules and `v4-s3express` signing | requests against them fail |
 
-## s3transfer-gated
+## 3. s3transfer-gated
 
 | Feature | Needs | Below it |
 | --- | --- | --- |
@@ -51,7 +51,7 @@ Three shapes, chosen per feature so the caller is never silently wrong:
 | the CRT transfer engine at all | s3transfer >= 0.8.0 (the CRT lock and credentials surface) | an explicit `preferred_transfer_client = crt` is refused up front; `auto` falls back to classic silently |
 | `[s3]` tuning reaching the CRT manager | s3transfer >= 0.16.0 (`CRTTransferManager`'s `config` kwarg) | manager-level tuning is dropped with boto3's own warning, while `part_size` and `target_throughput` still reach the CRT client directly |
 
-## awscrt
+## 4. awscrt
 
 `awscrt` is not a default dependency but an opt-in extra (`crt`). It gates two
 independent things - the CRT transfer engine, and the CRT-family checksum
@@ -61,7 +61,7 @@ code mismatch (see [`overview.md`](./overview.md) section 3). The exit code
 charter does apply once the CRT stack is usable: awscrt present and, for the
 transfer engine, an s3transfer with the CRT surface.
 
-## Not a version gap: the aws-cli s3transfer fork
+## 5. Not a version gap: the aws-cli s3transfer fork
 
 The `[s3]` file-I/O keys `should_stream` / `disk_throughput` / `direct_io` are
 parsed and validated but have no effect, because no released pip `s3transfer`
@@ -72,7 +72,7 @@ release fixes this; it needs the parameter to ship upstream, after which the
 keys start working here with no code change (the call site checks the
 signature).
 
-## Where the mechanisms are documented
+## 6. Where the mechanisms are documented
 
 This document records availability. The design behind each gate lives with its
 component: [`transfer.md`](./transfer.md) for conditional writes, copy-props and
