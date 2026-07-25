@@ -229,11 +229,11 @@ the op layer and are generally not counted.
 
 ## 5. exit code mapping (CLI)
 
-The CLI turns this hierarchy into aws-compatible exit codes. That mapping is
-specified once, in [`cli.md`](./cli.md) section 6 - the conditions, the
-precedence between them, and the per-command families that bypass
-`exit_code_for` with a local catch. The user-facing statement of the codes is
-[`guide/cli/exit-codes.md`](../docs/cli/exit-codes.md).
+The CLI turns this hierarchy into aws-compatible exit codes. What the codes mean
+and which one wins is specified in
+[`exit-codes.md`](../docs/cli/exit-codes.md); how the mapping is built - and
+which command families bypass `exit_code_for` with a local catch - is in
+[`cli.md`](./cli.md) section 6.
 
 Two consequences belong to this document, because they are properties of the
 taxonomy rather than of the mapping:

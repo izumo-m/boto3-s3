@@ -80,17 +80,29 @@ branch on it to identify a particular failure.
 
 ## 2. When more than one thing is wrong
 
-Which code wins is decided the same way `aws s3` decides it, not by a rule of
-our own. Two consequences are easy to miss:
+Two rules settle most cases, and a handful of orderings settle the rest.
 
-- `mb` and `rb` build their client before checking the path, so
-  `boto3-s3 mb badpath --profile nosuch` exits 255 for the bad profile rather
-  than 252 for the bad path.
-- Options that take a number are converted before the path is checked, so a
-  non-integer `--page-size` exits 255 even if the path is also wrong.
+**Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`
+/ `sync` report 1 after they begin — including errors S3 itself returned. That
+is why 254 is narrower than it looks. A usage error caught *before* the
+operation starts is still 252.
 
-The full precedence specification — every command family's rule and the order
-each check runs in — is in [`cli.md`](../../design/cli.md) section 6.
+**Before that, whether the request reached S3 decides the code.** Anything the
+service answered is 254, whatever kind of error it is — a 400 from S3 is 254,
+not 252, because the request went out. Errors that never left your machine are
+classified by kind: 252, 253 or 255.
+
+The orderings worth knowing, because the answer is not the one you would guess:
+
+| You run | You get | Because |
+| --- | --- | --- |
+| `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the client is built before the path is checked |
+| a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | numbers are converted before the path is checked |
+| `cp --expected-size` with a non-integer | 1 when uploading a stream, 0 otherwise | the value is read only on the streaming route |
+| `rb --force` whose object deletion fails | 255 | |
+| `mv --validate-same-s3-paths` whose lookup fails | 254 | that lookup reaches S3 before the move begins |
+
+All of this matches `aws s3`, including the orderings above.
 
 ## 3. Where this differs from `aws s3`
 

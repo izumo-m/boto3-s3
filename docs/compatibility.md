@@ -55,9 +55,10 @@ botocore can only compute through it - **`CRC32C`, `CRC64NVME`, and the
 `XXHASH` family**. The classic engine needs it for those too. `CRC32`, `SHA1`,
 `SHA256` and `SHA512` are pure Python and never need it.
 
-Missing awscrt fails only the features that need it, and that does not count as
-an exit code mismatch (see [`overview.md`](../design/overview.md) section 3). The
-exit code charter does apply once the CRT stack is usable.
+Missing awscrt fails only the features that need it, and nothing else changes.
+The `boto3-s3` command reports 253 for those; `aws` v2 bundles awscrt, so the
+situation cannot arise there, which
+[`exit-codes.md`](./cli/exit-codes.md) records as a deliberate difference.
 
 ## 3. Not a version gap: the aws-cli s3transfer fork
 
@@ -68,10 +69,3 @@ does, so `aws` honors these three where a pip install cannot. No newer pip
 release fixes this; it needs the parameter to ship upstream, after which the
 keys start working here with no change.
 
-## 4. Where the mechanisms are documented
-
-This document records availability. The design behind each gate lives with its
-component: [`transfer.md`](../design/transfer.md) for conditional writes,
-copy-props and checksums, [`crt.md`](../design/crt.md) for the CRT engine and its
-degradation, and [`opresult.md`](../design/opresult.md) for what `extra_info`
-carries.

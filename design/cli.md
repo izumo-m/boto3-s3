@@ -787,12 +787,13 @@ sync.md section 6).
 Following the charter in [`overview.md`](./overview.md) section 3, these match aws-cli
 v2's convention (aws-cli's `awscli/constants.py`).
 
-This section is the single specification of the exit codes: the conditions, the
-precedence among them, and the per-family rules below. Nothing else restates it -
+The specification belongs to [`exit-codes.md`](../docs/cli/exit-codes.md): what
+each code means, and which one wins when more than one thing is wrong. This
+section records how that is produced - the mapping function, the per-family
+catches, and the aws-cli counterpart each one mirrors.
 [`exceptions.md`](./exceptions.md) section 5 and [`testing.md`](./testing.md)
-section 2 point here, and [`guide/cli/exit-codes.md`](../docs/cli/exit-codes.md)
-states for users what the codes mean, deliberately without the precedence rules.
-A change here needs that page reviewed with it.
+section 2 point here for the mechanism. A change to either half needs the other
+reviewed with it.
 
 | code | condition | the name on the aws-cli side |
 |---|---|---|

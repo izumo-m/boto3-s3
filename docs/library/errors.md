@@ -35,9 +35,8 @@ The classification cuts across S3 and the local filesystem on purpose: an S3 403
 and a local `PermissionError` are the same category, because to your application
 they usually mean the same thing.
 
-The two refinements exist for the command's exit codes. Catch the parent —
-`ValidationError` also catches `InvalidValueError`, and `ConfigurationError`
-also catches `InvalidConfigError`.
+Catch the parent — `ValidationError` also catches `InvalidValueError`, and
+`ConfigurationError` also catches `InvalidConfigError`.
 
 `CancelledError` here is the library's own, unrelated to the identically named
 exceptions in `asyncio` and `concurrent.futures`.
