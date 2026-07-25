@@ -1253,6 +1253,11 @@ class S3:
         # non-stream loop does before pulling each item - a pre-cancelled
         # run transfers nothing and leaves a side-effecting stream untouched.
         _raise_if_cancelled(cancel_token, "cp")
+        # A stream is a single item with no destination tree, so no case-conflict
+        # gate is built here; the value is still read (and refused if bad) so
+        # every cp validates the option, whatever its paths - before the peer's
+        # client, the fileobj open, and the engine.
+        producers.case_conflict_mode(options, operation="cp")
         if src_is_stream:
             storage = self._stream_s3_peer(dest_storage)
             transfer_type = TransferType.UPLOAD

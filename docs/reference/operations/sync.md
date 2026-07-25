@@ -161,9 +161,10 @@ rejected; `src` and `dest` are resolved and validated; an already-cancelled
 that the local source path exists; a missing local destination directory is
 created; an S3 Express directory bucket on either side is rejected; a client
 is built for an S3 side that still has none; an open-route side is checked for
-the capabilities the route needs. The destination directory is therefore
-created even by a run that transfers nothing, and even by one the
-directory-bucket check goes on to reject. The check is a bare existence test,
+the capabilities the route needs; an unrecognized `case_conflict` value is
+rejected. The destination directory is therefore created even by a run that
+transfers nothing, by one the directory-bucket check goes on to reject, and by
+one the `case_conflict` check rejects. The check is a bare existence test,
 so a destination that already exists as a file passes it and every item fails
 afterwards. The source check is a bare existence test too: a local source that
 is a file passes it, the directory-style walk then enumerates nothing and emits
@@ -232,8 +233,10 @@ order rather than in compare-key order.
   custom (open-route) side that does not declare the capabilities the route
   needs (sorted scanning, the route's read or write, and deletion when the
   delete lane is on for a custom destination); an unrecognized `copy_props` or
-  `annotation_copy_mode` value on the S3-to-S3 route; and a `TransferConfig`
-  carrying classic-only settings with `preferred_transfer_client="crt"`,
+  `annotation_copy_mode` value on the S3-to-S3 route; an unrecognized
+  `case_conflict` value, on any route and not only the download the gate
+  covers; and a `TransferConfig` carrying classic-only settings with
+  `preferred_transfer_client="crt"`,
   rejected when the transfer engine is built and therefore not under `dryrun`.
 - [`NotFoundError`](../exceptions.md#notfounderror) — the local source path of
   an upload does not exist.

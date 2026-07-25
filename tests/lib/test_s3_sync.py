@@ -582,6 +582,24 @@ class TestSyncUpload:
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.txt"]
 
+    def test_unrecognized_case_conflict_mode_is_refused_outside_the_gate_scope(
+        self, tmp_path: Path
+    ) -> None:
+        # The conversion runs ahead of the gate's scope checks, so a bad value
+        # fails an upload sync too - a run the gate itself never covers.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                transfer_config=_SERIAL,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert calls == []
+
 
 class TestSyncDownload:
     def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
@@ -785,6 +803,24 @@ class TestSyncDownload:
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
         assert len(notices) == 1
         assert str(notices[0].error).startswith("warning: Skipping bucket/d/a.txt -> ")
+
+    def test_unrecognized_case_conflict_mode_raises_validation_error(self, tmp_path: Path) -> None:
+        # An unrecognized value is a caller error in the Boto3S3Error family,
+        # not the enum's raw ValueError (design/exceptions.md), and it is
+        # refused before a single request goes out.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                str(tmp_path / "out"),
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "sync"
+        assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
+        assert calls == []
 
 
 class TestSyncCopy:

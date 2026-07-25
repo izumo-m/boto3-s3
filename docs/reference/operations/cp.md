@@ -265,8 +265,10 @@ reference) are emitted inline on the calling thread
   declare what its route needs (`OPEN_READ` plus `SCAN` or `GET_FILEINFO` for a
   custom source, `OPEN_WRITE` for a custom destination); an option value the
   request mapper rejects, such as a malformed `grants` entry or an unrecognized
-  `copy_props` / `annotation_copy_mode`; a `TransferConfig` carrying
-  classic-only settings with `preferred_transfer_client="crt"`; a
+  `copy_props` / `annotation_copy_mode`; an unrecognized `case_conflict` value,
+  refused on every route including the streaming one, whose single item builds
+  no gate; a `TransferConfig` carrying classic-only settings with
+  `preferred_transfer_client="crt"`; a
   `StdioStorage` whose `stdin` / `stdout` is unavailable in this process; and a
   case-fold collision under `CaseConflictMode.ERROR`, raised from inside
   enumeration.

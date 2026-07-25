@@ -16,7 +16,7 @@ import io
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -1123,6 +1123,86 @@ class TestCaseConflictGate:
             gate.blocks(twin, transferrer)
         assert excinfo.value.operation == "mv"
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
+
+    def test_unrecognized_mode_raises_validation_error(self, tmp_path: Path) -> None:
+        # An unrecognized value is a caller error in the Boto3S3Error family,
+        # not the enum's raw ValueError (design/exceptions.md), and it is
+        # refused before a single request goes out.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/cc/", client=client),
+                str(tmp_path / "out"),
+                recursive=True,
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "cp"
+        assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
+        assert calls == []
+
+    def test_unrecognized_mode_reports_the_running_operation(self, tmp_path: Path) -> None:
+        # cp and mv share the transfer path, so the refusal carries the running
+        # operation rather than a hardcoded "cp".
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().mv(
+                S3Storage("s3://b/cc/", client=client),
+                str(tmp_path / "out"),
+                recursive=True,
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert excinfo.value.operation == "mv"
+        assert calls == []
+
+    def test_unrecognized_mode_is_refused_outside_the_gate_scope(self, tmp_path: Path) -> None:
+        # The conversion runs ahead of the gate's scope checks, so a bad value
+        # fails a non-recursive upload too - a run the gate itself never covers.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert calls == []
+
+    def test_unrecognized_mode_is_refused_on_the_stream_route(self) -> None:
+        # The stream route builds no gate at all, but it reads the option so
+        # that no cp escapes the check - refused before the stream is opened.
+        buf = io.BytesIO(b"x")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                IOStorage(buf),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "cp"
+        assert calls == []
+
+    def test_none_mode_reads_as_unspecified(self, tmp_path: Path) -> None:
+        # An explicit None is unspecified (an is-None check: None only, not any
+        # falsy value), like copy_props - a permissive caller still transfers.
+        out = tmp_path / "out"
+        client, calls = make_recording_client([_cc_listing(), get_response(), get_response()])
+        S3().cp(
+            S3Storage("s3://b/cc/", client=client),
+            str(out),
+            recursive=True,
+            transfer_config=_CASE_CONFLICT_CONFIG,
+            **cast(TransferOptions, {"case_conflict": None}),
+        )
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
 
     def _build_gate(
         self, dest: LocalStorage, item_filter: FileFilter | None = None

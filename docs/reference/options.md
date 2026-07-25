@@ -166,9 +166,8 @@ The gate's own conditions are with the operations that run it
 destination file differing only in case
 ([`CaseConflictMode`](#caseconflictmode)). It defaults to
 `CaseConflictMode.IGNORE`, which runs no check at all. Like the other mode
-options it accepts the enum member or its string value, but an unrecognized
-value raises a plain `ValueError` from the enum rather than a
-`ValidationError`.
+options it accepts the enum member or its string value, and an unrecognized
+value is rejected with [`ValidationError`](./exceptions.md#validationerror).
 
 `no_overwrite` defaults to `False`. `True` means an object already present at
 the destination is left alone rather than overwritten. How that is enforced,
@@ -188,9 +187,12 @@ at the destination produces no record of any kind
 
 Raises, over and above what each operation raises on its own:
 
-- [`ValidationError`](./exceptions.md#validationerror) — an unknown key, and
-  `no_overwrite` on a `cp` / `mv` download into a stream destination (both
-  before any work); a malformed `grants` entry (in flight); an unrecognized
+- [`ValidationError`](./exceptions.md#validationerror) — an unknown key,
+  `no_overwrite` on a `cp` / `mv` download into a stream destination, and an
+  unrecognized `case_conflict` on any `cp` / `mv` / `sync` run whatever its
+  paths (all before any transfer starts, which is not before every side effect
+  — a recursive `cp` / `mv` or a `sync` creates its missing destination
+  directory first); a malformed `grants` entry (in flight); an unrecognized
   `copy_props` or `annotation_copy_mode` on a copy (at engine construction).
 - [`ConfigurationError`](./exceptions.md#configurationerror) — `no_overwrite`
   on an upload or copy whose SDK cannot express a conditional write, and
@@ -198,8 +200,6 @@ Raises, over and above what each operation raises on its own:
   (unless `metadata_directive` disabled the chain). Both are refused at engine
   construction; `sync` never reaches the conditional-write gate because it
   sends no conditional header. See [`../compatibility.md`](../compatibility.md).
-- `ValueError` — an unrecognized `case_conflict` value. This one is not a
-  `Boto3S3Error`.
 
 ## TransferConfig
 

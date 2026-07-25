@@ -1018,6 +1018,26 @@ def open_download_item(
     )
 
 
+def case_conflict_mode(options: TransferOptions, *, operation: str) -> CaseConflictMode:
+    """Read ``case_conflict`` out of ``options`` as a ``CaseConflictMode``.
+
+    The member and its string value are both accepted; anything else is a
+    caller error reported as ``ValidationError``, so the enum's raw
+    ``ValueError`` never leaves the public API (design/exceptions.md), the
+    same translation the copy-props options get. Like those, the unspecified
+    check is is-None rather than falsy, so a permissive caller's explicit
+    ``None`` reads as the default while a present-but-empty value ("") still
+    fails the conversion.
+    """
+    raw = options.get("case_conflict")
+    if raw is None:
+        raw = CaseConflictMode.IGNORE
+    try:
+        return CaseConflictMode(raw)
+    except ValueError as exc:
+        raise ValidationError(f"Invalid case_conflict value: {raw!r}", operation=operation) from exc
+
+
 def cp_case_gate(
     plan: transferplan.TransferPlan,
     *,
@@ -1048,7 +1068,7 @@ def cp_case_gate(
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
     """
-    mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
+    mode = case_conflict_mode(options, operation=operation)
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
     # paths_type == "s3local" guarantees a LocalStorage destination here.
@@ -1081,7 +1101,7 @@ def sync_case_gate(
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
     ``s3open`` destination owns its key space and runs no such check.
     """
-    mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
+    mode = case_conflict_mode(options, operation="sync")
     if (
         transfer_type is not TransferType.DOWNLOAD
         or mode is CaseConflictMode.IGNORE
