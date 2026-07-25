@@ -73,8 +73,9 @@ but some are silent.
 - **What an option does** — `boto3-s3 <command> --help`. Every option is
   described there, including which of them are accepted but ignored.
 - **What an exit code means** — [`exit-codes.md`](./exit-codes.md).
-- **Where this differs from `aws s3`**, and the configuration files and
-  environment variables it reads — [`aws-differences.md`](./aws-differences.md).
+- **Where this differs from `aws s3`** — [`aws-differences.md`](./aws-differences.md).
+- **The configuration files, environment variables and `[s3]` tuning keys it
+  reads** — [`configuration.md`](./configuration.md).
 - **What changes with the installed dependencies** —
   [`compatibility.md`](../compatibility.md).
 

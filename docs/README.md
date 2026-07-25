@@ -10,9 +10,10 @@ section 4.
 `aws s3` with it, and where to look things up.
 
 - [`cli/exit-codes.md`](./cli/exit-codes.md) — the codes a script can branch on.
-- [`cli/aws-differences.md`](./cli/aws-differences.md) — what parity covers,
-  where behavior differs from `aws s3`, and the configuration files and
-  environment variables the command reads.
+- [`cli/aws-differences.md`](./cli/aws-differences.md) — what parity covers and
+  where behavior differs from `aws s3`.
+- [`cli/configuration.md`](./cli/configuration.md) — the configuration files,
+  environment variables and `[s3]` tuning keys the command reads.
 
 What each option does is not repeated here: every option is an `aws s3` option
 and `boto3-s3 <command> --help` describes it.

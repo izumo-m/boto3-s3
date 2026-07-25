@@ -1,13 +1,14 @@
-# Differences from `aws s3`, and configuration
+# Differences from `aws s3`
 
 `boto3-s3` aims to be a command-for-command replacement for `aws s3`. This page
-records where that aim stops — what parity covers, where behavior deliberately
-differs — and the configuration inputs that are not command-line options and so
-have no `--help` entry.
+records where that aim stops: what parity covers, and where behavior
+deliberately differs.
 
 For what each option does, run `boto3-s3 <command> --help`; every option is an
 `aws s3` option and is described there. For exit codes see
-[`exit-codes.md`](./exit-codes.md).
+[`exit-codes.md`](./exit-codes.md), and for the configuration files, environment
+variables and `[s3]` tuning keys the command reads see
+[`configuration.md`](./configuration.md).
 
 ## 1. What parity covers
 
@@ -60,58 +61,7 @@ Differences that depend on which dependencies are installed — the CRT engine,
 CRT-family checksums, conditional writes, and more — are in
 [`compatibility.md`](../compatibility.md).
 
-## 3. Configuration files and environment variables
-
-Credentials and connection settings come from the standard AWS sources, chosen
-with the same global flags as `aws s3`. A global flag may appear **before or
-after** the subcommand.
-
-Resolution order matches `aws` v2, which is not the same as plain boto3's — so a
-Python script using boto3 directly may pick a different profile or region than
-this command does from the same environment.
-
-- **Region**: `--region`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the
-  profile's `region`, then the EC2 instance metadata service. The environment
-  variables win by being **present**, so `AWS_REGION=` selects the empty region
-  rather than falling through.
-- **Profile**: `--profile`, then `AWS_PROFILE`, then `AWS_DEFAULT_PROFILE`, then
-  `default`. Present wins here too, so `AWS_PROFILE=` fails with a
-  profile-not-found error.
-- **Retries**: `standard` mode with 3 attempts, unless `AWS_RETRY_MODE` /
-  `AWS_MAX_ATTEMPTS` or the profile supplies one. Only `standard` and `adaptive`
-  are accepted; `legacy` is rejected, as `aws` v2 rejects it.
-
-The environment variables read are `AWS_REGION`, `AWS_DEFAULT_REGION`,
-`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
-`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`, and
-`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS`. The last is honored only when it is
-literally `true` (case-insensitively); `AWS_CLI_AUTO_PROMPT` accepts `on` and
-`on-partial`, and anything else counts as off.
-
-Transfer tuning comes from the profile's `[s3]` section in `~/.aws/config`; the
-keys are listed in the package README, and three of them are accepted but inert
-(see [`compatibility.md`](../compatibility.md)).
-
-## 4. Reading a value from a file
-
-Any option or path that takes a single string can be given as `file://path`
-(read as text) or `fileb://path` (read as bytes), resolved before the command
-runs. This covers the `<S3Uri>` positional of `ls` / `rm` / `website` / `mb` /
-`rb` / `presign` and the free-string options of `cp` / `mv` / `sync`.
-
-Two exclusions are worth knowing:
-
-- **List-valued options are not expanded** — `--exclude`, `--include`, and
-  `mb --tags` keep the text verbatim.
-- **Options with a fixed choice list cannot use it**, because the value is
-  rejected as an invalid choice first.
-
-A file that cannot be read, or a binary file given to the text `file://` form,
-is a usage error. `fileb://` yields raw bytes only for `--sse-c-key` and
-`--sse-c-copy-source-key`; those two keys are never base64-decoded, matching
-`aws`.
-
-## 5. Options that do nothing
+## 3. Options that do nothing
 
 `--output`, `--query`, `--no-paginate`, `--no-cli-pager`, `--color`,
 `--cli-error-format` and `--cli-binary-format` are accepted for compatibility
@@ -120,7 +70,7 @@ an option has a fixed choice list the value is still validated, so an invalid
 one is still an error, and `--query` is still compiled as a JMESPath expression
 and rejected if malformed.
 
-## 6. Options limited by one direction
+## 4. Options limited by one direction
 
 `cp` / `mv` / `sync` accept the same options on every route, but not every
 option applies to every route, and — following `aws` — the treatment is not
@@ -137,7 +87,7 @@ effect off its route. The write-side options in particular — `--acl`,
 `--storage-class`, the content headers, `--metadata`, `--grants`, the SSE
 family — are silently ignored on a download rather than rejected.
 
-## 7. Filtering on Windows
+## 5. Filtering on Windows
 
 `--exclude` / `--include` patterns match case-insensitively on Windows, matching
 `aws`. A backslash in a pattern is treated as a separator there, so
