@@ -56,6 +56,15 @@ are visible, or make no difference to the result.
   fixed choice list are completed (`aws` omits some), bucket and key names are
   not completed from the server, and shell completion is not provided. Nothing
   about the prompt is covered by parity.
+- **User-Agent.** Requests identify themselves as the installed
+  `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
+  metadata (`md/command#s3.ls` and the like). Visible only to the server and
+  in `--debug` traces; anything keying on the aws-cli User-Agent (bucket
+  policies, access-log analytics) will classify these requests differently.
+- **`AWS_DEFAULTS_MODE` is honored.** The installed botocore implements
+  defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
+  Setting it changes retry/timeout defaults here where `aws` would not, and an
+  invalid value is an error here (`aws` runs as if it were unset).
 
 Differences that depend on which dependencies are installed — the CRT engine,
 CRT-family checksums, conditional writes, and more — are in

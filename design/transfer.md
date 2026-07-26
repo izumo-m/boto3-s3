@@ -576,6 +576,18 @@ dest-existence check for download. We ported the same three faces:
   validation later is non-breaking (it only turns a corrupted success into a
   failure), so this is recorded as an accepted deviation until the feature
   reaches pip s3transfer.
+- Under `response_checksum_validation = when_required` (env
+  `AWS_RESPONSE_CHECKSUM_VALIDATION` or the config key; not the default), pip
+  s3transfer (0.19) skips the sizing HeadObject and opens every classic
+  download with a first-chunk **ranged** GetObject, discovering the size from
+  that response - an optimization the aws-cli fork does not have. aws HEADs
+  (when the size is unknown) and issues a plain GetObject below the multipart
+  threshold, so under that setting the two sides send different request
+  shapes for a small single-object download (the branch fires before any
+  provided size is consulted). Same bytes, same rc; only the wire shape
+  differs, and only under that non-default setting - recorded, not worked
+  around, for the same reason as the fork-only combine above: the divergence
+  lives in the installed s3transfer, not in this codebase.
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 
