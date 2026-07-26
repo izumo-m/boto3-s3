@@ -4,7 +4,7 @@ Read this before you switch a script over. Most `aws s3` invocations behave
 identically; the handful that do not are listed below, and one of them is
 silent.
 
-For what each option does, run `boto3-s3 <subcommand> --help`; every option is an
+For what each option does, run `boto3-s3 <subcommand> help`; every option is an
 `aws s3` option and is described there. For exit codes see
 [`exit-codes.md`](./exit-codes.md), and for the configuration files, environment
 variables and `[s3]` tuning keys the command reads see
@@ -17,7 +17,7 @@ state, the same returned values, the same error conditions, and the same exit
 code**. A mismatch in any of those is a bug worth reporting.
 
 **Do not parse the console output.** Error and warning wording, progress lines,
-`--debug` traces and `--help` text differ from `aws` and change between
+`--debug` traces and help pages differ from `aws` and change between
 releases (the error prefix is `boto3-s3:`, not `aws:`). One exception is worth
 knowing: parameter-validation errors do use aws's envelope,
 `An error occurred (ParamValidation): <message>`, and `--cli-error-format` does
@@ -43,8 +43,6 @@ are visible, or make no difference to the result.
   integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
   neither changes the result or the exit code. An explicit
   `--checksum-algorithm` makes the two agree.
-- **`-h` / `--help`.** An option here; `aws` offers `help` as a subcommand.
-  `boto3-s3 help` and `boto3-s3 <subcommand> help` also work.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -85,10 +83,10 @@ CRT-family checksums, conditional writes, and more — are in
 
 `--output`, `--query`, `--no-paginate`, `--no-cli-pager`, `--color`,
 `--cli-error-format` and `--cli-binary-format` are accepted for compatibility
-and have no effect — `--help` groups them under `recognized but ignored`. Where
-an option has a fixed choice list the value is still validated, so an invalid
-one is still an error, and `--query` is still compiled as a JMESPath expression
-and rejected if malformed.
+and have no effect — the help page groups them under `recognized but ignored`.
+Where an option has a fixed choice list the value is still validated, so an
+invalid one is still an error, and `--query` is still compiled as a JMESPath
+expression and rejected if malformed.
 
 ## 4. Options limited by one direction
 

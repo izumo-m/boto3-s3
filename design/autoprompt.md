@@ -89,8 +89,7 @@ The filter is auto-prompt's default **fuzzy** (subsequence match).
 
 The `help` subcommand is not offered (this CLI has no `help` subcommand - the
 dispatcher honors aws's bare `help` *token* at rc 0, [`cli.md`](./cli.md)
-section 1, but it is not a completable command; `--help` is also excluded
-because it is not in aws's candidate set).
+section 1, but it is not a completable command).
 
 ### Reachability (parser adjustments for usability)
 
@@ -162,8 +161,8 @@ Only `prompt.py` imports `prompt_toolkit`, and that import happens only when
 region/profile completers, but in a real prompt session the SDK is loaded
 before the first completion anyway: building the completion model runs
 `cli.build_parser()`, which loads every command module, and the transfer
-commands import the SDK-backed library modules at module top. Top-level
-`--help` / `--version` never touch `prompt_toolkit` (the `autoprompt`
+commands import the SDK-backed library modules at module top. The top-level
+`help` token and `--version` never touch `prompt_toolkit` (the `autoprompt`
 package's pure mode-resolution module, `autoprompt.resolve`, is imported with
 `cli` itself); this is an implementation detail outside the AWS SDK import
 contract ([`imports.md`](./imports.md)). Normal dispatch and usage-error paths
@@ -211,8 +210,8 @@ a mode string (`on` / `on-partial` / `off`), never an rc.
 
 The precedence in `resolve_auto_prompt_mode` (the first one decided wins):
 
-1. If any of `--help` / `-h` / `--version` is present -> **off** (display
-   help/version).
+1. If either of `help` / `--version` is present -> **off** (display
+   help/version). These are aws's `_NO_AUTO_PROMPT_ARGS`, token for token.
 2. `--no-cli-auto-prompt` -> **off**.
 3. `--cli-auto-prompt` -> **on**.
 4. Otherwise -> env `AWS_CLI_AUTO_PROMPT` -> profile `cli_auto_prompt` -> `'off'`.
@@ -297,7 +296,7 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
 - **Drift guard**: each subcommand's completer option set == its argparse option
   set.
 - **Wiring**: mutual exclusion 252, missing-dep (stub `find_spec`) guidance +
-  252, re-dispatch via an injected prompter, `--help` precedence,
+  252, re-dispatch via an injected prompter, `help`-token precedence,
   `--no-cli-auto-prompt` triggering no prompt.
 - **Mode resolution (Phase 2)**: env on/off/invalid, config file (`[default]` /
   `[profile X]`, `AWS_CONFIG_FILE`), env > config precedence, explicit flag >

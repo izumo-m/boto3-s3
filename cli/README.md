@@ -177,7 +177,7 @@ What each key does, how the transfer engine is chosen, and the environment
 variables read are in
 [`configuration.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/configuration.md).
 
-Run `boto3-s3 <subcommand> --help` for a subcommand's full option list.
+Run `boto3-s3 <subcommand> help` for a subcommand's full option list.
 
 ## License
 

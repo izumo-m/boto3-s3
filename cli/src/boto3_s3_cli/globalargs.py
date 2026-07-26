@@ -272,7 +272,7 @@ def add_common_arguments(
     # Opt-in interactive UI (section 3, the "autoprompt" extra). Both are
     # resolved from raw argv before parsing, so they are effective options, not
     # members of the ignored group; argparse still has to declare them so they
-    # parse and reach --help (aws shows both).
+    # parse and appear on the help page (aws lists both).
     parser.add_argument(
         "--cli-auto-prompt",
         action="store_true",

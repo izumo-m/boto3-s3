@@ -55,20 +55,21 @@ solidified design is added here.
   flows down to the leaf parser (`--expires-in=120 presign s3://b/k` is
   rc 0). The parse itself settles two outcomes even earlier, replayed from
   the captured output: a global that fails to parse (invalid choice, missing
-  value) is the run's error - beating the invalid-subcommand rejection and a
-  `-h` anywhere in argv - and a parse-time `--version` prints and exits 0
-  even beside an invalid subcommand (both measured). A parse-time `-h` /
-  `--help` ahead of the subcommand wins over the resolutions - an extension
-  slot: aws s3 accepts neither (`aws -h` / `aws s3 ls --help` are the 252
-  "Unknown options" / missing-command errors, measured on 2.36.1;
-  testing.md files `--help` under the extension options the differential
-  cannot diff), so ours orders it like the `--version` action, which aws
-  does fire parse-time - and aws's **help-token rule** applies: an
-  exactly-`help` post-globals remainder, or an exactly-`help` stage-2 token
-  list after a subcommand, prints the corresponding help page at rc 0 (`ls
-  help` shows ls's help rather than listing a bucket named `help`; `help
-  foo` stays the invalid-choice 252, like aws; `presign help --region
-  us-east-1` still pages because the globals are already gone, like aws).
+  value) is the run's error - beating the invalid-subcommand rejection and
+  any unknown option anywhere in argv - and a parse-time `--version` prints
+  and exits 0 even beside an invalid subcommand (both measured). Help is
+  reached only through aws's **help-token rule**: an exactly-`help`
+  post-globals remainder, or an exactly-`help` stage-2 token list after a
+  subcommand, prints the corresponding help page at rc 0 (`ls help` shows
+  ls's help rather than listing a bucket named `help`; `help foo` stays the
+  invalid-choice 252, like aws; `presign help --region us-east-1` still pages
+  because the globals are already gone, like aws). No parser declares an
+  argparse help action, so `-h` / `--help` are unrecognized options exactly
+  as on aws (`s3 --help` and `s3 ls -h` are `Unknown options: ...`; at a leaf
+  still missing its positionals the required-argument report comes first, as
+  in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
+  `s3 help --help` breaks the exactly-`help` remainder into an invalid
+  choice `help` - all measured on 2.36.1).
 - The first `--` stops the globals pass (argparse semantics, verified
   identical on 3.10 and aws's bundled 3.14) and the marker survives in the
   remainder for stage 2's parse to honor, so the tail stays positional all
@@ -129,7 +130,7 @@ solidified design is added here.
   - **Ambiguous-abbreviation candidates.** `--c could match ...` lists the
     same options aws lists, in our option-registration order rather than
     aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
-    declaring the globals in aws's order, which reshuffles `--help`.
+    declaring the globals in aws's order, which reshuffles the help page.
   - **Subcommand-level parse errors.** aws builds its leaf parsers with the
     same top-level usage string, so a leaf failure (`ls --page-size` with no
     value, `cp` with missing paths) closes with that guidance block too;
@@ -647,7 +648,8 @@ The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws-cli):
 **a top-level global that fails to parse, or a parse-time `--version` (252 /
 0**, settled during `_dispatch`'s globals pass itself - ahead of everything
-below, the invalid-subcommand rejection and `-h` included; section 1) ->
+below, the invalid-subcommand rejection and the unknown-options report
+included; section 1) ->
 **`--query` compile (252**, aws resolves it at `top-level-args-parsed`, the
 first of the resolutions) -> **`--endpoint-url` scheme (252**, aws validates the
 value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
@@ -881,7 +883,7 @@ reviewed with it.
 
 | code | condition | the name on the aws-cli side |
 |---|---|---|
-| 0 | Success. `--help` / `--version`, and a `BrokenPipeError` reaching `main`'s handler, are also 0 (in the common `ls \| head` pipeline the interpreter's shutdown flush then fails on the closed pipe and the *process* exits 120 - aws identically, measured) | - |
+| 0 | Success. The `help` token / `--version`, and a `BrokenPipeError` reaching `main`'s handler, are also 0 (in the common `ls \| head` pipeline the interpreter's shutdown flush then fails on the closed pipe and the *process* exits 120 - aws identically, measured) | - |
 | 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
@@ -973,7 +975,7 @@ of **rc 1**; off the stream route the value is ignored, so a non-integer is rc 0
 
 ## 7. Import discipline (startup cost)
 
-The top-level `--help` and `--version` exits load no AWS SDK module (boto3 /
+The top-level `help` token and `--version` exits load no AWS SDK module (boto3 /
 botocore / s3transfer), no subcommand's command module (the `commands`
 package's shared `base` infrastructure may load), and no library module beyond
 the lazy `boto3_s3` root and its pure `exceptions`. This is the full CLI import

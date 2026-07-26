@@ -11,8 +11,8 @@ scenario, unconditionally - there is deliberately no flag to relax it.
 
 Not represented here:
 
-- extension options absent from ``aws s3`` (e.g. ``--help``): they cannot run
-  on the aws side, which is exactly the charter's exception 1.
+- the interactive prompt (``--cli-auto-prompt``): it needs a terminal on both
+  sides and is the charter's exception 2, so it is unit-tested instead.
 """
 
 from __future__ import annotations

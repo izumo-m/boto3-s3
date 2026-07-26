@@ -62,8 +62,8 @@ expected to produce differs by command family, so consult
 [`cli.md`](./cli.md) section 6 when adding an error scenario rather than
 assuming the shape of a neighbouring command's.
 
-Charter exceptions map naturally: extension options (e.g. `--help`) cannot
-run on the aws side, so they are unit-tested instead of diffed.
+Charter exceptions map naturally: the interactive prompt cannot run on the
+aws side, so it is unit-tested instead of diffed.
 
 `test_positional_fileb_bug_parity.py` is a dedicated drift tripwire rather
 than a golden scenario. It feeds a readable binary positional to all six
@@ -431,7 +431,7 @@ and skip on default Linux ones.
 
 `tests/lib/test_import_contract.py` pins the lazy package root and explicitly
 pure modules. `tests/cli/unit/test_import_contract.py` pins the CLI's two narrow
-guarantees: top-level `--help` and `--version` load no boto3 / botocore /
+guarantees: the top-level `help` token and `--version` load no boto3 / botocore /
 s3transfer module or subcommand's command module (`commands/base.py` is
 carved out as shared infrastructure). Normal dispatch, usage errors,
 subcommand help, and `S3()` construction have no SDK-free contract.

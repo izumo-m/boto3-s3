@@ -1,6 +1,6 @@
 """The lazy command table must not drift from the command classes.
 
-Stage 1 renders the top-level ``--help`` and validates the subcommand name
+Stage 1 renders the top-level help page and validates the subcommand name
 from ``cli._COMMAND_TABLE`` alone - without importing any command module - so
 the table duplicates each class's ``name`` / ``help`` on purpose
 (design/imports.md section 2 item 4). These cases import everything and pin the
@@ -11,6 +11,7 @@ tree's.
 from __future__ import annotations
 
 from boto3_s3_cli import cli
+from boto3_s3_cli.autoprompt.model import subparser_map
 
 
 class TestCommandTable:
@@ -53,3 +54,29 @@ class TestCommandTable:
             help_text = parser.format_help()
             assert "<subcommand> ...\n" in help_text
             assert "<command>" not in help_text
+
+    def test_no_parser_declares_a_help_option(self) -> None:
+        # Like aws, the `help` token is the only route to a help page: no
+        # parser carries a help option, so no usage line shows `[-h]` and no
+        # option list shows `-h, --help`. Both trees' subparsers are covered
+        # too, and the declared options are checked alongside the rendered
+        # text: stage 1's stubs render identically either way, so a stray help
+        # action there would show up in nothing but the action list.
+        trees = [cli._build_stage1_parser(), cli.build_parser()]
+        parsers = [
+            *trees,
+            *(subparser for tree in trees for subparser in subparser_map(tree).values()),
+            *(
+                builder(name, cli._load_command(name)())
+                for name in cli._COMMAND_TABLE
+                for builder in (cli._build_command_parser, cli._build_command_parse_parser)
+            ),
+        ]
+        for parser in parsers:
+            actions = parser._actions  # pyright: ignore[reportPrivateUsage]
+            declared = {opt for action in actions for opt in action.option_strings}
+            assert not declared & {"-h", "--help"}
+            rendered = parser.format_help() + parser.format_usage()
+            assert "[-h]" not in rendered
+            assert "-h, --help" not in rendered
+            assert "--help" not in rendered

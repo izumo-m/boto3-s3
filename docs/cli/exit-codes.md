@@ -7,7 +7,7 @@ script that already branches on `aws s3`'s codes keeps working unchanged.
 
 | code | what it means |
 | --- | --- |
-| 0 | The command succeeded. `--help` and `--version` also exit 0. |
+| 0 | The command succeeded. `help` and `--version` also exit 0. |
 | 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
 | 130 | Interrupted with Ctrl-C before the operation started. |
@@ -18,7 +18,7 @@ script that already branches on `aws s3`'s codes keeps working unchanged.
 
 ### 0 — success
 
-`--help` and `--version` exit 0 as well. Piping into a reader that closes early
+`help` and `--version` exit 0 as well. Piping into a reader that closes early
 (`ls | head`) is a special case: the command itself succeeds, but the process
 usually ends with 120, once Python fails to flush to the closed pipe. `aws` does
 the same, so do not branch on it.
@@ -107,10 +107,8 @@ All of this matches `aws s3`, including the orderings above.
 
 ## 3. Where this differs from `aws s3`
 
-Three cases where the codes are deliberately not identical:
+Two cases where the codes are deliberately not identical:
 
-- **`-h` / `--help`** is an option here; `aws` offers `help` as a subcommand
-  instead. An extension that `aws s3` does not have cannot match it.
 - **Features needing `awscrt`** exit 253 when the `crt` extra is not installed.
   `aws` v2 bundles awscrt, so this situation cannot arise there.
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See

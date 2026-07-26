@@ -275,7 +275,7 @@ For completeness, the options that **do** have an effect:
 
 `boto3-s3-cli` does not guarantee byte-for-byte identity with
 `aws s3` console output. Human-readable text - `--debug` traces, error
-and warning messages, progress lines, `--help` - may differ in
+and warning messages, progress lines, help pages - may differ in
 wording, ordering, or exact content between the two tools and between
 `boto3-s3-cli` releases. Parity is defined on S3 object state, return
 values, and error conditions, not on console formatting.

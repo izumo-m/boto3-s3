@@ -123,12 +123,24 @@ class _RaisingClient:
 
 
 class _OnePageClient:
-    """Fake whose ListObjectsV2 paginator yields a single canned page."""
+    """Fake whose ListObjectsV2 paginator yields a single canned page.
+
+    ``calls`` collects the kwargs each ``paginate`` received, so a test can pin
+    which bucket and prefix the parse produced, and ``size`` sets the canned
+    key's size for the cases that read the formatted listing back.
+    """
+
+    def __init__(self, size: int = 1) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._size = size
 
     def get_paginator(self, name: str) -> Any:
+        calls, size = self.calls, self._size
+
         class _Paginator:
             def paginate(self, **kwargs: Any) -> Any:
-                yield {"Contents": [{"Key": "p/x", "Size": 1, "LastModified": MTIME}]}
+                calls.append(kwargs)
+                yield {"Contents": [{"Key": "p/x", "Size": size, "LastModified": MTIME}]}
 
         return _Paginator()
 
@@ -579,10 +591,10 @@ class TestTopLevelErrorText:
 class TestPreParseErrorAttribution:
     """A global that fails to parse - or a parse-time ``--version`` - settles
     the run in the pre-pass, like aws's ``MainArgParser``: it beats the
-    invalid-subcommand error and a ``-h`` anywhere in argv (measured against
-    the pinned aws-cli: ``s3 bogus --output bad`` blames ``--output``,
-    ``s3 ls -h --output bad`` errors instead of helping, ``s3 bogus
-    --version`` prints the version at rc 0)."""
+    invalid-subcommand error and any unknown option (measured against the
+    pinned aws-cli: ``s3 bogus --output bad`` blames ``--output``,
+    ``s3 ls -h --output bad`` blames ``--output`` rather than the unknown
+    ``-h``, ``s3 bogus --version`` prints the version at rc 0)."""
 
     # Every choices-validated global; aws rejects each the same way (measured
     # per option against the pinned aws-cli, same [ERROR] line and rc).
@@ -623,11 +635,11 @@ class TestPreParseErrorAttribution:
         assert cli.main(["nosuchcmd", "--version"]) == 0
         assert capsys.readouterr().out.startswith("boto3-s3-cli/")
 
-    def test_parse_error_beats_help_in_either_position(
+    def test_parse_error_is_blamed_ahead_of_an_unknown_help_option(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's main parse precedes its help handling entirely, so -h cannot
-        # rescue a bad global even when it comes first.
+        # The globals pass runs before the unknown options are collected, so a
+        # bad global is the report even when `-h` / `--help` comes first.
         assert cli.main(["ls", "-h", "--output", "bad"]) == 252
         assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
         assert cli.main(["--help", "--output", "bad"]) == 252
@@ -716,9 +728,12 @@ class TestParseToValidationOrder:
         assert cli.main(["--version", "--cli-read-timeout", "abc"]) == 0
         capsys.readouterr()
 
-    def test_help_wins_over_a_bad_timeout(self, capsys: pytest.CaptureFixture[str]) -> None:
-        assert cli.main(["--help", "--cli-read-timeout", "abc"]) == 0
-        capsys.readouterr()
+    def test_bad_timeout_beats_an_unknown_help_option(self) -> None:
+        # The timeout coercion runs in the globals pass, ahead of the command
+        # layer that would report `--help` as unknown (measured: 255 on both
+        # `s3 --help --cli-read-timeout abc` and `s3 ls -h --cli-read-timeout abc`).
+        assert cli.main(["--help", "--cli-read-timeout", "abc"]) == 255
+        assert cli.main(["ls", "-h", "--cli-read-timeout", "abc"]) == 255
 
     def test_bad_profile_beats_the_local_local_usage_error(self) -> None:
         assert cli.main(["cp", "a", "b", "--profile", self._BOGUS]) == 255
@@ -992,13 +1007,17 @@ class TestHelpToken:
         assert cli.main(["--debug", "help"]) == 0
         capsys.readouterr()
 
-    def test_subcommand_help_token(self, capsys: pytest.CaptureFixture[str]) -> None:
-        assert cli.main(["ls", "help"]) == 0
-        assert "usage: boto3-s3 ls" in capsys.readouterr().out
-
-    def test_help_token_beats_missing_arguments(self, capsys: pytest.CaptureFixture[str]) -> None:
-        assert cli.main(["cp", "help"]) == 0
-        capsys.readouterr()
+    @pytest.mark.parametrize("name", sorted(cli._COMMAND_TABLE))
+    def test_subcommand_help_token(self, name: str, capsys: pytest.CaptureFixture[str]) -> None:
+        # The token is now the only route to a help page, so every entry in the
+        # command table is pinned - including the ones whose normal parse would
+        # fail on missing positionals (measured: all nine are rc 0 on aws).
+        assert cli.main([name, "help"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith(f"usage: boto3-s3 {name}")
+        # The page is the full renderer's, not the leaf parse parser's reduced
+        # view: it carries the recognized-but-ignored globals section too.
+        assert out == cli._build_command_parser(name, cli._load_command(name)()).format_help()
 
     def test_help_token_with_extras_is_not_special(self) -> None:
         assert cli.main(["help", "foo"]) == 252
@@ -1014,6 +1033,153 @@ class TestHelpToken:
         assert "usage:" in capsys.readouterr().out.lower()
         assert cli.main(["presign", "help", "--region", "us-east-1", "--no-cli-pager"]) == 0
         assert "usage: boto3-s3 presign" in capsys.readouterr().out
+
+
+class TestHelpOptionsAreUnknownOptions:
+    """``-h`` / ``--help`` are options on neither tool: the ``help`` token is
+    the only route to a help page, and both spellings fall through as ordinary
+    unrecognized options. Every report below is the pinned aws-cli's own stderr
+    under this file's fixed mapping (aws opens each report with a blank line;
+    ours does not)."""
+
+    _UNKNOWN = "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: "
+
+    @pytest.mark.parametrize(
+        ("argv", "reported"),
+        [
+            (["--help"], "--help"),
+            (["-h"], "-h"),
+            (["-h", "-h"], "-h,-h"),
+            (["--help", "--funky"], "--help,--funky"),
+            (["--funky", "--help"], "--funky,--help"),
+            (["--", "--help"], "--help"),
+            (["--no-cli-auto-prompt", "--help"], "--help"),
+            (["ls", "--help"], "--help"),
+            (["ls", "-h"], "-h"),
+            (["-h", "ls"], "-h"),
+            (["ls", "--help", "--help"], "--help,--help"),
+            (["ls", "--help", "s3://bucket"], "--help"),
+            (["ls", "help", "--help"], "--help"),
+            (["sync", "-h", "a", "b"], "-h"),
+            (["cp", "--help", "a", "b"], "--help"),
+            (["cp", "a", "b", "--help"], "--help"),
+            (["cp", "--recursive", "--help", "a", "b"], "--help"),
+        ],
+        ids=[
+            "top-level-long",
+            "top-level-short",
+            "repeated-short",
+            "before-another-unknown",
+            "after-another-unknown",
+            "behind-a-leading-marker",
+            "beside-a-global",
+            "after-the-subcommand",
+            "after-the-subcommand-short",
+            "before-the-subcommand",
+            "repeated-at-the-leaf",
+            "before-a-path",
+            "after-a-help-shaped-path",
+            "between-the-subcommand-and-its-paths",
+            "before-satisfied-paths",
+            "after-satisfied-paths",
+            "beside-a-real-option",
+        ],
+    )
+    def test_reported_as_unknown_options(
+        self, argv: list[str], reported: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == f"{self._UNKNOWN}{reported}\n"
+
+    @pytest.mark.parametrize(
+        ("argv", "required_name"),
+        [
+            (["cp", "-h"], "paths"),
+            (["cp", "--help"], "paths"),
+            (["cp", "--help", "--recursive"], "paths"),
+            (["mb", "-h"], "path"),
+            (["rb", "-h"], "path"),
+            (["presign", "--help"], "path"),
+            (["website", "--help"], "paths"),
+        ],
+        ids=["cp-short", "cp-long", "cp-with-an-option", "mb", "rb", "presign", "website"],
+    )
+    def test_missing_arguments_are_reported_ahead_of_the_unknown_option(
+        self, argv: list[str], required_name: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # argparse settles the required positionals inside the parse, so at a
+        # leaf that still lacks them the missing-argument report wins - aws
+        # reports the same way round (measured on every command above).
+        assert cli.main(argv) == 252
+        err = capsys.readouterr().err
+        assert err.startswith(
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"the following arguments are required: {required_name}\n"
+        )
+        assert "Unknown options" not in err
+
+    @pytest.mark.parametrize(
+        ("argv", "rejected"),
+        [
+            (["help", "--help"], "help"),
+            (["help", "-h"], "help"),
+            (["-h", "help"], "help"),
+            (["--region", "us-east-2", "--", "--help"], "--help"),
+            (["bogus", "--help"], "bogus"),
+            (["--help", "bogus"], "bogus"),
+        ],
+        ids=[
+            "help-token-then-option",
+            "help-token-then-short",
+            "short-then-help-token",
+            "protected-by-a-kept-marker",
+            "invalid-subcommand-first",
+            "invalid-subcommand-last",
+        ],
+    )
+    def test_reported_as_an_invalid_subcommand(
+        self, argv: list[str], rejected: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The help-token rule needs an exactly-``['help']`` remainder, so an
+        # accompanying ``-h`` / ``--help`` turns the token into a subcommand
+        # name - and a marker-protected ``--help`` is a name in its own right.
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument subcommand: Found invalid choice '{rejected}'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize("argv", [["--version", "--help"], ["--help", "--version"]])
+    def test_version_wins_in_either_order(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `--version` is a real option here and on aws, and its parse-time
+        # action fires before the unknown options are ever collected.
+        assert cli.main(argv) == 0
+        captured = capsys.readouterr()
+        assert captured.out.startswith("boto3-s3-cli/")
+        assert captured.err == ""
+
+    def test_help_option_behind_a_leaf_marker_is_positional_data(self) -> None:
+        # Measured: `s3 ls -- --help` lists the bucket named `--help` rather
+        # than reporting anything - the marker survives to the leaf parse.
+        client = _OnePageClient()
+        rc = cli.main(["ls", "--", "--help"], ctx=Context(client_factory=lambda _a: client))
+        assert rc == 0
+        assert [call["Bucket"] for call in client.calls] == ["--help"]
+
+    def test_dash_dash_h_abbreviates_to_human_readable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `s3 ls --h` runs (aws resolves the abbreviation against
+        # `--human-readable`); with `-h` gone nothing shadows it here either.
+        client = _OnePageClient(size=2048)
+        rc = cli.main(
+            ["ls", "s3://bucket/pre/", "--h"], ctx=Context(client_factory=lambda _a: client)
+        )
+        assert rc == 0
+        assert "2.0 KiB" in capsys.readouterr().out
 
 
 class _RecordingPresignClient:

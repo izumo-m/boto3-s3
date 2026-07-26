@@ -3,7 +3,7 @@
 `cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
 arguments, plus a few the command has no flag for. Each accepts the same values
 as the `aws s3` option of the same name, so `aws`'s own reference — or
-`boto3-s3 cp --help`, if you installed the command — says what any one of them
+`boto3-s3 cp help`, if you installed the command — says what any one of them
 means.
 
 ```python

@@ -257,14 +257,9 @@ class TestCompletionReachability:
 
 
 def _argparse_options(parser: argparse.ArgumentParser) -> set[str]:
-    """Every option string a parser declares, minus the -h/--help action."""
+    """Every option string a parser declares."""
     actions = parser._actions  # pyright: ignore[reportPrivateUsage]
-    return {
-        opt
-        for action in actions
-        if action.option_strings and "--help" not in action.option_strings
-        for opt in action.option_strings
-    }
+    return {opt for action in actions if action.option_strings for opt in action.option_strings}
 
 
 class TestModelReflectsParser:
@@ -363,12 +358,24 @@ class TestAutoPromptWiring:
         assert rc == 252
         assert prompter.seen == []  # the prompt ran (empty seed) - the 252 is post-prompt
 
-    def test_help_takes_precedence_over_prompt(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_help_token_takes_precedence_over_prompt(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's _NO_AUTO_PROMPT_ARGS is the raw `help` token (and `--version`),
+        # so a requested prompt still yields to it.
         prompter = _FakePrompter(["--version"])
-        rc = cli.main(["--cli-auto-prompt", "--help"], ctx=Context(auto_prompter=prompter))
+        rc = cli.main(["--cli-auto-prompt", "help"], ctx=Context(auto_prompter=prompter))
         assert rc == 0
         assert prompter.seen is None  # never prompted
         assert "usage:" in capsys.readouterr().out.lower()
+
+    def test_help_option_is_prompted_like_any_unknown_option(self) -> None:
+        # `--help` is not a token this CLI knows, so it does not suppress the
+        # prompt (aws behaves the same: only the `help` token is in its list).
+        prompter = _FakePrompter(["--version"])
+        rc = cli.main(["--cli-auto-prompt", "ls", "--help"], ctx=Context(auto_prompter=prompter))
+        assert rc == 0
+        assert prompter.seen == ["ls", "--help"]  # seeded and prompted
 
     def test_debug_handlers_detach_during_prompt_and_restore(
         self, capsys: pytest.CaptureFixture[str]
@@ -512,12 +519,12 @@ class TestAutoPromptModeResolution:
         assert prompter.seen is None  # --no-cli-auto-prompt wins -> off -> 252
         assert rc == 252
 
-    def test_help_beats_env_on(
+    def test_help_token_beats_env_on(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on")
         prompter = _FakePrompter(["--version"])
-        rc = cli.main(["--help"], ctx=Context(auto_prompter=prompter))
+        rc = cli.main(["help"], ctx=Context(auto_prompter=prompter))
         assert prompter.seen is None
         assert rc == 0
         assert "usage:" in capsys.readouterr().out.lower()

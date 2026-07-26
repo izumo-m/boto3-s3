@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- `--help` now describes every option instead of listing bare names.
+- `-h` / `--help` removed to match aws-cli — use `help`; they now fail with aws's `Unknown options` error. Help pages describe every option instead of listing bare names.
 - Argument parsing restructured to aws-cli's shape: global options are consumed first wherever they sit (abbreviations, values interleaved with command options, `--` separators, options ahead of the subcommand, and `help` wrapped in globals now all parse like aws), and top-level usage and error text now matches aws-cli's aside from the program name.
 - More aws-cli parity on edge behavior: bucket-less `s3:///key` targets now fail at aws's stage with aws's wording (a dryrun upload/delete of one is rc 0), `--expected-size` is not converted under `--dryrun`, a broken `[s3]` config value beats the S3 Express `--case-conflict` rejection, an explicit `multipart_chunksize` under the CRT engine keeps aws's single-put/multipart cutoff, and a named error code over HTTP 404 is no longer rewritten to the key-missing message.
 - The CRT engine now verifies TLS against the same CA bundle as the classic engine and aws-cli, instead of the operating system's trust store.

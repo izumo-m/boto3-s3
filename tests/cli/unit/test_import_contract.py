@@ -1,10 +1,10 @@
 """Import contract for the two top-level informational exits.
 
-Top-level ``--help`` and ``--version`` complete without importing the AWS SDK,
-a command module, or any library module beyond the lazy ``boto3_s3`` root and
-its pure exceptions taxonomy - in particular not the SDK-backed ``boto3_s3.s3``,
-which imports boto3 at module top. No import guarantee applies to normal
-dispatch, usage errors, or subcommand help.
+The top-level ``help`` token and ``--version`` complete without importing the
+AWS SDK, a command module, or any library module beyond the lazy ``boto3_s3``
+root and its pure exceptions taxonomy - in particular not the SDK-backed
+``boto3_s3.s3``, which imports boto3 at module top. No import guarantee applies
+to normal dispatch, usage errors, or subcommand help.
 
 Each case runs ``main()`` in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -70,10 +70,10 @@ def _run_fresh(code: str) -> str:
 
 
 class TestCliImportContract:
-    def test_top_level_help_is_sdk_and_command_free(self) -> None:
+    def test_top_level_help_token_is_sdk_and_command_free(self) -> None:
         _run_fresh(
             """
-            assert main(["--help"]) == 0
+            assert main(["help"]) == 0
             assert_no_heavy_imports()
             assert_no_command_modules()
             assert_no_library_modules()

@@ -406,8 +406,8 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
     """
-    # Importing boto3 drags in botocore and s3transfer. The top-level
-    # --help/--version exits return before this normal-dispatch path.
+    # Importing boto3 drags in botocore and s3transfer. The informational exits
+    # (`--version`, the help token) return before this normal-dispatch path.
     import boto3
     import botocore.session
     from botocore import UNSIGNED

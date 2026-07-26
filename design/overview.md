@@ -86,11 +86,11 @@ maintaining high functional compatibility (parity).
   same conditions, **whether on success or error**. This holds for any arguments
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
   are only two exceptions.
-  1. Extension options that do not exist in `aws s3` (e.g., the CLI's own
-     `--help` / `-h`, which aws-cli instead exposes as a `help` subcommand.
-     `--version` is *not* such an exception: aws accepts it under any `aws s3`
-     subcommand through its global argument handling - version line, rc 0 -
-     and the CLI matches that.)
+  1. Extension options that do not exist in `aws s3`. The CLI declares none:
+     its option surface is exactly `aws s3`'s, so this exception is currently
+     unused. `--version` is *not* one of them - aws accepts it under any
+     `aws s3` subcommand through its global argument handling (version line,
+     rc 0) and the CLI matches that.
   2. When it depends on a feature that is hard to realize (e.g., the CLI's
      interactive UI)
 

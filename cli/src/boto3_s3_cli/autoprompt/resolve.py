@@ -17,14 +17,14 @@ from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 # The flags take no value, so a raw-argv membership test is exact. They are
 # also declared on the parser so argparse accepts them on the normal off-mode
-# dispatch (e.g. `ls --no-cli-auto-prompt`) and lists them in --help; the
+# dispatch (e.g. `ls --no-cli-auto-prompt`) and the help page lists them; the
 # dispatcher strips them before re-dispatching a completed command line.
 AUTO_PROMPT_FLAG = "--cli-auto-prompt"
 NO_AUTO_PROMPT_FLAG = "--no-cli-auto-prompt"
-# Presence of any of these means "show help/version, don't prompt" (aws-cli's
-# _NO_AUTO_PROMPT_ARGS analog; ours is --help/-h/--version since we have no
-# `help` subcommand).
-NO_PROMPT_ARGS = ("--help", "-h", "--version")
+# Presence of any of these means "show help/version, don't prompt" - aws-cli's
+# _NO_AUTO_PROMPT_ARGS, token for token (its clidriver.py tests the raw argv
+# for exactly these two).
+NO_PROMPT_ARGS = ("help", "--version")
 # The env var and profile config key aws-cli resolves cli_auto_prompt from
 # (aws-cli clidriver.py _construct_cli_auto_prompt_chain: env > scoped config >
 # 'off').
@@ -40,7 +40,7 @@ def resolve_auto_prompt_mode(raw_argv: list[str]) -> str:
     - except the ``--cli-auto-prompt`` / ``--no-cli-auto-prompt`` mutual
     exclusion, which aws validates inside its resolver and the dispatcher's
     pre-pass here checks separately:
-    help/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
+    ``help``/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
     ``--cli-auto-prompt`` -> on; else ``AWS_CLI_AUTO_PROMPT`` env -> profile
     ``cli_auto_prompt`` -> ``off``. The value is lowercased and anything other
     than ``on`` / ``on-partial`` behaves as off (aws's else branch). The profile

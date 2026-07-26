@@ -10,7 +10,7 @@ usage errors, and subcommand help may all import the AWS SDK freely.
    / `s3transfer`) and executes none of the package's own submodules.
 2. Pure-Python building blocks (`globsieve` / `types` / `exceptions`, and the
    other modules the contract test names) import without any SDK module.
-3. `boto3-s3 --help` and `boto3-s3 --version` complete without importing any
+3. `boto3-s3 help` and `boto3-s3 --version` complete without importing any
    AWS SDK module, any per-command module (the `commands` package's shared
    `base` infrastructure may load), or any library module beyond the lazy
    `boto3_s3` root and its pure `exceptions`. Version tokens for installed
