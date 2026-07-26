@@ -48,9 +48,11 @@ class Boto3S3Error(Exception):
 
 `operation` is the operation name the failure belongs to (`"cp"`, `"sync"`,
 …). `None` is a legitimate value rather than a gap: it means no single
-operation was in scope — while a client is being built, or on the shared
+operation was in scope — while a client is being built, on the shared
 object-listing path that backs every recursive scan, which `ls` / `rm` / `cp` /
-`mv` / `sync` all ride.
+`mv` / `sync` all ride, or when the caller invokes a storage-level method
+directly, such as `Storage.validate` ([`storage.md`](./storage.md)). The same
+validation reached through an operation carries that operation's name instead.
 
 `bucket` and `key` are best-effort context for the failing entry. `key` names
 that entry in the address space it came from, not necessarily an S3 key: a

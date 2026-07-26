@@ -108,11 +108,14 @@ code.
 
 The context attributes are best-effort, and `operation=None` is a legitimate
 value: it means no subcommand-scoped operation was in scope - client
-construction, and the shared object-listing path that backs every recursive
+construction, the shared object-listing path that backs every recursive
 scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
-would mislabel the others). A locally-originating error carries a filesystem
-path in `key` (and no `bucket`) when set: the field names the failing entry in
-the backend's own address space, not always an S3 key.
+would mislabel the others), and a storage-level method the caller invokes
+itself, such as `Storage.validate` (an operation running the same check stamps
+its own name, since only the operation layer knows it). A locally-originating
+error carries a filesystem path in `key` (and no `bucket`) when set: the field
+names the failing entry in the backend's own address space, not always an S3
+key.
 
 Custom backends: an exception a custom `Storage` raises that is not already a
 `Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as

@@ -127,6 +127,26 @@ def _validate_transfer_options(options: TransferOptions, *, operation: str) -> N
         )
 
 
+def _validate_storage(storage: Storage, *, operation: str) -> None:
+    """Run ``Storage.validate`` and attribute its failure to ``operation``.
+
+    ``validate`` knows the location but not the operation that is about to use
+    it, so its errors would otherwise carry ``operation=None`` - the value the
+    contract reserves for "no single operation was in scope"
+    (docs/reference/exceptions.md). The operation layer fills the name in here,
+    only when the error left it unset (a backend that already attributed the
+    failure keeps its own name), and re-raises the same object so the traceback
+    and ``__cause__`` survive. A caller invoking ``storage.validate()`` directly
+    still gets ``operation=None``.
+    """
+    try:
+        storage.validate()
+    except Boto3S3Error as exc:
+        if exc.operation is None:
+            exc.operation = operation
+        raise
+
+
 def _emit_result(
     on_result: ResultCallback | None,
     *,
@@ -873,7 +893,7 @@ class S3:
                     operation=operation,
                 )
             storage = S3Storage(target, client=self.client())
-        storage.validate()
+        _validate_storage(storage, operation=operation)
         return storage
 
     # -- byte transfer ----------------------------------------------------
@@ -1031,8 +1051,8 @@ class S3:
         surfaces as a clear ``ValidationError`` instead of failing deep in the
         engine.
         """
-        src_storage.validate()
-        dest_storage.validate()
+        _validate_storage(src_storage, operation=operation)
+        _validate_storage(dest_storage, operation=operation)
         # A pre-cancelled token acts before this method's side effects: the
         # destination pre-create below, the case-gate's destination walk, and
         # any lazily-deferred client build (a caller-made S3Storage without a
@@ -1337,7 +1357,7 @@ class S3:
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        peer.validate()
+        _validate_storage(peer, operation="cp")
         return peer
 
     def mv(
@@ -1555,8 +1575,8 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        src_storage.validate()
-        dest_storage.validate()
+        _validate_storage(src_storage, operation="sync")
+        _validate_storage(dest_storage, operation="sync")
         # A pre-cancelled token acts before this method's side effects (the
         # destination pre-create below, any lazily-deferred client build - a
         # caller-made S3Storage without a client; resolve() above already

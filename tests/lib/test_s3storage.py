@@ -685,6 +685,20 @@ class TestConstructor:
         with pytest.raises(ValidationError):
             S3Storage("s3:///key").validate()
 
+    def test_key_without_bucket_rejection_carries_the_key(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage("s3:///key").validate()
+        assert exc_info.value.key == "key"
+        assert exc_info.value.bucket is None
+
+    def test_direct_validate_leaves_the_operation_unset(self) -> None:
+        # The storage does not know which operation is about to use it; the
+        # operation layer stamps the name (see test_s3.py). A caller invoking
+        # validate() directly keeps the documented operation=None.
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage("s3:///key").validate()
+        assert exc_info.value.operation is None
+
 
 class TestArnBuckets:
     """ARN-shaped bucket parts split like aws-cli's ``find_bucket_key``.
@@ -734,6 +748,22 @@ class TestArnBuckets:
         )
         with pytest.raises(ValidationError, match="Outpost Bucket"):
             S3Storage(f"s3://{arn}").validate()
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap",
+            "arn:aws:s3-outposts:us-west-2:123456789012:"
+            "outpost/op-01234567890123456/bucket/my-bucket",
+        ],
+    )
+    def test_rejections_carry_the_whole_arn_as_the_bucket(self, arn: str) -> None:
+        # The whole ARN identifies what was rejected, whatever the constructor's
+        # splitters made of it.
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage(f"s3://{arn}/some/key").validate()
+        assert exc_info.value.bucket == arn
+        assert exc_info.value.key is None
 
 
 class TestResolveRouting:

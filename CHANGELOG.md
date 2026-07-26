@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a user guide covering both packages under `docs/`; the design documents moved to `design/`.
 - Added a hand-written per-symbol API reference under `docs/reference/`, with an index pinned to the export surface by a test.
 - Names referenced by package-root signatures and defaults (`AwsConfig` / `ConfigSection`, the three sync comparison strategies, `PatternKind`, `S3_DELETE_BATCH`) are now importable from the package root.
-- An invalid `case_conflict` value now raises `ValidationError` instead of a raw `ValueError`.
+- Exception polish: an invalid `case_conflict` value now raises `ValidationError`, and operation-invoked location validation carries the operation name and location context.
 
 ## [0.8.0] - 2026-07-23
 

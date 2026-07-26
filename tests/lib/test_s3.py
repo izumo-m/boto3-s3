@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import threading
+from collections.abc import Callable
 from typing import Any, cast
 
 import boto3
@@ -19,6 +20,7 @@ from boto3_s3 import (
     FileKind,
     InvalidConfigError,
     LocalStorage,
+    NotFoundError,
     S3Storage,
     TransferConfig,
     ValidationError,
@@ -187,6 +189,91 @@ class TestUnknownTransferOption:
         with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
             method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
         assert type(ei.value) is ValidationError
+
+
+class TestValidationOperationAttribution:
+    """A location the storage rejects names the operation that ran the check.
+
+    ``Storage.validate`` sees the location but not its caller, so the operation
+    layer stamps its own name; ``operation=None`` stays reserved for a check the
+    caller ran itself (docs/reference/exceptions.md).
+    """
+
+    @pytest.mark.parametrize(
+        ("operation", "call"),
+        [
+            ("ls", lambda s3, _dest: s3.ls("s3:///key", on_entry=lambda _info: None)),
+            ("rm", lambda s3, _dest: s3.rm("s3:///key")),
+            ("cp", lambda s3, dest: s3.cp("s3:///key", dest)),
+            ("mv", lambda s3, dest: s3.mv("s3:///key", dest)),
+            ("sync", lambda s3, dest: s3.sync("s3:///key", dest)),
+        ],
+    )
+    def test_each_entry_path_stamps_its_own_name(
+        self, operation: str, call: Callable[[S3, str], None], tmp_path: Any
+    ) -> None:
+        # One case per entry path: the single-target resolver (ls / rm), the
+        # shared cp/mv pipeline, and sync. "s3:///key" is the cheapest reject.
+        with pytest.raises(ValidationError) as exc_info:
+            call(S3(), str(tmp_path / "dest"))
+        assert exc_info.value.operation == operation
+        assert exc_info.value.key == "key"
+
+    @pytest.mark.parametrize(
+        ("operation", "call"),
+        [
+            ("cp", lambda s3, src: s3.cp(src, "s3:///key")),
+            ("mv", lambda s3, src: s3.mv(src, "s3:///key")),
+            ("sync", lambda s3, src: s3.sync(src, "s3:///key")),
+        ],
+    )
+    def test_the_destination_side_is_stamped_too(
+        self, operation: str, call: Callable[[S3, str], None], tmp_path: Any
+    ) -> None:
+        # Both sides of a transfer are attributed, not just the source: a local
+        # source validates as a no-op, so only the destination's check can raise
+        # here.
+        src = tmp_path / "src"
+        src.mkdir()
+        with pytest.raises(ValidationError) as exc_info:
+            call(S3(), str(src))
+        assert exc_info.value.operation == operation
+        assert exc_info.value.key == "key"
+
+    def test_a_non_validation_failure_is_stamped_too(self) -> None:
+        # A custom backend's validate() may raise any family member, so the
+        # attribution is not ValidationError-specific.
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise NotFoundError("the backend location is gone")
+
+        with pytest.raises(NotFoundError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value.operation == "ls"
+
+    def test_an_operation_the_backend_named_is_kept(self) -> None:
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise ValidationError("the backend said no", operation="backend-op")
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value.operation == "backend-op"
+
+    def test_the_original_error_and_its_cause_survive(self) -> None:
+        # The stamping re-raises the same object, so a backend's own chaining
+        # is not flattened into a new exception.
+        cause = RuntimeError("underneath")
+        error = ValidationError("the backend said no")
+
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise error from cause
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value is error
+        assert exc_info.value.__cause__ is cause
 
 
 class TestClientSeam:

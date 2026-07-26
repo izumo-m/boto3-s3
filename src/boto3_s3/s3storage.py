@@ -601,18 +601,33 @@ class S3Storage(Storage):
         wants the rejection). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
+
+        The rejections carry what identifies the offending location: the whole
+        ARN for the two ARN forms - taken from the match here, not from
+        ``bucket``, which holds only the part before the first ``/`` for any
+        ARN family the splitters above do not recognize - and the orphaned key
+        for the bucket-less form. ``operation`` stays unset: the storage does
+        not know which operation is about to use it, and the operation layer
+        fills it in (``s3._validate_storage``).
         """
         rest = self._uri.partition("://")[2]
-        if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
+        object_lambda = _S3_OBJECT_LAMBDA_ARN_RE.match(rest)
+        if object_lambda is not None:
             raise ValidationError(
-                "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
+                "s3 commands do not support S3 Object Lambda resources. "
+                "Use s3api commands instead.",
+                bucket=object_lambda["bucket"],
             )
-        if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
+        outpost_bucket = _S3_OUTPOST_BUCKET_ARN_RE.match(rest)
+        if outpost_bucket is not None:
             raise ValidationError(
-                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
+                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead.",
+                bucket=outpost_bucket["bucket"],
             )
         if not self._bucket and self._key:
-            raise ValidationError(f"s3:// URL has a key but no bucket: {self._uri!r}")
+            raise ValidationError(
+                f"s3:// URL has a key but no bucket: {self._uri!r}", key=self._key
+            )
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.

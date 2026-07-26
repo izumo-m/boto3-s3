@@ -308,6 +308,11 @@ so an operation — or the CLI at its parity point — calls this to reject a
 malformed location loudly before use. The base implementation is a concrete
 no-op; `S3Storage` overrides it. Idempotent.
 
+When an operation runs the check, a `Boto3S3Error` raised here that names no
+operation is stamped with that operation's name; a direct call leaves
+`operation` unset, and an exception outside the hierarchy — a backend's own
+`ValueError`, say — propagates untouched ([`exceptions.md`](./exceptions.md)).
+
 ### default_scan_options()
 
 Builds this backend's own `ScanOptions` value. The base implementation
@@ -738,6 +743,13 @@ Lambda ARN, an Outposts *bucket* ARN, or a key with no bucket. The library
 calls it before an operation and the CLI at its parity point, so a malformed
 location fails loudly instead of reaching the API as a cryptic botocore error.
 Idempotent.
+
+Each rejection carries what identifies the offending location. The two ARN
+forms report the whole ARN as `bucket` and leave `key` unset — the whole ARN,
+not this storage's `bucket`, which holds only the part before the first `/`
+for an ARN family the splitters do not recognize. The bucket-less form
+reports the orphaned key as `key`. `operation` is stamped by the operation that
+ran the check and stays unset on a direct call.
 
 ### get_client()
 

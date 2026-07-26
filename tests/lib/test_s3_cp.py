@@ -933,6 +933,15 @@ class TestStreamRoutes:
             S3().cp(str(tmp_path / "in.txt"), IOStorage(io.BytesIO()))
         assert "the other must be s3://" in str(down.value)
 
+    def test_stream_peer_validation_is_attributed_to_cp(self) -> None:
+        # The peer's validate() failure carries cp like every other rejection
+        # on this route - the stream route serves cp only.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(IOStorage(io.BytesIO(b"x")), S3Storage("s3:///key", client=client))
+        assert (excinfo.value.operation, excinfo.value.key) == ("cp", "key")
+        assert calls == []
+
     def test_stream_cancel_token_stops_before_open(self) -> None:
         # The stream route honors cancel_token like the non-stream route: a
         # pre-cancelled token raises before the fileobj is opened or submitted,
