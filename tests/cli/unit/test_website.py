@@ -153,6 +153,27 @@ class TestWebsiteExitCodeShape:
         assert rc == 252
         assert "Invalid bucket name" in capsys.readouterr().err
 
+    def test_bucketless_key_folds_into_the_bucket_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # website does not split: the whole scheme-stripped remainder is the
+        # bucket name, so aws rejects the name "/k" (measured) rather than the
+        # bucket-less URI form.
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
+        assert rc == 252
+        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert client.calls == []
+
+    def test_bucketless_key_schemeless_folds_into_the_bucket_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", "/k", "--index-document", "i.html"], ctx=client_ctx(client))
+        assert rc == 252
+        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert client.calls == []
+
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

@@ -525,6 +525,12 @@ rc forms: **0 / 252 / 253 / 255 only** (because the server is never reached, 1 /
 `main()`, a client-creation failure is 253 for the unresolvable pair
 (credentials / region) and 255 for a present-but-unusable config
 (`InvalidConfigError`, section 6), and a non-integer `--expires-in` is 255.
+A key with no bucket (`s3:///k`, or the scheme-less `/k`) is part of that
+botocore 252 rather than a rejection of the form: aws splits it into `Bucket=""`
+plus the key and signs, so the bad-bucket-name text - regex tail included - is
+botocore's own. The CLI therefore builds the storage through `build_s3_storage`
+(the `rm` / transfer-family carve-out), which keeps the strict ARN rejections
+but lets this one form ride.
 
 ### 5.6 `website`
 
@@ -540,8 +546,17 @@ Path handling follows the same procedure as aws's `_get_bucket_name`: `s3://` is
 optional -> strip **exactly one trailing slash** -> treat the whole remainder as
 the bucket name. Because aws **keeps a key (`s3://b/some/key`) folded into the
 bucket name** and lets botocore's name regex reject it (rc 252), the CLI side
-reproduces the same shape (`storage.key` or the `/` left after stripping) with a
-`ValidationError` (`s3://b//` is also 252). An accesspoint ARN passes through
+reproduces the same shape with a `ValidationError` naming the *unsplit*
+remainder. Only the remainders whose rejection the split would otherwise hide
+need that: whatever `S3Storage` read as a key, the bucket-less `s3:///k`
+(measured: aws rejects the name `/k`, so `build_s3_storage`'s carve-out is used
+here too - without it `S3Storage` would refuse the bucket-less form first, with
+its own wording), and the `/` left after stripping (`s3://b//`). Every other name
+botocore refuses - a slash-free bad one (`b@d`, `s3://b b`), the empty bucket of
+`s3://` - survives the split unchanged and rides on to PutBucketWebsite, where
+botocore's own rejection (regex tail included) is byte-identical to aws's. So
+website has **two** 252 sources for a bad bucket name: the synthesized one here
+and botocore's. An accesspoint ARN passes through
 entirely as `Bucket` (aws's `block_unsupported_resources` rejects only Object
 Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
 

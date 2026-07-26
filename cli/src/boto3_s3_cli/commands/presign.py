@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3 import S3Storage
 from boto3_s3_cli import clientfactory, globalargs, output
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -42,12 +42,16 @@ class PresignCommand(Command):
         Exit-code shape (design/cli.md section 6): pure client-side
         computation, so rc 1 cannot happen and no S3 request is sent (a
         deferred credential resolution - an assume-role profile - can still
-        dial STS during signing, whose ClientError maps to 254) - 0 on success, 252 for
-        botocore's client-side parameter validation (empty bucket or key,
-        surfaced as the library's ValidationError through main), 253 for
+        dial STS during signing, whose ClientError maps to 254). 0 on
+        success; 252 for the strict aws-cli path rejections (the unsupported
+        ARN families) and for botocore's client-side parameter validation
+        while signing (an absent key, and an empty bucket - the bare
+        ``s3://`` service root and the bucket-less ``s3:///k``, which aws
+        splits into Bucket="" plus a key rather than refusing up front),
+        both surfaced as the library's ValidationError through main; 253 for
         client construction's unresolvable credentials / region (its other
         botocore failures - a bad ``--profile``, partial credentials - are
-        255), 255 for a non-integer ``--expires-in``.
+        255); 255 for a non-integer ``--expires-in``.
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
@@ -65,10 +69,12 @@ class PresignCommand(Command):
         assert expires_in is not None
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
-        # there is no path-type check here; S3Storage takes both forms too.
+        # there is no path-type check here; build_s3_storage reads both forms
+        # the same way. It keeps the strict ARN rejections and carves out the
+        # bucket-less key-carrying form, which aws signs with Bucket="" and
+        # lets botocore's bad-bucket-name validation refuse.
         s3 = ctx.s3(args)
-        storage = S3Storage(args.path, client=s3.client())
-        storage.validate()
+        storage = transferargs.build_s3_storage(args.path, client=s3.client())
         url = s3.presign(storage, expires_in=expires_in)
         output.uni_write(sys.stdout, url + "\n")
         return 0

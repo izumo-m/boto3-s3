@@ -746,17 +746,22 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
 
 
 class _BucketlessS3Storage(S3Storage):
-    """A key-carrying bucket-less s3 URI (``s3:///k``) riding to the API.
+    """A key-carrying bucket-less s3 URI (``s3:///k``) riding onward.
 
-    aws sends Bucket="" onward, and botocore's client-side validation fails
-    the first stage that touches it: the blind single download's HeadObject
-    and every listing turn fatal (rc 1, ``--dryrun`` included), a live
-    upload/copy fails per item at submit time, and a dryrun upload never
-    reaches the submit at all (rc 0) - all measured against the pinned
-    aws-cli. ``S3Storage.validate`` (which the operation entry re-runs via
-    ``_validate_storage``) would instead reject the form up front as a
-    252-shaped ``ValidationError``, so this override is what lets the form
-    ride; the ARN rejections it skips cannot apply to a bucket-less URI.
+    aws has no up-front rejection for the form: it sends Bucket="" toward the
+    API and each command fails wherever that first bites. ``S3Storage.validate``
+    (which the library entry re-runs via ``_validate_storage``) would instead
+    refuse the form as a 252-shaped ``ValidationError``, so this override is
+    what lets it ride, and the failure that follows is aws's own. Measured
+    against the pinned aws-cli: on the transfer family botocore's client-side
+    validation makes the blind single download's HeadObject and every listing
+    fatal (rc 1, ``--dryrun`` included), a live upload/copy fails per item at
+    submit time, and a dryrun upload never reaches the submit at all (rc 0);
+    ``presign`` fails the same validation while signing (rc 252). ``website``
+    never reaches botocore - it folds the whole remainder into the bucket name
+    like aws does and rejects it itself - and needs the pass-through only to
+    get that far. The ARN rejections this override skips cannot apply to a
+    bucket-less URI.
     """
 
     def validate(self) -> None:
@@ -766,14 +771,19 @@ class _BucketlessS3Storage(S3Storage):
 def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:
     """An ``S3Storage`` for a CLI s3 path, validated the aws-cli way.
 
-    The strict aws-cli rejections (the unsupported ARN families) fire here,
-    ahead of the pipeline (rc 252, aws's parse-time parity); the bucket-less
+    Shared by the transfer family, ``rm``, ``presign`` and ``website``. The
+    strict aws-cli rejections (the unsupported ARN families) fire here, ahead
+    of the pipeline (rc 252, aws's parse-time parity); the bucket-less
     key-carrying form is the one carve-out, flowing through
     ``_BucketlessS3Storage`` so aws's stage-shaped failures fall out of the
     normal machinery.
+
+    The split reads *arg* exactly as the ``S3Storage`` constructor reads it -
+    the ``s3://`` scheme optional, access-point ARNs kept whole - so the
+    scheme-less path ``presign`` accepts (``/k``) is recognized as the same
+    carve-out its ``s3:///k`` spelling is.
     """
-    rest = arg.partition("://")[2]
-    bucket, _, key = rest.partition("/")
+    bucket, key = S3Storage.split_bucket_key(S3Storage.strip_scheme(arg))
     if not bucket and key:
         return _BucketlessS3Storage(arg, client=client, page_size=page_size)
     storage = S3Storage(arg, client=client, page_size=page_size)

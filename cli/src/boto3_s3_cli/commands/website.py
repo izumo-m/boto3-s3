@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 
-from boto3_s3 import S3Storage, ValidationError
+from boto3_s3 import ValidationError
 from boto3_s3_cli import clientfactory, globalargs, usage
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -80,15 +81,22 @@ class WebsiteCommand(Command):
             path = path[:-1]
 
         s3 = ctx.s3(args)
-        storage = S3Storage(f"s3://{path}", client=s3.client())
-        storage.validate()
+        # build_s3_storage keeps the strict ARN rejections; its bucket-less
+        # carve-out is what keeps "s3:///k" from failing S3Storage.validate
+        # before the rejection below can shape it aws's way.
+        storage = transferargs.build_s3_storage(f"s3://{path}", client=s3.client())
         if path.endswith("/") or storage.key:
-            # S3Storage splits "b/k" where aws would send the whole string as
-            # the Bucket and let botocore's name regex reject it; reproduce
-            # the rejection (same rc, botocore-shaped message) here. An
-            # accesspoint ARN parses to a bucket with no key and passes
-            # through, exactly like aws. The endswith check catches "b//",
-            # whose leftover slash S3Storage's split would silently drop.
+            # aws hands the whole remainder to PutBucketWebsite as the Bucket
+            # and lets botocore's name regex reject it (rc 252). S3Storage
+            # splits it instead, which would hide that rejection, so the
+            # remainders the split disturbs are refused here from the unsplit
+            # path: whatever S3Storage read as a key ("b/some/key"), the
+            # bucket-less "/k" (whose split leaves no bucket at all), and
+            # "b//", whose leftover slash the split would silently drop. Every
+            # other name botocore refuses - a slash-free bad one, the empty
+            # bucket of "s3://" - survives the split intact and rides on to
+            # keep botocore's own text. An accesspoint ARN parses to a bucket
+            # with no key and passes through, exactly like aws.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),
                 operation="website",
