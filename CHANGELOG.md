@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a hand-written per-symbol API reference under `docs/reference/`, with an index pinned to the export surface by a test.
 - Names referenced by package-root signatures and defaults (`AwsConfig` / `ConfigSection`, the three sync comparison strategies, `PatternKind`, `S3_DELETE_BATCH`) are now importable from the package root.
 - Exception polish: an invalid `case_conflict` or `presign` `method` value now raises `ValidationError`, errors now carry the running operation's name and location context, and `ls` bucket filters on a too-old SDK are now refused up front.
+- aws-cli parity fixes on error paths: only a bare-404 `HeadObject` miss is rewritten to the key-missing message, and a custom storage carrying a bucket-less key can reach the delete submit (its dryrun records instead of failing).
 
 ## [0.8.0] - 2026-07-23
 
