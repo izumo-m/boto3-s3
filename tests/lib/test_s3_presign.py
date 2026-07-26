@@ -10,7 +10,7 @@ aws-cli parity facts asserted here (aws-cli PresignCommand,
   surfaced as ``ValidationError`` (the ``s3_errors`` ParamValidationError
   branch) - what the CLI's rc-252 parity rests on;
 - ``method="put_object"`` is the library's permissive superset (aws-cli only
-  signs ``get_object``).
+  signs ``get_object``), and any other value is refused before signing.
 """
 
 from __future__ import annotations
@@ -73,6 +73,32 @@ class TestPresign:
     def test_invalid_target_type_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError):
             S3().presign(123)  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize(
+        "method", ["delete_object", "no_such_method", pytest.param("", id="empty")]
+    )
+    def test_unsupported_method_raises_validation_error(self, method: str) -> None:
+        # Only the two documented values sign. Without this check any other
+        # client method taking Bucket/Key ("delete_object") would sign an
+        # undocumented operation - and, the SigV4 forcing having been
+        # registered for PutObject, sign it as the deprecated SigV2.
+        client = _FakePresignClient()
+        with pytest.raises(ValidationError) as excinfo:
+            S3().presign(_storage("s3://b/k", client), method=method)  # pyright: ignore[reportArgumentType]
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == f"Invalid method value: {method!r}"
+        assert excinfo.value.operation == "presign"
+        assert excinfo.value.__cause__ is None  # no underlying exception
+        assert client.calls == []  # refused before signing
+
+    def test_method_is_checked_before_the_target(self) -> None:
+        # Pins the documented order: the method is checked ahead of target
+        # resolution, so a bad method wins over a bad target. Without this,
+        # moving the check below the resolution goes unnoticed - a pre-built
+        # S3Storage resolves without ever touching its client.
+        with pytest.raises(ValidationError) as excinfo:
+            S3().presign(123, method="delete_object")  # pyright: ignore[reportArgumentType]
+        assert str(excinfo.value) == "Invalid method value: 'delete_object'"
 
     def test_default_client_signs_sigv4_not_legacy_sigv2(self) -> None:
         # Real botocore (no fake): left alone, a default us-east-1 client

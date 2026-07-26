@@ -2069,7 +2069,10 @@ class S3:
         bucket or key fails botocore's client-side parameter validation ->
         `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
-        library's permissive superset.
+        library's permissive superset, and any other value is refused with
+        `ValidationError` before ``target`` is resolved or anything is
+        signed (otherwise a client method taking Bucket and Key would sign
+        an undocumented operation, and miss the SigV4 forcing below).
 
         The URL is signed with SigV4, matching ``aws s3 presign``. This
         matters because botocore, left to itself, still downgrades a default
@@ -2083,6 +2086,8 @@ class S3:
         (``s3v4a``) resolve to, and an unsigned client, are left as botocore
         chose them.
         """
+        if method not in ("get_object", "put_object"):
+            raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
         storage = self._resolve_s3_target(target, operation="presign")
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"

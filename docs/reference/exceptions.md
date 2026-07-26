@@ -154,11 +154,11 @@ empty where the operation requires one; a `mv` whose source and destination
 name the same object; a stream used where the operation does not accept one
 (both sides at once, a `mv` source, a recursive stream destination); an
 unrecognized value for a mode option such as `copy_props`,
-`annotation_copy_mode` or `case_conflict`; a case-fold collision under
-`CaseConflictMode.ERROR`; and `stdin` or `stdout` unavailable where a stream
-needs it. It is also the class for botocore's `ParamValidationError` —
-client-side validation, so no request was sent — and for an S3 4xx other than
-403 and 404 whose code is not in the category table.
+`annotation_copy_mode` or `case_conflict`, or for `presign`'s `method`; a
+case-fold collision under `CaseConflictMode.ERROR`; and `stdin` or `stdout`
+unavailable where a stream needs it. It is also the class for botocore's
+`ParamValidationError` — client-side validation, so no request was sent — and
+for an S3 4xx other than 403 and 404 whose code is not in the category table.
 
 ```python
 class ValidationError(Boto3S3Error): ...
