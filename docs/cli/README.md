@@ -69,7 +69,7 @@ but some are silent.
 
 ## 3. Finding things
 
-- **What an option does** — `boto3-s3 <command> --help`. Every option is
+- **What an option does** — `boto3-s3 <subcommand> --help`. Every option is
   described there, including which of them are accepted but ignored.
 - **What an exit code means** — [`exit-codes.md`](./exit-codes.md).
 - **Where this differs from `aws s3`** — [`aws-differences.md`](./aws-differences.md).

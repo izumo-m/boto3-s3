@@ -43,6 +43,17 @@ def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
     return exc
 
 
+# The usage block every subcommand-decision / globals-parse failure closes
+# with - aws's, with its two-level hierarchy collapsed onto our single one.
+_USAGE_BLOCK = (
+    "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+    "To see help text, you can run:\n"
+    "\n"
+    "  boto3-s3 help\n"
+    "  boto3-s3 <subcommand> help\n"
+)
+
+
 class TestExitCodeFor:
     def test_server_side_error_maps_to_254(self) -> None:
         exc = _with_cause(
@@ -184,7 +195,7 @@ class TestMainExitCodes:
 
     def test_missing_subcommand_exits_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert cli.main([]) == 252
-        assert "command" in capsys.readouterr().err
+        assert "too few arguments" in capsys.readouterr().err
 
     def test_server_error_surfaces_as_254(self, capsys: pytest.CaptureFixture[str]) -> None:
         client = _RaisingClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
@@ -381,6 +392,190 @@ class TestValidationOrder:
         assert rc == 252
 
 
+class TestTopLevelErrorText:
+    """The subcommand-decision and globals-parse reports, byte for byte.
+
+    Every assertion here is the pinned aws-cli's own stderr under one fixed
+    mapping: ``aws [options] s3`` -> ``boto3-s3 [options]``, aws's
+    ``<command> <subcommand>`` hierarchy collapsed onto our single level (this
+    command *is* ``aws s3``), and the ``aws:`` prefix renamed. aws opens each
+    report with a blank line; ours does not, as on every other error path.
+    """
+
+    def test_no_arguments_reports_too_few_arguments(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's bare missing-subcommand error: the usage line with no help
+        # blurb, and a second line whose prefix is part of the message.
+        assert cli.main([]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+            "boto3-s3: [ERROR]: too few arguments\n"
+        )
+
+    def test_a_bare_dash_dash_reports_too_few_arguments(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The marker is consumed, so nothing is left to report as unknown.
+        assert cli.main(["--"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+            "boto3-s3: [ERROR]: too few arguments\n"
+        )
+
+    def test_invalid_subcommand_reports_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws names the positional after its dest, so the report says a bare
+        # `subcommand` even though the help page displays `<subcommand>`. The
+        # message carries a newline of its own, which is the second blank line.
+        assert cli.main(["foobar"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'foobar'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_subcommand_suggests_close_matches(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws offers the close matches of its command table (difflib, cutoff
+        # 0.8) between the message and the block.
+        assert cli.main(["lss"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'lss'\n"
+            "\nMaybe you meant:\n"
+            "\n  * ls\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_subcommand_suggestions_keep_aws_similarity_cutoff(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's cutoff is 0.8: `web` is too far from `website` to be offered
+        # (measured - aws prints no suggestion for it either), so a looser
+        # cutoff here would add a block aws does not print.
+        assert cli.main(["web"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'web'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_an_option_form_subcommand_behind_dash_dash_is_blamed_by_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Behind `--` an option-form token is data, so it names the subcommand
+        # and is rejected as one (aws: `s3 --region us-east-1 -- --bogus`).
+        # The report must blame that name, not read it back as an option.
+        assert cli.main(["--region", "us-east-1", "--", "--bogus"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice '--bogus'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+        # The marker itself is just as much a name once it is behind one.
+        assert cli.main(["--", "--", "--bogus"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice '--bogus'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_trailing_options_do_not_change_the_subcommand_report(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["foobar", "--nope"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'foobar'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_missing_global_value_reports_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # No trailing newline on this message, so a single blank line.
+        assert cli.main(["ls", "--region"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --region: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--profile"],
+            ["--profile", "--debug"],
+            ["ls", "--profile"],
+            ["--debug", "--profile"],
+            ["--p"],
+            ["help", "--profile"],
+            ["--version", "--profile"],
+        ],
+        ids=[
+            "last-token",
+            "option-looking-value",
+            "after-the-subcommand",
+            "after-debug",
+            "abbreviated",
+            "beats-the-help-token",
+            "beats-version",
+        ],
+    )
+    def test_profile_without_a_value_reports_the_preliminary_usage(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's preliminary --profile / --debug scan runs before everything
+        # else, so wherever --profile loses its value it wins - with that
+        # parser's own two-option usage, not the top-level block.
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --profile: expected one argument\n"
+            "\nusage: boto3-s3 [--profile PROFILE] [--debug]\n"
+        )
+
+    @pytest.mark.parametrize("argv", [["--debug=1"], ["--d=1"], ["ls", "--debug=1"]])
+    def test_debug_given_a_value_also_fails_the_preliminary_scan(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The scan's other failure mode: --debug takes no value, so an
+        # attached one is rejected there too, with the same short usage.
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --debug: ignored explicit argument '1'\n"
+            "\nusage: boto3-s3 [--profile PROFILE] [--debug]\n"
+        )
+
+    def test_a_protected_profile_token_escapes_the_preliminary_scan(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Behind `--` the token is data, so the scan cannot see it and the
+        # dispatch reports it as an unknown option (measured on aws).
+        assert cli.main(["--", "--profile"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --profile\n"
+        )
+
+    def test_unknown_options_carry_no_usage_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws reports unknown options from its command layers, which raise a
+        # plain message - the block belongs to the parsers only.
+        assert cli.main(["--bogus"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
+        )
+        assert cli.main(["ls", "--nope"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --nope\n"
+        )
+
+
 class TestPreParseErrorAttribution:
     """A global that fails to parse - or a parse-time ``--version`` - settles
     the run in the pre-pass, like aws's ``MainArgParser``: it beats the
@@ -438,17 +633,18 @@ class TestPreParseErrorAttribution:
         assert cli.main(["--help", "--output", "bad"]) == 252
         assert "argument --output: Found invalid choice 'bad'" in capsys.readouterr().err
 
-    def test_replayed_error_renders_the_stage1_usage(
+    def test_globals_parse_error_renders_the_top_level_usage_block(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The pre-pass replay must be byte-identical to the stage-1 report it
-        # supersedes: same [ERROR] line, same usage block (the globals parser
-        # borrows stage 1's usage, <command> token and all).
+        # A failed global reports the same usage block a rejected subcommand
+        # name gets, exactly as aws's main parser and command layers share one
+        # usage string.
         assert cli.main(["ls", "--output", "bad"]) == 252
-        err = capsys.readouterr().err
-        assert "argument --output: Found invalid choice 'bad'" in err
-        assert "usage: boto3-s3 " in err
-        assert "<command>" in err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --output: Found invalid choice 'bad'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
 
     def test_bare_invalid_subcommand_is_still_blamed(
         self, capsys: pytest.CaptureFixture[str]

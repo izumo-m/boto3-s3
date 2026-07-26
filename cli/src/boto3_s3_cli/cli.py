@@ -11,6 +11,7 @@ import re
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from difflib import get_close_matches
 from typing import TYPE_CHECKING, NoReturn, cast
 
 if TYPE_CHECKING:
@@ -97,10 +98,35 @@ _COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
 # subcommand scan must not skip it as an option.
 _NEGATIVE_NUMBER_RE = re.compile(r"^-\d+$|^-\d*\.\d+$")
 
+# aws-cli's top-level usage block (its argparser.py USAGE + HELP_BLURB),
+# collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws calls
+# the subcommand is our only level - aws's `<command> <subcommand>` pair and
+# its third help line have no counterpart here. Every top-level parse error
+# renders it, exactly as aws appends its parser's usage to the message.
+_TOP_LEVEL_USAGE = (
+    "boto3-s3 [options] <subcommand> [parameters]\n"
+    "To see help text, you can run:\n"
+    "\n"
+    "  boto3-s3 help\n"
+    "  boto3-s3 <subcommand> help\n"
+)
+
+# aws's missing-subcommand report (its command layer's usage error): the usage
+# line alone - no help blurb - plus a second line that carries its own
+# `[ERROR]` prefix inside the message, which is why the prefix appears twice.
+_TOO_FEW_ARGUMENTS = (
+    "usage: boto3-s3 [options] <subcommand> [parameters]\nboto3-s3: [ERROR]: too few arguments"
+)
+
 
 def _write_error(message: object, *, rc: int | None = None) -> None:
-    """Write one CLI error, adding the enhanced envelope required by `rc`."""
-    detail = str(message)
+    """Write one CLI error, adding the enhanced envelope required by `rc`.
+
+    The message is stripped first, like aws's error formatter: the multi-line
+    reports assembled below end with the newline their usage block carries, and
+    it must not surface as a trailing blank line.
+    """
+    detail = str(message).strip()
     if rc == _PARAM_VALIDATION_ERROR_RC:
         detail = f"An error occurred (ParamValidation): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
@@ -108,6 +134,23 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
     """Render argparse failures through aws-cli's ParamValidation envelope."""
+
+    def _check_value(self, action: argparse.Action, value: object) -> None:
+        """Reject an off-list value with aws's wording, suggestions included.
+
+        aws overrides the same hook (its `CLIArgParser`), so the report is
+        `Found invalid choice '<value>'` - a trailing newline of its own
+        included, which is what puts the extra blank line ahead of a usage
+        block - followed by the close matches of the choice list, if any.
+        """
+        if action.choices is None or value in action.choices:
+            return
+        message = [f"Found invalid choice '{value}'\n"]
+        possible = get_close_matches(str(value), [str(c) for c in action.choices], cutoff=0.8)
+        if possible:
+            message.append("Maybe you meant:\n")
+            message.extend(f"  * {word}" for word in possible)
+        raise argparse.ArgumentError(action, "\n".join(message))
 
     def _aws_error_message(self, message: str) -> str:
         """Translate the small argparse wording differences visible in aws-cli."""
@@ -120,13 +163,6 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
                 if not action.option_strings and action.metavar is not None
             }
             return required_prefix + ", ".join(positional_names.get(name, name) for name in missing)
-
-        invalid_marker = ": invalid choice: "
-        argument, marker, remainder = message.partition(invalid_marker)
-        if marker:
-            choice, separator, _choices = remainder.rpartition(" (choose from ")
-            if separator and choice:
-                return f"{argument}: Found invalid choice {choice}"
         return message
 
     def error(self, message: str) -> NoReturn:
@@ -145,6 +181,24 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
             self.help_renderer.print_help(file)
         else:
             super().print_help(file)
+
+
+class _TopLevelArgumentParser(_ParamValidationArgumentParser):
+    """A parser whose failures carry aws's usage report inside the message.
+
+    aws builds every top-level parse error as ``<message>\\n\\n<usage>`` and
+    hands that one string to its error formatter, so the usage lands *after* a
+    blank line and inside the same ``[ERROR]`` report - unlike a subcommand's
+    error here, which prints the message and then argparse's own usage on the
+    next line. Which usage that is comes from each parser: the collapsed
+    top-level block for the ones that decide the subcommand, and argparse's
+    generated one-liner for the preliminary ``--profile`` scan.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        report = f"{self._aws_error_message(message)}\n\n{self.format_usage()}"
+        _write_error(report, rc=_PARAM_VALIDATION_ERROR_RC)
+        self.exit(2)
 
 
 def _find_command_token(tokens: list[str]) -> tuple[str | None, int]:
@@ -205,25 +259,60 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     """The top-level rendering parser: globals + the subcommand names and help lines.
 
     No command module is imported here. The stub entries carry only the
-    table's name/help, so the top-level help page and the stage-1 usage
-    errors (missing subcommand, invalid choice - argparse's wording, remapped
-    to 252) render exactly as the full tree renders them while the path stays
-    SDK- and command-module-free. The dispatch never parses a real argv
-    through it: ``_find_command_token`` locates the subcommand, and this
-    parser only replays the invalid-choice / missing-command errors
-    byte-identically (``parse_args`` over the offending token alone).
+    table's name/help, so the top-level help page renders exactly as the full
+    tree renders it while the path stays SDK- and command-module-free. The
+    dispatch never parses through this parser at all: ``_find_command_token``
+    locates the subcommand and a rejected one is reported by
+    ``_build_subcommand_error_parser``, so this one only ever prints help.
     """
     parser = _ParamValidationArgumentParser(
         prog="boto3-s3", description="An aws s3-compatible CLI built on the boto3-s3 library."
     )
     globalargs.add_common_arguments(parser)
-    subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    subparsers = parser.add_subparsers(dest="command", metavar="<subcommand>", required=True)
     for name, (_module, _cls, help_text) in _COMMAND_TABLE.items():
         subparsers.add_parser(name, help=help_text, add_help=False)
     return parser
 
 
-def _build_globals_parser() -> argparse.ArgumentParser:
+def _build_subcommand_error_parser() -> _TopLevelArgumentParser:
+    """The parser that reports a subcommand name no table entry matches.
+
+    aws checks the name with a positional whose choices are its command
+    table, so the report reads ``argument subcommand: Found invalid choice
+    '<name>'`` (argparse names a positional after its dest) and closes with
+    the top-level usage block. Only that report is wanted here, so this parser
+    carries the positional alone - the globals are long consumed by the
+    top-level pass, and the help page is stage 1's job.
+    """
+    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
+    parser.add_argument("subcommand", choices=list(_COMMAND_TABLE))
+    return parser
+
+
+def _build_first_pass_parser() -> _TopLevelArgumentParser:
+    """aws's preliminary ``--profile`` / ``--debug`` scan, run before everything.
+
+    aws reads those two options off the raw argv with a parser that knows
+    nothing else (its ``FirstPassGlobalArgParser``, used while the driver is
+    still being constructed) to pick the profile whose config the run loads
+    and to switch on debug logging early. Only that scan's *failure* is
+    reproduced here: both values are parsed again by the top-level globals
+    pass, which is where ours takes them from, so this parse's namespace is
+    discarded. Because the scan happens first its failure beats every other
+    outcome - ``--version``, the help token, the auto-prompt flag rejection
+    (all measured) - and it reports argparse's own two-option usage rather
+    than the top-level block. Both options can fail: ``--profile`` by having
+    no value, ``--debug`` by being handed one (``--debug=1``, abbreviations
+    included).
+    """
+    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False)
+    parser.add_argument("--profile", type=str)
+    parser.add_argument("--debug", action="store_true", default=False)
+    return parser
+
+
+def _build_globals_parser() -> _TopLevelArgumentParser:
     """Globals-only parser for the aws-shaped top-level pass (``_dispatch``).
 
     aws parses the top-level globals over the *full* argv first
@@ -239,13 +328,11 @@ def _build_globals_parser() -> argparse.ArgumentParser:
     missing value, an ambiguous abbreviation) and a parse-time ``--version``.
     ``add_help=False`` keeps ``-h`` / ``--help`` in the remainder - they win
     over the later resolutions but NOT over a parse error (measured: ``s3 ls
-    -h --output bad`` errors instead of helping). Its captured output is the
-    dispatcher's replay source on those exits, so the usage line is pinned to
-    stage 1's: the replayed error must render byte-identically to the stage-1
-    report it supersedes.
+    -h --output bad`` errors instead of helping). A failure here reports the
+    same top-level usage block as a rejected subcommand name, like aws, whose
+    main parser and command layers share one usage string.
     """
-    usage = _build_stage1_parser().format_usage().removeprefix("usage: ").rstrip("\n")
-    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=usage)
+    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
     globalargs.add_common_arguments(parser)
     return parser
 
@@ -305,7 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     globalargs.add_common_arguments(parser)
     shared = _shared_globals_parent()
-    subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    subparsers = parser.add_subparsers(dest="command", metavar="<subcommand>", required=True)
     for name in _COMMAND_TABLE:
         command_cls = _load_command(name)
         command_cls().configure(
@@ -463,6 +550,18 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
+    # aws's preliminary --profile / --debug scan of the raw argv, run before
+    # the driver even exists, so either of them failing to parse - --profile
+    # without a value, --debug handed one - settles the run here, ahead of
+    # --version, the help token, the auto-prompt rejection and every parse
+    # below (all measured). The parsed values are dropped: the top-level
+    # globals pass reads them again. It is outside the on-partial silencing
+    # too (aws's silencer is installed on the driver, which this precedes),
+    # so the message always reaches stderr.
+    try:
+        _build_first_pass_parser().parse_known_args(raw)
+    except SystemExit:
+        return _PARAM_VALIDATION_ERROR_RC
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(
             "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
@@ -642,24 +741,25 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # layer's wording (awscli customizations/commands.py joins with ","
         # and NO space - verified against the pinned aws-cli, unlike the
         # top-level clidriver.py which uses ", "), prefixed like aws's error
-        # handler (errorformat.py "<prog>: [ERROR]: <msg>").
+        # handler (errorformat.py "<prog>: [ERROR]: <msg>"). With nothing left
+        # to report it is aws's bare missing-subcommand usage error, which
+        # carries no help blurb (measured: `s3` and `s3 --`).
         leftovers = [token for token in tokens if token != "--"]
-        if leftovers:
-            if not suppress_usage_errors:
-                _write_error(
-                    f"Unknown options: {','.join(leftovers)}", rc=_PARAM_VALIDATION_ERROR_RC
-                )
-            return _PARAM_VALIDATION_ERROR_RC
-    if kind is None or tokens[index] not in _COMMAND_TABLE:
-        # Replay the missing-command / invalid-choice error through the
-        # stage-1 parser so the wording and usage block stay byte-identical
-        # to what a direct parse reported (argparse writes the message itself;
-        # its exit 2 remaps per the charter). The replay always errors.
-        try:
-            with silencer:
-                _build_stage1_parser().parse_args([] if kind is None else [tokens[index]])
-        except SystemExit as exc:
-            return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
+        if not suppress_usage_errors:
+            message = f"Unknown options: {','.join(leftovers)}" if leftovers else _TOO_FEW_ARGUMENTS
+            _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
+        return _PARAM_VALIDATION_ERROR_RC
+    if tokens[index] not in _COMMAND_TABLE:
+        # Report the rejected name through the dedicated parser so argparse
+        # words it exactly as aws's command-table positional does (it writes
+        # the message itself; its exit 2 remaps per the charter). The parse
+        # always errors - the token is known not to be in the table. It is fed
+        # behind a `--`: the scan reaches option-form tokens too (behind a
+        # `--` of their own, they are data), and without the marker argparse
+        # would read one back as an option and report a missing subcommand
+        # instead of the name aws blames (`--region us-east-1 -- --bogus`).
+        with contextlib.suppress(SystemExit), silencer:
+            _build_subcommand_error_parser().parse_args(["--", tokens[index]])
         return _PARAM_VALIDATION_ERROR_RC
 
     name = tokens[index]

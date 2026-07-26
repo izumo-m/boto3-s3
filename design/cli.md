@@ -24,6 +24,20 @@ solidified design is added here.
   `AssertionError` is re-raised (a broken invariant should crash loudly, not
   fold into an rc; section 6). The exit codes for exceptions and usage errors
   are covered in section 6 (the implementation of the exit code parity charter).
+- `main` opens with aws's **preliminary `--profile` / `--debug` scan**
+  (`_build_first_pass_parser`, aws's `FirstPassGlobalArgParser`, which it runs
+  while the driver is still being constructed): a two-option
+  `parse_known_args` over the raw argv, ahead of everything else. Either
+  option can fail it - `--profile` by having no value, `--debug` by being
+  handed one (`--debug=1`) - and because the scan comes first that failure
+  beats `--version`, the help token, the auto-prompt rejection and every parse
+  below, wherever the option sits (`ls --profile`, `--debug --profile`, the
+  abbreviations `--p` / `--d=1`; behind `--` the token is data, so the scan
+  cannot see it - all measured). It reports that parser's own two-option usage
+  rather than the top-level block, and the on-partial silencing does not cover
+  it (aws installs its silencer on the driver, which this precedes). Only the
+  failure is reproduced: the values themselves come from the globals pass
+  below, which parses them again.
 - `_dispatch` opens with the aws-shaped **top-level globals pass**: a
   globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
   that both *consumes* the globals - its remainder is the only token stream
@@ -86,12 +100,42 @@ solidified design is added here.
   first positional-looking token (argparse's classification: not dash-led, a
   lone `-`, a negative number, a token with a space, or anything behind
   `--`) names the command, and only that token leaves the stream. A wrong
-  name or a missing command replays through the stage-1 stub parser
-  (`_COMMAND_TABLE` names + help lines, no command module imported) for
-  byte-stable wording; with no command token at all, surviving option-like
-  tokens are reported first as `Unknown options` (aws: `s3 --bogus`,
-  measured). Each subcommand class adds its own arguments via
-  `configure(parser)` on the real stage-2 parser.
+  name goes to `_build_subcommand_error_parser` - a lone positional whose
+  choices are the `_COMMAND_TABLE` keys, so argparse words the rejection
+  exactly as aws's command-table positional does. The name is fed to it
+  behind a `--`, because an option-form token *can* be the name once it sits
+  behind one of its own (`--region us-east-1 -- --bogus` is aws's invalid
+  choice `'--bogus'`, measured) and a bare replay would read it back as an
+  option. With no command token at all, surviving option-like tokens are
+  reported first as `Unknown options` (aws: `s3 --bogus`, and a leading `--`
+  is used up by the globals pass, so `s3 -- --profile` is one too), and with
+  nothing left at all it is aws's bare `too few arguments` usage error. No
+  command module is imported on any of those paths. Each subcommand class
+  adds its own arguments via `configure(parser)` on the real stage-2 parser.
+- **Top-level error text.** The subcommand-decision and globals-parse
+  failures reproduce aws's byte for byte under one mapping: `aws [options] s3`
+  -> `boto3-s3 [options]`, with aws's `<command> <subcommand>` hierarchy
+  collapsed onto our single level (this command *is* `aws s3`), which also
+  drops the third line of its help blurb. Both parsers close with that one
+  block (`_TOP_LEVEL_USAGE`), appended after a blank line *inside* the same
+  `[ERROR]` report as aws does it, while the `Unknown options` reports carry
+  no usage at all (measured). Off-list values are reported by `_check_value`,
+  aws's hook: `Found invalid choice '<value>'` plus the close matches of the
+  choice list (difflib, cutoff 0.8 - aws's, so `lss` offers `ls` while `web`
+  offers nothing). The name displayed for the positional is `<subcommand>`
+  (help page included), while the error prefix says a bare `subcommand` -
+  argparse names a positional after its dest, exactly as aws's does.
+  Two residual differences remain, both outside that mapping:
+  - **Ambiguous-abbreviation candidates.** `--c could match ...` lists the
+    same options aws lists, in our option-registration order rather than
+    aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
+    declaring the globals in aws's order, which reshuffles `--help`.
+  - **Subcommand-level parse errors.** aws builds its leaf parsers with the
+    same top-level usage string, so a leaf failure (`ls --page-size` with no
+    value, `cp` with missing paths) closes with that guidance block too;
+    ours prints the command's own argparse usage on the next line instead.
+    Only the top level was brought onto aws's text here; the leaf tail is a
+    known divergence, not parity.
 
 ## 3. Module layout
 

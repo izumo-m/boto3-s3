@@ -4,7 +4,7 @@ Read this before you switch a script over. Most `aws s3` invocations behave
 identically; the handful that do not are listed below, and one of them is
 silent.
 
-For what each option does, run `boto3-s3 <command> --help`; every option is an
+For what each option does, run `boto3-s3 <subcommand> --help`; every option is an
 `aws s3` option and is described there. For exit codes see
 [`exit-codes.md`](./exit-codes.md), and for the configuration files, environment
 variables and `[s3]` tuning keys the command reads see
@@ -44,7 +44,7 @@ are visible, or make no difference to the result.
   neither changes the result or the exit code. An explicit
   `--checksum-algorithm` makes the two agree.
 - **`-h` / `--help`.** An option here; `aws` offers `help` as a subcommand.
-  `boto3-s3 help` and `boto3-s3 <command> help` also work.
+  `boto3-s3 help` and `boto3-s3 <subcommand> help` also work.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
