@@ -809,3 +809,126 @@ class TestHelpToken:
 
     def test_bad_timeout_beats_the_help_token(self) -> None:
         assert cli.main(["help", "--cli-read-timeout", "abc"]) == 255
+
+    def test_help_token_with_trailing_globals(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The top-level pass strips globals on either side, so aws pages here
+        # (measured: `s3 help --region us-east-1` and
+        # `s3 presign help --region us-east-1 --no-cli-pager` are both 0).
+        assert cli.main(["help", "--region", "us-east-1"]) == 0
+        assert "usage:" in capsys.readouterr().out.lower()
+        assert cli.main(["presign", "help", "--region", "us-east-1", "--no-cli-pager"]) == 0
+        assert "usage: boto3-s3 presign" in capsys.readouterr().out
+
+
+class _RecordingPresignClient:
+    """Offline presign stand-in recording (Params, ExpiresIn) per call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, Any], int]] = []
+
+    def generate_presigned_url(self, method: str, **kwargs: Any) -> str:
+        self.calls.append((kwargs["Params"], kwargs["ExpiresIn"]))
+        return "https://example.test/presigned"
+
+
+def _presign_ctx(client: _RecordingPresignClient) -> Context:
+    return Context(client_factory=lambda _args: client)  # pyright: ignore[reportArgumentType]
+
+
+class TestTopLevelGlobalsStripping:
+    """The aws-shaped token flow (measured on the pinned aws-cli 2.36.1).
+
+    aws parses and REMOVES the globals over the full argv first, locates the
+    subcommand among the survivors (unknown optionals assumed valueless), and
+    hands every other token to the leaf parser in original order. The first
+    ``--`` protects what follows from the globals pass and the leaf re-honors
+    it - except a leading ``--``, which aws's first parse uses up against its
+    service token, so the tail is re-read as options downstream.
+    """
+
+    def test_global_prefix_wins_over_command_option_prefix(self) -> None:
+        # aws resolves `--e` against the globals alone (its first parse runs
+        # before any command parser), never reporting the `--endpoint-url` /
+        # `--expires-in` ambiguity a merged parser would see. Measured rc 0
+        # with the URL built on https://example.com.
+        client = _RecordingPresignClient()
+        args = ["--region", "us-east-1", "presign", "s3://b/k", "--e", "https://example.com"]
+        assert cli.main(args, ctx=_presign_ctx(client)) == 0
+        assert client.calls == [({"Bucket": "b", "Key": "k"}, 3600)]
+
+    def test_global_between_option_and_value(self) -> None:
+        # Measured: `s3 presign --expires-in --region us-east-1 120 s3://b/k`
+        # is rc 0 with Expires=120 - the globals pass lifts the pair out from
+        # between `--expires-in` and its value.
+        client = _RecordingPresignClient()
+        args = ["presign", "--expires-in", "--region", "us-east-1", "120", "s3://b/k"]
+        assert cli.main(args, ctx=_presign_ctx(client)) == 0
+        assert client.calls == [({"Bucket": "b", "Key": "k"}, 120)]
+
+    def test_command_option_before_subcommand(self) -> None:
+        # Measured: `s3 --expires-in=120 presign s3://b/k` is rc 0 - the
+        # option-form token flows past the subcommand scan to the leaf.
+        client = _RecordingPresignClient()
+        assert cli.main(["--expires-in=120", "presign", "s3://b/k"], ctx=_presign_ctx(client)) == 0
+        assert client.calls == [({"Bucket": "b", "Key": "k"}, 120)]
+
+    def test_unknown_option_before_subcommand_uses_leaf_wording(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `s3 --bogus presign s3://b/k` -> `Unknown options: --bogus`.
+        assert cli.main(["--bogus", "presign", "s3://b/k"]) == 252
+        assert "Unknown options: --bogus" in capsys.readouterr().err
+
+    def test_unknown_option_without_subcommand(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Measured: `s3 --bogus` reports the unknown option, not the missing
+        # subcommand.
+        assert cli.main(["--bogus"]) == 252
+        assert "Unknown options: --bogus" in capsys.readouterr().err
+
+    def test_double_dash_before_subcommand(self) -> None:
+        # Measured rc 0: the leading `--` is consumed by aws's first parse
+        # (its service token always precedes it), so the subcommand still
+        # resolves.
+        client = _RecordingPresignClient()
+        args = ["--region", "us-east-1", "--", "presign", "s3://b/k"]
+        assert cli.main(args, ctx=_presign_ctx(client)) == 0
+        assert client.calls == [({"Bucket": "b", "Key": "k"}, 3600)]
+
+    def test_leading_double_dash_help_token_pages(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Measured: `s3 -- help` pages (rc 0) - the dropped marker leaves an
+        # exactly-['help'] remainder.
+        assert cli.main(["--", "help"]) == 0
+        assert "usage:" in capsys.readouterr().out.lower()
+
+    def test_dropped_leading_double_dash_rereads_options(self) -> None:
+        # Measured: `s3 -- presign --expires-in 120 s3://b/k` is rc 0 - once
+        # the leading marker is gone the leaf parses the option normally.
+        client = _RecordingPresignClient()
+        args = ["--", "presign", "--expires-in", "120", "s3://b/k"]
+        assert cli.main(args, ctx=_presign_ctx(client)) == 0
+        assert client.calls == [({"Bucket": "b", "Key": "k"}, 120)]
+
+    def test_global_after_dropped_double_dash_is_unknown(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `s3 -- presign --region us-east-2 s3://b/k` ->
+        # `Unknown options: --region,s3://b/k` - the leaf parser does not know
+        # the globals, and the value lands in the path slot.
+        assert cli.main(["--", "presign", "--region", "us-east-2", "s3://b/k"]) == 252
+        assert "Unknown options: --region,s3://b/k" in capsys.readouterr().err
+
+    def test_interior_double_dash_protects_the_tail(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `s3 presign -- s3://b/k --expires-in 120` ->
+        # `Unknown options: --expires-in,120` - with a token ahead of it the
+        # marker survives to the leaf and the tail stays positional.
+        assert cli.main(["presign", "--", "s3://b/k", "--expires-in", "120"]) == 252
+        assert "Unknown options: --expires-in,120" in capsys.readouterr().err
+
+    def test_kept_double_dash_after_globals(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Measured: `s3 --region us-east-2 -- help` -> invalid choice 'help'
+        # (the marker is kept when consumed globals precede it, so the help
+        # token is a protected positional, not the help-token rule).
+        assert cli.main(["--region", "us-east-2", "--", "help"]) == 252
+        assert "Found invalid choice 'help'" in capsys.readouterr().err

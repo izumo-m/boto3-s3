@@ -24,51 +24,80 @@ solidified design is added here.
   `AssertionError` is re-raised (a broken invariant should crash loudly, not
   fold into an rc; section 6). The exit codes for exceptions and usage errors
   are covered in section 6 (the implementation of the exit code parity charter).
-- Before the two parse stages, `_dispatch` runs the aws-shaped **top-level
-  pre-pass**: a globals-only `parse_known_args` over the full argv (aws's
-  `MainArgParser`), then the `--query` compile, the `--endpoint-url` scheme
-  check, and the `--cli-read-timeout` / `--cli-connect-timeout` coercions in
-  aws's registration order - so those errors beat an invalid choice, unknown
-  options, and missing arguments (measured; section 5.7/6). The parse itself
-  settles two outcomes even earlier, replayed from the pre-pass capture: a
-  global that fails to parse (invalid choice, missing value) is the run's
-  error - beating the invalid-subcommand rejection and a `-h` anywhere in
-  argv - and a parse-time `--version` prints and exits 0 even beside an
-  invalid subcommand (both measured). A parse-time `-h` / `--help` wins over
-  the resolutions - an extension slot: aws s3 accepts neither (`aws -h` /
-  `aws s3 ls --help` are the 252 "Unknown options" / missing-command errors,
-  measured on 2.36.1; testing.md files `--help` under the extension options
-  the differential cannot diff), so ours orders it like the `--version`
-  action, which aws does fire parse-time - and aws's
-  **help-token rule** applies: an exactly-`help` pre-pass remainder, or an
-  exactly-`help` stage-2 remainder after a subcommand, prints the
-  corresponding help page at rc 0 (`ls help` shows ls's help rather than
-  listing a bucket named `help`; `help foo` stays the invalid-choice 252,
-  like aws).
+- `_dispatch` opens with the aws-shaped **top-level globals pass**: a
+  globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
+  that both *consumes* the globals - its remainder is the only token stream
+  the later stages see, exactly as aws's command layers only see what
+  `MainArgParser` left over - and resolves them: the `--query` compile, the
+  `--endpoint-url` scheme check, and the `--cli-read-timeout` /
+  `--cli-connect-timeout` coercions in aws's registration order - so those
+  errors beat an invalid choice, unknown options, and missing arguments
+  (measured; section 5.7/6). Consuming here is what makes the measured aws
+  behaviors fall out: a global is recognized on either side of the
+  subcommand and even between a command option and its value (`presign
+  --expires-in --region us-east-1 120` is rc 0), abbreviation resolves
+  against the globals alone (`--e` is `--endpoint-url`, never ambiguous with
+  `--expires-in`), and a leftover option-form token ahead of the subcommand
+  flows down to the leaf parser (`--expires-in=120 presign s3://b/k` is
+  rc 0). The parse itself settles two outcomes even earlier, replayed from
+  the captured output: a global that fails to parse (invalid choice, missing
+  value) is the run's error - beating the invalid-subcommand rejection and a
+  `-h` anywhere in argv - and a parse-time `--version` prints and exits 0
+  even beside an invalid subcommand (both measured). A parse-time `-h` /
+  `--help` ahead of the subcommand wins over the resolutions - an extension
+  slot: aws s3 accepts neither (`aws -h` / `aws s3 ls --help` are the 252
+  "Unknown options" / missing-command errors, measured on 2.36.1;
+  testing.md files `--help` under the extension options the differential
+  cannot diff), so ours orders it like the `--version` action, which aws
+  does fire parse-time - and aws's **help-token rule** applies: an
+  exactly-`help` post-globals remainder, or an exactly-`help` stage-2 token
+  list after a subcommand, prints the corresponding help page at rc 0 (`ls
+  help` shows ls's help rather than listing a bucket named `help`; `help
+  foo` stays the invalid-choice 252, like aws; `presign help --region
+  us-east-1` still pages because the globals are already gone, like aws).
+- The first `--` stops the globals pass (argparse semantics, verified
+  identical on 3.10 and aws's bundled 3.14) and the marker survives in the
+  remainder for stage 2's parse to honor, so the tail stays positional all
+  the way down (`presign -- s3://b/k --expires-in 120` is aws's
+  `Unknown options: --expires-in,120`, measured). The one exception is a
+  *leading* `--`: aws's first parse uses it up against the always-preceding
+  service token (`s3 -- help` pages; `s3 -- presign --expires-in 120
+  s3://b/k` re-reads the option at the leaf, rc 0 - both measured), so ours
+  drops the marker off a `--`-led argv after the pass.
 - `ctx` (`Context`) is the injection point for runtime dependencies (section 3.1). When
   not supplied, the real one (the default `Context()`) is assembled. Tests pass a
   `Context` loaded with fakes.
 
 ## 2. Parser construction (standard argparse, no added dependencies)
 
-- The common options are registered on **both** the "top parser (with the real
-  defaults)" and the "parent of each subparser (`suppress_defaults=True`)".
-  Suppressing the subparser-side defaults (`argparse.SUPPRESS`) keeps a value
-  parsed before the subcommand from being overwritten by the subcommand's own
-  unset default. This lets a global option be placed **either before or after**
-  the subcommand (both `boto3-s3 --profile foo ls s3://b` and
-  `boto3-s3 ls s3://b --profile foo` work, matching `aws s3 --profile foo ls ...`).
-- The subparsers are created by `cli.py`: stage 1 registers stub entries whose
-  action (`_Stage1CommandAction`, an `argparse._SubParsersAction` subclass)
-  records the matched subcommand and captures the remaining argv uninterpreted
-  for stage 2, and each subcommand class adds its own arguments via
+- The top-level globals pass owns every global (its namespace, defaults
+  included, seeds the stage-2 parse), so placing one before or after the
+  subcommand is the same parse (both `boto3-s3 --profile foo ls s3://b` and
+  `boto3-s3 ls s3://b --profile foo` work, matching `aws s3 --profile foo ls
+  ...`). The **rendering** parsers - each subcommand's help page and the
+  auto-prompt model's `build_parser()` tree - still take the
+  `suppress_defaults=True` globals parent so their help keeps listing the
+  globals; the parser stage 2 actually parses with
+  (`_build_command_parse_parser`) knows only the command's own arguments,
+  like aws's leaf parser, with its usage string and `print_help` pinned to
+  the full renderer.
+- The subcommand is located by `_find_command_token` - aws's
+  `SubCommandArgParser` shape: unknown optionals are assumed valueless, the
+  first positional-looking token (argparse's classification: not dash-led, a
+  lone `-`, a negative number, a token with a space, or anything behind
+  `--`) names the command, and only that token leaves the stream. A wrong
+  name or a missing command replays through the stage-1 stub parser
+  (`_COMMAND_TABLE` names + help lines, no command module imported) for
+  byte-stable wording; with no command token at all, surviving option-like
+  tokens are reported first as `Unknown options` (aws: `s3 --bogus`,
+  measured). Each subcommand class adds its own arguments via
   `configure(parser)` on the real stage-2 parser.
 
 ## 3. Module layout
 
 | module | role |
 |---|---|
-| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): stage 1 parses globals + the subcommand name off `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
+| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
@@ -564,15 +593,15 @@ Signing stays pure-Python via the pin of section 4.
 The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws-cli):
 **a top-level global that fails to parse, or a parse-time `--version` (252 /
-0**, settled during `_dispatch`'s pre-pass parse itself - ahead of everything
+0**, settled during `_dispatch`'s globals pass itself - ahead of everything
 below, the invalid-subcommand rejection and `-h` included; section 1) ->
 **`--query` compile (252**, aws resolves it at `top-level-args-parsed`, the
 first of the resolutions) -> **`--endpoint-url` scheme (252**, aws validates the
 value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
 coercions (255**, read before connect - aws's registration order at the same
-event; all three resolutions run in `_dispatch`'s top-level pre-pass, so they
-also beat stage 1's invalid-choice / unknown-options / missing-argument
-rejections, section 1) -> **the direct-option paramfile loads and the two
+event; all three resolutions run in `_dispatch`'s top-level globals pass, so
+they also beat the invalid-choice / unknown-options / missing-argument
+rejections of the later stages, section 1) -> **the direct-option paramfile loads and the two
 integer coercions, interleaved per aws's `TRANSFER_ARGS` registration order**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
 blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
@@ -880,7 +909,7 @@ a usage error (252), it is not used; instead, each `run()` converts at the top v
 `parse_integer_option` in `commands/base.py` (before the client factory = exits
 255 with the SDK still unloaded), raising `InvalidValueError` - the class
 `exit_code_for` sends to 255. The CLI timeouts' `_coerce_cli_timeout` uses the
-same class, but runs earlier: `_dispatch`'s top-level pre-pass coerces both
+same class, but runs earlier: `_dispatch`'s top-level globals pass coerces both
 timeouts (read, then connect) ahead of every command-layer parse, aws's
 `top-level-args-parsed` timing (section 1; the client builders coerce the same
 strings again when they build). **The exception is cp's `--expected-size`**:
