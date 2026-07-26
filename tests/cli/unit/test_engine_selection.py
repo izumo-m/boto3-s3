@@ -219,6 +219,28 @@ class TestBuildTransferConfig:
         # must accept the resulting config without raising.
         crtsupport._validate_crt_transfer_config(config)
 
+    def test_crt_pins_the_threshold_to_an_explicit_chunksize(self) -> None:
+        # aws-cli sends no per-request threshold under CRT and aws-c-s3 falls
+        # back to the client part size, so an explicit multipart_chunksize IS
+        # aws's effective threshold - while the installed s3transfer stamps
+        # the config's *resolved* threshold onto every CRT put (8 MiB default
+        # if left unset, which would multipart a 16 MiB file aws single-puts
+        # at chunksize 64MB). The [s3] multipart_threshold key itself stays
+        # ignored under CRT, exactly like aws.
+        scoped = {"multipart_chunksize": "64MB", "multipart_threshold": "10MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
+        assert config.multipart_threshold == 64 * _MIB
+        assert config.multipart_chunksize == 64 * _MIB
+        crtsupport._validate_crt_transfer_config(config)
+
+    def test_crt_without_an_explicit_chunksize_leaves_the_threshold_unset(self) -> None:
+        # No pin without an explicit chunksize: the stamped 8 MiB resolved
+        # default equals aws-c-s3's default part size - the same effective
+        # cutoff aws gets with its dynamic part sizing.
+        scoped = {"multipart_threshold": "10MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
+        assert config.get_deep_attr("multipart_threshold") is config.UNSET_DEFAULT
+
     def test_classic_keeps_io_chunksize_and_max_bandwidth(self) -> None:
         # The same keys are honored verbatim under the classic engine.
         scoped = {"io_chunksize": "1MB", "max_bandwidth": "10MB/s"}

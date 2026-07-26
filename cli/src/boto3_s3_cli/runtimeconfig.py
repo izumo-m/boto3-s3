@@ -359,6 +359,18 @@ def build_transfer_config(
             # _validate_crt_transfer_config (a failed run where aws exits 0).
             continue
         kwargs[ctor_key] = runtime_config[rc_key]
+    if crt and "multipart_chunksize" in scoped:
+        # aws-cli sends no per-request threshold on the CRT lane, and aws-c-s3
+        # falls back to the client part size when none arrives - so an explicit
+        # ``multipart_chunksize`` IS aws's effective threshold (the ``[s3]``
+        # ``multipart_threshold`` key is ignored there, like aws). The
+        # installed s3transfer always stamps the config's *resolved* threshold
+        # onto every CRT put, so leaving it unset would stamp the 8 MiB boto3
+        # default and multipart a file aws single-puts; pinning it to the part
+        # size restores aws's request sequence. With no explicit chunksize the
+        # stamped 8 MiB default equals aws-c-s3's default part size - the same
+        # effective cutoff - so no pin is needed.
+        kwargs["multipart_threshold"] = runtime_config["multipart_chunksize"]
     config = TransferConfig(**kwargs)
     if not crt:
         # Classic-only tuning aws-cli applies solely to its classic
