@@ -974,7 +974,10 @@ seek-based parallel download would interleave.
 
 Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when the
 selected process stream is unavailable, raised here rather than letting a
-transfer worker receive an unusable file object.
+transfer worker receive an unusable file object. The error names no operation
+of its own: the run that invoked the storage stamps the one it is performing —
+a streaming `cp` reports `"cp"`, a `mv` onto a stream reports `"mv"` — while a
+direct call leaves `operation` as `None`.
 
 ## LocalFileGenerator
 

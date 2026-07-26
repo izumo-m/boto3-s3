@@ -111,11 +111,27 @@ value: it means no subcommand-scoped operation was in scope - client
 construction, the shared object-listing path that backs every recursive
 scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
 would mislabel the others), and a storage-level method the caller invokes
-itself, such as `Storage.validate` (an operation running the same check stamps
-its own name, since only the operation layer knows it). A locally-originating
-error carries a filesystem path in `key` (and no `bucket`) when set: the field
-names the failing entry in the backend's own address space, not always an S3
-key.
+itself - `Storage.validate`, or `open` on a storage that does not name its own
+errors (the stream wrappers; `LocalStorage` / `S3Storage` name theirs), where
+an operation making the same call stamps its own name, since only the operation
+layer knows it. A locally-originating error carries a filesystem path in `key`
+(and no `bucket`) when set: the field names the failing entry in the backend's
+own address space, not always an S3 key.
+
+The engine fills the same three attributes on every family error it records as
+a per-item failure: it supplies the run's `operation` and the item's `bucket` /
+`key` where the error left them unset, and never overwrites what the raiser
+authored. That is how an error raised in-pipeline - inside a backend's `open`
+or its reads and writes, where only the location is known - reaches the caller
+attributed, without the run's context having to be threaded into every raise
+site. `bucket` and `key` fill **as a pair**: an error that set only `key` named
+the entry in its own address space (a local path, `bucket` unset by contract),
+and pairing this item's bucket with it would invent a mixed address. A
+`BatchError` is skipped by that pair fill entirely - it stands for a whole run,
+and section 4 pins its coordinates as always `None`. The fill is in place on
+the recorded object, so a raiser that reuses one exception instance across
+items sees the first item's attribution on every later record: attribution is
+best-effort, not per-record.
 
 Custom backends: an exception a custom `Storage` raises that is not already a
 `Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as

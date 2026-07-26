@@ -81,6 +81,7 @@ from s3transfer.upload import UploadSubmissionTask
 from boto3_s3 import crtsupport, requestparams
 from boto3_s3.exceptions import (
     AccessDeniedError,
+    BatchError,
     Boto3S3Error,
     CancelledError,
     ConfigurationError,
@@ -1495,6 +1496,24 @@ class Transferrer:
             # __cause__ (exceptions.md section 2.1). A pass-through
             # Boto3S3Error keeps whatever cause it already has.
             error.__cause__ = exc
+        # Best-effort attribution: fill what the raiser could not know, never
+        # overwrite what it did. A family error raised in-pipeline passes
+        # through the translation unchanged, so this is where the run's context
+        # reaches it - a backend's open / read / write, the stream storages'
+        # missing-stdio check, and this module's own subscribers that raise
+        # unnamed (_DirectoryCreator / _FsyncDest); a translated error already
+        # carries these values.
+        if error.operation is None:
+            error.operation = self._operation
+        # bucket and key fill as a pair, never one alone: a raiser that named
+        # only the key placed it in its own address space (translate_os_error's
+        # local path, which leaves bucket unset by contract), and pairing this
+        # item's bucket with it would invent a mixed address. A BatchError is
+        # skipped outright - it stands for a whole run, and its coordinates are
+        # pinned as always-None (docs/reference/exceptions.md).
+        if error.bucket is None and error.key is None and not isinstance(error, BatchError):
+            error.bucket = item.dest_bucket or item.src_bucket
+            error.key = item.dest_key or item.src_key
         with self._lock:
             self._failed += 1
             if self._first_error is None:

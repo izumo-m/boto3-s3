@@ -51,8 +51,10 @@ class Boto3S3Error(Exception):
 operation was in scope — while a client is being built, on the shared
 object-listing path that backs every recursive scan, which `ls` / `rm` / `cp` /
 `mv` / `sync` all ride, or when the caller invokes a storage-level method
-directly, such as `Storage.validate` ([`storage.md`](./storage.md)). The same
-validation reached through an operation carries that operation's name instead.
+directly, such as `Storage.validate` ([`storage.md`](./storage.md)), or `open`
+on a storage that does not name its own errors — the stream wrappers, where
+`LocalStorage` and `S3Storage` do name theirs. The same call reached through an
+operation carries that operation's name instead.
 
 `bucket` and `key` are best-effort context for the failing entry. `key` names
 that entry in the address space it came from, not necessarily an S3 key: a
@@ -105,7 +107,13 @@ exception surfacing inside a translated S3 call becomes a `ConfigurationError`.
 An exception raised by a custom `Storage` backend that is not already a
 `Boto3S3Error` is wrapped into this base class when it surfaces as a per-item
 failure, but one raised during enumeration (`scan`) or on the fatal path
-propagates as-is (see [`storage.md`](./storage.md)).
+propagates as-is (see [`storage.md`](./storage.md)). Attribution on a per-item
+failure is filled in the same best-effort spirit: a family error raised
+in-pipeline, from a backend's `open` or its reads and writes, arrives with
+whatever its raiser attributed — often nothing — and the run fills in only what
+is unset, never overwriting a value the raiser set itself. `bucket` and `key`
+fill as a pair, so an error that named the failing entry in its own address
+space keeps that naming whole.
 
 ## AccessDeniedError
 

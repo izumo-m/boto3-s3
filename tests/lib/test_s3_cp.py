@@ -29,7 +29,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from boto3_s3.iostorage import IOStorage
+from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.producers import CaseConflictGate
 from boto3_s3.s3 import S3
@@ -940,6 +940,22 @@ class TestStreamRoutes:
         with pytest.raises(ValidationError) as excinfo:
             S3().cp(IOStorage(io.BytesIO(b"x")), S3Storage("s3:///key", client=client))
         assert (excinfo.value.operation, excinfo.value.key) == ("cp", "key")
+        assert calls == []
+
+    def test_missing_stdio_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # StdioStorage.open names no operation of its own (it serves cp and mv
+        # alike), so the eager open on this route stamps cp - the only
+        # operation the route serves - in both directions.
+        client, calls = make_recording_client([])
+        monkeypatch.setattr("sys.stdin", None)
+        with pytest.raises(ValidationError, match="stdin is required") as up:
+            S3().cp(StdioStorage(), S3Storage("s3://b/k", client=client))
+        assert up.value.operation == "cp"
+        monkeypatch.setattr("sys.stdout", None)
+        with pytest.raises(ValidationError, match="stdout is required") as down:
+            S3().cp(S3Storage("s3://b/k", client=client), StdioStorage())
+        assert down.value.operation == "cp"
+        # The open precedes every request, so nothing was asked of S3.
         assert calls == []
 
     def test_stream_cancel_token_stops_before_open(self) -> None:

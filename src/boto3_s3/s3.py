@@ -127,24 +127,32 @@ def _validate_transfer_options(options: TransferOptions, *, operation: str) -> N
         )
 
 
-def _validate_storage(storage: Storage, *, operation: str) -> None:
-    """Run ``Storage.validate`` and attribute its failure to ``operation``.
+@contextmanager
+def _attributed_to(operation: str) -> Generator[None, None, None]:
+    """Stamp ``operation`` onto an unattributed family error leaving the block.
 
-    ``validate`` knows the location but not the operation that is about to use
-    it, so its errors would otherwise carry ``operation=None`` - the value the
-    contract reserves for "no single operation was in scope"
-    (docs/reference/exceptions.md). The operation layer fills the name in here,
-    only when the error left it unset (a backend that already attributed the
-    failure keeps its own name), and re-raises the same object so the traceback
-    and ``__cause__`` survive. A caller invoking ``storage.validate()`` directly
-    still gets ``operation=None``.
+    A storage-level method knows the location but not the operation that is
+    about to use it, so its errors would otherwise carry ``operation=None`` -
+    the value the contract reserves for "no single operation was in scope"
+    (docs/reference/exceptions.md). Only the operation layer knows the name, so
+    it fills it in here: the same exception object is re-raised (traceback and
+    ``__cause__`` survive), the name is written only when the error left it
+    unset (a backend that already attributed the failure keeps its own), and a
+    non-family exception passes through untouched. A caller invoking the
+    storage method itself still gets ``operation=None``.
     """
     try:
-        storage.validate()
+        yield
     except Boto3S3Error as exc:
         if exc.operation is None:
             exc.operation = operation
         raise
+
+
+def _validate_storage(storage: Storage, *, operation: str) -> None:
+    """Run ``Storage.validate`` and attribute its failure to ``operation``."""
+    with _attributed_to(operation):
+        storage.validate()
 
 
 def _emit_result(
@@ -1281,18 +1289,21 @@ class S3:
         if src_is_stream:
             storage = self._stream_s3_peer(dest_storage)
             transfer_type = TransferType.UPLOAD
+            # dryrun reports the item without submitting it, so skip the open -
+            # like the open routes (open_upload_item / open_download_item),
+            # keeping a side-effecting stream untouched on a dry run. A live
+            # run opens eagerly here, unlike those routes' deferred handles:
+            # a stream storage wraps an already-open in-hand stream (no
+            # resource is acquired), it is a single item (nothing queues
+            # up), and StdioStorage's missing-stdio ValidationError keeps
+            # its documented in-pipeline slot - attributed to cp here, since
+            # the storage cannot know which operation opened it.
+            with _attributed_to("cp"):
+                src_fileobj = None if dryrun else src_storage.open(storage.key, "rb")
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
-                # dryrun reports the item without submitting it, so skip the open -
-                # like the open routes (open_upload_item / open_download_item),
-                # keeping a side-effecting stream untouched on a dry run. A live
-                # run opens eagerly here, unlike those routes' deferred handles:
-                # a stream storage wraps an already-open in-hand stream (no
-                # resource is acquired), it is a single item (nothing queues
-                # up), and StdioStorage's missing-stdio ValidationError keeps
-                # its documented in-pipeline slot.
-                src_fileobj=None if dryrun else src_storage.open(storage.key, "rb"),
+                src_fileobj=src_fileobj,
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
                 src_display="-",
@@ -1301,12 +1312,14 @@ class S3:
         else:
             storage = self._stream_s3_peer(src_storage)
             transfer_type = TransferType.DOWNLOAD
+            # See the upload branch: a dry run never opens the stream.
+            with _attributed_to("cp"):
+                dest_fileobj = None if dryrun else dest_storage.open(storage.key, "wb")
             item = TransferItem(
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                # See the upload branch: a dry run never opens the stream.
-                dest_fileobj=None if dryrun else dest_storage.open(storage.key, "wb"),
+                dest_fileobj=dest_fileobj,
                 src_display=f"s3://{storage.bucket}/{storage.key}",
                 dest_display="-",
             )

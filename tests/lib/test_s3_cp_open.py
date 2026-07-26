@@ -25,6 +25,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter, producers
 from boto3_s3.exceptions import (
     BatchError,
+    Boto3S3Error,
     CancelledError,
     NotFoundError,
     ValidationError,
@@ -642,6 +643,49 @@ class TestOpenRouteContracts:
         # The failed first item did not stop the second from being fetched.
         assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"b.txt": b"BBB"}
+
+    def test_per_item_attribution_fills_only_what_the_backend_left_unset(self) -> None:
+        # exceptions.md: attribution on a per-item failure is best-effort - the
+        # run supplies the operation and the item's coordinates a family error
+        # raised in-pipeline could not know, and overwrites nothing the backend
+        # authored itself. The error object passes through as-is either way.
+        # bucket and key move as a pair, and a BatchError takes neither.
+        class _OpenFailMem(_MemStorage):
+            def __init__(self, error: Boto3S3Error) -> None:
+                super().__init__({}, location="mem://data/out.bin")
+                self._error = error
+
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                raise self._error
+
+        unattributed = ValidationError("backend refused the open")
+        authored = ValidationError(
+            "backend refused the open", operation="custom", bucket="own-b", key="own-k"
+        )
+        # A composite backend driving a nested library run can raise this one:
+        # it stands for a whole run, so it takes the operation name but never an
+        # item's coordinates (the reference pins those as always None).
+        nested = BatchError("1 of 1 transfers failed", succeeded=0, failed=1, warned=0, skipped=0)
+        cases: list[tuple[Boto3S3Error, tuple[str | None, str | None, str | None]]] = [
+            (unattributed, ("mv", "b", "d/a.txt")),
+            (authored, ("custom", "own-b", "own-k")),
+            (nested, ("mv", None, None)),
+        ]
+        for error, expected in cases:
+            client, calls = make_recording_client([head_response(), get_response()])
+            results: list[OpResult] = []
+            with pytest.raises(BatchError):
+                S3().mv(
+                    S3Storage("s3://b/d/a.txt", client=client),
+                    _OpenFailMem(error),
+                    transfer_config=_SYNC,
+                    on_result=results.append,
+                )
+            assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+            assert results[0].error is error
+            assert (error.operation, error.bucket, error.key) == expected
 
     def test_upload_closes_the_source_reader(self) -> None:
         # design/transfer.md: the route closes every fileobj the backend's

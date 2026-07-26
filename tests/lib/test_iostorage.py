@@ -183,12 +183,17 @@ class TestStdioStorage:
     def test_read_without_stdin_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdin", None)
         # ValidationError: a runtime-state precondition (exceptions.md section 3).
-        with pytest.raises(ValidationError, match="stdin is required"):
+        with pytest.raises(ValidationError, match="stdin is required") as excinfo:
             StdioStorage().open("k", "rb")
+        # A directly invoked storage method names no operation: the storage
+        # cannot know which one (cp streams, mv moves onto a stream), so an
+        # operation-driven run stamps its own name instead.
+        assert excinfo.value.operation is None
 
     def test_write_without_stdout_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdout", None)
         # Fail at the storage boundary instead of returning a wrapper that raises
         # AttributeError later from a transfer worker.
-        with pytest.raises(ValidationError, match="stdout is required"):
+        with pytest.raises(ValidationError, match="stdout is required") as excinfo:
             StdioStorage().open("k", "wb")
+        assert excinfo.value.operation is None
