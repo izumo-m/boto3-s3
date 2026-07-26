@@ -850,6 +850,11 @@ class TestCaseConflict:
 
 class TestS3ExpressCaseConflict:
     def test_skip_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The rejection fires after the client and the [s3] runtime config
+        # (aws validates it while building the run's instructions, past the
+        # transfer manager - so a bad [s3] value beats this 252, measured),
+        # but before any request: the recording client must stay uncalled.
+        ctx, calls = _recording_ctx([])
         rc = cli.main(
             [
                 "cp",
@@ -859,10 +864,42 @@ class TestS3ExpressCaseConflict:
                 "--case-conflict",
                 "skip",
             ],
-            ctx=_failing_factory_ctx(),
+            ctx=ctx,
         )
         assert rc == 252
         assert "`skip` is not a valid value" in capsys.readouterr().err
+        assert calls == []
+
+    def test_bad_runtime_config_beats_the_rejection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: with `[s3] multipart_threshold = nope` in the profile, aws
+        # reports `Invalid size value: nope` (rc 255) instead of the
+        # directory-bucket `--case-conflict skip` 252 - the runtime config
+        # loads with the transfer manager, ahead of the instruction-time
+        # case-conflict validation. No injected transfer config here: the
+        # [s3] read must really happen.
+        config = tmp_path / "config"
+        config.write_text("[default]\ns3 =\n  multipart_threshold = nope\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        client, calls = make_recording_client([])
+        ctx = Context(client_factory=lambda _args: client)
+        rc = cli.main(
+            [
+                "cp",
+                "s3://bucket--usw2-az1--x-s3/",
+                "out",
+                "--recursive",
+                "--case-conflict",
+                "skip",
+            ],
+            ctx=ctx,
+        )
+        err = capsys.readouterr().err
+        assert rc == 255
+        assert "Invalid size value: nope" in err
+        assert "case-conflict" not in err
+        assert calls == []
 
     def test_warn_emits_the_standing_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -84,8 +84,6 @@ class CpCommand(Command):
             # failure is aws's pre-pipeline rc 255, not the pipeline's rc 1.
             transferargs.create_local_dest_dir(dest, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
-        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
 
         s3 = head.s3
         client = s3.client()
@@ -138,6 +136,13 @@ class CpCommand(Command):
                 args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
             )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # After the [s3] runtime config: aws validates --case-conflict against
+        # S3 Express while building the run's instructions, past the transfer
+        # manager whose creation loads the config - so a bad [s3] value beats
+        # the invalid-mode 252 (measured: `Invalid size value: nope` rc 255
+        # wins over `--case-conflict skip` on a directory bucket).
+        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
+        options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
         printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)

@@ -91,8 +91,6 @@ class MvCommand(Command):
             # destination is created during validation (pre-pipeline rc 255).
             transferargs.create_local_dest_dir(dest, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
-        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
 
         s3 = head.s3
         client = s3.client()
@@ -118,6 +116,12 @@ class MvCommand(Command):
             args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
         )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # After the [s3] runtime config: aws validates --case-conflict against
+        # S3 Express past the transfer manager whose creation loads the
+        # config, so a bad [s3] value beats the invalid-mode 252 (measured
+        # on cp; mv shares aws's S3TransferCommand shape).
+        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
+        options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:
