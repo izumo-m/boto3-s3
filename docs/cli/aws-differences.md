@@ -44,7 +44,7 @@ are visible, or make no difference to the result.
   neither changes the result or the exit code. An explicit
   `--checksum-algorithm` makes the two agree.
 - **`-h` / `--help`.** An option here; `aws` offers `help` as a subcommand.
-  `boto3-s3 <command> help` also works.
+  `boto3-s3 help` and `boto3-s3 <command> help` also work.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
