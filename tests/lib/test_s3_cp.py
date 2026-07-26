@@ -561,6 +561,18 @@ class TestDownloadRoute:
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
 
+    def test_named_404_code_is_not_rewritten(self, tmp_path: Path) -> None:
+        # aws-cli's filegenerator rewrites only `Error.Code == '404'` (the
+        # bare HeadObject miss); an endpoint that names a code over HTTP 404
+        # (NoSuchBucket) surfaces the original error, not the key-missing
+        # wording.
+        client, _ = make_recording_client([client_error("NoSuchBucket", 404, "HeadObject")])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        message = str(excinfo.value)
+        assert "NoSuchBucket" in message
+        assert "does not exist" not in message
+
     def test_bucketless_service_root_source_reaches_the_listing_not_silent_zero(
         self, tmp_path: Path
     ) -> None:

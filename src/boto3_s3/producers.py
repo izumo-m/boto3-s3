@@ -608,6 +608,15 @@ def head_single(
         with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
+        # aws-cli's filegenerator rewrites only the bare HTTP-404 HeadObject
+        # miss (`Error.Code == '404'` - HeadObject has no body, so S3 sends
+        # the bare status). An endpoint that names a code (NoSuchBucket over
+        # HTTP 404) surfaces as-is in aws, so the translation passes through
+        # untouched here too.
+        response = getattr(exc.__cause__, "response", None)
+        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        if code != "404":
+            raise
         # Chain the originating ClientError directly: this aws-worded error
         # replaces the s3_errors translation wholesale, and the section 2.1
         # reachability guarantee (exceptions.md) promises the ClientError on
