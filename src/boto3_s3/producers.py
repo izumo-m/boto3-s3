@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
@@ -612,10 +612,11 @@ def head_single(
         # miss (`Error.Code == '404'` - HeadObject has no body, so S3 sends
         # the bare status). An endpoint that names a code (NoSuchBucket over
         # HTTP 404) surfaces as-is in aws, so the translation passes through
-        # untouched here too.
-        response = getattr(exc.__cause__, "response", None)
-        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
-        if code != "404":
+        # untouched here too. Duck-typed: this module never imports botocore,
+        # and a translated cause always carries the ClientError's dict.
+        raw_response = getattr(exc.__cause__, "response", None)
+        response = cast("dict[str, Any]", raw_response) if isinstance(raw_response, dict) else {}
+        if response.get("Error", {}).get("Code") != "404":
             raise
         # Chain the originating ClientError directly: this aws-worded error
         # replaces the s3_errors translation wholesale, and the section 2.1

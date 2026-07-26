@@ -7,7 +7,7 @@ import os
 
 # Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch) -
 # or up front when auto-prompt builds the full command model.
-from boto3_s3 import NotFoundError, S3Storage, StdioStorage, ValidationError
+from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -107,13 +107,11 @@ class CpCommand(Command):
                 recursive=False,
             )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            dest_s3 = S3Storage(f"s3://{dest}", client=client)
-            dest_s3.validate()  # permissive construction; reject bad forms pre-pipeline
-            dest_location = dest_s3
+            # Strict aws-cli validation with the measured bucket-less
+            # carve-out (a dryrun stream upload to s3:///k is aws rc 0).
+            dest_location = transferargs.build_s3_storage(f"s3://{dest}", client=client)
         elif dest == "-":
-            src_s3 = S3Storage(src, client=client)
-            src_s3.validate()  # permissive construction; reject bad forms pre-pipeline
-            src_location = src_s3
+            src_location = transferargs.build_s3_storage(src, client=client)
             dest_location = StdioStorage()
         else:
             src_location, dest_location = transferargs.resolve_locations(

@@ -28,6 +28,16 @@ from tests.utils.recorder import make_recording_client
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
 
+def _real_client_ctx() -> Context:
+    # A real botocore client (still offline: the client-side parameter
+    # validation under test fires before any connection is attempted).
+    import boto3
+
+    return Context(
+        client_factory=lambda _args: boto3.session.Session().client("s3", region_name="us-east-1")
+    )
+
+
 def _obj(key: str, size: int = 1) -> dict[str, Any]:
     return {"Key": key, "Size": size, "LastModified": _MTIME}
 
@@ -213,12 +223,34 @@ class TestExitCodeShape:
         assert "invalid literal for int()" in result.stderr
 
     def test_empty_bucket_with_key_is_rc_1_delete_failed(self) -> None:
-        # aws sends Bucket="" to DeleteObject and botocore fails client-side:
-        # shaped as a per-key failure, not a usage error.
-        result = run_cli_in_process(["rm", "s3:///key"], ctx=client_ctx(object()))
+        # aws sends Bucket="" onward and botocore fails client-side at the
+        # delete submit: shaped as a per-key failure, not a usage error. A
+        # real (offline) client is required - the parameter validation IS the
+        # behavior under test, and it fires before any connection.
+        result = run_cli_in_process(["rm", "s3:///key"], ctx=_real_client_ctx())
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3:///key ")
         assert "Invalid bucket name" in result.stderr
+
+    def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:
+        # The dryrun never reaches the submit-time validation: aws prints the
+        # dryrun record and exits 0 (measured).
+        result = run_cli_in_process(["rm", "s3:///key", "--dryrun"], ctx=client_ctx(object()))
+        assert result.rc == 0
+        assert result.stdout == "(dryrun) delete: s3:///key\n"
+
+    def test_empty_bucket_enumerating_paths_fail_at_the_listing(self) -> None:
+        # Recursive / keyless forms die at ListObjectsV2's client-side
+        # validation - fatal rc 1 even under --dryrun (measured); synthesized
+        # ahead of any client, so the factory must stay uncalled.
+        for argv in (
+            ["rm", "s3:///key", "--recursive", "--dryrun"],
+            ["rm", "s3://", "--dryrun"],
+        ):
+            result = run_cli_in_process(argv, ctx=unused_ctx())
+            assert result.rc == 1, argv
+            assert result.stderr.startswith("fatal error: Parameter validation failed")
+            assert "Invalid bucket name" in result.stderr
 
 
 class TestFilterWiring:
@@ -335,7 +367,7 @@ class TestScanInterruptPolicy:
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the command module's binding: rm.py imports S3Storage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.rm.S3Storage", _Recording)
+        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.S3Storage", _Recording)
         client, _calls = make_recording_client([{}])
         assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=client_ctx(client)) == 0
         assert scan_waits == [False]

@@ -711,13 +711,11 @@ def resolve_locations(
     """
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
-        # Construction is permissive (non-raising); validate the strict aws-cli
-        # forms here so a usage error (rc 252) still precedes the transfer
-        # pipeline. The CLI's process-fatal Ctrl-C posture is not a storage
-        # concern: build_s3 declares it once (S3's wait_on_interrupt).
-        storage = S3Storage(arg, client=client_for, page_size=page_size)
-        storage.validate()
-        return storage
+        # build_s3_storage applies the strict aws-cli validation (rc 252
+        # ahead of the pipeline) with the measured bucket-less carve-out. The
+        # CLI's process-fatal Ctrl-C posture is not a storage concern:
+        # build_s3 declares it once (S3's wait_on_interrupt).
+        return build_s3_storage(arg, client=client_for, page_size=page_size)
 
     def _local(path: str) -> LocalStorage:
         return LocalStorage(path, follow_symlinks=args.follow_symlinks)
@@ -745,6 +743,42 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     ``resolve_locations``.
     """
     return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
+
+
+class _BucketlessS3Storage(S3Storage):
+    """A key-carrying bucket-less s3 URI (``s3:///k``) riding to the API.
+
+    aws sends Bucket="" onward, and botocore's client-side validation fails
+    the first stage that touches it: the blind single download's HeadObject
+    and every listing turn fatal (rc 1, ``--dryrun`` included), a live
+    upload/copy fails per item at submit time, and a dryrun upload never
+    reaches the submit at all (rc 0) - all measured against the pinned
+    aws-cli. ``S3Storage.validate`` (which the operation entry re-runs via
+    ``_validate_storage``) would instead reject the form up front as a
+    252-shaped ``ValidationError``, so this override is what lets the form
+    ride; the ARN rejections it skips cannot apply to a bucket-less URI.
+    """
+
+    def validate(self) -> None:
+        """aws-faithful pass-through: botocore validates at request time."""
+
+
+def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:
+    """An ``S3Storage`` for a CLI s3 path, validated the aws-cli way.
+
+    The strict aws-cli rejections (the unsupported ARN families) fire here,
+    ahead of the pipeline (rc 252, aws's parse-time parity); the bucket-less
+    key-carrying form is the one carve-out, flowing through
+    ``_BucketlessS3Storage`` so aws's stage-shaped failures fall out of the
+    normal machinery.
+    """
+    rest = arg.partition("://")[2]
+    bucket, _, key = rest.partition("/")
+    if not bucket and key:
+        return _BucketlessS3Storage(arg, client=client, page_size=page_size)
+    storage = S3Storage(arg, client=client, page_size=page_size)
+    storage.validate()
+    return storage
 
 
 def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:

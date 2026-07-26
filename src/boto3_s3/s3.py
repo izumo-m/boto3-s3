@@ -1846,12 +1846,18 @@ class S3:
         """
         storage = self._resolve_s3_target(target, operation="rm")
         _raise_if_cancelled(cancel_token, "rm")
-        if not storage.bucket:
+        if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a
-            # bucketless service root cannot resolve to anything to delete. aws
-            # sends Bucket="" to the API and fails botocore's client-side
-            # validation (rc 1); reject up front the same way - a deterministic
-            # library-level check that does not depend on the client validating.
+            # bucketless enumerating target cannot resolve to anything to
+            # delete. aws sends Bucket="" to the listing and fails botocore's
+            # client-side validation (rc 1, dryrun included); reject up front
+            # the same way - a deterministic library-level check that does not
+            # depend on the client validating. The blind single delete (a key,
+            # not recursive - only reachable through a custom storage whose
+            # validate allows the form) is deliberately NOT checked: aws only
+            # fails it at submit time, so a dryrun records it at rc 0 and a
+            # live run fails per-key through the same client validation
+            # (measured shapes).
             raise ValidationError('Invalid bucket name "": rm requires a bucket', operation="rm")
         root = rm_filter_root(storage.key, recursive=recursive)
 

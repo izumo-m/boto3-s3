@@ -12,10 +12,10 @@ from boto3_s3 import (
     Boto3S3Error,
     OpOutcome,
     OpResult,
-    S3Storage,
     ValidationError,
 )
 from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -143,26 +143,24 @@ class RmCommand(Command):
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
 
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
-            # aws sends Bucket="" to the API and botocore's client-side
-            # validation fails the task -> rc 1: shaped like a
-            # per-key failure on the blind single path, a fatal error on the
-            # enumerating paths. S3Storage.validate() would reject "s3:///k" as a
-            # ValidationError (252-shaped), so handle the form before construction
-            # to keep this path at rc 1.
-            message = usage.invalid_bucket_name_message()
+        if not bucket_part and (args.recursive or not key_part):
+            # The enumerating bucket-less forms (keyless service root, or
+            # --recursive): aws sends Bucket="" to the listing and botocore's
+            # client-side validation makes it a fatal rc 1, --dryrun included
+            # (measured). Synthesized with aws's wording before any client
+            # exists, keeping the fake-driven paths (rb --force's inner rm
+            # included) deterministic; the blind single delete instead rides
+            # to the API via build_s3_storage below - its dryrun records at
+            # rc 0 and its live run fails per-key, exactly aws's shapes.
             if not args.quiet:
-                if key_part and not args.recursive:
-                    sys.stderr.write(f"delete failed: {target} {message}\n")
-                else:
-                    sys.stderr.write(f"fatal error: {message}\n")
+                sys.stderr.write(f"fatal error: {usage.invalid_bucket_name_message()}\n")
             return 1
 
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
-        # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
-        # from the now non-raising construction) through main -> rc 252, matching aws.
-        storage = S3Storage(target, client=s3.client(), page_size=page_size)
-        storage.validate()
+        # Outposts bucket) raise ValidationError through main -> rc 252,
+        # matching aws; the bucket-less blind single delete flows through
+        # build_s3_storage's carve-out instead of failing validation.
+        storage = transferargs.build_s3_storage(target, client=s3.client(), page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).
         item_filter = filters.compile_filter(
