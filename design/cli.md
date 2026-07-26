@@ -179,7 +179,16 @@ These implement the policy in
   `Config(signature_version=UNSIGNED)`, `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config`. The assembled client is handed to the
   library via `S3Storage(uri, client=...)` (the library does not rebuild the
-  connection settings).
+  connection settings). `verify` is never left to botocore to resolve later:
+  `_resolve_verify` walks `--no-verify-ssl` > `--ca-bundle` > the `ca_bundle`
+  config variable (`AWS_CA_BUNDLE` or the profile key, read off the session the
+  client is built from) > `REQUESTS_CA_BUNDLE` > `get_cert_path(True)`, so every
+  CLI-built client carries an explicit trust source. The first two steps are the
+  option mapping; the rest reproduce, up front, the chain botocore would have
+  walked at request time - which the CRT engine never sees, since
+  `create_s3_crt_client(verify=None)` means the platform trust store
+  ([`crt.md`](./crt.md)). Leaving it unresolved had the two engines trusting
+  different roots.
 - **`build_client`'s alignment with aws v2**: `build_client`
   absorbs six differences between stock botocore and the botocore bundled with
   aws v2.

@@ -200,6 +200,47 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     return ChainProvider(providers=providers).provide()
 
 
+def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession) -> bool | str:
+    """The TLS trust source, resolved to an explicit value for every CLI client.
+
+    ``--no-verify-ssl`` -> ``False``, ``--ca-bundle`` -> that path, then the
+    two fallbacks botocore itself would walk if the value were left ``None``:
+    the ``ca_bundle`` config variable (``AWS_CA_BUNDLE`` env or the profile's
+    ``ca_bundle`` key, read off the *same* session the client is built from, so
+    the resolved profile is honored) and the ``REQUESTS_CA_BUNDLE`` env var
+    (botocore's ``EndpointCreator._get_verify_value``, present-wins so an empty
+    value keeps its "verification off" meaning). Nothing set lands on the
+    bundle botocore would have used at request time - certifi's, or botocore's
+    own ``cacert.pem`` where certifi is absent, which is why this asks
+    ``get_cert_path`` rather than importing certifi.
+
+    Resolving here rather than passing ``None`` is what gives the CRT engine a
+    CA file: ``create_s3_crt_client(verify=None)`` means the *platform* trust
+    store, so a ``None`` that classic silently resolved to certifi left the two
+    engines trusting different roots. aws-cli has the same split in reverse
+    (its CRT lane resolves its bundled ``cacert.pem`` explicitly, ``factory.py``
+    ``_resolve_verify``, while its classic clients ride the botocore chain);
+    resolving once, up front, keeps both of *our* engines on the file classic
+    was already using - and keeps every CLI-built client on one value, which
+    the CRT singleton's verify compatibility check requires.
+    """
+    if args.no_verify_ssl:
+        return False
+    if args.ca_bundle is not None:
+        return cast("str", args.ca_bundle)
+    configured = botocore_session.get_config_variable("ca_bundle")
+    if configured is not None:
+        return cast("str", configured)
+    requests_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
+    if requests_bundle is not None:
+        return requests_bundle
+    # Present at the botocore floor (docs/compatibility.md); True means "the
+    # default bundle" and is exactly what botocore resolves per request.
+    from botocore.httpsession import get_cert_path
+
+    return cast("str", get_cert_path(True))
+
+
 def build_service_client(
     service: str,
     args: argparse.Namespace,
@@ -212,7 +253,7 @@ def build_service_client(
     aws-cli's ``S3PathResolver.from_session``: a plain ``create_client`` carrying
     only the profile session, the caller's region choice (the source side
     passes ``--source-region``, the destination ``--region``, sts none),
-    and the ``--no-verify-ssl`` / ``--ca-bundle`` verify setting - no endpoint
+    and the resolved TLS ``verify`` setting (`_resolve_verify`) - no endpoint
     override. aws binds ``--region`` into the session itself at startup
     (clidriver's ``set_config_variable``), so a ``create_client`` with no
     ``region_name`` still lands in ``--region``; mirror that by falling back
@@ -233,11 +274,6 @@ def build_service_client(
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
-    verify: bool | str | None
-    if args.no_verify_ssl:
-        verify = False
-    else:
-        verify = args.ca_bundle
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile); translate them so the credential/region 253 split
     # survives - untranslated they would fall to the dispatcher's generic
@@ -271,7 +307,7 @@ def build_service_client(
             region_name=_resolve_region(
                 region if region is not None else args.region, botocore_session
             ),
-            verify=verify,
+            verify=_resolve_verify(args, botocore_session),
             config=Config(**service_overrides),
         )
     except (NoCredentialsError, NoRegionError) as exc:
@@ -364,9 +400,11 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
     ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
-    kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` map to
-    ``verify``. The client is handed to the library through ``S3Storage`` - the
-    library never rebuilds connection settings itself.
+    kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
+    the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
+    value so both transfer engines trust the same roots). The client is handed
+    to the library through ``S3Storage`` - the library never rebuilds
+    connection settings itself.
     """
     # Importing boto3 drags in botocore and s3transfer. The top-level
     # --help/--version exits return before this normal-dispatch path.
@@ -383,12 +421,6 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # and for direct callers - botocore would otherwise raise a bare
     # ValueError at client creation.
     validate_endpoint_url(args)
-
-    verify: bool | str | None
-    if args.no_verify_ssl:
-        verify = False
-    else:
-        verify = args.ca_bundle  # a path, or None to use the default trust store
 
     # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
     # signers) left - only the generic query-protocol "v2" - while stock
@@ -447,7 +479,7 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
             "s3",
             region_name=_resolve_region(args.region, botocore_session),
             endpoint_url=args.endpoint_url,
-            verify=verify,
+            verify=_resolve_verify(args, botocore_session),
             config=config,
         )
     except (NoCredentialsError, NoRegionError) as exc:

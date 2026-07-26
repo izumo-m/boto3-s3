@@ -547,9 +547,14 @@ def _derive_use_ssl(endpoint_url: str | None) -> bool:
 def _derive_verify(client: S3Client) -> Any:
     """Map botocore's verify setting onto ``create_s3_crt_client``'s contract.
 
-    The CRT factory takes ``None`` (default trust store), ``False`` (skip
-    verification) or a CA-bundle path - never ``True``, which botocore uses
-    for its own default.
+    The CRT factory takes ``None`` (the *platform* trust store), ``False``
+    (skip verification) or a CA-bundle path - never ``True``, which botocore
+    uses for its own default. A client that never named a bundle therefore
+    maps to ``None``, exactly as plain boto3 does (it passes no ``verify`` to
+    the CRT at all): the library stays boto3-faithful even though the platform
+    store is not the certifi bundle the classic engine would have used.
+    ``boto3-s3-cli`` avoids that split by resolving an explicit CA file into
+    every client it builds, so its clients arrive here carrying a path.
     """
     verify = getattr(
         getattr(getattr(client, "_endpoint", None), "http_session", None), "_verify", None

@@ -435,6 +435,8 @@ class TestSourceRegionWiring:
                 "us-east-1",
                 "--endpoint-url",
                 "http://main-endpoint",
+                "--ca-bundle",
+                "/ca/bundle.pem",
             ],
             ctx=ctx,
         )
@@ -445,6 +447,13 @@ class TestSourceRegionWiring:
         # aws-cli ClientFactory: --source-region replaces the region and drops
         # the --endpoint-url override for the source client.
         assert (source_args.region, source_args.endpoint_url) == ("eu-west-3", None)
+        # Everything else rides over untouched. The TLS settings matter beyond
+        # tidiness: build_client resolves `verify` per client, and a source
+        # client resolving a different value than the destination would make
+        # the CRT singleton reject the second one and silently fall back to
+        # classic (crtsupport._is_compatible_request).
+        assert source_args.ca_bundle == "/ca/bundle.pem"
+        assert source_args.no_verify_ssl == main_args.no_verify_ssl
 
     def test_without_source_region_one_client_serves_both_sides(self) -> None:
         ctx, namespaces = self._factory_recording_ctx()

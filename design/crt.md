@@ -128,10 +128,18 @@ also read as `'auto'`) with the same rules as boto3.
     with `AWS_IO_SOCKET_CLOSED`; we do not hit it because we derive from the
     resolved `client.meta.endpoint_url`.
   - use_ssl = the endpoint's scheme is other than `http`
-  - verify = the client's TLS verification setting (`--no-verify-ssl` /
-    `--ca-bundle`). Via the private botocore attribute
-    `client._endpoint.http_session._verify` (a private dependency at the same
-    level as `client._get_credentials()`)
+  - verify = the client's TLS verification setting. Via the private botocore
+    attribute `client._endpoint.http_session._verify` (a private dependency at
+    the same level as `client._get_credentials()`). `False` and a CA-bundle
+    path ride through; botocore's own default (`True`, or nothing set at all)
+    maps to `None`, which is boto3-faithful (plain boto3 passes no `verify` to
+    `create_s3_crt_client` either) but means the **platform** trust store,
+    not the certifi bundle the classic engine uses. The CLI does not rely on
+    this mapping: `clientfactory._resolve_verify` resolves an explicit CA file
+    into every client it builds (`--no-verify-ssl` > `--ca-bundle` >
+    `ca_bundle` config variable > `REQUESTS_CA_BUNDLE` > botocore's
+    `get_cert_path(True)`), so both engines trust the same roots and every
+    CLI client passes the verify half of the compatibility check below
   - credentials = no provider if `signature_version is UNSIGNED`
     (`--no-sign-request`), otherwise
     `BotocoreCRTCredentialsWrapper(client._get_credentials())`

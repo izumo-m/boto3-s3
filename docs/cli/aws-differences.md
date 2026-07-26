@@ -65,6 +65,17 @@ are visible, or make no difference to the result.
   defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
   Setting it changes retry/timeout defaults here where `aws` would not, and an
   invalid value is an error here (`aws` runs as if it were unset).
+- **Which CA certificates are trusted.** Both tools verify every TLS connection
+  against an explicit CA file — never the operating system's trust store — but
+  not the same file: `aws` uses the `cacert.pem` bundled in its own
+  installation, while this command uses the bundle shipped with the installed
+  botocore/certifi. Both are derived from Mozilla's CA list, so the trusted
+  roots are the same in practice; they are separate snapshots and can differ in
+  age, so a very recently added or removed root may be known to one and not the
+  other. `--ca-bundle` and `AWS_CA_BUNDLE` override the file on both tools
+  identically, and `--no-verify-ssl` disables verification on both;
+  `REQUESTS_CA_BUNDLE` is honored here whichever transfer engine runs, while
+  `aws` honors it on its classic engine only (its CRT transfers ignore it).
 
 Differences that depend on which dependencies are installed — the CRT engine,
 CRT-family checksums, conditional writes, and more — are in
