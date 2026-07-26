@@ -489,6 +489,20 @@ class TestStreaming:
         assert rc == 1
         assert "fatal error: invalid literal for int()" in captured.err
 
+    def test_expected_size_non_integer_dryrun_stays_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A dryrun never reaches the submit-time int(): aws branches to the
+        # dryrun record before building the live subscribers (measured:
+        # `cp - s3://b/k --expected-size abc --dryrun` is rc 0).
+        monkeypatch.setattr("sys.stdin", _StdinShim(b"x"))
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(["cp", "-", "s3://bucket/k", "--expected-size", "abc", "--dryrun"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "(dryrun) upload: - to s3://bucket/k" in captured.out
+        assert calls == []
+
     def test_unexpected_pipeline_exception_is_a_fatal_error(
         self,
         monkeypatch: pytest.MonkeyPatch,

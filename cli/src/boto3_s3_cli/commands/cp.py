@@ -147,9 +147,12 @@ class CpCommand(Command):
             # a bare int() at submit time, stdin resolves when first needed.
             # aws only ever converts --expected-size on the streaming-upload
             # route (UploadStreamRequestSubmitter); on every other route the
-            # value is untouched and ignored, so a non-integer there stays rc 0.
+            # value is untouched and ignored, so a non-integer there stays
+            # rc 0 - and a dryrun never converts either (aws branches to the
+            # dryrun record before building the live subscribers, so
+            # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None
-            if src == "-" and args.expected_size is not None:
+            if src == "-" and args.expected_size is not None and not args.dryrun:
                 expected_size = int(args.expected_size)
             s3.cp(
                 src_location,  # type: ignore[arg-type]
