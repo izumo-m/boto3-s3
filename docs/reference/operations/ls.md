@@ -112,11 +112,9 @@ parameter not at all. It is ignored at the service root.
 `ListBuckets`'s `Prefix` and `BucketRegion`. Each is sent only when truthy, so
 `""` behaves as `None` does. They apply at the service root only and are
 ignored when the target names a bucket. Both need a recent enough SDK
-([`../../compatibility.md`](../../compatibility.md)) and fail in two distinct
-ways below it: where botocore cannot paginate `ListBuckets` at all, `ls` issues
-one unpaginated call and these two are never sent, so the unfiltered bucket
-list arrives; where botocore paginates but predates the two input parameters,
-the request is rejected client-side and `ls` raises `ValidationError`.
+([`../../compatibility.md`](../../compatibility.md)); requesting either on an
+SDK below that raises `ConfigurationError`, so a filtered bucket listing either
+filters or fails.
 
 `cancel_token` accepts a `CancelToken` shared with anything else that holds it
 (see [`../results.md`](../results.md)). It is consulted once before the listing
@@ -182,9 +180,12 @@ of `cp` / `mv` / `rm` / `sync`; the bucket listing stamps `operation="ls"`.
   timeout failure, a throttling or server-side code (`SlowDown`,
   `ServiceUnavailable`, `InternalError`, `RequestTimeout`), or another 5xx.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
-  [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — the
-  client cannot be built: unresolvable credentials or region, a set-but-unusable
-  profile, a malformed endpoint.
+  [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — a
+  bucket filter (`bucket_name_prefix` / `bucket_region`) on an SDK whose
+  `ListBuckets` model lacks the matching input member, raised as the bucket
+  listing starts and before any request; and a client that cannot be built:
+  unresolvable credentials or region, a set-but-unusable profile, a malformed
+  endpoint.
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a failure the
   translator cannot classify.
 

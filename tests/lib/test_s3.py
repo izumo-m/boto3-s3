@@ -25,6 +25,7 @@ from boto3_s3 import (
     TransferConfig,
     ValidationError,
 )
+from tests.utils.fakemodel import model_meta
 
 _MTIME = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -43,6 +44,9 @@ class _FakeS3Client:
     def __init__(self, pages: list[dict[str, Any]]) -> None:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
+        # The ListBuckets filter gate reads the model, so the fake carries the
+        # one a current botocore has.
+        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, _name: str) -> bool:
         return True

@@ -825,10 +825,11 @@ class S3:
         ``ls`` dispatches to `S3Storage.list_buckets` (aws-cli's ``ls``
         splits the bucket listing from the object listing the same way), yielding
         one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
-        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing on
-        a botocore that models them (the back-compat floor's unpaginated
-        fallback cannot send them - `S3Storage.list_buckets`) and
-        are meaningless for an object listing; conversely ``recursive`` /
+        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing
+        and are meaningless for an object listing; each requires a botocore
+        whose ``ListBuckets`` can carry it, and one that cannot raises
+        ``ConfigurationError`` naming the version it needs
+        (`S3Storage.list_buckets`); conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
         aws-cli). The listing page size (object listings, and bucket listings on a
         paginator-capable botocore - the floor's fallback issues one

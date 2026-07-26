@@ -62,7 +62,9 @@ message uses the same envelope as `aws`:
 
 Credentials or a region could not be resolved, or a requested feature needs a
 dependency that is not installed — asking for the CRT transfer engine without
-the `crt` extra is the common case.
+the `crt` extra is the common case — or one that is installed but too old to
+carry it ([`compatibility.md`](../compatibility.md) lists what each feature
+needs).
 
 ### 254 — S3 returned an error
 

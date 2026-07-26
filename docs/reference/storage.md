@@ -814,12 +814,12 @@ container rather than an openable entity, so no transfer scan ever yields one.
 `name_prefix` and `region` map to `ListBuckets`'s `Prefix` and `BucketRegion`,
 omitted when falsy. The page size is the storage's own `page_size`.
 
-Below the botocore version that added the `ListBuckets` paginator, this falls
-back to a single unpaginated call in which those two filters are never sent and
-are simply inert. On a botocore that paginates but predates the `Prefix` /
-`BucketRegion` input parameters, passing either raises a botocore
-`ParamValidationError` (see [`../compatibility.md`](../compatibility.md)).
-Errors surface on the consumer's pull.
+Requesting either filter on a botocore whose `ListBuckets` model lacks the
+matching input member raises `ConfigurationError` naming the version they need
+(see [`../compatibility.md`](../compatibility.md)), so a filtered listing
+either filters or fails. An unfiltered listing needs neither member: below the
+botocore version that added the `ListBuckets` paginator it is issued as a
+single unpaginated `ListBuckets` call. Errors surface on the consumer's pull.
 
 ### open(key, mode, \*, size=None)
 

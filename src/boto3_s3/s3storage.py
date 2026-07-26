@@ -23,6 +23,7 @@ import os
 import re
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import boto3
@@ -334,6 +335,42 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
             )
         )
     return infos
+
+
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md): the
+# ListBuckets Prefix / BucketRegion input parameters arrived in botocore
+# 1.35.42, so below that a bucket filter cannot ride the request at all - an
+# unsent filter would answer a filtered listing with every bucket the account
+# has. Asking for one is therefore refused up front, ahead of botocore's own
+# opaque param validation. Drop this gate once the floor reaches 1.35.42.
+_BUCKET_FILTERS_MIN_BOTOCORE = "1.35.42"
+
+
+def _bucket_filters_unsupported_reason(
+    client: S3Client, *, name_prefix: str | None, region: str | None
+) -> str | None:
+    """Why the installed SDK cannot carry the requested bucket filters, or ``None``.
+
+    ``name_prefix`` / ``region`` ride the ``ListBuckets`` ``Prefix`` /
+    ``BucketRegion`` input members, so the client's S3 model must define the
+    ones actually requested. Membership is introspected directly
+    (version-agnostic - a botocore old enough to lack the operation's input
+    shape altogether reads as no members), while the returned message names the
+    minimum version as a hint. An unfiltered listing needs neither member, so
+    it is never probed. Returns ``None`` when the listing is supported.
+    """
+    if not name_prefix and not region:
+        return None
+    members = getattr(
+        client.meta.service_model.operation_model("ListBuckets").input_shape, "members", {}
+    )
+    if (name_prefix and "Prefix" not in members) or (region and "BucketRegion" not in members):
+        return (
+            "--bucket-name-prefix / --bucket-region require botocore >= "
+            f"{_BUCKET_FILTERS_MIN_BOTOCORE} for ListBuckets (Prefix / BucketRegion); "
+            f"the installed botocore is {version('botocore')}."
+        )
+    return None
 
 
 class S3Storage(Storage):
@@ -760,23 +797,30 @@ class S3Storage(Storage):
         ever yields buckets. The page size is the storage's own ``page_size``
         (constructor config, shared with the object listing). ``name_prefix`` /
         ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
-        when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
-        floor (botocore 1.34.162) it falls back to one unpaginated
-        ``list_buckets()``, where these filters are simply never sent (inert). The
-        ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
-        1.35.42), so on a paginating botocore that predates them (1.34.162 through
-        1.35.41) passing ``name_prefix`` / ``region`` fails botocore's
-        client-side validation; the caller sees the translated
-        ``ValidationError``, since the whole body runs inside ``s3_errors``
-        (docs/compatibility.md). Errors surface on the consumer's pull.
+        when falsy, aws-cli's truthiness check). Each requires a botocore whose
+        ``ListBuckets`` can carry it (the input parameters landed in 1.35.42);
+        requesting one where the model has no such member raises
+        ``ConfigurationError`` naming that version, so a filtered listing either
+        filters or fails (docs/compatibility.md). An unfiltered listing needs
+        neither member: below the ListBuckets-paginator floor (botocore
+        1.34.162) it falls back to one unpaginated ``list_buckets()``. Errors
+        surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
+            reason = _bucket_filters_unsupported_reason(
+                client, name_prefix=name_prefix, region=region
+            )
+            if reason is not None:
+                # The environment (SDK floor) lacks the capability, not the
+                # caller's arguments: a ConfigurationError. s3_errors translates
+                # botocore exceptions only, so this reaches the caller as raised.
+                raise ConfigurationError(reason, operation="ls")
             if not client.can_paginate("list_buckets"):
                 # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
-                # late-2024 addition (botocore 1.34.162); its Prefix / BucketRegion
-                # input parameters came later still (botocore 1.35.42). Drop this
-                # branch once the floor reaches the paginator.
+                # late-2024 addition (botocore 1.34.162), so an older botocore has
+                # only the single unpaginated call to list with. Drop this branch
+                # once the floor reaches the paginator.
                 yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
             paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
