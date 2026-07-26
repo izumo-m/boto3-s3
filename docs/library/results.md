@@ -46,20 +46,20 @@ reconcile the two.
 
 ## 2. What a record carries
 
-| field | what it holds |
-| --- | --- |
-| `transfer_type` | `upload` / `download` / `copy` / `move` / `delete` |
-| `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE` / `CANCELLED` |
-| `compare_key` | the item's identity relative to the operation's root, `/`-separated — the same key space filters match against |
-| `bytes_transferred` | bytes moved on success; 0 for a delete, an advisory, and every non-success record |
-| `error` | the failure on `FAILED`, the advisory text on `WARNED` / `NOTICE` |
-| `src` / `dest` | display endpoints, for a `verb: src to dest` line |
-| `src_info` / `dest_info` | the listing entries (`FileInfo`) |
-| `src_storage` / `dest_storage` | the backends behind each side |
-| `extra_info` | S3 response metadata (below) |
+A record describes one item: what was done to it (`transfer_type`), how that
+ended (`outcome`), and which item it was (`compare_key` — the item's identity
+relative to the operation's root, `/`-separated, the same key space filters
+match against). Around that core sit `bytes_transferred`, the `error` holding a
+failure or an advisory's text, the `src_*` and `dest_*` fields describing the
+two sides — the endpoint as displayed (`src` / `dest`), the listing entry as a
+`FileInfo` (`src_info` / `dest_info`), and the backend behind it
+(`src_storage` / `dest_storage`) — and `extra_info`, the S3 response metadata
+(below). The complete field list, each field with its exact contract, is
+[`OpResult`](../reference/results.md#opresult) in the API reference.
 
-`bytes_transferred` is 0 on any non-success record even when bytes really
-landed — an `mv` whose copy succeeded but whose source delete failed reports 0.
+`bytes_transferred` is 0 on a delete and on any non-success record, even when
+bytes really landed — an `mv` whose copy succeeded but whose source delete
+failed reports 0.
 
 ### Reading `src` and `dest`
 

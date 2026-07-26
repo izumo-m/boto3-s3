@@ -42,16 +42,21 @@ exceptions in `asyncio` and `concurrent.futures`.
 Programming mistakes are not wrapped. A `TypeError` from your own callback, a
 `KeyboardInterrupt`, a `SystemExit` — all pass straight through.
 
+Every class in the tree has its own entry in the API reference,
+[`exceptions.md`](../reference/exceptions.md) — the exact conditions that raise
+it, and what its attributes hold.
+
 ## 2. What you may depend on
 
 Two things are stable across releases: **the class** and the **structured
 attributes**.
 
-Every `Boto3S3Error` carries `operation`, `bucket` and `key`. `BatchError` adds
-its counters and leaves `bucket` and `key` empty — it stands for a whole run
-rather than one entry. Message strings are **display only** — they track
-`aws s3`'s wording and change whenever parity requires it, so branch on the
-class and read the attributes, and never parse `str(exc)`.
+Every [`Boto3S3Error`](../reference/exceptions.md#boto3s3error) carries
+`operation`, `bucket` and `key`. `BatchError` adds its counters and leaves
+`bucket` and `key` empty — it stands for a whole run rather than one entry.
+Message strings are **display only** — they track `aws s3`'s wording and change
+whenever parity requires it, so branch on the class and read the attributes,
+and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is
@@ -91,7 +96,8 @@ above, 5xx to `TransportError`, other 4xx to `ValidationError`.
 ## 4. When a batch partly fails
 
 `cp` / `mv` / `rm` with `recursive=True`, and `sync`, **attempt every item**. If
-any of them failed, the call raises `BatchError` once, at the end.
+any of them failed, the call raises
+[`BatchError`](../reference/exceptions.md#batcherror) once, at the end.
 
 ```python
 from boto3_s3 import BatchError

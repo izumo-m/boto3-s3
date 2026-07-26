@@ -13,9 +13,9 @@ A skipped item is skipped silently — no record reaches `on_result`, matching
 
 ## 1. Glob patterns
 
-`GlobFilter` is the `aws s3`-style include/exclude matcher. Patterns are
-evaluated in order, **the last one that matches wins**, and an item that matches
-nothing is **included**:
+[`GlobFilter`](../reference/filters.md#globfilter) is the `aws s3`-style
+include/exclude matcher. Patterns are evaluated in order, **the last one that
+matches wins**, and an item that matches nothing is **included**:
 
 ```python
 from boto3_s3 import GlobFilter
@@ -65,12 +65,12 @@ s3.rm("s3://bucket/tmp/", recursive=True, filter=lambda info: info.size == 0)
 s3.sync(src, dest, filter=lambda info: not info.compare_key.startswith("draft/"))
 ```
 
-`FileInfo` carries `key`, `compare_key`, `size`, `mtime`, `storage_class` and
-`storage` — the last being the backend the entry came from, always stamped
-before any filter runs, so a predicate can reach back through it (a
-`HeadObject` for something the listing omits, say). One caveat: on `rm`'s
-non-recursive single-key path there is no listing, so only `key`,
-`compare_key` and `storage` are populated — `size`, `mtime` and
+[`FileInfo`](../reference/results.md#fileinfo) carries `key`, `compare_key`,
+`size`, `mtime`, `storage_class` and `storage` — the last being the backend the
+entry came from, always stamped before any filter runs, so a predicate can
+reach back through it (a `HeadObject` for something the listing omits, say).
+One caveat: on `rm`'s non-recursive single-key path there is no listing, so
+only `key`, `compare_key` and `storage` are populated — `size`, `mtime` and
 `storage_class` are `None`. Guard for that if your predicate might run there.
 
 **On an enumerating path the predicate runs on a listing prefetch worker

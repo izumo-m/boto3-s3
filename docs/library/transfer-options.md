@@ -20,18 +20,21 @@ s3.cp(
 Grouped by what they control:
 
 - **Metadata and headers** — `metadata`, `metadata_directive`, `copy_props`,
-  `cache_control`, `content_type`, `content_disposition`, `content_encoding`,
-  `content_language`, `expires`, `website_redirect`, `guess_mime_type`
-- **Access and storage class** — `acl`, `grants`, `storage_class`,
-  `request_payer`
-- **Encryption** — `sse`, `sse_kms_key_id`, `sse_c`, `sse_c_key`, and the
-  copy-source pair `sse_c_copy_source` / `sse_c_copy_source_key`
+  `content_type`, `cache_control`
+- **Access and storage class** — `acl`, `grants`, `storage_class`
+- **Encryption** — `sse`, `sse_kms_key_id`, `sse_c`, `sse_c_key`, and an SSE-C
+  copy-source pair
 - **Integrity and write control** — `checksum_algorithm`, `checksum_mode`,
   `no_overwrite`, `case_conflict`
 - **Archived objects** — `force_glacier_transfer`, `ignore_glacier_warnings`
 - **Streams and annotations** — `annotation_copy_mode`, and `cp`'s
   `expected_size`, a size hint for uploading from a stream
   ([`streams.md`](./streams.md)). The command has no flag for either.
+
+Those are the themes, not the whole list. The complete set of option keys, and
+the exact contract of each, is
+[`TransferOptions`](../reference/options.md#transferoptions) in the API
+reference.
 
 An option that does not apply to the direction being run is simply ignored
 rather than rejected — passing `acl` on a download changes nothing, and neither
@@ -44,7 +47,8 @@ wrong path format, matching `aws s3`.
 ## 1. Multipart and concurrency
 
 Thresholds, part sizes, concurrency, bandwidth and the transfer engine are a
-`TransferConfig`, not individual options:
+[`TransferConfig`](../reference/options.md#transferconfig), not individual
+options:
 
 ```python
 from boto3_s3 import TransferConfig
@@ -82,7 +86,8 @@ means it also works on older SDKs where `cp` would be refused up front. See
 ## 3. Copying properties between S3 objects
 
 A single-request copy carries metadata and tags across natively, but **a
-multipart copy does not**. `copy_props` says what to do about that:
+multipart copy does not**. `copy_props` says what to do about that
+([`CopyPropsMode`](../reference/options.md#copypropsmode)):
 
 | value | what carries over |
 | --- | --- |
@@ -103,7 +108,8 @@ that cleanup itself fails: the item is then reported **successful** with the
 destination left carrying no tags, which is `aws s3`'s behavior as well.
 
 `annotation_copy_mode` chooses how a multipart copy under `copy_props="all"`
-stages the source annotations:
+stages the source annotations
+([`AnnotationCopyMode`](../reference/options.md#annotationcopymode)):
 
 | value | what it does |
 | --- | --- |
@@ -126,7 +132,8 @@ does not appear in a listing, and a recursive run decides from the listing, so
 
 On a case-insensitive destination — Windows, or a macOS volume — two keys
 differing only in case collide. `case_conflict` chooses what a recursive
-download does about it:
+download does about it
+([`CaseConflictMode`](../reference/options.md#caseconflictmode)):
 
 | value | what happens |
 | --- | --- |
