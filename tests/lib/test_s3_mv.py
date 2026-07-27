@@ -205,7 +205,9 @@ class TestUploadMove:
         # The source delete names the failing entry in the local address space:
         # a filesystem path in key, no bucket (exceptions.md). The engine's
         # per-item fill must not pair the S3 destination's bucket with that
-        # path, so bucket and key are filled together or not at all.
+        # path, so bucket and key are filled together or not at all. The path
+        # is the walk entry's own key, so it keeps the FileInfo separator
+        # convention (os.sep normalized to "/"), not the host form.
         src = tmp_path / "a.txt"
         src.write_bytes(b"x" * 7)
 
@@ -226,7 +228,11 @@ class TestUploadMove:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert error is not None
-        assert (error.operation, error.bucket, error.key) == ("delete", None, str(src))
+        assert (error.operation, error.bucket, error.key) == (
+            "delete",
+            None,
+            str(src).replace(os.sep, "/"),
+        )
 
     def test_filtered_out_files_are_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
 
