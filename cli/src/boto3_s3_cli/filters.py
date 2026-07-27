@@ -36,7 +36,7 @@ import fnmatch
 import os
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from boto3_s3 import GlobPattern, globsieve
 from boto3_s3.globsieve import Matcher, PatternKind
@@ -71,7 +71,19 @@ class AppendFilterAction(argparse.Action):
 
     The aws-cli ``AppendFilter`` equivalent: both options share ``dest``
     (``filters``) so the rule order is exactly the command-line order.
+
+    aws declares both options with ``nargs=1``, which words a missing value
+    ``expected 1 argument``; ``aws_nargs`` marks that declaration so the
+    parser's message translation can reproduce the wording. Only the wording:
+    a real ``nargs=1`` would also let a dash-led token be consumed as the
+    value, and whether it does depends on the host Python version, so the
+    classification is deliberately left alone - a dash-led value is rejected
+    as a missing one on every Python. ``nargs`` therefore stays unspecified
+    here.
     """
+
+    # The wording marker above; not an argparse attribute.
+    aws_nargs: ClassVar[int] = 1
 
     def __call__(
         self,

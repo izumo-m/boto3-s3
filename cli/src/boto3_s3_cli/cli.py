@@ -98,8 +98,9 @@ _NEGATIVE_NUMBER_RE = re.compile(r"^-\d+$|^-\d*\.\d+$")
 # aws-cli's top-level usage block (its argparser.py USAGE + HELP_BLURB),
 # collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws calls
 # the subcommand is our only level - aws's `<command> <subcommand>` pair and
-# its third help line have no counterpart here. Every top-level parse error
-# renders it, exactly as aws appends its parser's usage to the message.
+# its third help line have no counterpart here. Every parse error renders it,
+# a subcommand's own parse included, exactly as aws hands one shared USAGE
+# constant to its main, service and leaf parsers alike.
 _TOP_LEVEL_USAGE = (
     "boto3-s3 [options] <subcommand> [parameters]\n"
     "To see help text, you can run:\n"
@@ -130,7 +131,17 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
-    """Render argparse failures through aws-cli's ParamValidation envelope."""
+    """Render argparse failures through aws-cli's ParamValidation envelope.
+
+    The counterpart of aws's `CLIArgParser`, which every one of its parsers is
+    built on: one error shape for all of them. The report is
+    ``<message>\\n\\n<usage>`` handed to the error formatter as a single
+    string, so the usage lands after a blank line and *inside* the same
+    ``[ERROR]`` report. Which usage that is comes from each parser's ``usage``
+    argument: the collapsed top-level block for the ones that decide the
+    subcommand and for the leaf parse parsers, and argparse's generated
+    one-liner for the preliminary ``--profile`` / ``--debug`` scan.
+    """
 
     def _check_value(self, action: argparse.Action, value: object) -> None:
         """Reject an off-list value with aws's wording, suggestions included.
@@ -160,25 +171,22 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
                 if not action.option_strings and action.metavar is not None
             }
             return required_prefix + ", ".join(positional_names.get(name, name) for name in missing)
+        missing_value = re.fullmatch(r"argument (\S+): expected one argument", message)
+        if missing_value is not None:
+            option = missing_value.group(1)
+            # aws declares the filter options with nargs=1, which words their
+            # missing value "expected 1 argument"; the action carries that
+            # declaration as a marker (`filters.AppendFilterAction`). Read it
+            # duck-typed: importing the filters here would drag in
+            # `boto3_s3.globsieve`, and the informational exits may reach no
+            # library module beyond the lazy `boto3_s3` root (design/imports.md,
+            # pinned by test_import_contract.py).
+            if any(
+                option in action.option_strings and getattr(action, "aws_nargs", None) == 1
+                for action in self._actions
+            ):
+                return f"argument {option}: expected 1 argument"
         return message
-
-    def error(self, message: str) -> NoReturn:
-        _write_error(self._aws_error_message(message), rc=_PARAM_VALIDATION_ERROR_RC)
-        self.print_usage(sys.stderr)
-        self.exit(2)
-
-
-class _TopLevelArgumentParser(_ParamValidationArgumentParser):
-    """A parser whose failures carry aws's usage report inside the message.
-
-    aws builds every top-level parse error as ``<message>\\n\\n<usage>`` and
-    hands that one string to its error formatter, so the usage lands *after* a
-    blank line and inside the same ``[ERROR]`` report - unlike a subcommand's
-    error here, which prints the message and then argparse's own usage on the
-    next line. Which usage that is comes from each parser: the collapsed
-    top-level block for the ones that decide the subcommand, and argparse's
-    generated one-liner for the preliminary ``--profile`` scan.
-    """
 
     def error(self, message: str) -> NoReturn:
         report = f"{self._aws_error_message(message)}\n\n{self.format_usage()}"
@@ -262,7 +270,7 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_subcommand_error_parser() -> _TopLevelArgumentParser:
+def _build_subcommand_error_parser() -> _ParamValidationArgumentParser:
     """The parser that reports a subcommand name no table entry matches.
 
     aws checks the name with a positional whose choices are its command
@@ -272,12 +280,12 @@ def _build_subcommand_error_parser() -> _TopLevelArgumentParser:
     carries the positional alone - the globals are long consumed by the
     top-level pass, and the help page is stage 1's job.
     """
-    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
     parser.add_argument("subcommand", choices=list(_COMMAND_TABLE))
     return parser
 
 
-def _build_first_pass_parser() -> _TopLevelArgumentParser:
+def _build_first_pass_parser() -> _ParamValidationArgumentParser:
     """aws's preliminary ``--profile`` / ``--debug`` scan, run before everything.
 
     aws reads those two options off the raw argv with a parser that knows
@@ -293,13 +301,13 @@ def _build_first_pass_parser() -> _TopLevelArgumentParser:
     no value, ``--debug`` by being handed one (``--debug=1``, abbreviations
     included).
     """
-    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False)
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
     parser.add_argument("--profile", type=str)
     parser.add_argument("--debug", action="store_true", default=False)
     return parser
 
 
-def _build_globals_parser() -> _TopLevelArgumentParser:
+def _build_globals_parser() -> _ParamValidationArgumentParser:
     """Globals-only parser for the aws-shaped top-level pass (``_dispatch``).
 
     aws parses the top-level globals over the *full* argv first
@@ -320,7 +328,7 @@ def _build_globals_parser() -> _TopLevelArgumentParser:
     block as a rejected subcommand name, like aws, whose main parser and
     command layers share one usage string.
     """
-    parser = _TopLevelArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
+    parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
     globalargs.add_common_arguments(parser)
     return parser
 
@@ -329,10 +337,10 @@ def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParse
     """The subcommand's full rendering parser: globals section + command args.
 
     ``prog`` / ``description`` match what ``add_parser`` produces under the
-    full tree, so ``boto3-s3 <cmd> help`` and the subcommand's usage errors
-    render identically to the pre-split output. The dispatch parses with
-    ``_build_command_parse_parser`` and only renders help pages through this
-    one; the auto-prompt model keeps deriving from the full tree.
+    full tree, so ``boto3-s3 <cmd> help`` pages exactly as the whole tree
+    pages it. The dispatch parses with ``_build_command_parse_parser`` and
+    only renders help pages through this one; the auto-prompt model keeps
+    deriving from the full tree.
     """
     parser = _ParamValidationArgumentParser(
         prog=f"boto3-s3 {name}",
@@ -352,14 +360,15 @@ def _build_command_parse_parser(name: str, command: Command) -> argparse.Argumen
     global-looking token that reaches stage 2, which only a dropped leading
     ``--`` can produce, is rejected as unknown exactly like aws (measured:
     ``s3 -- presign --region us-east-2 s3://b/k`` reports ``Unknown options:
-    --region,s3://b/k``). The usage string is taken from the full renderer, so
-    a usage error here lists the whole option surface.
+    --region,s3://b/k``). It carries the same top-level guidance block aws
+    builds its ``ArgTableArgParser`` with, so a usage error here closes with
+    that block; the command's whole option surface stays on its help page,
+    which ``_build_command_parser`` renders.
     """
-    renderer = _build_command_parser(name, command)
     parser = _ParamValidationArgumentParser(
         prog=f"boto3-s3 {name}",
         description=type(command).help,
-        usage=renderer.format_usage().removeprefix("usage: ").rstrip("\n"),
+        usage=_TOP_LEVEL_USAGE,
         add_help=False,
     )
     command.configure(parser)

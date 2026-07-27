@@ -94,8 +94,8 @@ solidified design is added here.
   `suppress_defaults=True` globals parent so their help keeps listing the
   globals; the parser stage 2 actually parses with
   (`_build_command_parse_parser`) knows only the command's own arguments,
-  like aws's leaf parser, with its usage string and `print_help` pinned to
-  the full renderer.
+  like aws's leaf parser, and carries the shared top-level usage string that
+  aws's leaf parsers carry.
 - The subcommand is located by `_find_command_token` - aws's
   `SubCommandArgParser` shape: unknown optionals are assumed valueless, the
   first positional-looking token (argparse's classification: not dash-led, a
@@ -113,30 +113,42 @@ solidified design is added here.
   nothing left at all it is aws's bare `too few arguments` usage error. No
   command module is imported on any of those paths. Each subcommand class
   adds its own arguments via `configure(parser)` on the real stage-2 parser.
-- **Top-level error text.** The subcommand-decision and globals-parse
-  failures reproduce aws's byte for byte under one mapping: `aws [options] s3`
-  -> `boto3-s3 [options]`, with aws's `<command> <subcommand>` hierarchy
-  collapsed onto our single level (this command *is* `aws s3`), which also
-  drops the third line of its help blurb. Both parsers close with that one
-  block (`_TOP_LEVEL_USAGE`), appended after a blank line *inside* the same
-  `[ERROR]` report as aws does it, while the `Unknown options` reports carry
-  no usage at all (measured). Off-list values are reported by `_check_value`,
-  aws's hook: `Found invalid choice '<value>'` plus the close matches of the
-  choice list (difflib, cutoff 0.8 - aws's, so `lss` offers `ls` while `web`
-  offers nothing). The name displayed for the positional is `<subcommand>`
-  (help page included), while the error prefix says a bare `subcommand` -
-  argparse names a positional after its dest, exactly as aws's does.
-  Two residual differences remain, both outside that mapping:
+- **Parse error text.** aws builds every parser on one base class and hands
+  its main, service and leaf parsers the same usage string, so *every*
+  argparse failure folds `<message>\n\n<usage>` into a single `[ERROR]`
+  report. `_ParamValidationArgumentParser` is that base here, and the
+  failures reproduce aws's byte for byte under one mapping:
+  `aws [options] s3` -> `boto3-s3 [options]`, with aws's
+  `<command> <subcommand>` hierarchy collapsed onto our single level (this
+  command *is* `aws s3`), which also drops the third line of its help blurb.
+  The subcommand-decision, globals-parse and subcommand parse failures all
+  close with that one block (`_TOP_LEVEL_USAGE`); only the preliminary
+  `--profile` / `--debug` scan carries argparse's generated one-liner
+  instead, and the `Unknown options` reports - raised by the command layers,
+  not a parser - carry no usage at all (all measured). Off-list values are
+  reported by `_check_value`, aws's hook: `Found invalid choice '<value>'`
+  plus the close matches of the choice list (difflib, cutoff 0.8 - aws's, so
+  `lss` offers `ls` while `web` offers nothing). The name displayed for the
+  positional is `<subcommand>` (help page included), while the error prefix
+  says a bare `subcommand` - argparse names a positional after its dest,
+  exactly as aws's does. Two residual differences remain, both outside that
+  mapping:
   - **Ambiguous-abbreviation candidates.** `--c could match ...` lists the
     same options aws lists, in our option-registration order rather than
     aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
     declaring the globals in aws's order, which reshuffles the help page.
-  - **Subcommand-level parse errors.** aws builds its leaf parsers with the
-    same top-level usage string, so a leaf failure (`ls --page-size` with no
-    value, `cp` with missing paths) closes with that guidance block too;
-    ours prints the command's own argparse usage on the next line instead.
-    Only the top level was brought onto aws's text here; the leaf tail is a
-    known divergence, not parity.
+  - **Dash-led filter values.** aws declares `--exclude` / `--include` with
+    `nargs=1`, so a dash-led token after one is consumed as the pattern
+    there (`--exclude '-foo*'` is accepted); ours rejects it as a missing
+    value. The swallowed token also shifts the remaining positionals, so a
+    different error can surface entirely rather than the same one worded
+    differently (`cp --exclude --include x s3://a/ s3://b/` is aws's
+    `Unknown options: s3://b/`, with no usage block, against our missing
+    value - measured). The wording is matched - both report
+    `expected 1 argument`, which `AppendFilterAction` marks the pair for -
+    but the classification is not: a real `nargs=1` consumes the token only
+    on Python 3.12+, so adopting it would make the accept/reject decision
+    depend on the host Python.
 
 ## 3. Module layout
 

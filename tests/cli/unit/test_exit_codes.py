@@ -43,8 +43,9 @@ def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
     return exc
 
 
-# The usage block every subcommand-decision / globals-parse failure closes
-# with - aws's, with its two-level hierarchy collapsed onto our single one.
+# The usage block every parse failure closes with - the subcommand-decision
+# and globals passes and a subcommand's own parse alike. aws's, with its
+# two-level hierarchy collapsed onto our single one.
 _USAGE_BLOCK = (
     "usage: boto3-s3 [options] <subcommand> [parameters]\n"
     "To see help text, you can run:\n"
@@ -585,6 +586,113 @@ class TestTopLevelErrorText:
         assert cli.main(["ls", "--nope"]) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --nope\n"
+        )
+
+
+class TestSubcommandParseErrorText:
+    """A subcommand's own parse failures, byte for byte.
+
+    aws hands the same usage string to its leaf parser as to its main and
+    service ones, so a leaf failure closes with the identical guidance block
+    rather than the command's generated option list. Every assertion is the
+    pinned aws-cli's own stderr under this file's fixed mapping.
+    """
+
+    def test_missing_option_value_closes_with_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A plain option (no nargs) reads "one argument" on aws too.
+        assert cli.main(["ls", "--page-size"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --page-size: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_missing_positional_closes_with_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The metavar -> dest translation still runs ahead of the folding, so
+        # the report names `paths`, not the displayed `<path>` metavar.
+        assert cli.main(["cp"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "the following arguments are required: paths\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_choice_suggestions_precede_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's own order for this value: STANDARD_IA then STANDARD. The blank
+        # lines are the message elements' own trailing newlines.
+        assert cli.main(["cp", "--storage-class", "STANDARD_I", "s3://b/k", "s3://b2/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --storage-class: Found invalid choice 'STANDARD_I'\n"
+            "\nMaybe you meant:\n"
+            "\n  * STANDARD_IA\n"
+            "  * STANDARD\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "option"),
+        [
+            ("cp", "--exclude"),
+            ("cp", "--include"),
+            ("mv", "--exclude"),
+            ("rm", "--include"),
+            ("sync", "--exclude"),
+        ],
+    )
+    def test_filter_option_without_a_value_says_one_numeral(
+        self, command: str, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws declares the filter pair with nargs=1, which words the missing
+        # value "expected 1 argument" - unlike every other option, whose
+        # wording the test above pins.
+        assert cli.main([command, option]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument {option}: expected 1 argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "option"),
+        [
+            ("cp", "--storage-class"),
+            ("mv", "--content-type"),
+            ("sync", "--acl"),
+            ("rm", "--page-size"),
+        ],
+    )
+    def test_other_options_on_a_filter_command_keep_the_plain_wording(
+        self, command: str, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The numeral wording belongs to the marked options alone, not to
+        # every option of a command that happens to carry filters: aws words
+        # each of these "expected one argument" (measured per option).
+        assert cli.main([command, option]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument {option}: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_a_dash_led_filter_value_is_still_a_missing_value(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Only aws's *wording* is reproduced, not its nargs=1 model: a real
+        # nargs=1 would consume this token as the pattern (as aws does) on
+        # some Python versions and reject it on others. The token stays
+        # rejected here on every Python.
+        assert cli.main(["cp", "--exclude", "-foo*"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --exclude: expected 1 argument\n"
+            f"\n{_USAGE_BLOCK}"
         )
 
 
