@@ -51,10 +51,13 @@ solidified design is added here.
   credentials file - and its rules apply: the path must name a file (a
   directory or a missing path is simply "no config file"), `configparser`
   must accept it (a non-UTF-8 byte counts as a parse failure), and an
-  indented `key = value` block must split on `=`. The same scan collects the
-  merged **profile map** (`[default]` / `[profile <name>]` in the config
-  file, every section of the credentials file), which section 6 uses to
-  decide whether a report still carries its envelope.
+  indented `key = value` block must split on `=` (parsed one level deep and
+  kept, so a value can be a map). The same scan collects the merged **profile
+  map** (`[default]` / `[profile <name>]` in the config file, every section of
+  the credentials file, the latter updating the former key by key like
+  botocore's `full_config`), which section 6 uses to decide whether a report
+  still carries its envelope and which `ConfigScan.scoped` reads
+  `cli_timestamp_format` out of (below).
 - `_dispatch` opens with the aws-shaped **top-level globals pass**: a
   globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
   that both *consumes* the globals - its remainder is the only token stream
@@ -87,6 +90,20 @@ solidified design is added here.
   in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
   `s3 help --help` breaks the exactly-`help` remainder into an invalid
   choice `help` - all measured on 2.36.1).
+- Between those resolutions and the help-token rule sits the
+  **`cli_timestamp_format` gate** (`ConfigScan.invalid_timestamp_format`),
+  aws's only rc-253 `Configuration` failure on this surface (section 6). aws
+  validates the setting in the first handler of its `session-initialized`
+  event, which it emits after binding `--profile` and before handing the argv
+  to any command layer, so an unknown value is the run's outcome ahead of the
+  help token, an invalid subcommand, unknown options and missing arguments,
+  while `--version`, the preliminary scan, the auto-prompt rejection, the
+  unparseable-config abort and the three global resolutions all still outrank
+  it (all measured). The value comes from the scan's profile map scoped to
+  the profile aws would have bound - `--profile` under its truthy guard, then
+  the env chain - and an *undeclared* profile stands the gate down, because
+  botocore raises `ProfileNotFound` there and aws's handler catches it and
+  keeps its `iso8601` default.
 - The first `--` stops the globals pass (argparse semantics, verified
   identical on 3.10 and aws's bundled 3.14) and the marker survives in the
   remainder for stage 2's parse to honor, so the tail stays positional all
@@ -223,7 +240,7 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255 and the profile map the error rendering consults (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` and the auto-prompt resolution |
+| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255, the profile map the error rendering consults, and the scoped read of `cli_timestamp_format` behind the rc-253 gate (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` and the auto-prompt resolution |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
@@ -997,7 +1014,7 @@ reviewed with it.
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved - the two of aws's four rc-253 handlers reachable here, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` (its `ConfigurationErrorHandler` / `PagerErrorHandler` share the rc; below) |
+| 253 | `ConfigurationError` (credentials / region unresolved, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare), plus the pre-dispatch `cli_timestamp_format` gate (section 1), enveloped `Configuration` and raising nothing | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file caught by the pre-dispatch scan (section 1), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
@@ -1037,16 +1054,29 @@ The program-name prefix remains outside the parity target, and alternate
 `--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
 
-aws has **two more rc-253 handlers** whose codes never appear here.
+Of aws's **two other rc-253 handlers**, only one is reachable here.
 `PagerErrorHandler` (`Pager`) belongs to the output pager, which this CLI does
 not implement. `ConfigurationErrorHandler` (`Configuration`) claims the
-`ConfigurationError` its own customizations raise, and it *is* reachable
-inside the mapped surface: with `cli_timestamp_format` set to an unknown value
-in the config file, `aws s3 ls s3://b/` is rc 253 `An error occurred
-(Configuration): Unknown cli_timestamp_format value: ...`, ahead even of a
-help token (measured). `cli_timestamp_format` is not implemented here at all,
-so neither the setting nor its report exists - a behavior gap tracked
-separately, not an envelope one.
+`ConfigurationError` aws's own customizations raise, and one of them lands
+inside the mapped surface: `cli_timestamp_format` set to anything other than
+`wire` or `iso8601` is rc 253 `An error occurred (Configuration): Unknown
+cli_timestamp_format value: <value>, valid values are "wire" or "iso8601"`,
+ahead even of a help token. The gate is reproduced (section 1), and it is the
+one report here whose envelope code is named by the caller rather than derived
+from an exception, because no exception carries it: the check is a
+pre-dispatch read, not a failure of the command. It can never be seen degraded
+- the undeclared profile that would strip the envelope also stands the gate
+down.
+
+The **accepted values change nothing on this surface**. On aws the setting
+swaps botocore's timestamp parser for one that keeps the wire string (`wire`)
+or returns an ISO-8601 string (`iso8601`), and its own `s3` customization then
+re-parses whichever it got with a general date parser before rendering local
+time, so both settings and the unset default print the same line. Measured
+against the pinned aws-cli on a live endpoint: `ls`, `ls --recursive`, the
+all-buckets listing and `--human-readable --summarize` were byte-identical
+under `wire`, `iso8601` and no setting at all. So only the validation is
+implemented; there is no parser to swap.
 
 **The envelope disappears when the run names a profile no config file
 declares**, and the exit code does not change. aws renders it through its

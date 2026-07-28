@@ -368,3 +368,36 @@ class TestScanInterruptPolicy:
         ctx, _client = _fake_ctx([{"Contents": []}])
         assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
         assert scan_waits == [False]
+
+
+class TestTimestampFormat:
+    """`cli_timestamp_format` is validated, but neither value moves this output.
+
+    On aws the setting swaps botocore's timestamp parser for one that keeps the
+    wire string (`wire`) or hands back an ISO-8601 string (`iso8601`), and its
+    `s3` customization then re-parses whichever it got with a general date
+    parser before rendering local time - so both settings, and the unset
+    default, print the same line. Measured against the pinned aws-cli on a live
+    endpoint: `ls`, `ls --recursive`, the all-buckets listing and
+    `--human-readable --summarize` were byte-identical under `wire`, `iso8601`
+    and no setting at all. This CLI therefore only implements the validation
+    (design/cli.md section 6); the pin here is that the accepted values leave
+    the listing alone.
+    """
+
+    @pytest.mark.parametrize("value", ["wire", "iso8601", None], ids=["wire", "iso8601", "unset"])
+    def test_the_accepted_values_render_the_same_line(
+        self,
+        tmp_path: Path,
+        value: str | None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = tmp_path / "config"
+        setting = "" if value is None else f"cli_timestamp_format = {value}\n"
+        config.write_text(f"[default]\n{setting}")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        ctx, _ = _fake_ctx([{"Contents": [_obj("p/a.txt", 3)]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        date = _MTIME.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        assert capsys.readouterr().out == f"{date}          3 a.txt\n"

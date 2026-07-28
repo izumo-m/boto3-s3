@@ -93,7 +93,22 @@ To see which engine a run actually used, pass `--debug`. Set
 `preferred_transfer_client = crt` when you need to be sure: that form fails
 rather than falling back.
 
-## 4. Reading a value from a file
+## 4. `cli_timestamp_format`
+
+The profile key `cli_timestamp_format` takes `wire` or `iso8601`, exactly as
+`aws` accepts it. Neither value changes anything this command prints — the
+listing timestamps of `ls` are rendered the same way either way, as they are
+under `aws s3`.
+
+What it does do is fail the run when the value is neither: exit code 253, ahead
+of the command itself — a `help` page included. That matches `aws`, where the
+check happens as the session comes up.
+
+The value is read from the selected profile only — a `[profile x]` setting
+applies under `--profile x` or `AWS_PROFILE=x`, not otherwise — and the shared
+credentials file is read for it too, winning over `~/.aws/config`.
+
+## 5. Reading a value from a file
 
 Any option or path that takes a single string can be given as `file://path`
 (read as text) or `fileb://path` (read as bytes), resolved before the command

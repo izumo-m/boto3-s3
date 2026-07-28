@@ -1,12 +1,14 @@
 """What a broken profile / config file does to the error reports (design/cli.md section 6).
 
-Two aws behaviors that only show up once the config files are involved:
+Three aws behaviors that only show up once the config files are involved:
 
 - a *named* profile no file declares makes botocore's scoped-config read
   raise inside aws's error renderer, which falls back to the bare report -
   the `ParamValidation` envelope disappears while the exit code stays 252;
 - a file that is not valid INI replaces the run's outcome entirely with
-  botocore's `Unable to parse config file` at rc 255.
+  botocore's `Unable to parse config file` at rc 255;
+- an unknown `cli_timestamp_format` in the selected profile replaces it with
+  aws's `Configuration` report at rc 253.
 
 Every expectation here was measured against the pinned aws-cli under the
 `aws [options] s3 <subcommand>` -> `boto3-s3 [options] <subcommand>` mapping
@@ -57,6 +59,14 @@ _RESOLUTION_ERRORS = [
         "Must be of the form http://<hostname>/ or https://<hostname>/\n",
     ),
 ]
+
+
+# aws's report for a `cli_timestamp_format` its timestamp-format customization
+# rejects, with the value it echoes back left to `format`.
+_TIMESTAMP_REPORT = (
+    "boto3-s3: [ERROR]: An error occurred (Configuration): Unknown cli_timestamp_format "
+    'value: {}, valid values are "wire" or "iso8601"\n'
+)
 
 
 @pytest.fixture
@@ -433,3 +443,275 @@ class TestUnparseableConfigFile:
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
         )
+
+
+class TestInvalidTimestampFormat:
+    """An unknown `cli_timestamp_format` ends the run at rc 253.
+
+    aws validates the setting in the first handler of its `session-initialized`
+    event, which it emits after binding `--profile` and before handing the argv
+    to any command layer. Every expectation was measured against the pinned
+    aws-cli.
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["ls", "s3://bucket/p/"],
+            ["ls", "help"],
+            ["help"],
+            [],
+            ["bogus"],
+            ["cp", "a", "b"],
+            ["ls", "--bogus"],
+        ],
+        ids=[
+            "listing",
+            "subcommand-help",
+            "help",
+            "bare",
+            "invalid-choice",
+            "cp",
+            "unknown-option",
+        ],
+    )
+    def test_it_preempts_every_command_outcome(
+        self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(argv) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_the_version_flag_still_wins(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `--version` is a parse-time action of the top-level pass, which runs
+        # before aws emits the event this hangs off.
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--version"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_the_preliminary_scan_still_outranks_it(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--profile"]) == 252
+        assert "cli_timestamp_format" not in capsys.readouterr().err
+
+    def test_the_auto_prompt_conflict_outranks_it(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 252
+        assert "cli_timestamp_format" not in capsys.readouterr().err
+
+    def test_an_unparseable_config_outranks_it(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The setting lives in the file that cannot be read, so the parse
+        # failure is all aws ever reports.
+        config.write_text("[[[broken\ncli_timestamp_format = bogus\n")
+        assert cli.main(["ls", "s3://bucket/p/"]) == 255
+        assert capsys.readouterr().err == (
+            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("argv", "message"), _RESOLUTION_ERRORS, ids=["globals-parse", "query", "endpoint"]
+    )
+    def test_the_global_resolutions_outrank_it(
+        self, config: Path, argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws hangs those on `top-level-args-parsed`, emitted one step earlier
+        # than `session-initialized`, so all three keep their 252.
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {_ENVELOPE}{message}"
+
+    def test_the_timeout_coercion_outranks_it(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--cli-read-timeout", "abc", "ls"]) == 255
+        assert "invalid literal for int()" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("value", ["wire", "iso8601", "  wire  "])
+    def test_the_accepted_values_change_nothing(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # configparser strips the value, so the padded form is the plain one.
+        config.write_text(f"[default]\ncli_timestamp_format ={value}\n")
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_an_absent_key_is_the_iso8601_default(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\nregion = us-east-1\n")
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("value", ["", "WIRE"], ids=["empty", "wrong-case"])
+    def test_the_rejected_value_is_echoed_verbatim(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # An empty value is a value, not an absent key, and the comparison is
+        # case-sensitive (both measured).
+        config.write_text(f"[default]\ncli_timestamp_format = {value}\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format(value)
+
+    def test_the_key_is_case_insensitive(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # configparser lowercases option names, as botocore's parse does.
+        config.write_text("[default]\nCLI_TIMESTAMP_FORMAT = bogus\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_an_indented_block_is_reported_as_the_map_botocore_builds(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # botocore parses an indented `key = value` block into a dict, and the
+        # report interpolates whatever it parsed (measured).
+        config.write_text("[default]\ncli_timestamp_format =\n  wire = x\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("{'wire': 'x'}")
+
+
+class TestWhichProfileTheTimestampFormatComesFrom:
+    """The setting is read from the scoped config of the profile aws bound."""
+
+    def test_an_unselected_profiles_value_is_ignored(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_the_flag_selects_it(self, config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--profile", "p", "help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    @pytest.mark.parametrize("env", ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])
+    def test_the_env_vars_select_it(
+        self,
+        config: Path,
+        env: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
+        monkeypatch.setenv(env, "p")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_a_declared_flag_profile_restores_the_envelope_first(
+        self,
+        config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The gate runs *after* --profile re-decides the rendering, so a
+        # declared flag profile lifts the degradation an undeclared env profile
+        # imposed and the report comes out enveloped (measured: aws is rc 253
+        # `An error occurred (Configuration): ...` for this exact combination).
+        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
+        monkeypatch.setenv("AWS_PROFILE", "nosuch")
+        assert cli.main(["--profile", "p", "ls", "help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_a_selected_clean_profile_shadows_the_default_section(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's scoped config is the one profile's options, not a merge with
+        # `[default]`, so selecting a clean profile silences the setting.
+        config.write_text("[default]\ncli_timestamp_format = bogus\n[profile p]\n")
+        assert cli.main(["--profile", "p", "help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_an_empty_flag_leaves_the_env_chain_in_force(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's truthy guard again: `--profile ""` binds nothing, so the
+        # default section still decides.
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["--profile", "", "help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    @pytest.mark.parametrize("argv", [["--profile", "nosuch", "help"], ["help"]])
+    def test_an_undeclared_profile_falls_back_to_the_default_format(
+        self,
+        config: Path,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # botocore raises `ProfileNotFound` for the scoped-config read and aws's
+        # handler catches exactly that, keeping its `iso8601` default - so the
+        # `[default]` section's bad value is never seen (measured). This is also
+        # why an rc-253 `Configuration` report can never come out degraded: the
+        # undeclared profile that would strip the envelope also stands the check
+        # down.
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        if argv == ["help"]:
+            monkeypatch.setenv("AWS_PROFILE", "nosuch")
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_the_credentials_file_is_part_of_the_scoped_config(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # botocore merges the credentials file into the profile map, so a
+        # setting written there is read like any other.
+        config.write_text("[default]\n")
+        (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_the_credentials_file_wins_over_the_config_file(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The merge is per key, credentials last (botocore's `full_config`).
+        config.write_text("[default]\ncli_timestamp_format = wire\n")
+        (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    def test_the_credentials_file_can_repair_the_config_file(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = wire\n")
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_a_credentials_section_updates_rather_than_replaces(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The other half of "per key": a credentials section that carries some
+        # *other* key leaves the config file's setting standing, where a
+        # wholesale replacement would drop it (measured: aws is still rc 253).
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        (config.parent / "credentials").write_text("[default]\nregion = us-west-2\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[default]\ncli_timestamp_format = bogus\n[profile default]\nregion = us-east-1\n",
+            "[profile default]\ncli_timestamp_format = bogus\n[default]\nregion = us-east-1\n",
+        ],
+        ids=["default-first", "profile-default-first"],
+    )
+    def test_a_later_section_claims_the_profile_outright(
+        self, config: Path, text: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `[default]` and `[profile default]` name the same profile; botocore's
+        # loop assigns whole sections, so the later one replaces the earlier
+        # rather than merging into it (measured both ways round).
+        config.write_text(text)
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""

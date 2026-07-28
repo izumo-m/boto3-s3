@@ -64,7 +64,9 @@ Credentials or a region could not be resolved, or a requested feature needs a
 dependency that is not installed — asking for the CRT transfer engine without
 the `crt` extra is the common case — or one that is installed but too old to
 carry it ([`compatibility.md`](../compatibility.md) lists what each feature
-needs).
+needs). An unusable `cli_timestamp_format` in the profile lands here too, and
+it lands early: ahead of the command itself, a `help` page included
+([`configuration.md`](./configuration.md)).
 
 Unresolved credentials and an unresolved region are reported with the same
 envelope and hint as `aws` — `An error occurred (NoCredentials): Unable to

@@ -133,8 +133,15 @@ _TOO_FEW_ARGUMENTS = (
 # the session caching `full_config`) and resets the flag, `_dispatch` re-decides
 # it at the two points where aws's session learns the profile. `_main` is the
 # only route into `_dispatch`, so the snapshot is never consulted stale.
-_config_scan = configfiles.ConfigScan(None, frozenset())
+_config_scan = configfiles.ConfigScan(None, {})
 _enhanced_envelope = True
+
+# aws's report for a `cli_timestamp_format` its timestamp-format customization
+# does not accept, verbatim (its ConfigurationError; the code the envelope
+# names is its ConfigurationErrorHandler's).
+_UNKNOWN_TIMESTAMP_FORMAT = (
+    'Unknown cli_timestamp_format value: {}, valid values are "wire" or "iso8601"'
+)
 
 
 def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
@@ -155,9 +162,10 @@ def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot reach
     them, and they carry no such cause - so they stay bare.
 
-    aws has two further rc-253 handlers, `Configuration` and `Pager`, neither
-    of which any failure here raises; design/cli.md section 6 records what
-    reaches them on aws.
+    aws's other reachable rc-253 handler, `Configuration`, claims no exception
+    here: its one failure on this surface (an unknown `cli_timestamp_format`)
+    is a pre-dispatch gate that names its code directly. `Pager` belongs to
+    the output pager, which this CLI does not implement.
     """
     # Imported here, on a path where credential / region resolution has already
     # loaded the SDK, so the informational exits stay SDK-free (design/imports.md).
@@ -171,17 +179,19 @@ def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     return None
 
 
-def _write_error(message: object, *, rc: int | None = None) -> None:
+def _write_error(message: object, *, rc: int | None = None, code: str | None = None) -> None:
     """Write one CLI error, adding the enhanced envelope required by `rc`.
 
     aws renders every enveloped report through one formatter, so the code it
     names comes from whichever handler claimed the exception: `ParamValidation`
     for the whole rc-252 family, and - for the two rc-253 failures aws reaches
     through a botocore exception on the surface implemented here - one of the
-    codes `_unresolved_config_report` supplies. The rcs below envelope nothing:
-    an rc-254 `ClientError` already carries `An error occurred (<Code>) when
-    calling ...` in its own text, and aws's general rc-255 handler formats
-    nothing.
+    codes `_unresolved_config_report` supplies. A caller that already knows
+    which handler aws would use passes `code` itself, for a failure this CLI
+    settles without an exception (the `cli_timestamp_format` gate). The rcs
+    below envelope nothing: an rc-254 `ClientError` already carries `An error
+    occurred (<Code>) when calling ...` in its own text, and aws's general
+    rc-255 handler formats nothing.
 
     The message is stripped first, like aws's error formatter: the multi-line
     reports assembled below end with the newline their usage block carries, and
@@ -189,21 +199,23 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
     embedded `[ERROR]` line (the missing-subcommand report) therefore renders as
     two prefixed lines, enveloped or not, exactly as aws's does.
     """
-    code: str | None = None
     detail = str(message)
-    if rc == _PARAM_VALIDATION_ERROR_RC:
-        code = "ParamValidation"
-    elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
-        report = _unresolved_config_report(message)
-        if report is not None:
-            code, detail = report
+    if code is None:
+        if rc == _PARAM_VALIDATION_ERROR_RC:
+            code = "ParamValidation"
+        elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
+            report = _unresolved_config_report(message)
+            if report is not None:
+                code, detail = report
     detail = detail.strip()
     # The degradation is the renderer's, so it costs any code its envelope
     # while leaving the message the handler built - aws's fallback writes the
     # extracted `Message`, hints included. Only the rc-252 family can be
     # observed degraded: an undeclared profile makes botocore raise
     # `ProfileNotFound` (rc 255) before credentials or a region are ever
-    # resolved, so no rc-253 report co-occurs with it (measured).
+    # resolved, so no rc-253 report co-occurs with it (measured) - the
+    # `Configuration` gate reads the same undeclared profile and stands down
+    # for the same reason.
     if code is not None and _enhanced_envelope:
         detail = f"An error occurred ({code}): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
@@ -905,6 +917,23 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # --profile "" leaves the env chain in force, like `resolve_profile`.
     if head.profile:
         _enhanced_envelope = _config_scan.declares(head.profile)
+    # aws emits `session-initialized` right after binding --profile, and the
+    # first handler on it validates `cli_timestamp_format` against the now-bound
+    # profile's scoped config. So an unknown value settles the run here: after
+    # the three resolutions above (a bad --endpoint-url / --query is still their
+    # 252, a bad --cli-read-timeout still its 255) and ahead of everything the
+    # command layers decide - the help token, an invalid subcommand, unknown
+    # options, missing arguments (all measured). `--version` and the
+    # preliminary scan escape it by exiting further up. The on-partial silencer
+    # does not cover it: aws silences the 252 family alone.
+    invalid_format = _config_scan.invalid_timestamp_format(clientfactory.resolve_profile(head))
+    if invalid_format is not None:
+        _write_error(
+            _UNKNOWN_TIMESTAMP_FORMAT.format(invalid_format),
+            rc=_CONFIGURATION_ERROR_RC,
+            code="Configuration",
+        )
+        return _CONFIGURATION_ERROR_RC
     if tokens == ["help"]:
         _build_stage1_parser().print_help()
         return 0
