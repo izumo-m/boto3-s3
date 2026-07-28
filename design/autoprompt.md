@@ -26,9 +26,10 @@ Therefore:
   non-contractual).
 - The degradation (refusal) when `prompt_toolkit` is absent "does not count as a
   mismatch," just like awscrt.
-- Console output (the appearance of the prompt and the completion menu) is also
-  non-contractual
-  ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 6).
+- Console output (the appearance of the prompt and the completion menu) is
+  outside the **output parity charter** too, under that charter's own
+  interactive-UI exception ([`overview.md`](./overview.md) section 3;
+  [`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 6).
 
 Because auto-prompt is an interactive UI, **it is entirely outside the scope of
 the charter**: in addition to rc and console output, **the set of completion

@@ -72,9 +72,9 @@ group (`aws s3`).
 - **parity** - under identical settings, each boto3-s3 operation produces the
   same functional result (final state of S3 objects, return values, error
   conditions) as the corresponding `aws s3` subcommand. Parity does not extend
-  to internal processing order, the exact console output text, or features that
-  cannot be embedded in a library. (Exit codes are held to a stricter charter
-  at the CLI layer; see [`overview.md`](./overview.md).)
+  to internal processing order, or to features that cannot be embedded in a
+  library. (The CLI layer is held to two stricter charters, one on exit codes
+  and one on console output; see [`overview.md`](./overview.md).)
 - **key** - the full, `/`-separated identifier of a listing entry (an S3 object
   key / prefix / bucket name, or a local path with the host `os.sep` translated
   to `/`). It is `/`-form on **every OS**, never the host separator, so the two

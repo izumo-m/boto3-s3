@@ -157,7 +157,10 @@ solidified design is added here.
   failures reproduce aws's byte for byte under one mapping:
   `aws [options] s3` -> `boto3-s3 [options]`, with aws's
   `<command> <subcommand>` hierarchy collapsed onto our single level (this
-  command *is* `aws s3`), which also drops the third line of its help blurb.
+  command *is* `aws s3`), which also drops the **first** line of its help
+  blurb - `aws help`, the level above us; its `aws <command> help` is our
+  `boto3-s3 help` and its `aws <command> <subcommand> help` our
+  `boto3-s3 <subcommand> help`.
   The subcommand-decision, globals-parse and subcommand parse failures all
   close with that one block (`_TOP_LEVEL_USAGE`); only the preliminary
   `--profile` / `--debug` scan carries argparse's generated one-liner
@@ -486,8 +489,8 @@ listing the same way), which yields entries of `FileKind.BUCKET` (`mtime` =
 CreationDate). `scan` itself is object listing only, so a transfer never sees a
 bucket entry.
 
-Output (follows `aws s3 ls`, though a byte-for-byte match of the console output
-is not guaranteed):
+Output (`aws s3 ls`'s own, byte for byte under the parity criterion of
+[`testing.md`](./testing.md) section 9):
 
 - Objects: `YYYY-MM-DD HH:MM:SS` (local tz) + size (right-aligned 10) + name
   (non-recursive = basename / recursive = full key).
@@ -827,8 +830,9 @@ suppresses only success/progress (dryrun appears. A run involving a stream force
 this), `--no-progress` = suppresses only progress. Only the **NOTICE**
 (case-conflict's skip / warn messages) is outside the matrix: it goes to stderr
 even under `--quiet` and is not counted (transfer.md section 8). aws's `~total
-(calculating...)` display (the listing-incomplete marker) is not reproduced (the
-console output is non-contractual, option-handling section 6).
+(calculating...)` display (the listing-incomplete marker) is not reproduced -
+the library has no enumeration-finished signal to drive it - which is one of
+the recorded progress-display deviations (option-handling section 6).
 
 rc forms: **0 / 1 / 2 / 252 / 253 / 255**. 254 cannot occur (the transfer family
 folds every error after the start into 1). 255 is for the integer options + **a
@@ -1050,8 +1054,8 @@ credential-less run reports rc 1 with botocore's own text - a per-item
 (cp / mv / a keyed rm), a whole-run `fatal error: Unable to locate
 credentials` when it lands on the listing a recursive run opens with (sync,
 `rm --recursive`); all four measured on both tools.
-The program-name prefix remains outside the parity target, and alternate
-`--cli-error-format` renderings are not implemented
+The program-name prefix is rewritten on aws's side before the comparison
+(class 1), and alternate `--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
 
 Of aws's **two other rc-253 handlers**, only one is reachable here.

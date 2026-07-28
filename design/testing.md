@@ -1,8 +1,9 @@
 # Testing
 
 This document describes how the test suite is organized, what runs by default,
-and how aws-cli parity is enforced. The exit-code charter this enforces lives
-in [`overview.md`](./overview.md) section 3.
+and how aws-cli parity is enforced. The exit-code and output-parity charters
+it enforces live in [`overview.md`](./overview.md) section 3; section 9 below
+is the operational definition every output comparison applies.
 
 ## 1. Tiers
 
@@ -150,10 +151,11 @@ is deterministic and parity-relevant) and never dropped. For **rm**
 (`normalize_rm_stdout`) the lines are **sorted** instead: aws-cli emits
 delete lines in parallel-completion order, which is nondeterministic run to
 run (observed on MinIO), so the line *set* is the contract; the end-state
-comparison (`remaining_keys`) pins down what sorting relaxes. Console output
-is not byte-guaranteed
-([`aws-cli-option-handling.md`](./aws-cli-option-handling.md)); stderr is
-only checked for stable tokens, never compared byte-for-byte.
+comparison (`remaining_keys`) pins down what sorting relaxes. Stderr is not
+part of a golden at all: the e2e tier probes it for stable tokens
+(`assert_stderr_tokens`), never byte-for-byte - the byte-level comparison
+section 9 defines is carried by the unit tier, whose expectations are the
+pinned aws's own measured bytes.
 
 Destructive commands cannot share one seeding between the two e2e sides:
 `test_rm_parity.py` seeds, runs aws, captures the end state, then resets and
@@ -565,3 +567,124 @@ prepends the pinned `aws.exe` to `PATH` when present, mirroring how
 Section 3's capture rule - a Windows run never touches the base (POSIX)
 goldens - applies to the e2e golden drift checks of cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
 never run the Windows and Linux e2e suites concurrently.
+
+## 9. The output-parity criterion
+
+The output-parity charter ([`overview.md`](./overview.md) section 3) requires
+the output to match aws's byte for byte "after a defined normalization"; this
+section is that definition.
+
+Two runs of the same command under the same arguments and conditions are
+**parity-equal** iff, after the normalization below has been applied to both
+sides, their stdout is byte-identical, their stderr is byte-identical, and
+their exit codes are equal.
+
+The normalization is exactly three classes, and each carries an operational
+test, so which class a difference falls into - or that it falls into none - is
+decided by procedure rather than by taste.
+
+### Class 1 - program-identity mapping
+
+A closed list of deterministic rewrites translating aws's identity into ours:
+the fixed mapping the CLI unit tests name in their docstrings before asserting
+the pinned aws's measured bytes. Four rules.
+
+- **The program token**: `aws` -> `boto3-s3`, in usage lines and in the error
+  prefix (`aws: [ERROR]:` -> `boto3-s3: [ERROR]:`).
+- **The command hierarchy**: aws's `s3` command level disappears, because this
+  command *is* `aws s3`. It surfaces in two forms, and both belong to this one
+  rule - the literal token (`aws [options] s3 <subcommand> ...` ->
+  `boto3-s3 [options] <subcommand> ...`, and `aws s3 <subcommand>` ->
+  `boto3-s3 <subcommand>` in prose and synopsis text), and the top-level usage
+  line's metavar chain (`usage: aws [options] <command> <subcommand>
+  [<subcommand> ...] [parameters]` -> `usage: boto3-s3 [options] <subcommand>
+  [parameters]`).
+- **The leading blank line** aws opens each `aws: [ERROR]:` report with is
+  stripped; ours opens with the report itself. It comes from aws's error
+  writer, so it is bound to that prefix and goes no further: the s3 command
+  layer's own stderr lines (`fatal error:`, `<op> failed:`,
+  `make_bucket failed:` ...) carry neither the blank line nor the prefix on
+  either tool, and are compared verbatim.
+- **The help blurb**: aws lists one help invocation per level (`aws help`,
+  `aws <command> help`, `aws <command> <subcommand> help`). We have one level
+  fewer, so the *first* line - the level above `aws s3` - has no counterpart
+  and goes; aws's middle line is our `boto3-s3 help` and its third is our
+  `boto3-s3 <subcommand> help`, both under the hierarchy rule above
+  ([`cli.md`](./cli.md) section 2).
+
+The list is **closed**. A comparison never invents a rule to absorb a
+difference it has just found; a new rule takes an explicit design decision and
+is written here.
+
+### Class 2 - implementation internals
+
+Operational test: **would these bytes differ if aws's own code ran from a
+different installation** - the same version installed from PyPI instead of the
+official bundle? Then they describe the implementation that ran, not the
+outcome it reports, and they are excluded. Members: traceback bodies, memory
+addresses inside object reprs, installation paths, interpreter version strings.
+
+The deterministic frame around such content stays comparable: the literal
+marker prefixes (`Exception ignored in: `,
+`Traceback (most recent call last):`), and the presence and the position of
+the block. Mechanically, the excluded body is replaced on both sides with a
+fixed placeholder (the `<PLACEHOLDER>` convention section 3's normalizers
+already use) before comparing, so a block that only one side emits - or one
+that sits somewhere else in the report - is still a divergence.
+
+### Class 3 - run nondeterminism
+
+Operational test: **run the same aws command twice under identical conditions
+and diff the two outputs.** Bytes that differ between aws's own runs can carry
+no byte-parity requirement, because there is no single aws output to match.
+Timing-dependent content qualifies (progress statements, their speed and
+elapsed figures), and so do execution-order effects - chiefly the interleaving
+of the per-item records concurrent work emits: rm's delete lines
+([`cli.md`](./cli.md) section 5.2) and sync's delete lines against its transfer
+lines ([`cli.md`](./cli.md) section 5.9, [`sync.md`](./sync.md) section 5) are
+both stated non-contractual for exactly this reason. Note how narrow the test
+is: an order aws produces deterministically carries the full requirement, which
+is why ls's listing order is compared unsorted (section 3).
+
+The devices are not class 2's placeholder, because what varies here is whole
+records rather than a span inside one. Progress statements are **dropped**
+(`normalize_cp_stdout`), and their presence is then asserted separately
+(`had_progress_lines`) - presence is what `--no-progress` / `--quiet` change,
+so it stays under test. Ordering is absorbed by comparing the lines **sorted**,
+which leaves the record set and the line count fully compared. Either way the
+relaxation is narrow: the same records must still appear on both sides, and the
+exit codes must still be equal.
+
+### Everything else is comparable surface
+
+Message wording, punctuation, line counts, record formats, and which stream a
+line goes to are all comparable: a difference that survives the normalization
+is a **parity divergence**. The default resolution is to align with aws-cli.
+Taking the divergence deliberately is allowed, but then it is recorded - in
+[`aws-differences.md`](../docs/cli/aws-differences.md) when a user can observe
+it, otherwise as a residual in the design document that owns the behavior.
+
+### Where the criterion applies
+
+Every comparison against aws runs this definition, each tier reaching as far as
+its mechanism allows:
+
+- the **e2e differential** (both CLIs against one endpoint in one run) compares
+  normalized stdout and the exit code. Stderr it probes for stable tokens
+  instead (section 3) - a limit of running against a live endpoint, not a
+  relaxation of the criterion;
+- the **golden** capture and drift checks compare that same normalized stdout
+  against the recorded aws run;
+- the **unit tier** is where stderr is compared as bytes, its expectations
+  being what the pinned `aws` was measured writing - which is also where the
+  ad-hoc A/B measurements that settle a behavior question during development
+  end up.
+
+The differential applies the same normalizers the goldens do (section 3's
+endpoint policy: timestamps, bucket name, endpoint, credential scope), so a
+parity-relevant value inside a masked span is not compared *there*. Each such
+value is compensated at another tier rather than dropped: presign's
+credential-scope region by the same-run equality check on the raw value
+(section 3, step 2), ls's timestamps by unit-tier expectations on the rendered
+line. Masking a field with neither compensation is what would turn the
+normalization into a hole.

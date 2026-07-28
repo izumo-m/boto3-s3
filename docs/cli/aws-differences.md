@@ -16,26 +16,36 @@ Under the same arguments and configuration you get **the same resulting S3
 state, the same returned values, the same error conditions, and the same exit
 code**. A mismatch in any of those is a bug worth reporting.
 
-**Do not parse the console output.** Error and warning wording, progress lines,
-`--debug` traces and help pages differ from `aws` and change between
-releases (the error prefix is `boto3-s3:`, not `aws:`). One exception is worth
-knowing: parameter-validation errors do use aws's envelope,
-`An error occurred (ParamValidation): <message>`, and so do the two exit-code
-253 reports this command can produce — unresolved credentials and an unresolved
-region (see [`exit-codes.md`](./exit-codes.md)). Those two also keep aws's hint
-verbatim, which is why the credentials error tells you to run `aws login`: this
-command has no login subcommand of its own, and both tools read the same
-credentials and config files, so configuring credentials with `aws` — or by any
-other means — is what fixes the run either way. The unresolved-region report
-points at `aws configure` for the same reason. `aws` drops the envelope when the
-profile you named does not exist in any config file, keeping the exit code, and
-so does this command. The one place they part: on `aws`, setting
+**Do not parse the console output.** Not because the wording differs: result
+lines, error text and warnings are aws's own, with this command's name
+substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
+lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
+is exactly what makes parsing fragile: the wording is aws's to change, and it
+does change from one `aws` release to the next. Five of section 2's entries
+cover the text that differs on purpose — the progress display, help pages and
+`--debug` traces, the one-line invalid-bucket-name report, the `--version`
+line, and two argument-parsing corners. The interactive prompt
+(`--cli-auto-prompt`) is outside parity altogether, its output included. And
+the ordering of concurrent output is not reproducible on either tool (below).
+
+Because the text is aws's, so are its envelopes: parameter-validation errors
+use `An error occurred (ParamValidation): <message>`, and so do the two
+exit-code 253 reports this command can produce — unresolved credentials and an
+unresolved region (see [`exit-codes.md`](./exit-codes.md)). Those two also keep
+aws's hint verbatim, which is why the credentials error tells you to run
+`aws login`: this command has no login subcommand of its own, and both tools
+read the same credentials and config files, so configuring credentials with
+`aws` — or by any other means — is what fixes the run either way. The
+unresolved-region report points at `aws configure` for the same reason.
+`aws` drops the envelope when the profile you named does not exist in any
+config file, keeping the exit code, and so does this command. The one place
+they part: on `aws`, setting
 `--cli-error-format` or `AWS_CLI_ERROR_FORMAT` to `enhanced` puts the envelope
 back in that situation, while here those two are accepted and ignored, so the
 envelope stays dropped.
 
-Ordering is not reproducible either: with concurrent transfers, result lines —
-and `delete:` lines against transfer lines — interleave freely, on either tool.
+**Ordering**, as promised above: with concurrent transfers, result lines — and
+`delete:` lines against transfer lines — interleave freely, on either tool.
 
 ## 2. Behavior differences
 
@@ -57,9 +67,32 @@ are visible, or make no difference to the result.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
-- **Progress repaint rate.** `aws` repaints on every transferred chunk; here
+- **Progress display.** `aws` repaints on every transferred chunk; here
   repaints are floored at 0.1 s, or `--progress-frequency` when that is larger.
-  The numbers painted are exact either way — only the cadence differs.
+  The numbers painted are exact either way — only the cadence differs. `aws`
+  also paints a `~total (calculating...)` marker while it is still enumerating
+  what to transfer; here the total is painted plain.
+- **Help pages and `--debug` traces.** Help pages are laid out by this
+  command's own parser, not by aws's documentation renderer; the options, their
+  values and their meanings are the same, the typography is not. `--debug`
+  traces come from the installed boto3/botocore rather than aws's bundled copy,
+  and credentials appearing in them are masked here — `aws` prints them in
+  full.
+- **Invalid bucket names report one line.** For a name S3 cannot accept, `aws`
+  prints botocore's full report, ending in the regex the name must match; here
+  the report stops after `Invalid bucket name "<name>"`. The exit code is the
+  same (`mb` / `rb` 1, `website` 252).
+- **The `--version` line.** `aws` names itself and its interpreter; this
+  command names the four packages that decide its behavior —
+  `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
+  <System>/<release>` — and has no `exe/<machine>` install-source token to
+  report. Anything keying on the `aws-cli/<version>` token will not match.
+- **Two argument-parsing corners.** When an abbreviated option is ambiguous,
+  the candidates are listed in a different order than `aws` lists them; and on
+  Python 3.10 and 3.11 only, a value that itself ambiguously abbreviates one of
+  the command's options (`--exclude --ss`) is rejected here where `aws` takes
+  it as the value. Both affect the error text, not which options exist;
+  [`../../design/cli.md`](../../design/cli.md) section 2 records why.
 - **Interactive prompt.** `--cli-auto-prompt` needs the `autoprompt` extra, and
   its completions are not the same as aws's: values of every option that has a
   fixed choice list are completed (`aws` omits some), bucket and key names are

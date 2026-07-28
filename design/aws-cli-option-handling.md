@@ -271,23 +271,24 @@ For completeness, the options that **do** have an effect:
   <System>/<release>`) and exits; handled entirely in `boto3-s3-cli`, with no
   library involvement.
 
-## 6. Console output identity is not guaranteed
+## 6. Console output: the parity target and its recorded deviations
 
-`boto3-s3-cli` does not guarantee byte-for-byte identity with
-`aws s3` console output. Human-readable text - `--debug` traces, error
-and warning messages, progress lines, help pages - may differ in
-wording, ordering, or exact content between the two tools and between
-`boto3-s3-cli` releases. Parity is defined on S3 object state, return
-values, and error conditions, not on console formatting.
+Console output is held to the **output parity charter**
+([`overview.md`](./overview.md) section 3): under the same arguments and
+conditions the command writes what `aws s3` writes, byte for byte, after the
+normalization [`testing.md`](./testing.md) section 9 defines. A difference that
+survives that normalization is a divergence - a bug, or one of the deliberate
+deviations recorded below.
 
-The program name is explicitly outside the parity target. The root command
-tokens `aws` and `boto3-s3`, and output derived from them - for example usage
-lines and the `aws: [ERROR]:` / `boto3-s3: [ERROR]:` prefixes - are expected to
-differ. Comparisons may ignore or substitute the root command name while still
-checking the surrounding message on a best-effort basis.
+The program name and the command hierarchy are **class 1** of that
+normalization rather than an exemption from it. The root tokens `aws` /
+`boto3-s3` and everything derived from them - usage lines, the `aws: [ERROR]:`
+/ `boto3-s3: [ERROR]:` prefixes, aws's `<command> <subcommand>` level collapsed
+onto our single one - are rewritten on aws's side before the comparison, and
+the surrounding message is then compared in full, byte for byte.
 
-The default enhanced-style parameter-validation envelope is reproduced where
-practical: parser failures, unknown options, path/option validation failures,
+The default enhanced-style parameter-validation envelope is therefore
+reproduced: parser failures, unknown options, path/option validation failures,
 and auto-prompt flag conflicts use
 `An error occurred (ParamValidation): <message>`. This target is the default
 output of aws-cli; selecting another `--cli-error-format` does not alter
@@ -301,9 +302,17 @@ aws consults neither the session nor the config once `--cli-error-format` or
 `AWS_CLI_ERROR_FORMAT` sets the format, so an undeclared profile plus an
 explicit `enhanced` keeps the envelope on aws and loses it here.
 
-Two deliberate output-pipeline deviations sit under this umbrella
-(`progress.py`; the rendering thread itself mirrors aws-cli's
-`ResultProcessor`):
+### Recorded deviations
+
+These are the places `boto3-s3-cli` deliberately displays something other than
+what `aws` displays. **The list is exhaustive for the display layer**: nothing
+here licenses an unrecorded difference, and a new one is added by the same
+explicit decision a new normalization rule takes. All but the last are
+user-reachable and are therefore carried in
+[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well.
+
+The first three are the output pipeline's (`progress.py`; the rendering thread
+itself mirrors aws-cli's `ResultProcessor`):
 
 - **Bounded printer queue.** aws-cli feeds its printer thread through an
   unbounded queue: transfers are never slowed by console output, but a
@@ -317,3 +326,44 @@ Two deliberate output-pipeline deviations sit under this umbrella
   `--progress-frequency` when higher), so repaint records enter the queue at
   a chunk-independent rate. Display cadence only; the painted numbers are
   exact snapshots.
+- **No `~total (calculating...)` marker.** aws paints that marker on the
+  progress line while its enumeration is still running. The library has no
+  enumeration-finished signal to drive it, so the total is painted plain
+  ([`cli.md`](./cli.md) section 5.7).
+
+The rest sit outside the pipeline:
+
+- **Help pages** are rendered from this CLI's own argparse parsers, while aws
+  renders its own documentation tree, so the two are laid out differently. The
+  options, their values and their meanings are the same - that is what the
+  page promises, not its typography.
+- **`--debug` traces** are the installed boto3 / botocore's, not aws's
+  bundled ones, and this project additionally masks credentials that aws
+  prints in full - a safety feature beyond aws-cli, not a parity item
+  ([`masking.md`](./masking.md)).
+- **The `--version` line** names the four packages that decide this command's
+  behavior (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v>`) where aws
+  names one, and it carries no `exe/<machine>` install-source token. This is
+  the program identifying itself, but the shape of the line differs beyond a
+  token rewrite, so it is recorded here rather than folded into the
+  program-identity mapping.
+- **The invalid-bucket-name report is truncated** to botocore's leading
+  `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
+  after it (`usage.py`; the tail is botocore-version-fragile). The exit code
+  is unaffected - mb / rb 1, website 252.
+- **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
+  and renders `None`; `human_readable_size` keeps counting in EiB instead
+  (`output.py`). Unreachable in practice - a total below 1 EiB never gets
+  there - which is why this one is not in the user-facing list.
+
+Two further differences reach stderr from the **parser** rather than the
+display layer: the candidate order of an ambiguous-abbreviation report, and an
+ambiguous abbreviation used as an option value on Python 3.10 / 3.11. Both are
+recorded with their rationale in [`cli.md`](./cli.md) section 2.
+
+The interactive auto-prompt is on no list at all, because it is outside the
+charter: the output parity charter carries its own interactive-UI exception,
+matching the exit code charter's second, and it covers the prompt's console
+output and its completion set alike
+([`overview.md`](./overview.md) section 3, section 3 of this document,
+[`autoprompt.md`](./autoprompt.md) section 1).

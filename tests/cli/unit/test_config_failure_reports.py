@@ -13,7 +13,7 @@ Three aws behaviors that only show up once the config files are involved:
 Every expectation here was measured against the pinned aws-cli under the
 `aws [options] s3 <subcommand>` -> `boto3-s3 [options] <subcommand>` mapping
 (the leading blank line aws prints before each report, and the program name,
-are the known residuals - `aws-cli-option-handling.md` section 6).
+are class-1 rules of the parity normalization - design/testing.md section 9).
 """
 
 from __future__ import annotations

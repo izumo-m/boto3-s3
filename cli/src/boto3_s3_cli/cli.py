@@ -104,8 +104,11 @@ _NEGATIVE_NUMBER_RE = re.compile(r"-\.?\d")
 
 # aws-cli's top-level usage block (its argparser.py USAGE + HELP_BLURB),
 # collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws calls
-# the subcommand is our only level - aws's `<command> <subcommand>` pair and
-# its third help line have no counterpart here. Every parse error renders it,
+# the subcommand is our only level - aws's `<command> <subcommand>` metavar
+# pair collapses to `<subcommand>`, and its *first* help line (`aws help`, the
+# level above us) has no counterpart here, while `aws <command> help` is our
+# `boto3-s3 help` and `aws <command> <subcommand> help` our
+# `boto3-s3 <subcommand> help`. Every parse error renders it,
 # a subcommand's own parse included, exactly as aws hands one shared USAGE
 # constant to its main, service and leaf parsers alike.
 _TOP_LEVEL_USAGE = (

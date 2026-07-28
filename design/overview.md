@@ -102,6 +102,22 @@ maintaining high functional compatibility (parity).
   Where the stack is not usable only the relevant features fail, and that is not
   a mismatch. What "usable" requires is in
   [`compatibility.md`](../docs/compatibility.md).
+- **output parity (charter)**: what `boto3-s3 <subcommand>` writes to stdout and
+  stderr **must match** what `aws s3 <subcommand>` writes under the same
+  arguments and the same conditions, byte for byte, after a defined
+  normalization. That normalization tolerates only what follows from the two
+  being different implementations of one command - program identity (the
+  command's name and its command hierarchy), leakage of implementation
+  internals (tracebacks, addresses, install paths), and run-to-run
+  nondeterminism (execution and interleaving order included) - so a difference
+  of those kinds is not a parity divergence. Everything the normalization does
+  not cover is comparable surface, where a difference **is** a divergence: a
+  bug, or a deliberate deviation that has been written down. The three classes,
+  each with the test that decides membership, are defined in
+  [`testing.md`](./testing.md) section 9. This charter has one exception,
+  matching the exit code charter's second: an **interactive UI**
+  (`--cli-auto-prompt`) is outside it, its console output and its completion
+  candidates alike.
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
@@ -181,7 +197,8 @@ Neither design nor promises to users - how to work on the project. Read with
 [`CONTRIBUTING.md`](../CONTRIBUTING.md), which is the entry point.
 
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
-  contracts, e2e gate, enforcement of the exit code charter).
+  contracts, e2e gate, enforcement of the exit code charter) and the
+  operational definition of the output parity criterion.
 - [`benchmark.md`](./benchmark.md) - the local performance benchmarks
   (E2E differential against the pinned aws-cli, in-process stubbed-S3
   timings, startup-adjusted comparison, regression flags).

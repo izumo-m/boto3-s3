@@ -20,8 +20,8 @@ lines:
   neither does this printer - piped output carries the same ``\\r`` segments
   (the golden normalization strips them). aws's ``~total (calculating...)``
   markers for a still-running enumeration are not reproduced (the library
-  has no enumeration-finished signal); console identity is non-contractual
-  (design/aws-cli-option-handling.md section 6).
+  has no enumeration-finished signal) - one of the recorded progress-display
+  deviations (design/aws-cli-option-handling.md section 6).
 
 Rendering is decoupled from the transfer workers, aws-cli's results-pipeline
 shape (its ``ResultProcessor`` thread): the worker-side callbacks only update

@@ -1,8 +1,11 @@
 """``aws s3`` output formatting (``ls`` listing, ``rm`` delete, ``mb`` / ``rb`` bucket lines).
 
-Console output identity is not contractual (``design/aws-cli-option-handling.md``
-section 6), but the layout is kept close to aws-cli so tooling that parses its output
-keeps working.
+These lines are held to the output parity charter: they are aws-cli's own bytes
+under the program-identity mapping (``design/aws-cli-option-handling.md``
+section 6, ``design/testing.md`` section 9), so any layout change here is a
+parity divergence rather than a free choice. The single recorded deviation is
+``human_readable_size``'s past-EiB range (its docstring), which no real total
+reaches.
 """
 
 from __future__ import annotations

@@ -634,11 +634,17 @@ def assert_stderr_tokens(
 ) -> None:
     """Assert each token appears in *stderr* (substring check, never equality).
 
-    aws-cli and boto3-s3 wrap error text differently, so stderr is only ever
-    probed for stable tokens (error codes, option names). ``require_empty``
-    additionally asserts *stderr* is exactly empty - the one thing a token
-    list cannot express (a ``--quiet`` contract: an empty token tuple asserts
-    nothing at all, so a reappearing error line would pass silently).
+    A limitation of this tier, not a relaxation of parity: a live run's stderr
+    carries environment-dependent content (endpoint hosts, request ids,
+    timings), so e2e probes stable tokens (error codes, option names) rather
+    than comparing bytes. The byte-level criterion (design/testing.md section
+    9) is carried by the unit tier, whose expectations are the pinned aws's own
+    measured bytes.
+
+    ``require_empty`` additionally asserts *stderr* is exactly empty - the one
+    thing a token list cannot express (a ``--quiet`` contract: an empty token
+    tuple asserts nothing at all, so a reappearing error line would pass
+    silently).
     """
     if require_empty and stderr != "":
         pytest.fail(f"[{scenario}] {side} stderr must be empty but was:\n{stderr}")

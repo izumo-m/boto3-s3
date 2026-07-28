@@ -347,8 +347,8 @@ class TestValidateSamePathsClientOrder:
     s3control, the only region-less failure this surface reaches.
 
     Measured against the pinned aws-cli with an isolated HOME: identical bytes
-    but for the program name and the leading blank line aws prints, both known
-    residuals (aws-cli-option-handling.md section 6).
+    but for the program name and the leading blank line aws prints, both
+    class-1 rules of the parity normalization (design/testing.md section 9).
     """
 
     _ALIASES: ClassVar[list[str]] = [

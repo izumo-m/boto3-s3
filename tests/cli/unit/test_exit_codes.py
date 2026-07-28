@@ -413,10 +413,10 @@ class TestUnresolvedConfigReports:
     point aliases with `--validate-same-s3-paths` and no region, which is what
     reaches an s3control client - the s3 client itself falls back to the global
     endpoint and never raises `NoRegionError`). The leading blank line aws
-    prints before each report, and the program name, are the known residuals
-    (aws-cli-option-handling.md section 6). The hint keeps naming the `aws`
-    tool because those are the bytes aws writes and both tools read the same
-    config files (docs/cli/aws-differences.md).
+    prints before each report, and the program name, are class-1 rules of the
+    parity normalization (design/testing.md section 9). The hint keeps naming
+    the `aws` tool because those are the bytes aws writes and both tools read
+    the same config files (docs/cli/aws-differences.md).
 
     aws has two further rc-253 handlers (`Configuration`, `Pager`) that no
     failure here can raise; design/cli.md section 6 records them.
