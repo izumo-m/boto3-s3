@@ -703,6 +703,15 @@ class S3:
     every other exception always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.wait_on_interrupt``.
+
+    ``crt_allow_absent_credentials`` is the second such posture declaration,
+    for the CRT transfer engine. ``False`` (the default) is boto3's rule: a
+    client that resolved no credentials never gets the CRT engine, so the
+    transfer runs classic and reports botocore's "Unable to locate
+    credentials". ``True`` is aws-cli's: the CRT client is built around a
+    credentials delegate that has nothing to resolve, and the failure surfaces
+    from inside it instead. Only the CLI distribution, which owes ``aws s3``
+    output parity, sets it (design/crt.md section 4).
     """
 
     def __init__(
@@ -713,12 +722,14 @@ class S3:
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
         wait_on_interrupt: bool = True,
+        crt_allow_absent_credentials: bool = False,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
         self._wait_on_interrupt = wait_on_interrupt
+        self._crt_allow_absent_credentials = crt_allow_absent_credentials
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -1120,6 +1131,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
@@ -1337,6 +1349,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             session=self._session,
         )
         with transferrer:
@@ -1683,6 +1696,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             session=self._session,
         )
         deletes = _SyncDeletes(

@@ -60,6 +60,15 @@ class TestBuildClient:
         # so the Transferrer's meta-equality gate recognizes the CLI client.
         assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
 
+    def test_build_s3_takes_aws_clis_posture_on_absent_credentials(self) -> None:
+        # aws-cli hands its CRT client a credentials delegate built from
+        # whatever the session resolved - None included - so a credential-less
+        # CRT upload fails inside the delegate rather than dropping to classic.
+        # The library keeps boto3's opposite default; the CLI opts in
+        # (design/crt.md section 4).
+        s3 = clientfactory.build_s3(_parse([]))
+        assert s3._crt_allow_absent_credentials is True  # pyright: ignore[reportPrivateUsage]
+
     def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
         # Every CLI-built session registers the library's fast_parse_timestamp
         # on its response-parser factory before any client exists; listing

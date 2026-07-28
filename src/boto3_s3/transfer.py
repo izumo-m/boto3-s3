@@ -668,6 +668,7 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt_endpoint: str | None = None,
+        crt_allow_absent_credentials: bool = False,
         session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
@@ -752,6 +753,10 @@ class Transferrer:
         # the CRT engine so it pins a custom endpoint the host heuristic would
         # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
         self._crt_endpoint = crt_endpoint
+        # aws-cli's posture on a client that resolved no credentials: enter the
+        # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
+        # boto3's classic fallback, which every library caller keeps.
+        self._crt_allow_absent_credentials = crt_allow_absent_credentials
         # The caller's boto3 session (S3.session), threaded to the CRT engine
         # so its request serializer reuses the warm session instead of paying
         # a fresh one per process (crtsupport._botocore_session); None = the
@@ -1273,6 +1278,9 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
+        ``crt_allow_absent_credentials`` is the one caller-declared posture
+        departure from boto3's rules available here, and applies only when the
+        caller asks for it.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1310,6 +1318,7 @@ class Transferrer:
                 self._transfer_config,
                 endpoint=endpoint,
                 session=self._session,
+                allow_absent_credentials=self._crt_allow_absent_credentials,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig

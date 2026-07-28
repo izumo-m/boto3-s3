@@ -30,7 +30,11 @@ client (design/crt.md):
   same level as ``client._get_credentials()``, which boto3 itself uses.
 - **compatibility**: the singleton additionally pins the derived endpoint and
   the signed/unsigned mode; a later client that disagrees falls back to
-  classic, same as boto3's region/credentials mismatch.
+  classic, same as boto3's region/credentials mismatch. The credentials half
+  of that check has one opt-out, ``allow_absent_credentials``, for a caller
+  that wants aws-cli's posture rather than boto3's (see
+  `create_crt_transfer_manager`); ``boto3-s3-cli`` is the caller that sets it
+  and the default keeps every library caller boto3-faithful.
 
 Nothing here imports awscrt or ``s3transfer.crt`` at module import time; the
 classic path never pays for them (design/imports.md).
@@ -235,6 +239,7 @@ def create_crt_transfer_manager(
     *,
     endpoint: str | None = None,
     session: Session | None = None,
+    allow_absent_credentials: bool = False,
 ) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
 
@@ -242,6 +247,15 @@ def create_crt_transfer_manager(
     is held elsewhere, or the process singleton was created for a different
     region / credentials / endpoint / signing mode / TLS ``verify`` /
     ``Config.s3`` shape.
+
+    ``allow_absent_credentials`` opts out of one half of that identity check:
+    boto3 refuses the CRT engine to a client that resolved *no* credentials,
+    while aws-cli hands the CRT client a delegate wrapping the same ``None``
+    and lets the transfer fail inside it. Only the "both sides have no
+    credentials" case is admitted - every other identity mismatch, and every
+    other pin, still falls back to classic. Default ``False`` = boto3's rule;
+    ``boto3-s3-cli`` sets it because the CLI layer owes aws-cli parity
+    (design/crt.md section 4).
 
     ``endpoint`` is the caller's explicit endpoint (the CLI threads its
     ``--endpoint-url`` here, matching aws-cli, which passes it to the CRT
@@ -266,7 +280,9 @@ def create_crt_transfer_manager(
 
         config = TransferConfig()
     crt_s3_client = _get_crt_s3_client(client, config, endpoint, session)
-    if not _is_compatible_request(client, crt_s3_client, endpoint):
+    if not _is_compatible_request(
+        client, crt_s3_client, endpoint, allow_absent_credentials=allow_absent_credentials
+    ):
         return None
     assert crt_s3_client is not None
     from s3transfer.crt import CRTTransferManager
@@ -409,7 +425,11 @@ def _serializer_config_shape(client: S3Client) -> tuple[Any, Any, Any]:
 
 
 def _is_compatible_request(
-    client: S3Client, crt_s3_client: _CrtS3Client | None, endpoint: str | None
+    client: S3Client,
+    crt_s3_client: _CrtS3Client | None,
+    endpoint: str | None,
+    *,
+    allow_absent_credentials: bool = False,
 ) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
     TLS-``verify`` / Config-shape pins.
@@ -422,6 +442,12 @@ def _is_compatible_request(
     silently transfer under the first one's TLS and URL-shaping settings.
     Incompatible means classic for that run, never a wrong-config CRT
     transfer.
+
+    ``allow_absent_credentials`` is the caller's opt-in described on
+    `create_crt_transfer_manager`. It relaxes exactly one branch - a client
+    with no credentials against a singleton that also has none - and never
+    the region / endpoint / verify / Config pins, which protect a *second*
+    client from riding the first one's baked-in wiring.
     """
     if crt_s3_client is None:
         return False
@@ -439,8 +465,33 @@ def _is_compatible_request(
         return False
     boto3_creds = _client_credentials(client)
     if boto3_creds is None:
-        return False
+        # boto3's rule: no credentials means no CRT, so the run drops to
+        # classic and fails with botocore's own "Unable to locate credentials".
+        # Under the opt-in the two sides are instead compared as identities -
+        # "no credentials" matches a singleton that resolves none either, and
+        # the transfer proceeds into the CRT delegate exactly like aws-cli's.
+        return allow_absent_credentials and _resolves_no_credentials(crt_s3_client.cred_wrapper)
     return _compare_identity(boto3_creds.get_frozen_credentials(), crt_s3_client.cred_wrapper)
+
+
+def _resolves_no_credentials(cred_wrapper: Any) -> bool:
+    """Whether the singleton's credentials delegate has nothing to sign with.
+
+    ``BotocoreCRTCredentialsWrapper`` raises ``NoCredentialsError`` when it was
+    built from ``None``, which is the same probe `_compare_identity` already
+    performs - asked here for its own sake rather than to compare key material.
+    Only that exception answers "resolves none": any other credential-provider
+    failure (``CredentialRetrievalError`` and friends, from a wrapper built
+    around a real provider) propagates, as it does out of `_compare_identity`.
+    Unreachable from the CLI, whose process holds a single client.
+    """
+    from botocore.exceptions import NoCredentialsError
+
+    try:
+        cred_wrapper()
+    except NoCredentialsError:
+        return True
+    return False
 
 
 def _compare_identity(frozen_creds: Any, cred_wrapper: Any) -> bool:

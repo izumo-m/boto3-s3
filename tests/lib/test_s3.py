@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import os
 import threading
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from boto3_s3 import (
     CancelToken,
     FileKind,
     InvalidConfigError,
+    IOStorage,
     LocalStorage,
     NotFoundError,
     S3Storage,
@@ -396,18 +398,19 @@ class _StopTransferError(Exception):
 
 
 @pytest.fixture
-def _captured_transfer_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Capture the ``transfer_config`` a transfer would build its Transferrer with.
+def _captured_transferrer_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Capture the keyword arguments a transfer would build its Transferrer with.
 
-    Patches ``Transferrer.__init__`` to record the kwarg and raise, so the test
+    Patches ``Transferrer.__init__`` to record them and raise, so the test
     stops at construction - before the plan submits anything to S3.
     """
     import boto3_s3.s3 as s3mod
 
     captured: dict[str, Any] = {}
 
-    def spy(_self: Any, _kind: Any, _client: Any, *, transfer_config: Any = None, **_: Any) -> None:
-        captured["transfer_config"] = transfer_config
+    def spy(_self: Any, _kind: Any, _client: Any, **kwargs: Any) -> None:
+        captured.clear()
+        captured.update(kwargs)
         raise _StopTransferError
 
     monkeypatch.setattr(s3mod.Transferrer, "__init__", spy)
@@ -418,24 +421,58 @@ class TestTransferConfigDefault:
     """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins."""
 
     def test_instance_default_reaches_the_transferrer(
-        self, _captured_transfer_config: dict[str, Any], tmp_path: Any
+        self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
         marker = TransferConfig()
         with pytest.raises(_StopTransferError):
             S3(transfer_config=marker).cp(str(src), "s3://bucket/key")
-        assert _captured_transfer_config["transfer_config"] is marker
+        assert _captured_transferrer_kwargs["transfer_config"] is marker
 
     def test_per_call_overrides_instance_default(
-        self, _captured_transfer_config: dict[str, Any], tmp_path: Any
+        self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
         instance_tc, call_tc = TransferConfig(), TransferConfig()
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
-        assert _captured_transfer_config["transfer_config"] is call_tc
+        assert _captured_transferrer_kwargs["transfer_config"] is call_tc
+
+
+class TestCrtAbsentCredentialsPosture:
+    """``crt_allow_absent_credentials`` reaches every route that builds a Transferrer.
+
+    The flag is what makes ``boto3-s3-cli`` enter the CRT engine with no
+    credentials the way ``aws s3`` does (design/crt.md section 4); a route that
+    forgot to thread it would silently keep boto3's classic fallback there.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            # The streaming route builds its own Transferrer (s3.py `_cp_stream`).
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize("allow", [False, True], ids=["default", "opt-in"])
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        allow: bool,
+    ) -> None:
+        s3 = S3(crt_allow_absent_credentials=allow) if allow else S3()
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_allow_absent_credentials"] is allow
 
 
 class TestModuleLevelConvenienceSignatures:

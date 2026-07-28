@@ -87,7 +87,10 @@ also read as `'auto'`) with the same rules as boto3.
   client bakes in the first client's `verify` and the shared serializer its
   `Config`, so a differing later client must not silently ride those) also
   drops to classic (the same shape as boto3's region/credentials-mismatch
-  fallback). On an explicit `'crt'` it also ports
+  fallback). The credentials half of that check carries one caller opt-in,
+  `allow_absent_credentials` (section 4, "Entering the CRT engine without
+  credentials"); it is off by default, so every library caller keeps boto3's
+  rule. On an explicit `'crt'` it also ports
   boto3's `_validate_crt_transfer_config` (which rejects an explicit setting of a
   CRT-unsupported option).
 - **Deriving the connection parameters (a documented improvement over boto3)**:
@@ -252,6 +255,47 @@ paths_type=...)`. The test-injected `ctx.transfer_config` always takes precedenc
 **after** the usage (252) and source-absent (255) validations (an
 invalid `[s3]` value loses to either).
 
+### Entering the CRT engine without credentials
+
+aws-cli's factory builds the CRT credentials delegate from whatever the session
+resolved - `session.get_credentials()` returning `None` included - and hands it
+to the CRT client unexamined. The failure therefore happens at transfer time,
+inside the delegate: the `NoCredentialsError` its Python callback raises cannot
+cross the C stack, so the interpreter prints an `Exception ignored in:` block
+and the request comes back as `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`
+- one per-item `upload failed:` line, rc 1. boto3 instead refuses the CRT
+engine to a client that resolved no credentials, and the library, being
+boto3-faithful, falls back to classic and reports `Unable to locate
+credentials`.
+
+The split of section 1 decides where the difference is absorbed: **the library
+keeps boto3's rule and the CLI opts out of it**, through
+`S3(crt_allow_absent_credentials=True)` (`clientfactory.build_s3`), which
+threads to `create_crt_transfer_manager(allow_absent_credentials=...)`. Two
+properties make that opt-in narrow enough to live in the library:
+
+- it relaxes exactly one branch of the compatibility check - a client with no
+  credentials against a singleton whose delegate also resolves none. Every
+  other identity mismatch (credentials that appeared, or disappeared, between
+  two clients) and every other pin (region, endpoint, TLS `verify`,
+  `Config.s3` shape) still selects classic, so a second client can never ride
+  the first one's baked-in wiring;
+- it is off by default, so nothing changes for a library caller.
+
+The alternatives considered were both worse. Building the CRT manager on the
+CLI side - a port of aws-cli's `_create_crt_transfer_manager` - would duplicate
+the whole of `_initialize` (serializer, `verify`, part size, fio options) and
+contradict section 1, where the CLI resolves the engine and the library builds
+it. Carrying the flag on `TransferConfig` would reach the same code with no
+plumbing, but that class is transfer *tuning*, and a compatibility-posture
+boolean does not belong in it. `S3` already declares one such posture
+(`wait_on_interrupt`), so it is where the second one goes.
+
+Only uploads reach this surface - a local source or a stdin stream alike, both
+measured byte-for-byte. A download or a sync fails earlier, at the botocore
+listing / HeadObject call, with `fatal error: Unable to locate credentials` on
+both tools.
+
 ## 5. Charter treatment
 
 The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
@@ -269,7 +313,35 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
   These are the accepted deletion paths documented in deleter.md section 4;
   the CRT e2e lane pins the charter-observable rc, output, and end states for
-  single/recursive rm and both sync-delete directions.
+  single/recursive rm and both sync-delete directions. One consequence shows in
+  the credentials-absent corner of section 4: with CRT configured, aws's `rm`
+  fails inside the CRT credentials delegate (`delete failed: ...
+  AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, unraisable block included)
+  while ours fails on its `DeleteObject` (`delete failed: ... Unable to locate
+  credentials`). Same rc 1; the wording follows from the routing decision, not
+  from how credentials are handled. A user can observe it, so it is recorded
+  in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
+  (testing.md section 9's recording rule); the mechanism stays here.
+- **CRT configured x no resolvable region**: a measured divergence, **deferred
+  to a follow-up task** rather than accepted - rc 255 against our rc 1 is
+  precisely what the exit-code charter and
+  [`aws-differences.md`](../docs/cli/aws-differences.md) section 1 promise
+  equal, so this is an open bug, not a blessed deviation.
+  aws's factory hands `create_s3_crt_client` whatever its
+  region chain answered, unvalidated, so an unresolved region reaches
+  `awscrt.s3.S3Client`'s `assert isinstance(region, str)`; the bare
+  `AssertionError` reaches aws's general handler and prints an **empty** report
+  (`aws: [ERROR]:`) at rc 255. It fires for every command whose architecture
+  builds a transfer manager - `cp` / `mv` / `sync` **and** `rm` - and
+  independently of whether credentials exist. Ours derives the region from the
+  built client, where botocore has already resolved S3's `aws-global`
+  pseudo-region, so the CRT client is created and the run proceeds. Aligning it
+  would need `rm` to resolve the `[s3]` runtime config, which it does not do at
+  all today (an invalid `[s3] preferred_transfer_client` is rc 255 on aws's
+  `rm` and unnoticed on ours), plus aws's empty-message rendering
+  (`format_error_message` returns a bare `<prog>: [ERROR]:` with no trailing
+  space). Both are wider than the credentials work above, which is why they
+  are a follow-up rather than part of it.
 - **awscrt absent x explicit crt**: an area that cannot arise because aws bundles
   awscrt. Our awscrt is an opt-in extra (`boto3-s3-cli[crt]` ->
   `boto3-s3[crt]` -> `boto3[crt]`, transfer.md section 9).

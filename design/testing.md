@@ -393,6 +393,24 @@ parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
 `test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
 process lock monkeypatched.
 
+One CRT surface needs neither an endpoint nor the e2e opt-in:
+`tests/cli/functional/test_crt_no_credentials.py` pins the credential-less CRT
+upload (crt.md section 4), whose failure happens inside the CRT credentials
+delegate before any connection. It drives a real subprocess - the unraisable
+block is written by the interpreter from a CRT worker thread, and a CRT client
+in the pytest process would hold the cross-process lock for the rest of the
+session - against `--endpoint-url http://127.0.0.1:1`, so not even DNS is
+touched. Its expectations are the pinned aws's own measured bytes under
+section 9: the object repr's address and the traceback body collapse to
+placeholders (class 2) while the `Exception ignored in: ` marker, the block's
+position ahead of the result line, the result line, and the exit code are
+compared. The CRT case self-skips when this application's CRT slot
+(`PROCESS_LOCK_NAME`, host-wide) is already taken - by another process on the
+host, or by an in-process CRT client built earlier in the session - since the
+child would silently fall back to classic; the lock is probed in a throwaway
+subprocess so the probe does not hold it. The skip is scoped to that one case,
+so its classic control runs either way.
+
 ## 5. aws-cli test ports
 
 Ports keep aws-cli test names, canned responses, and expectations verbatim

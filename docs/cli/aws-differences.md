@@ -21,10 +21,11 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Five of section 2's entries
+does change from one `aws` release to the next. Six of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
-`--debug` traces, the one-line invalid-bucket-name report, the `--version`
-line, and two argument-parsing corners. The interactive prompt
+`--debug` traces, a `rm` that cannot reach its credentials under the CRT
+engine, the one-line invalid-bucket-name report, the `--version` line, and two
+argument-parsing corners. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -78,6 +79,16 @@ are visible, or make no difference to the result.
   traces come from the installed boto3/botocore rather than aws's bundled copy,
   and credentials appearing in them are masked here — `aws` prints them in
   full.
+- **Deletes never ride the CRT engine.** With
+  `preferred_transfer_client = crt`, `aws` routes each `rm` — and each S3-side
+  `sync --delete` — through its CRT client, while here they keep their
+  `DeleteObject` / batched `DeleteObjects` requests. Same objects deleted, same
+  exit code; the one place it shows in the output is a failure the CRT reports
+  differently, such as credentials that cannot be resolved: `aws` prints its
+  CRT delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` (preceded by
+  a Python `Exception ignored in:` block) where this command prints botocore's
+  `Unable to locate credentials`. Uploads and downloads use the CRT engine on
+  both tools.
 - **Invalid bucket names report one line.** For a name S3 cannot accept, `aws`
   prints botocore's full report, ending in the regex the name must match; here
   the report stops after `Invalid bucket name "<name>"`. The exit code is the

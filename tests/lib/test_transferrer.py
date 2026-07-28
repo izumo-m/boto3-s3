@@ -1626,7 +1626,12 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -1645,7 +1650,12 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1677,7 +1687,12 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1699,7 +1714,12 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
         ) -> Any:
             seen.append(session)
             return object()
@@ -1716,13 +1736,51 @@ class TestEngineSelection:
         transferrer._get_manager()
         assert seen == [caller_session]
 
+    @pytest.mark.parametrize("allow", [False, True], ids=["library-default", "cli-opt-in"])
+    def test_absent_credentials_posture_is_threaded_to_crtsupport(
+        self, monkeypatch: pytest.MonkeyPatch, allow: bool
+    ) -> None:
+        # The library default is boto3's (classic without credentials); only a
+        # caller that asks - boto3-s3-cli - gets aws-cli's CRT entry.
+        from boto3_s3 import crtsupport
+
+        seen: list[bool] = []
+
+        def fake_create(
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+        ) -> Any:
+            seen.append(allow_absent_credentials)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])
+        kwargs: dict[str, Any] = {"crt_allow_absent_credentials": True} if allow else {}
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            **kwargs,
+        )
+        transferrer._get_manager()
+        assert seen == [allow]
+
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
         from boto3_s3 import crtsupport
 
         def boom(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
@@ -1741,7 +1799,7 @@ class TestEngineSelection:
         monkeypatch.setattr(
             crtsupport,
             "create_crt_transfer_manager",
-            lambda c, cfg, *, endpoint=None, session=None: None,
+            lambda c, cfg, *, endpoint=None, session=None, allow_absent_credentials=False: None,
         )
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()

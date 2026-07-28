@@ -154,7 +154,18 @@ def build_s3(args: argparse.Namespace) -> S3:
     # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    return CliS3(session=session, endpoint_url=args.endpoint_url, wait_on_interrupt=False)
+    # crt_allow_absent_credentials=True: aws-cli hands its CRT client a
+    # credentials delegate built from whatever the session resolved, ``None``
+    # included, so a credential-less CRT upload fails inside the delegate
+    # rather than falling back to classic. The library defaults to boto3's
+    # opposite rule; the aws-faithful entry is this layer's (design/crt.md
+    # section 4).
+    return CliS3(
+        session=session,
+        endpoint_url=args.endpoint_url,
+        wait_on_interrupt=False,
+        crt_allow_absent_credentials=True,
+    )
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:

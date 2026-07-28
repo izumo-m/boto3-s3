@@ -29,6 +29,10 @@ from boto3_s3.transferconfig import TransferConfig  # noqa: E402
 
 AWS_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
 
+# ``creds=None`` means "this client resolved no credentials" (botocore's own
+# answer for an unconfigured environment), so the default needs its own marker.
+_DEFAULT_CREDS = object()
+
 
 def make_creds(access_key: str = "AK", secret: str = "SK", token: str | None = None) -> Any:
     frozen = SimpleNamespace(access_key=access_key, secret_key=secret, token=token)
@@ -43,7 +47,7 @@ class FakeClient:
         endpoint: str = AWS_ENDPOINT,
         verify: Any = True,
         unsigned: bool = False,
-        creds: Any = None,
+        creds: Any = _DEFAULT_CREDS,
         s3_config: Any = None,
     ) -> None:
         signature_version: Any = UNSIGNED if unsigned else "s3v4"
@@ -53,14 +57,20 @@ class FakeClient:
             config=SimpleNamespace(signature_version=signature_version, s3=s3_config),
         )
         self._endpoint = SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
-        self._creds = creds if creds is not None else make_creds()
+        self._creds = make_creds() if creds is _DEFAULT_CREDS else creds
 
     def _get_credentials(self) -> Any:
         return self._creds
 
 
 class FakeCredWrapper:
-    """Stands in for BotocoreCRTCredentialsWrapper: wraps botocore credentials."""
+    """Stands in for BotocoreCRTCredentialsWrapper: wraps botocore credentials.
+
+    Wrapping ``None`` is legal and only fails when the delegate is called -
+    the real wrapper raises ``NoCredentialsError`` from ``_get_credentials``,
+    which is what turns a credential-less CRT transfer into the C layer's
+    delegate failure instead of a construction-time error.
+    """
 
     def __init__(self, credentials: Any) -> None:
         self._credentials = credentials
@@ -69,6 +79,10 @@ class FakeCredWrapper:
         return "crt-provider"
 
     def __call__(self) -> Any:
+        if self._credentials is None:
+            from botocore.exceptions import NoCredentialsError
+
+            raise NoCredentialsError
         frozen = self._credentials.get_frozen_credentials()
         return SimpleNamespace(
             access_key_id=frozen.access_key,
@@ -340,6 +354,87 @@ class TestCreateCrtTransferManager:
         assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
         other = FakeClient(**mismatch)
         assert crtsupport.create_crt_transfer_manager(other, None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_absent_credentials_fall_back_to_classic_by_default(self, stubs: CrtStubs) -> None:
+        # boto3's own rule, and the library default: a client that resolved no
+        # credentials never gets the CRT engine, so the transfer runs classic
+        # and reports botocore's "Unable to locate credentials".
+        assert crtsupport.create_crt_transfer_manager(FakeClient(creds=None), None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_absent_credentials_may_be_admitted_by_the_caller(self, stubs: CrtStubs) -> None:
+        # aws-cli's posture (boto3-s3-cli opts in): the CRT client is built
+        # around a delegate that has nothing to resolve, and the failure comes
+        # back from inside it as the C layer's delegate error.
+        manager = crtsupport.create_crt_transfer_manager(
+            FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
+            None,
+            allow_absent_credentials=True,
+        )
+        assert manager is not None
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["crt_credentials_provider"] == "crt-provider"
+
+    @pytest.mark.parametrize(
+        "mismatch",
+        [
+            {"region": "eu-west-1", "creds": None},
+            {"endpoint": "http://127.0.0.1:9000", "creds": None},
+            {"verify": False, "creds": None},
+            {"s3_config": {"addressing_style": "path"}, "creds": None},
+            {"unsigned": True},
+            # The relaxation is "no credentials on both sides", not "skip the
+            # identity check": a later client that did resolve credentials must
+            # not ride a singleton delegate that resolves none.
+            {},
+        ],
+        ids=["region", "endpoint", "verify", "s3-config", "unsigned", "credentials-appeared"],
+    )
+    def test_admitting_absent_credentials_relaxes_no_other_pin(
+        self, stubs: CrtStubs, mismatch: dict[str, Any]
+    ) -> None:
+        first = crtsupport.create_crt_transfer_manager(
+            FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
+            None,
+            allow_absent_credentials=True,
+        )
+        assert first is not None
+        other = FakeClient(**mismatch)
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                other,  # pyright: ignore[reportArgumentType]
+                None,
+                allow_absent_credentials=True,
+            )
+            is None
+        )
+
+    def test_absent_credentials_do_not_ride_a_credentialed_singleton(self, stubs: CrtStubs) -> None:
+        # The mirror of the case above: the singleton signs with real keys, so
+        # a later credential-less client must not borrow them.
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
+                None,
+                allow_absent_credentials=True,
+            )
+            is None
+        )
+
+    def test_absent_credentials_do_not_ride_an_unsigned_singleton(self, stubs: CrtStubs) -> None:
+        # An unsigned singleton (--no-sign-request) has no delegate at all, so
+        # there is nothing for a signed client to fail inside: admitting it
+        # would transfer the run unsigned. The relaxed branch must therefore
+        # stay below the "singleton has no wrapper" guard.
+        assert crtsupport.create_crt_transfer_manager(FakeClient(unsigned=True), None) is not None  # pyright: ignore[reportArgumentType]
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
+                None,
+                allow_absent_credentials=True,
+            )
+            is None
+        )
 
     def test_unsigned_client_omits_the_credentials_provider(self, stubs: CrtStubs) -> None:
         client = FakeClient(unsigned=True)

@@ -14,7 +14,8 @@ S3().cp("local.txt", "s3://bucket/key")
 
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
-   transfer_config=None, wait_on_interrupt=True)
+   transfer_config=None, wait_on_interrupt=True,
+   crt_allow_absent_credentials=False)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -31,6 +32,11 @@ S3(session=None, *, endpoint_url=None, config=None,
   as fatal to the process and lets the unwind abandon an in-flight listing page.
   Either way the interrupt is re-raised, never swallowed, and only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
+- **`crt_allow_absent_credentials`** — whether the CRT transfer engine may be
+  used by a client that resolved no credentials. `False` (the default) drops
+  to the classic engine and reports `Unable to locate credentials`; `True`
+  attempts the transfer and lets it fail inside the CRT credentials delegate,
+  which is what `aws s3` does. Only reproducing aws's output needs it.
 
 ## 2. Which client a location uses
 
