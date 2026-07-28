@@ -137,8 +137,51 @@ _config_scan = configfiles.ConfigScan(None, frozenset())
 _enhanced_envelope = True
 
 
+def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
+    """aws's envelope code and message for an unresolvable credentials / region.
+
+    aws gives botocore's `NoCredentialsError` and `NoRegionError` handlers of
+    their own (errorhandler.py). Each one names a fixed code - a per-handler
+    constant, not the exception's class name - and appends its own hint to
+    botocore's text: a `. ` separator for the credentials one, whose text ends
+    without a period, a bare space for the region one, whose text ends with
+    one. The hints keep naming the `aws` tool because that is what aws writes
+    and both tools read the same config files, so the advice holds
+    (docs/cli/aws-differences.md; `aws login` has no counterpart here).
+
+    The pair is identified by the botocore exception the library keeps as
+    `__cause__` (`s3storage.s3_errors`, the client builders), never by matching
+    the message text. Returns `None` for every other rc-253 failure: those are
+    this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot reach
+    them, and they carry no such cause - so they stay bare.
+
+    aws has two further rc-253 handlers, `Configuration` and `Pager`, neither
+    of which any failure here raises; design/cli.md section 6 records what
+    reaches them on aws.
+    """
+    # Imported here, on a path where credential / region resolution has already
+    # loaded the SDK, so the informational exits stay SDK-free (design/imports.md).
+    from botocore.exceptions import NoCredentialsError, NoRegionError
+
+    cause = exc.__cause__ if isinstance(exc, Boto3S3Error) else exc
+    if isinstance(cause, NoCredentialsError):
+        return "NoCredentials", f'{cause}. You can configure credentials by running "aws login".'
+    if isinstance(cause, NoRegionError):
+        return "NoRegion", f'{cause} You can also configure your region by running "aws configure".'
+    return None
+
+
 def _write_error(message: object, *, rc: int | None = None) -> None:
     """Write one CLI error, adding the enhanced envelope required by `rc`.
+
+    aws renders every enveloped report through one formatter, so the code it
+    names comes from whichever handler claimed the exception: `ParamValidation`
+    for the whole rc-252 family, and - for the two rc-253 failures aws reaches
+    through a botocore exception on the surface implemented here - one of the
+    codes `_unresolved_config_report` supplies. The rcs below envelope nothing:
+    an rc-254 `ClientError` already carries `An error occurred (<Code>) when
+    calling ...` in its own text, and aws's general rc-255 handler formats
+    nothing.
 
     The message is stripped first, like aws's error formatter: the multi-line
     reports assembled below end with the newline their usage block carries, and
@@ -146,9 +189,23 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
     embedded `[ERROR]` line (the missing-subcommand report) therefore renders as
     two prefixed lines, enveloped or not, exactly as aws's does.
     """
-    detail = str(message).strip()
-    if rc == _PARAM_VALIDATION_ERROR_RC and _enhanced_envelope:
-        detail = f"An error occurred (ParamValidation): {detail}"
+    code: str | None = None
+    detail = str(message)
+    if rc == _PARAM_VALIDATION_ERROR_RC:
+        code = "ParamValidation"
+    elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
+        report = _unresolved_config_report(message)
+        if report is not None:
+            code, detail = report
+    detail = detail.strip()
+    # The degradation is the renderer's, so it costs any code its envelope
+    # while leaving the message the handler built - aws's fallback writes the
+    # extracted `Message`, hints included. Only the rc-252 family can be
+    # observed degraded: an undeclared profile makes botocore raise
+    # `ProfileNotFound` (rc 255) before credentials or a region are ever
+    # resolved, so no rc-253 report co-occurs with it (measured).
+    if code is not None and _enhanced_envelope:
+        detail = f"An error occurred ({code}): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
 
 

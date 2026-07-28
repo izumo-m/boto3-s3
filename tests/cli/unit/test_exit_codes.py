@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import (
-    ClientError,
     NoCredentialsError,
     NoRegionError,
     ParamValidationError,
@@ -126,14 +125,15 @@ class TestExitCodeFor:
 
 
 class _RaisingClient:
-    """Fake S3 client whose page iterator raises a ClientError on iteration.
+    """Fake S3 client whose page iterator raises the given error on iteration.
 
-    The real paginator's ``paginate()`` only builds the iterator; the server
-    error surfaces on the first page fetch, so the fake raises from ``next()``,
-    not from ``paginate()`` itself.
+    The real paginator's ``paginate()`` only builds the iterator; the failure
+    surfaces on the first page fetch, so the fake raises from ``next()``,
+    not from ``paginate()`` itself. Any botocore error works, so the library's
+    own translation (``s3storage.s3_errors``) runs for real.
     """
 
-    def __init__(self, error: ClientError) -> None:
+    def __init__(self, error: BaseException) -> None:
         self._error = error
 
     def get_paginator(self, name: str) -> Any:
@@ -258,26 +258,55 @@ class TestMainExitCodes:
             cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=boom))
 
     @pytest.mark.parametrize(
-        ("error", "expected_rc"),
+        ("error", "expected_rc", "expected_message"),
         [
-            (NoCredentialsError(), 253),
-            (NoRegionError(), 253),
+            (
+                NoCredentialsError(),
+                253,
+                "An error occurred (NoCredentials): Unable to locate credentials. "
+                'You can configure credentials by running "aws login".',
+            ),
+            (
+                NoRegionError(),
+                253,
+                "An error occurred (NoRegion): You must specify a region. "
+                'You can also configure your region by running "aws configure".',
+            ),
             # PartialCredentialsError has no dedicated aws handler -> the general
-            # 255, NOT 253 (only NoCredentials / NoRegion are 253).
-            (PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"), 255),
-            (client_error("AccessDenied", 403, "ListObjectsV2"), 254),
-            (ParamValidationError(report="Invalid bucket name"), 252),
-            (RuntimeError("boom"), 255),
+            # 255, NOT 253 (only NoCredentials / NoRegion are 253), and that
+            # handler formats nothing, so its report stays bare.
+            (
+                PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"),
+                255,
+                "Partial credentials found in env, missing: aws_secret_access_key",
+            ),
+            (
+                client_error("AccessDenied", 403, "ListObjectsV2"),
+                254,
+                "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: stub",
+            ),
+            (
+                ParamValidationError(report="Invalid bucket name"),
+                252,
+                "An error occurred (ParamValidation): Parameter validation failed:\n"
+                "Invalid bucket name",
+            ),
+            (RuntimeError("boom"), 255, "boom"),
         ],
     )
     def test_raw_error_escaping_a_command_maps_without_traceback(
-        self, error: BaseException, expected_rc: int, capsys: pytest.CaptureFixture[str]
+        self,
+        error: BaseException,
+        expected_rc: int,
+        expected_message: str,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         # Defense in depth (_exit_code_for_unexpected): a non-Boto3S3Error that
         # escapes command.run untranslated must still map through aws-cli's
         # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
         # ClientError 254, else 255) without a traceback (the exit-code charter,
-        # design/overview.md section 3).
+        # design/overview.md section 3) - and render with whatever envelope that
+        # handler carries, which is what the expected text pins per row.
         # The client factory raising is the cleanest injection - ls.run calls
         # ctx.client_factory(args) directly, so the raw error escapes run.
         def factory(_args: Any) -> Any:
@@ -286,9 +315,7 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory))
         err = capsys.readouterr().err
         assert rc == expected_rc
-        assert "boto3-s3:" in err
-        if expected_rc == 252:
-            assert "An error occurred (ParamValidation):" in err
+        assert err == f"boto3-s3: [ERROR]: {expected_message}\n"
         assert "Traceback" not in err
 
     def test_broken_pipe_from_a_command_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,6 +403,124 @@ class TestClientCreationExitCodes:
         assert rc == 252
         assert "scheme is missing" in err
         assert "Traceback" not in err
+
+
+class TestUnresolvedConfigReports:
+    """The two rc-253 codes reachable here: envelope + hint bytes.
+
+    Measured against the pinned aws-cli with an isolated HOME and no
+    credentials configured (`s3 ls s3://b/`, and `s3 mv` between two access
+    point aliases with `--validate-same-s3-paths` and no region, which is what
+    reaches an s3control client - the s3 client itself falls back to the global
+    endpoint and never raises `NoRegionError`). The leading blank line aws
+    prints before each report, and the program name, are the known residuals
+    (aws-cli-option-handling.md section 6). The hint keeps naming the `aws`
+    tool because those are the bytes aws writes and both tools read the same
+    config files (docs/cli/aws-differences.md).
+
+    aws has two further rc-253 handlers (`Configuration`, `Pager`) that no
+    failure here can raise; design/cli.md section 6 records them.
+    """
+
+    _NO_CREDENTIALS = (
+        "boto3-s3: [ERROR]: An error occurred (NoCredentials): Unable to locate "
+        'credentials. You can configure credentials by running "aws login".\n'
+    )
+    _NO_REGION = (
+        "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
+        ' You can also configure your region by running "aws configure".\n'
+    )
+
+    def test_no_credentials_is_enveloped_with_the_login_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The whole real path: botocore raises inside the listing, the library
+        # translates it and keeps the botocore error as __cause__, and that
+        # cause is what names the code.
+        ctx = Context(client_factory=lambda _args: _RaisingClient(NoCredentialsError()))  # pyright: ignore[reportArgumentType]
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
+        assert capsys.readouterr().err == self._NO_CREDENTIALS
+
+    def test_no_region_is_enveloped_with_the_configure_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Same real translation for the other half of the pair. What raises it
+        # in production is a region-less s3control build (mv's path resolution,
+        # pinned in test_clientfactory.py) - the seam differs, the rendering
+        # does not.
+        ctx = Context(client_factory=lambda _args: _RaisingClient(NoRegionError()))  # pyright: ignore[reportArgumentType]
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
+        assert capsys.readouterr().err == self._NO_REGION
+
+    def test_the_code_is_read_off_the_cause_not_the_context(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `raise X from exc` sets __cause__ AND __context__, so only a
+        # cause-only exception distinguishes them. The translation is explicit
+        # about the link it attaches, and reading the implicit one would pick up
+        # whatever exception happened to be in flight.
+        def factory(_args: Any) -> Any:
+            raise _with_cause(ConfigurationError("You must specify a region."), NoRegionError())
+
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
+        assert capsys.readouterr().err == self._NO_REGION
+
+    def test_an_untranslated_botocore_error_is_enveloped_too(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The catch-all route (_exit_code_for_unexpected): a raw botocore error
+        # escaping a command is the same aws handler, so it renders the same.
+        def factory(_args: Any) -> Any:
+            raise NoCredentialsError()
+
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
+        assert capsys.readouterr().err == self._NO_CREDENTIALS
+
+    def test_partial_credentials_stays_bare(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws has no handler for it -> its general one: rc 255, no envelope,
+        # botocore's text unchanged (measured with AWS_ACCESS_KEY_ID alone).
+        ctx = Context(
+            client_factory=lambda _args: _RaisingClient(  # pyright: ignore[reportArgumentType]
+                PartialCredentialsError(provider="env", cred_var="AWS_SECRET_ACCESS_KEY")
+            )
+        )
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: Partial credentials found in env, missing: AWS_SECRET_ACCESS_KEY\n"
+        )
+
+    def test_profile_not_found_stays_bare(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The measured contrast against the two enveloped reports above, on the
+        # real session: aws's general handler again (rc 255, no envelope).
+        profile = "boto3_s3_no_such_profile_xyz"
+        assert cli.main(["ls", "s3://bucket/p/", "--profile", profile]) == 255
+        assert capsys.readouterr().err == (
+            f"boto3-s3: [ERROR]: The config profile ({profile}) could not be found\n"
+        )
+
+    def test_another_rc_leaves_the_same_exception_bare(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The envelope belongs to the handler, not to the exception: aws's
+        # rc-254 and rc-255 handlers format nothing, so the same botocore error
+        # reported at another rc must render bare.
+        monkeypatch.setattr(cli, "_enhanced_envelope", True)
+        cli._write_error(NoCredentialsError(), rc=255)
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unable to locate credentials\n"
+
+    def test_a_configuration_error_with_no_botocore_cause_stays_bare(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # This CLI's own rc-253 failures (an absent awscrt under an explicit
+        # `[s3] preferred_transfer_client = crt`, an SDK floor shortfall) have
+        # no aws counterpart and no botocore cause, so no code names them.
+        def factory(_args: Any) -> Any:
+            raise ConfigurationError("preferred_transfer_client is set to crt but awscrt is ...")
+
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: preferred_transfer_client is set to crt but awscrt is ...\n"
+        )
 
 
 class TestValidationOrder:

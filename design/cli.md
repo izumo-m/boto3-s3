@@ -983,7 +983,7 @@ reviewed with it.
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4) | `CONFIGURATION_ERROR_RC` |
+| 253 | `ConfigurationError` (credentials / region unresolved - the two of aws's four rc-253 handlers reachable here, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` (its `ConfigurationErrorHandler` / `PagerErrorHandler` share the rc; below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file caught by the pre-dispatch scan (section 1), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
@@ -998,12 +998,41 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 252 / 253 of plain `ValidationError` / `ConfigurationError`
 ([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
 validation failures mapped to 252 use aws-cli's default enhanced-style
-envelope,
-`An error occurred (ParamValidation): <message>`. This includes argparse
-failures, unknown options, plain `ValidationError`, and the auto-prompt flag
-conflict. The program-name prefix remains outside the parity target, and
-alternate `--cli-error-format` renderings are not implemented
+envelope, `An error occurred (ParamValidation): <message>`. This includes
+argparse failures, unknown options, plain `ValidationError`, and the
+auto-prompt flag conflict. The **code the envelope names is the handler's,
+not the exception class's**, and each handler also builds its own message, so
+the two rc-253 failures reachable here carry a hint botocore never wrote:
+`An error occurred (NoCredentials): Unable to locate credentials. You can
+configure credentials by running "aws login".` and `An error occurred
+(NoRegion): You must specify a region. You can also configure your region by
+running "aws configure".` (both measured; the `aws login` hint is reproduced
+verbatim - see [`aws-differences.md`](../docs/cli/aws-differences.md)).
+`_write_error` identifies that pair by the botocore exception the translation
+kept as `__cause__`, never by matching the message text, so the rc-253
+failures with no aws counterpart (an absent awscrt, an SDK floor shortfall)
+stay bare - as do 254 (a `ClientError` already carries its own `An error
+occurred (<Code>) when calling ...`) and 255. Inside the transfer pipeline
+nothing is enveloped: those failures never reach aws's handler chain, so a
+credential-less run reports rc 1 with botocore's own text - a per-item
+`upload failed: ... Unable to locate credentials` when it lands on an object
+(cp / mv / a keyed rm), a whole-run `fatal error: Unable to locate
+credentials` when it lands on the listing a recursive run opens with (sync,
+`rm --recursive`); all four measured on both tools.
+The program-name prefix remains outside the parity target, and alternate
+`--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
+
+aws has **two more rc-253 handlers** whose codes never appear here.
+`PagerErrorHandler` (`Pager`) belongs to the output pager, which this CLI does
+not implement. `ConfigurationErrorHandler` (`Configuration`) claims the
+`ConfigurationError` its own customizations raise, and it *is* reachable
+inside the mapped surface: with `cli_timestamp_format` set to an unknown value
+in the config file, `aws s3 ls s3://b/` is rc 253 `An error occurred
+(Configuration): Unknown cli_timestamp_format value: ...`, ahead even of a
+help token (measured). `cli_timestamp_format` is not implemented here at all,
+so neither the setting nor its report exists - a behavior gap tracked
+separately, not an envelope one.
 
 **The envelope disappears when the run names a profile no config file
 declares**, and the exit code does not change. aws renders it through its
@@ -1026,7 +1055,11 @@ preliminary scan, the auto-prompt flag conflict - never degrade, matching aws's
 entry-point handler chain, which is constructed without a session. A profile is
 "declared" if the merged map has it; `--profile ""` is ignored under aws's
 truthy guard, while an empty env value names the empty profile and is
-undeclared. One residual, of the `--cli-error-format` family already excluded
+undeclared. The degradation is the renderer's, so it applies to every code
+alike - but only the 252 family can be seen degraded: an undeclared profile
+makes the scoped-config read raise `ProfileNotFound` (255) before credentials
+or a region are ever resolved, so no rc-253 report co-occurs with it
+(measured). One residual, of the `--cli-error-format` family already excluded
 above: aws skips the session read entirely whenever the format is set outside
 the config file - by the option, or by `AWS_CLI_ERROR_FORMAT`, which its chain
 resolves ahead of the scoped-config provider - so an undeclared profile

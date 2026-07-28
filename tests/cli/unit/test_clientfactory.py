@@ -7,8 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import NoRegionError
 
-from boto3_s3 import Boto3S3Error, InvalidConfigError, InvalidValueError, ValidationError
+from boto3_s3 import (
+    Boto3S3Error,
+    ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
+    ValidationError,
+)
 from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.cli import exit_code_for
 
@@ -486,6 +493,31 @@ class TestBuildClient:
 
 
 class TestBuildServiceClient:
+    def test_regionless_s3control_raises_no_region_keeping_the_cause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The production seam behind the enveloped `NoRegion` report
+        # (test_exit_codes.py TestUnresolvedConfigReports): s3control has no
+        # global-endpoint fallback - unlike s3 and sts, which is why this is the
+        # only region-less failure the mapped `aws s3` surface can reach, via
+        # mv's --validate-same-s3-paths. The report's aws code is named off the
+        # botocore exception the translation keeps as `__cause__`, so dropping
+        # that link would silently cost the envelope; and the plain
+        # ConfigurationError (not the InvalidConfigError refinement) is what
+        # carries the rc.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        # No region left anywhere, so botocore would otherwise probe the EC2
+        # metadata service (the last link of aws's region chain).
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        with pytest.raises(ConfigurationError) as excinfo:
+            clientfactory.build_service_client("s3control", _parse([]))
+        assert type(excinfo.value) is ConfigurationError
+        assert isinstance(excinfo.value.__cause__, NoRegionError)
+        assert str(excinfo.value) == "You must specify a region."
+        assert exit_code_for(excinfo.value) == 253
+
     def test_timeouts_and_unsigned_are_inherited_like_from_session(self) -> None:
         # aws threads --cli-read-timeout / --cli-connect-timeout and
         # --no-sign-request through the session default client config at startup,

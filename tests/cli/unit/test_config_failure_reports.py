@@ -169,6 +169,25 @@ class TestUndeclaredProfileDropsTheEnvelope:
         assert cli.main(["bogus"]) == 252
         assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
 
+    def test_an_undeclared_profile_never_reaches_an_rc_253_report(
+        self,
+        config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The degradation is the renderer's, so on aws it would cost the rc-253
+        # reports their envelope too - but it cannot be observed there: the
+        # undeclared profile makes botocore raise `ProfileNotFound` while the
+        # session reads its scoped config, long before credentials or a region
+        # are resolved, so the run is the bare 255 below and never the 253
+        # (measured: no credentials at all plus `AWS_PROFILE=nosuch` reports
+        # this, not `Unable to locate credentials`).
+        monkeypatch.setenv("AWS_PROFILE", "nosuch")
+        assert cli.main(["ls", "s3://bucket/p/"]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: The config profile (nosuch) could not be found\n"
+        )
+
     def test_the_degradation_does_not_leak_into_the_next_run(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

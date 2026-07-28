@@ -66,6 +66,20 @@ the `crt` extra is the common case — or one that is installed but too old to
 carry it ([`compatibility.md`](../compatibility.md) lists what each feature
 needs).
 
+Unresolved credentials and an unresolved region are reported with the same
+envelope and hint as `aws` — `An error occurred (NoCredentials): Unable to
+locate credentials. You can configure credentials by running "aws login".`,
+and the `NoRegion` counterpart pointing at `aws configure`. The hints name
+`aws` because they are `aws`'s own wording and both tools read the same
+config files; see [`aws-differences.md`](./aws-differences.md). The
+dependency failures above are not something `aws` can report, so they have no
+envelope. Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
+failure is exit code 1 with no envelope instead: a per-item
+`upload failed:` / `move failed:` / `delete failed:` line when it lands on an
+object, and a whole-run `fatal error:` line when it lands on the listing a
+recursive run starts with (`sync`, `rm --recursive`). `aws` reports both the
+same way.
+
 ### 254 — S3 returned an error
 
 The command was valid, a request went out, and the service rejected it. `ls`

@@ -221,6 +221,25 @@ class TestPipelineErrors:
         assert "upload failed:" in captured.err
         assert "An error occurred (NoSuchBucket)" in captured.err
 
+    def test_no_credentials_in_the_pipeline_stays_bare(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's rc-253 handlers never see a failure the transfer pipeline
+        # catches, so the per-item record carries botocore's own text with no
+        # `An error occurred (NoCredentials)` envelope and no `aws login` hint,
+        # at rc 1 (measured: `s3 cp <file> s3://b/k` with no credentials).
+        from botocore.exceptions import NoCredentialsError
+
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        ctx, _ = _recording_ctx([NoCredentialsError()])
+        rc = cli.main(["cp", str(src), "s3://b/k"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == (
+            f"upload failed: {os.path.relpath(src)} to s3://b/k Unable to locate credentials\n"
+        )
+
     def test_bucketless_upload_fails_per_item(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

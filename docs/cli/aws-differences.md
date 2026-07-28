@@ -20,9 +20,16 @@ code**. A mismatch in any of those is a bug worth reporting.
 `--debug` traces and help pages differ from `aws` and change between
 releases (the error prefix is `boto3-s3:`, not `aws:`). One exception is worth
 knowing: parameter-validation errors do use aws's envelope,
-`An error occurred (ParamValidation): <message>`. `aws` drops that envelope when
-the profile you named does not exist in any config file, keeping the exit code,
-and so does this command. The one place they part: on `aws`, setting
+`An error occurred (ParamValidation): <message>`, and so do the two exit-code
+253 reports this command can produce — unresolved credentials and an unresolved
+region (see [`exit-codes.md`](./exit-codes.md)). Those two also keep aws's hint
+verbatim, which is why the credentials error tells you to run `aws login`: this
+command has no login subcommand of its own, and both tools read the same
+credentials and config files, so configuring credentials with `aws` — or by any
+other means — is what fixes the run either way. The unresolved-region report
+points at `aws configure` for the same reason. `aws` drops the envelope when the
+profile you named does not exist in any config file, keeping the exit code, and
+so does this command. The one place they part: on `aws`, setting
 `--cli-error-format` or `AWS_CLI_ERROR_FORMAT` to `enhanced` puts the envelope
 back in that situation, while here those two are accepted and ignored, so the
 envelope stays dropped.
