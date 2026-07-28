@@ -321,6 +321,15 @@ class TestAppendFilterAction:
             GlobPattern(PatternKind.INCLUDE, "c"),
         ]
 
+    def test_a_dash_led_pattern_reaches_the_filter_list(self) -> None:
+        # Through the parser the dispatch really parses with: aws's nargs=1
+        # consumption, reproduced by the parser base class, makes the token a
+        # pattern rather than a missing value or a positional.
+        parser = cli._build_command_parse_parser("rm", cli._load_command("rm")())
+        args = parser.parse_args(["s3://b/p", "--recursive", "--exclude", "-foo*"])
+        assert args.filters == [GlobPattern(PatternKind.EXCLUDE, "-foo*")]
+        assert args.paths == "s3://b/p"
+
     def test_compile_filter_none_for_no_patterns(self) -> None:
         target = S3Storage("s3://b")
         assert filters.compile_filter(None, src=target, dest=target, dir_op=True) is None

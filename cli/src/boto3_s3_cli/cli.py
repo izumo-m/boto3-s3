@@ -131,10 +131,12 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
-    """Render argparse failures through aws-cli's ParamValidation envelope.
+    """Parse and report failures the aws-cli way: its envelope, its token counts.
 
     The counterpart of aws's `CLIArgParser`, which every one of its parsers is
-    built on: one error shape for all of them. The report is
+    built on: one error shape for all of them, plus - through
+    `_match_argument` - the token consumption aws's own interpreter performs
+    for the options marked `aws_nargs`. The report is
     ``<message>\\n\\n<usage>`` handed to the error formatter as a single
     string, so the usage lands after a blank line and *inside* the same
     ``[ERROR]`` report. Which usage that is comes from each parser's ``usage``
@@ -160,6 +162,38 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
             message.extend(f"  * {word}" for word in possible)
         raise argparse.ArgumentError(action, "\n".join(message))
 
+    def _match_argument(self, action: argparse.Action, arg_strings_pattern: str) -> int:
+        """Give a count-declared option its tokens even when they are dash-led.
+
+        argparse sorts the tokens ahead of the decision into three classes -
+        ``A`` (plain), ``O`` (option-like) and ``-`` (the ``--`` separator) -
+        and for an option declared with a token count Python 3.12+ accepts
+        ``A`` and ``O`` alike (its nargs pattern became ``[AO]{N}``), which is
+        what this hook reproduces. So ``--exclude '-foo*'`` is a pattern and
+        ``mb --tags -k -v`` a tag pair, while a missing token still reports
+        the count and ``--`` never becomes a value (its class is neither) -
+        all as aws behaves. Before 3.12 only ``A`` counted, so the same
+        declarations reported a missing value; aws's official distribution
+        bundles 3.14, and the marker (``aws_nargs``, the count aws declares -
+        read duck-typed for the import reason ``_aws_error_message`` states)
+        keeps that outcome off the host Python version.
+
+        Only the count is settled here. Which class a token falls into stays
+        argparse's own decision, and up to 3.11 that classification pass also
+        raises the ambiguous-abbreviation error - it runs over the whole token
+        stream before any consumption, so a value that ambiguously
+        abbreviates one of the command's own options (``--exclude --ss``) is
+        rejected there while aws, and our 3.12+ runs, take it as the value.
+        design/cli.md section 2 records that as the residual it is.
+
+        ``_match_argument`` is private argparse API, the same kind of hook as
+        the ``_check_value`` above.
+        """
+        count = getattr(action, "aws_nargs", None)
+        if isinstance(count, int) and re.match(f"[AO]{{{count}}}", arg_strings_pattern):
+            return count
+        return super()._match_argument(action, arg_strings_pattern)
+
     def _aws_error_message(self, message: str) -> str:
         """Translate the small argparse wording differences visible in aws-cli."""
         required_prefix = "the following arguments are required: "
@@ -176,8 +210,11 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
             option = missing_value.group(1)
             # aws declares the filter options with nargs=1, which words their
             # missing value "expected 1 argument"; the action carries that
-            # declaration as a marker (`filters.AppendFilterAction`). Read it
-            # duck-typed: importing the filters here would drag in
+            # declaration as a marker (`filters.AppendFilterAction`). Only a
+            # count of 1 needs this: argparse itself words every higher count
+            # numerically ("expected 2 arguments", aws's wording for
+            # `mb --tags`), and "one" is what an uncounted option says. Read
+            # the marker duck-typed: importing the filters here would drag in
             # `boto3_s3.globsieve`, and the informational exits may reach no
             # library module beyond the lazy `boto3_s3` root (design/imports.md,
             # pinned by test_import_contract.py).

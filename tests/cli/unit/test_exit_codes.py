@@ -11,6 +11,7 @@ covered end-to-end through `main` too.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,11 @@ from boto3_s3 import (
     TransportError,
     ValidationError,
 )
-from boto3_s3_cli import cli
+from boto3_s3_cli import cli, filters
+from boto3_s3_cli.commands import mb
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.harness import unused_ctx
 
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
@@ -681,19 +684,158 @@ class TestSubcommandParseErrorText:
             f"\n{_USAGE_BLOCK}"
         )
 
-    def test_a_dash_led_filter_value_is_still_a_missing_value(
+    @pytest.mark.parametrize("option", ["--storage-class", "--acl"])
+    def test_an_unmarked_option_still_rejects_a_dash_led_value(
+        self, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The contrast to TestCountedOptionTokens below: only the marked
+        # options swallow a dash-led token. aws declares every other option
+        # without a count, so the token stays an option there and the value is
+        # missing (measured per option).
+        assert cli.main(["cp", option, "--exclude", "x", "s3://a/", "s3://b/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument {option}: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+
+class TestCountedOptionTokens:
+    """aws's count-declared options take their tokens however those look.
+
+    ``--exclude`` / ``--include`` are declared with one token and ``mb``'s
+    ``--tags`` with two, and the Python aws ships on then hands them dash-led
+    tokens as readily as plain ones;
+    ``_ParamValidationArgumentParser._match_argument`` reproduces that count
+    from the ``aws_nargs`` marker. A swallowed token stops being a positional,
+    so what surfaces is whatever the shifted positionals produce - each
+    assertion is the pinned aws-cli's own stderr under this file's mapping.
+
+    The hook settles the count only; what class a token belongs to stays
+    argparse's decision, and up to Python 3.11 that pass rejects a value
+    ambiguously abbreviating one of the command's own options (``--exclude
+    --ss``) before consumption can happen - the residual design/cli.md
+    section 2 records. Nothing below depends on it.
+    """
+
+    @pytest.mark.parametrize("option", ["--exclude", "--excl"])
+    def test_the_token_is_taken_as_the_pattern_abbreviations_included(
+        self, option: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws: `s3 sync --exclude -h a b` leaves `a b` as the two paths, so
+        # the local-to-local pair is what fails, not the option.
+        assert cli.main(["sync", option, "-h", "a", "b"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
+            "Error: Invalid argument type\n"
+        )
+
+    def test_a_following_known_option_is_swallowed_and_shifts_the_positionals(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Only aws's *wording* is reproduced, not its nargs=1 model: a real
-        # nargs=1 would consume this token as the pattern (as aws does) on
-        # some Python versions and reject it on others. The token stays
-        # rejected here on every Python.
-        assert cli.main(["cp", "--exclude", "-foo*"]) == 252
+        # aws: `--include` is the pattern, so cp sees three paths and the
+        # extra one is reported as an unknown option, with no usage block.
+        assert cli.main(["cp", "--exclude", "--include", "x", "s3://a/", "s3://b/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: s3://b/\n"
+        )
+
+    def test_a_negative_number_is_taken_as_the_pattern_too(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # argparse classifies `-1` as a plain token rather than an option, so
+        # the hook's count applies to a token it would have taken anyway; aws
+        # lands on the same synopsis failure as the dash-led cases (measured).
+        assert cli.main(["sync", "--exclude", "-1", "a", "b"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
+            "Error: Invalid argument type\n"
+        )
+
+    def test_a_following_double_dash_is_not_a_pattern(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `--` is argparse's positional marker, not a token: aws reports the
+        # missing value here, so the hook must leave that classification be.
+        assert cli.main(["sync", "--exclude", "--", "a", "b"]) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument --exclude: expected 1 argument\n"
             f"\n{_USAGE_BLOCK}"
         )
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["mb", "s3://a", "--tags"],
+            ["mb", "--tags", "-k"],
+            ["mb", "--tags", "k"],
+            ["mb", "--tags", "--", "k", "v", "s3://a"],
+            ["mb", "--tags", "k", "--", "v", "s3://a"],
+        ],
+    )
+    def test_a_two_token_option_short_of_tokens_reports_the_count(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `mb --tags` is aws's two-token declaration: one token left, or a
+        # `--` among them, is short either way, and argparse words the count
+        # numerically without any translation (aws says the same, measured
+        # for each argv here).
+        assert cli.main(argv) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --tags: expected 2 arguments\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+
+class TestCountedOptionMarker:
+    """The ``_match_argument`` hook itself, asked about token patterns.
+
+    The end-to-end tests above cannot separate the hook from the interpreter
+    on Python 3.12+, where stock argparse consumes the same tokens by itself;
+    these ask the hook directly, so a marker that stopped covering its count
+    fails here on every version. ``A`` / ``O`` / ``-`` are argparse's classes
+    for a plain token, an option-like one and the ``--`` separator.
+    """
+
+    @pytest.mark.parametrize("pattern", ["OO", "AO", "OA", "AA", "OOA"])
+    def test_two_marked_tokens_are_taken_whatever_their_class(self, pattern: str) -> None:
+        parser = cli._ParamValidationArgumentParser(add_help=False)
+        action = parser.add_argument("--tags", action=mb._AppendTagsAction, nargs=2)
+        assert parser._match_argument(action, pattern) == 2
+
+    @pytest.mark.parametrize("pattern", ["O", "A", "-AA", "", "O-A"])
+    def test_two_marked_tokens_are_not_invented(self, pattern: str) -> None:
+        # Short, or `--` inside the pair: argparse's own rejection stands.
+        parser = cli._ParamValidationArgumentParser(add_help=False)
+        action = parser.add_argument("--tags", action=mb._AppendTagsAction, nargs=2)
+        with pytest.raises(argparse.ArgumentError):
+            parser._match_argument(action, pattern)
+
+    @pytest.mark.parametrize("pattern", ["O", "A", "OA", "AO"])
+    def test_one_marked_token_is_taken_whatever_its_class(self, pattern: str) -> None:
+        parser = cli._ParamValidationArgumentParser(add_help=False)
+        action = parser.add_argument("--exclude", action=filters.AppendFilterAction, dest="filters")
+        assert parser._match_argument(action, pattern) == 1
+
+    @pytest.mark.parametrize("pattern", ["", "-A", "-"])
+    def test_one_marked_token_is_not_invented(self, pattern: str) -> None:
+        parser = cli._ParamValidationArgumentParser(add_help=False)
+        action = parser.add_argument("--exclude", action=filters.AppendFilterAction, dest="filters")
+        with pytest.raises(argparse.ArgumentError):
+            parser._match_argument(action, pattern)
+
+    @pytest.mark.parametrize("pattern", ["O", "OA"])
+    def test_an_unmarked_option_keeps_argparse_s_own_matching(self, pattern: str) -> None:
+        # The mutant guard for the marker check: without it every option would
+        # start swallowing option-like tokens, which aws does not do.
+        parser = cli._ParamValidationArgumentParser(add_help=False)
+        action = parser.add_argument("--storage-class")
+        with pytest.raises(argparse.ArgumentError):
+            parser._match_argument(action, pattern)
 
 
 class TestPreParseErrorAttribution:

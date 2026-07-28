@@ -48,6 +48,26 @@ class TestOutput:
         assert (result.rc, result.stdout) == (0, "make_bucket: b\n")
         assert calls[0].params == {"Bucket": "b"}
 
+    def test_dash_led_tag_tokens_are_taken_as_the_pair(self) -> None:
+        # aws declares --tags with a two-token count, so both tokens are the
+        # pair however they look and the bucket is created (measured: `mb
+        # --tags -k -v s3://a` reaches CreateBucket on aws, where our pre-3.12
+        # argparse used to report a missing value instead).
+        result, calls = run_recorded([{}], ["mb", "s3://b", "--tags", "-k", "-v"])
+        assert result.rc == 0
+        assert calls[0].params == {
+            "Bucket": "b",
+            "CreateBucketConfiguration": {"Tags": [{"Key": "-k", "Value": "-v"}]},
+        }
+
+    def test_a_dash_led_pair_parses_with_the_paths_intact(self) -> None:
+        # Through the parser the dispatch really parses with: the swallowed
+        # tokens are the pair, not positionals, so the path still arrives.
+        parser = cli._build_command_parse_parser("mb", cli._load_command("mb")())
+        args = parser.parse_args(["--tags", "-k", "-v", "--tags", "K", "V", "s3://b"])
+        assert args.tags == [["-k", "-v"], ["K", "V"]]
+        assert args.path == "s3://b"
+
     def test_tags_pairs_keep_order_and_duplicates(self) -> None:
         result, calls = run_recorded([{}], ["mb", "s3://b", "--tags", "K", "1", "--tags", "K", "2"])
         assert result.rc == 0

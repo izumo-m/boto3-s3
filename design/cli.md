@@ -137,18 +137,38 @@ solidified design is added here.
     same options aws lists, in our option-registration order rather than
     aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
     declaring the globals in aws's order, which reshuffles the help page.
-  - **Dash-led filter values.** aws declares `--exclude` / `--include` with
-    `nargs=1`, so a dash-led token after one is consumed as the pattern
-    there (`--exclude '-foo*'` is accepted); ours rejects it as a missing
-    value. The swallowed token also shifts the remaining positionals, so a
-    different error can surface entirely rather than the same one worded
-    differently (`cp --exclude --include x s3://a/ s3://b/` is aws's
-    `Unknown options: s3://b/`, with no usage block, against our missing
-    value - measured). The wording is matched - both report
-    `expected 1 argument`, which `AppendFilterAction` marks the pair for -
-    but the classification is not: a real `nargs=1` consumes the token only
-    on Python 3.12+, so adopting it would make the accept/reject decision
-    depend on the host Python.
+  - **Ambiguous abbreviations as option values** (Python 3.10 / 3.11 only).
+    A value that ambiguously abbreviates one of the command's own options -
+    `--exclude --ss` against cp's `--sse*` family - is rejected there as an
+    ambiguous option, where aws takes it as the value. Argparse raises that
+    one while *classifying* the token stream, a pass that runs to completion
+    before any value is consumed; 3.12 moved the check to the point of use,
+    which a consumed token never reaches. Closing it would mean overriding
+    the classification too (`_parse_optional` / `_get_option_tuples`), far
+    more private argparse surface than a corner input is worth.
+- **Counted option values.** aws declares `--exclude` / `--include` with
+  `nargs=1` and `mb`'s `--tags` with `nargs=2`, which both words a missing
+  value by the count (`expected 1 argument`, `expected 2 arguments`) and lets
+  those tokens be taken however they look (`--exclude '-foo*'`,
+  `--exclude --include`, `mb --tags -k -v`). The second half is not aws's
+  code but its interpreter: stock argparse gives a count-declared option
+  option-like tokens only from Python 3.12 on (its nargs pattern became
+  `[AO]{N}`), and aws-cli, source-installed across 3.9 to 3.14, flips at
+  exactly that boundary - the shipped distribution bundles 3.14, so consuming
+  is what its users get. Each such option's action carries the count as
+  `aws_nargs` (`AppendFilterAction`, mb's `_AppendTagsAction`) and
+  `_ParamValidationArgumentParser` reads the marker twice: for the wording,
+  and in a `_match_argument` override that applies the 3.12+ rule on every
+  supported Python. The consumption is visible beyond the option itself,
+  since a swallowed token no longer counts as a positional:
+  `cp --exclude --include x s3://a/ s3://b/` is aws's
+  `Unknown options: s3://b/` (three paths, one too many) and
+  `sync --exclude -h a b` its local-to-local synopsis error, both reproduced.
+  Only the count is decided there; what class a token belongs to stays
+  argparse's own decision, which is why `--` never becomes a value
+  (`--exclude -- a b` is the missing value, as on aws) and why the
+  ambiguous-abbreviation residual above survives on 3.10 / 3.11.
+  `--grants` (`nargs='+'`) needs no marker: its pattern is version-stable.
 
 ## 3. Module layout
 

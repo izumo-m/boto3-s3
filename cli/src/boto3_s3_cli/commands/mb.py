@@ -4,12 +4,44 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
+from typing import Any, ClassVar, cast
 
 # Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import Boto3S3Error, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
+
+
+class _AppendTagsAction(argparse.Action):
+    """Append one ``KEY VALUE`` pair, carrying aws's token count as a marker.
+
+    Stock ``append`` behavior (the value stays argparse's own shape - a list
+    of two-item lists, which ``run`` unpacks as pairs) plus ``aws_nargs``:
+    aws declares TAGS with a token count, so both tokens are taken however
+    they look (``mb --tags -k -v`` tags the bucket ``-k=-v``). The parser base
+    class reads the marker and reproduces that on every supported Python
+    (``cli._ParamValidationArgumentParser._match_argument``), which stock
+    argparse only does from 3.12 on. The real ``nargs=2`` stays, so a missing
+    token still reports aws's ``expected 2 arguments``.
+    """
+
+    # The count aws declares; not an argparse attribute.
+    aws_nargs: ClassVar[int] = 2
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        # The typeshed base signature; nargs is 2, so at runtime *values* is
+        # always a two-item list of str.
+        pairs: list[list[str]] = getattr(namespace, self.dest, None) or []
+        pairs.append(cast("list[str]", values))
+        setattr(namespace, self.dest, pairs)
 
 
 class MbCommand(Command):
@@ -25,7 +57,7 @@ class MbCommand(Command):
         # to reject (aws-cli TAGS arg: action append, nargs 2).
         parser.add_argument(
             "--tags",
-            action="append",
+            action=_AppendTagsAction,
             nargs=2,
             metavar=("KEY", "VALUE"),
             help="tag to attach to the new bucket; repeatable",
