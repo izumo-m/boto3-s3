@@ -3,7 +3,9 @@
 The rc shape (design/cli.md section 6): mv is
 cp with the onto-itself guard family in front - the local-local pair, any
 ``-`` path, the onto-itself shapes (recursive included), and the
-checksum/path-format pairing are all 252 before any client factory runs;
+checksum/path-format pairing are all 252 before any client factory runs
+(only the resolving branch of ``--validate-same-s3-paths`` builds a client
+ahead of them, mirroring aws's construction order);
 ``--validate-same-s3-paths`` resolution failures keep their class (an
 unresolvable path 252, a failing s3control/sts call 254 via the kept
 ClientError cause); the access-point warning goes to stderr without
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -331,6 +333,104 @@ class TestValidateSamePaths:
         assert rc == 0
         assert s3control.calls == []
         assert sts.calls == 0
+
+
+class TestValidateSamePathsClientOrder:
+    """Which client fails first when the resolving branch cannot build one.
+
+    aws creates its s3 client in ``S3Command._run_main``, ahead of the
+    ``add_paths`` validation that reaches ``S3PathResolver``, so an unusable
+    region is the *s3* endpoint's failure - resolving through s3control first
+    would name ``s3-control`` in the same report. These run the real client
+    factories (no injected Context); an empty region fails at construction, so
+    nothing reaches the network, and a merely absent one still lands on
+    s3control, the only region-less failure this surface reaches.
+
+    Measured against the pinned aws-cli with an isolated HOME: identical bytes
+    but for the program name and the leading blank line aws prints, both known
+    residuals (aws-cli-option-handling.md section 6).
+    """
+
+    _ALIASES: ClassVar[list[str]] = [
+        "mv",
+        "s3://a-s3alias/k",
+        "s3://b-s3alias/k",
+        "--validate-same-s3-paths",
+    ]
+    _INVALID_S3_ENDPOINT = "boto3-s3: [ERROR]: Invalid endpoint: https://s3..amazonaws.com\n"
+    _NO_REGION = (
+        "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
+        ' You can also configure your region by running "aws configure".\n'
+    )
+
+    @staticmethod
+    def _empty_region(monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.setenv(var, "")
+
+    def test_an_empty_region_env_fails_on_the_s3_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._empty_region(monkeypatch)
+        assert cli.main(self._ALIASES) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_an_empty_region_in_the_config_file_fails_the_same_way(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The other link of the region chain aws walks, same outcome.
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion =\n")
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert cli.main(self._ALIASES) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_the_client_precedes_even_the_onto_itself_guard(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's client exists before the guard runs, so with the flag on the
+        # same key an unusable region beats the 252 (measured).
+        self._empty_region(monkeypatch)
+        argv = ["mv", "s3://a-s3alias/k", "s3://a-s3alias/k", "--validate-same-s3-paths"]
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_an_endpoint_url_leaves_s3control_to_fail_on_the_region(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --endpoint-url reaches only the s3 client, so it masks the empty
+        # region there while s3control - which takes no override - still
+        # resolves an unusable endpoint: the early build must not swallow the
+        # later client's failure. Measured on both tools; the refused port is
+        # never dialed, the endpoint resolution fails first.
+        self._empty_region(monkeypatch)
+        argv = [*self._ALIASES, "--endpoint-url", "http://127.0.0.1:1"]
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: Invalid endpoint: https://s3-control..amazonaws.com\n"
+        )
+
+    def test_an_absent_region_still_reports_s3controls_no_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The contrast that keeps the pre-built client from swallowing the 253:
+        # with no region anywhere, s3 falls back to the global endpoint and
+        # builds, and s3control (which has no such fallback) raises NoRegion.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert cli.main(self._ALIASES) == 253
+        assert capsys.readouterr().err == self._NO_REGION
 
 
 class TestSuccessShapes:

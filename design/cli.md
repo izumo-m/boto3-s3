@@ -839,7 +839,8 @@ stays "cp commands" even for mv. `mv - -` hits the local->local usage error
 first).
 
 **mv-specific validation** (for s3s3, in `run()` after `classify_paths` has
-built the session-backed `S3`, before any client creation):
+built the session-backed `S3`. Only the resolving branch of step 2 creates a
+client, and it does so before step 1's guard):
 
 1. **The same-path guard** (always): if the keyless-normalized URI (`s3://b` ->
    `s3://b/`) matches `S3Storage.same_path` (an exact match, or a `/`-terminated dest
@@ -865,7 +866,20 @@ built the session-backed `S3`, before any client creation):
    `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
    alias is also 252 (the wording is verbatim from aws-cli). A ClientError from
    s3control / sts keeps `__cause__` and is **254** (aws is also 254 on
-   a GetCallerIdentity failure).
+   a GetCallerIdentity failure). **The main S3 client is built first** (and
+   reused by the rest of the run): aws creates its s3 client in
+   `S3Command._run_main`, so a region the client cannot use (an empty
+   `AWS_REGION` / `AWS_DEFAULT_REGION` / config `region =` -> `Invalid
+   endpoint: https://s3..amazonaws.com`, 255) fails on the s3 endpoint rather
+   than s3control's. aws builds it ahead of **all** the validation ported
+   here, not just this branch, so under an empty region its 255 also preempts
+   the usage errors above - the guard of step 1 without the flag, the
+   local-local pair, the streaming path. This CLI keeps validation first and
+   reports those as 252, which leaves those empty-region shapes divergent: a
+   **recorded residual**, awaiting a ruling on whether client construction
+   may precede usage-error validation. Nothing else is affected, because a
+   merely *absent* region builds fine (s3 falls back to the global endpoint,
+   s3control has no such fallback -> the `NoRegion` 253 of section 6).
 3. **A warning** (validation off and same_key and either side is an access-point form
    = `pathresolver.has_underlying_s3_path`): the aws-cli-worded permanent warning
    (`warning: Provided s3 paths may resolve to same underlying s3 object(s) ...`)
