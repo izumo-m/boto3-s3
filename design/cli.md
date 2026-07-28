@@ -116,15 +116,18 @@ solidified design is added here.
 - The subcommand is located by `_find_command_token` - aws's
   `SubCommandArgParser` shape: unknown optionals are assumed valueless, the
   first positional-looking token (argparse's classification: not dash-led, a
-  lone `-`, a negative number, a token with a space, or anything behind
-  `--`) names the command, and only that token leaves the stream. A wrong
-  name goes to `_build_subcommand_error_parser` - a lone positional whose
-  choices are the `_COMMAND_TABLE` keys, so argparse words the rejection
-  exactly as aws's command-table positional does. The name is fed to it
-  behind a `--`, because an option-form token *can* be the name once it sits
-  behind one of its own (`--region us-east-1 -- --bogus` is aws's invalid
-  choice `'--bogus'`, measured) and a bare replay would read it back as an
-  option. With no command token at all, surviving option-like tokens are
+  lone `-`, a negative-number opening, a token with a space, or anything
+  behind `--`) names the command, and only that token leaves the stream. It
+  shares the pinned matcher below with the parsers, so both stages classify a
+  token identically (`s3 -1x` is aws's invalid choice `'-1x'`, not an unknown
+  option - measured). A wrong name goes to `_build_subcommand_error_parser` -
+  a lone positional whose choices are the `_COMMAND_TABLE` keys, so argparse
+  words the rejection exactly as aws's command-table positional does. The
+  name is fed to it behind a `--`, because an option-form token *can* be the
+  name once it sits behind one of its own (`--region us-east-1 -- --bogus` is
+  aws's invalid choice `'--bogus'`, measured) and a bare replay would read it
+  back as an option - which also means that parser never classifies anything
+  itself. With no command token at all, surviving option-like tokens are
   reported first as `Unknown options` (aws: `s3 --bogus`, and a leading `--`
   is used up by the globals pass, so `s3 -- --profile` is one too), and with
   nothing left at all it is aws's bare `too few arguments` usage error. No
@@ -186,6 +189,33 @@ solidified design is added here.
   (`--exclude -- a b` is the missing value, as on aws) and why the
   ambiguous-abbreviation residual above survives on 3.10 / 3.11.
   `--grants` (`nargs='+'`) needs no marker: its pattern is version-stable.
+- **Negative-number classification.** The other place aws's behaviour comes
+  from its interpreter rather than its code. argparse asks
+  `_negative_number_matcher` whether a dash-led token that matches no option
+  string is a plain value or an option, and Python 3.14 loosened the pattern
+  from a whole-token number (`^-\d+$|^-\d*\.\d+$`) to a prefix (`-\.?\d`,
+  applied with `.match`), so `-1x` and `-.5x` became plain values. Since the
+  shipped distribution bundles 3.14, `cp --storage-class -1x s3://a/k
+  s3://b/k` is aws's `Found invalid choice '-1x'` and
+  `ls --page-size -1x s3://a/` its `invalid literal for int()` at rc 255,
+  where the older pattern would report a missing value.
+  `_ParamValidationArgumentParser` therefore pins 3.14's pattern as a
+  property (argparse's `__init__` assigns the host Python's over any plain
+  attribute), which covers every parser the dispatch builds - the first-pass
+  scan and the globals pass as much as a leaf - just as aws's one interpreter
+  covers its whole `CLIArgParser` family. `_find_command_token` reads the
+  same constant, so the subcommand scan and the parsers never disagree.
+  The effect is not confined to error text: a dash-led value or path shaped
+  like a negative number is now *accepted* where it used to be rejected
+  (`cp --dryrun -2024-report.csv s3://b/k` uploads, matching aws).
+  The boundary is unchanged for the marked options above, which consume a
+  token whatever its class, and for `-x` / `-.x` / `-.` / `--1`, which stay
+  option-like on aws too. One half of argparse's rule is left to the host:
+  the gate that disables the classification once a registered option string
+  itself looks like a negative number is evaluated per container, and the
+  optionals live on plain argument groups. No option string here is
+  digit-led, so the gate is empty everywhere; a test pins that, since a
+  digit-led option would need the gate pinned too.
 
 ## 3. Module layout
 

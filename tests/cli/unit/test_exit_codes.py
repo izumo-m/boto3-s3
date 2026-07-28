@@ -46,6 +46,30 @@ def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
     return exc
 
 
+def _every_built_parser() -> list[argparse.ArgumentParser]:
+    """Every parser the dispatch or a help page builds, subparsers included."""
+    parsers: list[argparse.ArgumentParser] = [
+        cli._shared_globals_parent(),
+        cli._build_stage1_parser(),
+        cli._build_subcommand_error_parser(),
+        cli._build_first_pass_parser(),
+        cli._build_globals_parser(),
+        cli.build_parser(),
+    ]
+    for name in cli._COMMAND_TABLE:
+        command = cli._load_command(name)()
+        parsers.append(cli._build_command_parser(name, command))
+        parsers.append(cli._build_command_parse_parser(name, command))
+    parsers.extend(
+        subparser
+        for parser in list(parsers)
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+        for subparser in action.choices.values()
+    )
+    return parsers
+
+
 # The usage block every parse failure closes with - the subcommand-decision
 # and globals passes and a subcommand's own parse alike. aws's, with its
 # two-level hierarchy collapsed onto our single one.
@@ -836,6 +860,154 @@ class TestCountedOptionMarker:
         action = parser.add_argument("--storage-class")
         with pytest.raises(argparse.ArgumentError):
             parser._match_argument(action, pattern)
+
+
+class TestNegativeNumberClassification:
+    """A dash-led token that opens like a negative number is a plain value.
+
+    Python 3.14 loosened argparse's negative-number matcher from a whole-token
+    number to a prefix (`-1x` and `-.5x` now classify as plain tokens, not as
+    options), and aws's official distribution runs on 3.14, so its parse
+    consumes such a token as the following option's value. The parser pins
+    3.14's pattern on every supported Python; without the pin our 3.10 floor
+    would report the value as missing. Every ``main`` assertion below is the
+    pinned aws-cli's own stderr under this file's mapping; the two structural
+    tests at the end assert no output, pinning where the matcher is installed
+    and the gate that would take it out of play.
+    """
+
+    @pytest.mark.parametrize("option", ["--storage-class", "--acl", "--sse"])
+    @pytest.mark.parametrize("value", ["-1x", "-.5x", "-1x2"])
+    def test_the_token_becomes_the_value_and_the_choice_is_rejected(
+        self, option: str, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["cp", option, value, "s3://a/k", "s3://b/k"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument {option}: Found invalid choice '{value}'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_an_int_option_takes_it_and_fails_the_conversion(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws lets the ValueError out of its own int conversion, so the report
+        # is Python's, unenveloped, at the general-error code.
+        assert cli.main(["ls", "--page-size", "-1x", "s3://a/"]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: invalid literal for int() with base 10: '-1x'\n"
+        )
+
+    @pytest.mark.parametrize("value", ["-x", "-.x", "-.", "--1"])
+    def test_a_token_that_only_looks_dash_led_stays_an_option(
+        self, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The boundary the loosened pattern draws: a digit must follow the
+        # dash (one optional dot aside), so these keep reporting the missing
+        # value on aws too.
+        assert cli.main(["cp", "--storage-class", value, "s3://a/k", "s3://b/k"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --storage-class: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize("value", ["-1", "-1.5", "-.5", "-"])
+    def test_a_whole_number_shaped_token_is_a_value_on_every_python(
+        self, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["cp", "--storage-class", value, "s3://a/k", "s3://b/k"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument --storage-class: Found invalid choice '{value}'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    @pytest.mark.parametrize("value", ["-1", "-1x"])
+    def test_the_subcommand_scan_classifies_it_the_same_way(
+        self, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `_find_command_token` mirrors the parser's classification, so such a
+        # token names the (invalid) subcommand rather than being walked past
+        # as an option - which is what `-x` does in the test below.
+        assert cli.main([value, "s3://a/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument subcommand: Found invalid choice '{value}'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_a_dash_led_non_number_is_skipped_by_the_scan(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The contrast that makes the test above about the classification:
+        # `-x` is option-like, so the scan walks past it and the *next* token
+        # is what names the (invalid) subcommand.
+        assert cli.main(["-x", "s3://a/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 's3://a/'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_it_reaches_a_positional_too(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert cli.main(["cp", "-1x", "s3://b/"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: The user-provided path -1x does not exist.\n"
+        )
+
+    @pytest.mark.parametrize("value", ["-1", "-1x", "-x"])
+    def test_a_marked_filter_option_is_unaffected(
+        self, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `--exclude` consumes A and O alike through the `aws_nargs` hook, so
+        # the classification never decides anything for it: all three shapes
+        # leave `a b` as the paths and fail the same synopsis check.
+        assert cli.main(["sync", "--exclude", value, "a", "b"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
+            "Error: Invalid argument type\n"
+        )
+
+    def test_the_first_pass_parser_takes_it_as_the_profile_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The preliminary --profile / --debug scan is its own parser, so the
+        # pin has to reach it too: aws names the profile it could not find
+        # rather than reporting a missing value.
+        assert cli.main(["--profile", "-1x", "ls", "s3://a/"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: The config profile (-1x) could not be found\n"
+        )
+
+    def test_the_globals_parser_takes_it_as_a_global_value(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # And the top-level globals pass, whose own choice-bearing option
+        # rejects the consumed token the same way a subcommand's does.
+        assert cli.main(["--output", "-1x", "ls", "s3://a/"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --output: Found invalid choice '-1x'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_the_pattern_is_the_pinned_one(self) -> None:
+        assert cli._NEGATIVE_NUMBER_RE.match("-1x")
+        assert not cli._NEGATIVE_NUMBER_RE.match("-x")
+
+    def test_no_option_string_anywhere_disables_the_classification(self) -> None:
+        # argparse only consults the matcher while no registered option string
+        # looks like a negative number itself. That gate is fed by each
+        # container's own matcher - the argument groups' is the host Python's,
+        # not the pin - so it is only moot as long as this holds. A digit-led
+        # option would need the gate pinned too.
+        for parser in _every_built_parser():
+            for action in parser._actions:
+                for option_string in action.option_strings:
+                    assert not cli._NEGATIVE_NUMBER_RE.match(option_string)
+            assert not parser._has_negative_number_optionals
 
 
 class TestPreParseErrorAttribution:

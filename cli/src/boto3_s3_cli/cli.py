@@ -90,10 +90,17 @@ _COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-# argparse's own negative-number shape: a token matching it is classified as a
-# positional (none of our parsers register numeric option strings), so the
-# subcommand scan must not skip it as an option.
-_NEGATIVE_NUMBER_RE = re.compile(r"^-\d+$|^-\d*\.\d+$")
+# Python 3.14's argparse negative-number matcher, verbatim, applied - as
+# argparse applies it - as a prefix match: a dash-led token whose first
+# character(s) look like the start of a negative number is classified as a
+# positional (none of our parsers register numeric option strings), so it
+# reaches an option as a value and the subcommand scan must not skip it as an
+# option. Up to 3.13 the pattern was anchored (`^-\d+$|^-\d*\.\d+$`), which
+# classifies `-1x` as option-like; aws's official distribution bundles 3.14, so
+# pinning 3.14's form here keeps the classification off the host Python
+# version. `_ParamValidationArgumentParser` installs it for argparse itself and
+# `_find_command_token` mirrors it; the two must stay the same pattern.
+_NEGATIVE_NUMBER_RE = re.compile(r"-\.?\d")
 
 # aws-cli's top-level usage block (its argparser.py USAGE + HELP_BLURB),
 # collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws calls
@@ -159,6 +166,38 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
     subcommand and for the leaf parse parsers, and argparse's generated
     one-liner for the preliminary ``--profile`` / ``--debug`` scan.
     """
+
+    @property
+    def _negative_number_matcher(self) -> re.Pattern[str]:
+        """Classify dash-led tokens by Python 3.14's rule on every Python.
+
+        argparse consults this attribute in `_parse_optional` to decide whether
+        a token that matches no option string is option-like or a plain
+        positional, and 3.14 loosened it (`_NEGATIVE_NUMBER_RE`). Since aws
+        runs on 3.14, `--storage-class -1x` is aws's invalid choice, not its
+        missing value, and pinning the pattern reproduces that from our 3.10
+        floor up. A property rather than a plain attribute because argparse's
+        own `__init__` assigns the host Python's matcher over any class
+        attribute; the setter below absorbs that assignment.
+
+        The pin covers the `_parse_optional` classification in every parser
+        the dispatch builds, matching aws, where the one interpreter decides
+        for its whole `CLIArgParser` family alike. argparse's other use of the
+        matcher stays the host Python's: the gate that switches the
+        classification off once a registered option string itself looks like a
+        negative number is evaluated per container, and every optional is
+        registered on a plain argument group. That is moot only because no
+        option string here is digit-led, which test_exit_codes.py pins.
+        """
+        return _NEGATIVE_NUMBER_RE
+
+    # Narrowing argparse's plain attribute to a property is the override this
+    # needs and the one a type checker flags; the getter documents why.
+    @_negative_number_matcher.setter
+    def _negative_number_matcher(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, matcher: re.Pattern[str]
+    ) -> None:
+        """Discard argparse's own assignment; the pinned pattern is the answer."""
 
     def _check_value(self, action: argparse.Action, value: object) -> None:
         """Reject an off-list value with aws's wording, suggestions included.
@@ -253,8 +292,10 @@ def _find_command_token(tokens: list[str]) -> int:
     (``SubCommandArgParser._remove_subcommand``): the first positional-looking
     token names the subcommand, everything else stays in place for the leaf
     parser. Positional-looking follows argparse's classification - not
-    dash-led, a lone ``-``, a negative number, a token with a space, or
-    anything after ``--``.
+    dash-led, a lone ``-``, a negative-number *opening*
+    (``_NEGATIVE_NUMBER_RE``, the same pattern
+    ``_ParamValidationArgumentParser`` pins for argparse itself), a token with
+    a space, or anything after ``--``.
 
     Returns the index of that token, or ``-1`` when nothing positional-looking
     remains.
