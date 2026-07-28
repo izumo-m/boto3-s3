@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -462,21 +463,23 @@ class TestAutoPromptModeResolution:
         assert rc == 0
 
     def test_non_utf8_config_does_not_crash(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The auto-prompt mode resolution runs on every command and reads
-        # ~/.aws/config; a non-UTF-8 file must be read as "off", not crash with an
-        # uncaught UnicodeDecodeError (regression: configparser.read raises it,
-        # and it is not a configparser.Error).
+        # A non-UTF-8 config must not crash the run with an uncaught
+        # UnicodeDecodeError (regression: configparser.read raises it, and it
+        # is not a configparser.Error). The dispatcher's config scan now
+        # rejects the file upstream, the way botocore does, so this pins the
+        # scan's outcome; the resolution's own tolerance for the same input -
+        # which the scan makes unreachable on this path - is pinned directly by
+        # TestScopedConfigReadTolerance below.
         monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         config = tmp_path / "config"
         config.write_bytes(b"[default]\ncli_auto_prompt = caf\xe9\n")  # latin-1, invalid UTF-8
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        # A parse-level usage error (invalid choice, rc 252) still runs the
-        # upstream auto-prompt config read; it must read the non-UTF-8 file as
-        # "off", not raise UnicodeDecodeError. (Using a parse error keeps the
-        # assertion off build_client, which reads the same broken config itself.)
-        assert cli.main(["no-such-command"]) == 252
+        assert cli.main(["no-such-command"]) == 255
+        assert capsys.readouterr().err == (
+            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
+        )
 
     def test_config_file_named_profile_section(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -592,6 +595,54 @@ class TestScopedConfigFileChoice:
     ) -> None:
         self._seed_fallback_config(monkeypatch, tmp_path)
         monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
+        assert resolve._read_scoped_cli_auto_prompt("default") == "on"
+
+
+class TestScopedConfigReadTolerance:
+    """A config this read cannot parse answers "absent", never a traceback.
+
+    `cli._main`'s config scan rejects such a file upstream now, so on the
+    normal dispatch this is defensive - it covers a config rewritten between
+    the two reads, and any direct caller. Exercised directly because that
+    upstream scan makes it unreachable through `main`.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"[[[broken\n", b"[default]\ncli_auto_prompt = caf\xe9\n"],
+        ids=["not-ini", "non-utf8"],
+    )
+    def test_an_unparseable_config_reads_as_absent(
+        self, content: bytes, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The two failures configparser raises: a MissingSectionHeaderError
+        # (a configparser.Error) and a UnicodeDecodeError (which is not one).
+        config = tmp_path / "config"
+        config.write_bytes(content)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        assert resolve._read_scoped_cli_auto_prompt("default") is None
+
+    def test_an_unreadable_config_reads_as_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        config.chmod(0o000)
+        if os.access(config, os.R_OK):  # running as root: the mode is advisory
+            pytest.skip("cannot make a file unreadable for this user")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        try:
+            assert resolve._read_scoped_cli_auto_prompt("default") is None
+        finally:
+            config.chmod(0o644)
+
+    def test_a_readable_config_is_still_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The contrast: the tolerance must not be a blanket "always absent".
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
         assert resolve._read_scoped_cli_auto_prompt("default") == "on"
 
 

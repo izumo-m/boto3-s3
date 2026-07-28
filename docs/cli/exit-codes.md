@@ -81,6 +81,15 @@ number, or an unexpected internal error. `aws` documents 255 as a catch-all
 whose specific cases may narrow over time; treat it the same way and do not
 branch on it to identify a particular failure.
 
+A config file that cannot be parsed is 255 as well, and it outranks almost
+everything else: `~/.aws/config` (or `AWS_CONFIG_FILE`) and `~/.aws/credentials`
+(or `AWS_SHARED_CREDENTIALS_FILE`) are read before the command line is, so a
+broken one is reported instead of whatever else the command would have done —
+`help` and `--version` included. The one thing read earlier is `--profile` /
+`--debug`, so a malformed one of those (`--profile` with no value, `--debug=1`)
+is still the 252 you would get with a working config. `aws` behaves the same way
+on both counts.
+
 ## 2. When more than one thing is wrong
 
 **Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`

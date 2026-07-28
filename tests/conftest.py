@@ -99,7 +99,12 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     monkeypatch.setenv(
         "AWS_SHARED_CREDENTIALS_FILE", str(_classic_aws_config.parent / "credentials-absent")
     )
-    for leak in ("AWS_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
+    # AWS_DEFAULT_PROFILE leaks as surely as AWS_PROFILE: it is the second link
+    # of the same chain, so a developer exporting it would name a profile the
+    # fixture config does not declare - which silently strips the
+    # ParamValidation envelope off every CLI error report (design/cli.md
+    # section 6) as well as steering the session.
+    for leak in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
         monkeypatch.delenv(leak, raising=False)
     # A prior test's boto3.client() / session-less S3() installs a
     # process-global default session built under THAT test's env, and

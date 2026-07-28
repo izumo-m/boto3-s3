@@ -20,8 +20,12 @@ code**. A mismatch in any of those is a bug worth reporting.
 `--debug` traces and help pages differ from `aws` and change between
 releases (the error prefix is `boto3-s3:`, not `aws:`). One exception is worth
 knowing: parameter-validation errors do use aws's envelope,
-`An error occurred (ParamValidation): <message>`, and `--cli-error-format` does
-not change it.
+`An error occurred (ParamValidation): <message>`. `aws` drops that envelope when
+the profile you named does not exist in any config file, keeping the exit code,
+and so does this command. The one place they part: on `aws`, setting
+`--cli-error-format` or `AWS_CLI_ERROR_FORMAT` to `enhanced` puts the envelope
+back in that situation, while here those two are accepted and ignored, so the
+envelope stays dropped.
 
 Ordering is not reproducible either: with concurrent transfers, result lines —
 and `delete:` lines against transfer lines — interleave freely, on either tool.

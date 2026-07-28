@@ -38,6 +38,23 @@ solidified design is added here.
   it (aws installs its silencer on the driver, which this precedes). Only the
   failure is reproduced: the values themselves come from the globals pass
   below, which parses them again.
+- Next comes the **config-file scan** (`configfiles.scan`, stdlib only -
+  `configparser` plus the `shlex` split botocore names its `[profile "..."]`
+  sections with; the informational exits must not import the SDK,
+  [`imports.md`](./imports.md)). aws builds its botocore session immediately
+  after the preliminary scan and hands the whole merged config to
+  `load_plugins`, so a file that is not valid INI settles the run right
+  there: `Unable to parse config file: <path>` at rc 255 (botocore's
+  `ConfigParseError` through aws's general handler), ahead of the auto-prompt
+  rejection, `--version`, the help token and every parse below. Both of
+  botocore's files are read in its order - the config file, then the shared
+  credentials file - and its rules apply: the path must name a file (a
+  directory or a missing path is simply "no config file"), `configparser`
+  must accept it (a non-UTF-8 byte counts as a parse failure), and an
+  indented `key = value` block must split on `=`. The same scan collects the
+  merged **profile map** (`[default]` / `[profile <name>]` in the config
+  file, every section of the credentials file), which section 6 uses to
+  decide whether a report still carries its envelope.
 - `_dispatch` opens with the aws-shaped **top-level globals pass**: a
   globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
   that both *consumes* the globals - its remainder is the only token stream
@@ -176,6 +193,7 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
+| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255 and the profile map the error rendering consults (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` and the auto-prompt resolution |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 5) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8) |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
@@ -937,7 +955,7 @@ reviewed with it.
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4) | `CONFIGURATION_ERROR_RC` |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file caught by the pre-dispatch scan (section 1), and any otherwise-uncaught exception via `_dispatch`'s backstop), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
 The mapping is `cli.exit_code_for`. It prioritizes "**whether the server was
 reached** (whether it derives from `ClientError`)" over the library's exception
@@ -956,6 +974,35 @@ failures, unknown options, plain `ValidationError`, and the auto-prompt flag
 conflict. The program-name prefix remains outside the parity target, and
 alternate `--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
+
+**The envelope disappears when the run names a profile no config file
+declares**, and the exit code does not change. aws renders it through its
+session: the handler asks the session for `cli_error_format`, the scoped-config
+read behind it raises botocore's `ProfileNotFound`, and the renderer's blanket
+catch turns that into "no structured render", falling back to the bare
+`<prog>: [ERROR]: <message>` while still returning its own rc. `_write_error`
+reproduces it from the profile map the section-1 config scan collected, and the
+message it degrades is unchanged - the usage block, difflib's spelling
+suggestions and the missing-subcommand report's own embedded `[ERROR]` line
+(which is why that one renders as two prefixed lines either way) all survive.
+**When** it applies follows aws's session, not the option: botocore reads
+`AWS_PROFILE` / `AWS_DEFAULT_PROFILE` while the session is being built, so an
+undeclared profile named there degrades everything `_dispatch` reports - the
+top-level globals parse and the three resolutions included - whereas
+`--profile` is bound by aws's `_handle_top_level_args`, after that parse and
+after the event those resolutions hang off, so it degrades only the command
+layers below (measured both ways). Errors raised before `_dispatch` - the
+preliminary scan, the auto-prompt flag conflict - never degrade, matching aws's
+entry-point handler chain, which is constructed without a session. A profile is
+"declared" if the merged map has it; `--profile ""` is ignored under aws's
+truthy guard, while an empty env value names the empty profile and is
+undeclared. One residual, of the `--cli-error-format` family already excluded
+above: aws skips the session read entirely whenever the format is set outside
+the config file - by the option, or by `AWS_CLI_ERROR_FORMAT`, which its chain
+resolves ahead of the scoped-config provider - so an undeclared profile
+combined with either `--cli-error-format enhanced` or
+`AWS_CLI_ERROR_FORMAT=enhanced` keeps the envelope there and loses it here
+(both measured).
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start

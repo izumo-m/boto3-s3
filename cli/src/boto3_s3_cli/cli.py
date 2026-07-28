@@ -21,7 +21,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import globalargs
+from boto3_s3_cli import configfiles, globalargs
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -117,15 +117,30 @@ _TOO_FEW_ARGUMENTS = (
 )
 
 
+# This run's snapshot of aws's config files, and whether an rc-252 report can
+# still carry the enhanced envelope. aws renders that envelope through its
+# session - the handler asks it for `cli_error_format` - so a session bound to
+# a profile no config file declares raises `ProfileNotFound` inside the
+# renderer, which swallows the failure and writes the bare report instead; the
+# rc is decided separately and stays 252. `_main` takes the snapshot once (like
+# the session caching `full_config`) and resets the flag, `_dispatch` re-decides
+# it at the two points where aws's session learns the profile. `_main` is the
+# only route into `_dispatch`, so the snapshot is never consulted stale.
+_config_scan = configfiles.ConfigScan(None, frozenset())
+_enhanced_envelope = True
+
+
 def _write_error(message: object, *, rc: int | None = None) -> None:
     """Write one CLI error, adding the enhanced envelope required by `rc`.
 
     The message is stripped first, like aws's error formatter: the multi-line
     reports assembled below end with the newline their usage block carries, and
-    it must not surface as a trailing blank line.
+    it must not surface as a trailing blank line. A message that carries its own
+    embedded `[ERROR]` line (the missing-subcommand report) therefore renders as
+    two prefixed lines, enveloped or not, exactly as aws's does.
     """
     detail = str(message).strip()
-    if rc == _PARAM_VALIDATION_ERROR_RC:
+    if rc == _PARAM_VALIDATION_ERROR_RC and _enhanced_envelope:
         detail = f"An error occurred (ParamValidation): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
 
@@ -584,6 +599,11 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
     """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
+    global _config_scan, _enhanced_envelope
+    # Nothing has built a session yet, so every report below the preliminary
+    # scan is rendered the enhanced way (aws's entry-point handler chain is
+    # constructed without one).
+    _enhanced_envelope = True
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -599,6 +619,17 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
         _build_first_pass_parser().parse_known_args(raw)
     except SystemExit:
         return _PARAM_VALIDATION_ERROR_RC
+    # aws reads the whole merged config next, while it is still constructing the
+    # driver, so a file that is not valid INI settles the run here - ahead of
+    # the auto-prompt rejection, --version, the help token and every parse below
+    # (all measured), and with botocore's own wording through aws's general
+    # handler (255). Only the preliminary scan above outranks it.
+    _config_scan = configfiles.scan()
+    if _config_scan.unparseable is not None:
+        _write_error(
+            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
+        )
+        return _GENERAL_ERROR_RC
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(
             "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
@@ -696,6 +727,14 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     parses (and only the parses - they are instant, no live output to lose) are
     wrapped to discard it; the command itself still runs with stderr live.
     """
+    global _enhanced_envelope
+    # aws's CLIDriver.main: from here down its session-backed handler chain does
+    # the rendering, and that session already read the profile env vars while it
+    # was being constructed. So a profile named there and declared nowhere costs
+    # every report below its envelope - the top-level parse and the resolutions
+    # right after it included, which a bad --profile (bound further down) leaves
+    # alone.
+    _enhanced_envelope = _config_scan.declares(configfiles.env_profile())
     silencer = (
         contextlib.redirect_stderr(io.StringIO())
         if suppress_usage_errors
@@ -760,6 +799,14 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
             _write_error(exc, rc=rc)
         return rc
+    # aws's _handle_top_level_args binds --profile onto the session here, after
+    # emitting the event the three resolutions above hang off. The ordering is
+    # observable: a bad --profile leaves those errors and the top-level parse
+    # enhanced and only degrades the command layers below, where a bad
+    # AWS_PROFILE degrades all of them (measured). The truthy guard is aws's, so
+    # --profile "" leaves the env chain in force, like `resolve_profile`.
+    if head.profile:
+        _enhanced_envelope = _config_scan.declares(head.profile)
     if tokens == ["help"]:
         _build_stage1_parser().print_help()
         return 0

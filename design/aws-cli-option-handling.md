@@ -293,6 +293,14 @@ and auto-prompt flag conflicts use
 output of aws-cli; selecting another `--cli-error-format` does not alter
 `boto3-s3-cli` output, as described in section 2.1.
 
+aws drops that envelope - keeping the exit code - when the run names a profile
+no config file declares, because it renders the envelope through the session
+that fails to resolve. That degradation is reproduced
+([`cli.md`](./cli.md) section 6). Its one gap follows from the paragraph above:
+aws consults neither the session nor the config once `--cli-error-format` or
+`AWS_CLI_ERROR_FORMAT` sets the format, so an undeclared profile plus an
+explicit `enhanced` keeps the envelope on aws and loses it here.
+
 Two deliberate output-pipeline deviations sit under this umbrella
 (`progress.py`; the rendering thread itself mirrors aws-cli's
 `ResultProcessor`):

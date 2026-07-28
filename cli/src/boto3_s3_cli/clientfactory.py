@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
+from boto3_s3_cli import configfiles
 
 if TYPE_CHECKING:
     from boto3.session import Session as Boto3Session
@@ -57,8 +57,7 @@ def _pin_python_sigv4_signers() -> None:
 def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
-    ``--profile`` (truthy only) > the first env var of
-    ``PROFILE_ENV_VARS`` that is *present* > ``None``
+    ``--profile`` (truthy only) > ``configfiles.env_profile`` > ``None``
     (boto3 then falls back to the ``default`` profile). The ``--profile`` guard is
     aws-cli's truthy test (its ``_handle_top_level_args`` binds the profile only
     ``if getattr(args, 'profile', False)``), so an empty ``--profile ""`` is
@@ -71,10 +70,7 @@ def resolve_profile(args: argparse.Namespace) -> str | None:
     """
     if args.profile:
         return args.profile
-    for name in PROFILE_ENV_VARS:
-        if name in os.environ:
-            return os.environ[name]
-    return None
+    return configfiles.env_profile()
 
 
 def validate_endpoint_url(args: argparse.Namespace) -> None:
