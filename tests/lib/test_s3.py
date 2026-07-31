@@ -569,6 +569,22 @@ class TestMaterializeCrtEngine:
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
         assert seen == [config]
 
+    def test_a_classic_selection_never_reads_the_crt_only_boto3_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Floor boto3 predates the CRT engine and carries no
+        # InvalidCrtTransferConfigError. Reading it ahead of the selection gate
+        # made this an ImportError on every classic run there - and every
+        # transfer command calls it, so the floor had no working transfer at
+        # all. Deleting the name is that floor, seen from the current SDK.
+        import boto3.exceptions
+
+        monkeypatch.delattr(boto3.exceptions, "InvalidCrtTransferConfigError", raising=False)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="classic")
+        # The no-op it is on the classic lane: no raise, nothing constructed.
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+
 
 class TestModuleLevelConvenienceSignatures:
     """The module-level wrappers introspect as their method minus ``self``

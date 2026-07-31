@@ -810,6 +810,12 @@ class S3:
         client reuses it.
         """
         config = transfer_config if transfer_config is not None else self._transfer_config
+        if not crtsupport.selects_crt(config):
+            # The no-op a classic selection makes of the call below, taken here
+            # so the CRT-only boto3 name is imported on the CRT lane alone -
+            # floor boto3 predates the CRT engine and carries no such name,
+            # and every transfer command owing aws parity calls this.
+            return
         # Deferred: absent on floor boto3 (pre-CRT), like the transfer engine's.
         from boto3.exceptions import InvalidCrtTransferConfigError
 
