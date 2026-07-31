@@ -3,7 +3,7 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-01
 
 - `-h` / `--help` removed to match aws-cli — use `help`; they now fail with aws's `Unknown options` error. Help pages describe every option instead of listing bare names.
 - Argument parsing restructured to aws-cli's shape: global options are consumed first wherever they sit (abbreviations, values interleaved with command options, `--` separators, options ahead of the subcommand, and `help` wrapped in globals now all parse like aws), `--exclude`/`--include` and `mb --tags` accept dash-led values like aws, tokens shaped like a negative number (`-1x`, `-2024-report.csv`) are accepted as option values and paths everywhere like aws instead of being rejected, and usage and error text now matches aws-cli's aside from the program name, including how aws reports errors when the named profile or a config file is broken and when credentials or a region cannot be resolved.
@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.1...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.7.0...HEAD
+[0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.1...boto3-s3-cli-v0.7.0
 [0.6.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.0...boto3-s3-cli-v0.6.1
 [0.6.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.5.0...boto3-s3-cli-v0.6.0
 [0.5.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.4.0...boto3-s3-cli-v0.5.0
