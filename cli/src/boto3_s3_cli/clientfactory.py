@@ -218,6 +218,14 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     as aws, rc 255). Only the CLI corrects this; the library
     (``S3.client``'s ``boto3.client`` fallback) keeps stock botocore order on
     purpose - the same library=boto3 / CLI=aws split as the profile chain.
+
+    A ``BadIMDSRequestError`` reads as no region. aws-cli carries its own copy
+    of botocore's region fetcher for exactly one added catch: botocore's
+    swallows only the retries-exceeded failure, so a metadata service that
+    rejects the token request outright - anything answering at the IMDS address
+    that is not EC2's service - escapes as that error and fails the whole
+    invocation (rc 255) where aws logs it and walks on with an unresolved
+    region.
     """
     if explicit is not None:
         return explicit
@@ -227,7 +235,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         EnvironmentProvider,
         ScopedConfigProvider,
     )
-    from botocore.utils import IMDSRegionProvider
+    from botocore.utils import BadIMDSRequestError, IMDSRegionProvider
 
     # botocore-stubs types ChainProvider's `providers` as Sequence[BaseProvider],
     # but IMDSRegionProvider (botocore.utils) is not declared a BaseProvider there
@@ -239,7 +247,12 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         ScopedConfigProvider(config_var_name="region", session=session),
         IMDSRegionProvider(session),
     ]
-    return ChainProvider(providers=providers).provide()
+    try:
+        return ChainProvider(providers=providers).provide()
+    except BadIMDSRequestError:
+        # The IMDS probe is the chain's last link, so its failure and an
+        # exhausted chain are the same answer.
+        return None
 
 
 def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession) -> bool | str:

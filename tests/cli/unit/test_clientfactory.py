@@ -293,6 +293,34 @@ class TestBuildClient:
         client = clientfactory.build_client(_parse([]))
         assert client.meta.region_name == "ap-southeast-2"
 
+    def test_a_rejected_imds_probe_reads_as_no_region(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore's region fetcher swallows only the retries-exceeded failure,
+        # so a service answering the IMDS address that is not EC2's - it
+        # rejects the token request outright - raises BadIMDSRequestError out
+        # of the chain. aws-cli carries its own fetcher for exactly that catch,
+        # so on such a host aws resolves no region and runs on; escaping here
+        # would instead fail every invocation at the client build (rc 255).
+        import botocore.awsrequest
+        import botocore.utils
+
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        token_request = botocore.awsrequest.AWSRequest(
+            method="PUT", url="http://169.254.169.254/latest/api/token"
+        )
+
+        class _RejectingIMDS:
+            def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+            def provide(self) -> str:
+                raise botocore.utils.BadIMDSRequestError(token_request)
+
+        monkeypatch.setattr(botocore.utils, "IMDSRegionProvider", _RejectingIMDS)
+        # The unresolved-region client, exactly as with no service answering.
+        assert clientfactory.build_client(_parse([])).meta.region_name == "aws-global"
+
     def test_us_east_1_resolves_regional_endpoint(self) -> None:
         # aws v2 resolves us-east-1 to the regional endpoint, not the legacy
         # global one (aws-cli functional-test expectations); build_client pins

@@ -1675,6 +1675,33 @@ class TestParseToValidationOrder:
         monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
         assert cli.main(["cp", "a", "b"]) == 252
 
+    def test_local_local_stays_252_when_the_imds_probe_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The same regionless environment, on a host where something other
+        # than EC2's metadata service answers the IMDS address and rejects the
+        # token request. aws logs that and runs on with no region, so the usage
+        # error still wins; before the chain swallowed it the escaping
+        # BadIMDSRequestError made every such host's invocation rc 255.
+        import botocore.awsrequest
+        import botocore.utils
+
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+        token_request = botocore.awsrequest.AWSRequest(
+            method="PUT", url="http://169.254.169.254/latest/api/token"
+        )
+
+        class _RejectingIMDS:
+            def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+            def provide(self) -> str:
+                raise botocore.utils.BadIMDSRequestError(token_request)
+
+        monkeypatch.setattr(botocore.utils, "IMDSRegionProvider", _RejectingIMDS)
+        assert cli.main(["cp", "a", "b"]) == 252
+
 
 class TestRecursiveDestDirCreation:
     """aws pre-creates the s3local dir_op destination during validation
