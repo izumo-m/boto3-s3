@@ -2,8 +2,8 @@
 
 The rc shape (design/cli.md section 6): the local-local pair, any ``-`` path,
 the checksum/path-format pairing, and an
-S3 Express directory bucket on either side are all 252 before any client
-factory runs; a missing local source is 255; ``--recursive`` and
+S3 Express directory bucket on either side are all 252; a missing local
+source is 255; ``--recursive`` and
 ``--expected-size`` do not exist on sync (Unknown options, 252). The output
 shapes pin the delete line (one endpoint, no ``to`` clause), its dryrun and
 ``--quiet`` forms, and the both-roots filter compilation that shields
@@ -23,7 +23,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, listing
-from tests.utils.harness import unused_ctx
+from tests.utils.harness import built_client_ctx, unused_ctx
 from tests.utils.recorder import make_recording_client, ops
 
 _SERIAL = TransferConfig(use_threads=False)
@@ -35,7 +35,7 @@ def _ctx(client: Any) -> Context:
 
 class TestUsageErrors:
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["sync", "a", "b"], ctx=unused_ctx())
+        rc = cli.main(["sync", "a", "b"], ctx=built_client_ctx())
         assert rc == 252
         err = capsys.readouterr().err
         assert "usage: boto3-s3 sync" in err
@@ -45,7 +45,7 @@ class TestUsageErrors:
     def test_any_stream_path_is_252(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(argv, ctx=unused_ctx())
+        rc = cli.main(argv, ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Streaming currently is only compatible with non-recursive cp commands"
@@ -55,7 +55,7 @@ class TestUsageErrors:
     def test_two_streams_hit_the_path_type_error_first(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["sync", "-", "-"], ctx=unused_ctx())
+        rc = cli.main(["sync", "-", "-"], ctx=built_client_ctx())
         assert rc == 252
         assert "Error: Invalid argument type" in capsys.readouterr().err
 
@@ -64,7 +64,7 @@ class TestUsageErrors:
     ) -> None:
         rc = cli.main(
             ["sync", "s3://b/p", str(tmp_path), "--checksum-algorithm", "CRC32"],
-            ctx=unused_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         err = capsys.readouterr().err
@@ -77,7 +77,7 @@ class TestUsageErrors:
     ) -> None:
         rc = cli.main(
             ["sync", str(tmp_path), "s3://b/p", "--checksum-mode", "ENABLED"],
-            ctx=unused_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert "Expected checksum-mode parameter" in capsys.readouterr().err
@@ -101,7 +101,7 @@ class TestUsageErrors:
         # during validation, before the directory-bucket rejection - keep the
         # "dl" byproduct out of the repo working tree.
         monkeypatch.chdir(tmp_path)
-        rc = cli.main(argv, ctx=unused_ctx())
+        rc = cli.main(argv, ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot use sync command with a directory bucket." in capsys.readouterr().err
 
@@ -109,17 +109,17 @@ class TestUsageErrors:
     def test_cp_only_options_are_unknown_here(
         self, flag: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["sync", "s3://b/p", "s3://b/q", *flag], ctx=unused_ctx())
+        rc = cli.main(["sync", "s3://b/p", "s3://b/q", *flag], ctx=built_client_ctx())
         assert rc == 252
         assert "Unknown options" in capsys.readouterr().err
 
 
 class TestGeneralErrors:
-    def test_missing_local_source_is_255_before_the_factory(
+    def test_missing_local_source_is_255(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = tmp_path / "nope"
-        rc = cli.main(["sync", str(missing), "s3://b/p"], ctx=unused_ctx())
+        rc = cli.main(["sync", str(missing), "s3://b/p"], ctx=built_client_ctx())
         assert rc == 255
         assert f"The user-provided path {missing} does not exist." in capsys.readouterr().err
 
@@ -128,15 +128,15 @@ class TestGeneralErrors:
         assert rc == 255
         assert "invalid literal" in capsys.readouterr().err
 
-    def test_dest_dir_creation_failure_is_255_before_the_factory(self, tmp_path: Path) -> None:
+    def test_dest_dir_creation_failure_is_255(self, tmp_path: Path) -> None:
         # aws creates the s3local dest dir during validation (before run); an
         # OSError there is rc 255, not the transfer pipeline's rc 1. The dest's
-        # parent is a regular file, so makedirs raises NotADirectoryError before
-        # any client is built.
+        # parent is a regular file, so makedirs raises NotADirectoryError with
+        # the built client still untouched.
         afile = tmp_path / "afile"
         afile.write_bytes(b"x")
         dest = afile / "sub"
-        rc = cli.main(["sync", "s3://b/pre", str(dest)], ctx=unused_ctx())
+        rc = cli.main(["sync", "s3://b/pre", str(dest)], ctx=built_client_ctx())
         assert rc == 255
 
     def test_dest_dir_creation_beats_sse_c_misuse(self, tmp_path: Path) -> None:
@@ -145,7 +145,9 @@ class TestGeneralErrors:
         afile = tmp_path / "afile"
         afile.write_bytes(b"x")
         dest = afile / "sub"
-        rc = cli.main(["sync", "s3://b/pre", str(dest), "--sse-c", "AES256"], ctx=unused_ctx())
+        rc = cli.main(
+            ["sync", "s3://b/pre", str(dest), "--sse-c", "AES256"], ctx=built_client_ctx()
+        )
         assert rc == 255
 
 

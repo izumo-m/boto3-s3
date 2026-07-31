@@ -669,6 +669,7 @@ class Transferrer:
         capture_response: bool = False,
         crt_endpoint: str | None = None,
         crt_allow_absent_credentials: bool = False,
+        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
@@ -757,6 +758,10 @@ class Transferrer:
         # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
         # boto3's classic fallback, which every library caller keeps.
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
+        # off the client, boto3's source); a declared None is what reaches
+        # awscrt's own region assertion, as aws-cli's region chain does.
+        self._crt_region: crtsupport.CrtRegion = crt_region
         # The caller's boto3 session (S3.session), threaded to the CRT engine
         # so its request serializer reuses the warm session instead of paying
         # a fresh one per process (crtsupport._botocore_session); None = the
@@ -1278,9 +1283,9 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_absent_credentials`` is the one caller-declared posture
-        departure from boto3's rules available here, and applies only when the
-        caller asks for it.
+        ``crt_allow_absent_credentials`` and ``crt_region`` are the
+        caller-declared posture departures from boto3's rules available here,
+        and apply only when the caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1291,24 +1296,13 @@ class Transferrer:
             # flag is library-only (no aws-cli equivalent), so no parity impact.
             logger.debug("transfer engine: classic forced by capture_response")
             return None
-        preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
-        if str(preferred).lower() == "classic":
-            return None
-        if not crtsupport.should_use_crt(str(preferred)):
+        if not crtsupport.selects_crt(self._transfer_config):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
-        # The explicit endpoint pin belongs to the client built from it: the
-        # run's client is the route-selected one (an S3Storage may carry its
-        # own), and pinning the S3-level endpoint onto a storage-supplied
-        # client would dial one endpoint with another's credentials and
-        # region (the classic lane just uses that client). botocore stores
-        # an explicit endpoint_url verbatim on meta, so equality identifies
-        # a client this S3 built; any other client falls back to the
-        # host heuristic on its *own* endpoint (`_derive_endpoint`).
-        endpoint = self._crt_endpoint
-        if endpoint is not None and self._client.meta.endpoint_url != endpoint:
-            endpoint = None
+        # The run's client is the route-selected one (an S3Storage may carry its
+        # own), so the S3-level endpoint pin only applies to the client it built.
+        endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
         # Deferred: absent on floor boto3 (pre-CRT); reached only on the CRT lane.
         from boto3.exceptions import InvalidCrtTransferConfigError
 
@@ -1319,6 +1313,7 @@ class Transferrer:
                 endpoint=endpoint,
                 session=self._session,
                 allow_absent_credentials=self._crt_allow_absent_credentials,
+                region=self._crt_region,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig

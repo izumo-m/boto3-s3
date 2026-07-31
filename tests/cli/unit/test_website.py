@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, unused_ctx
+from tests.utils.harness import built_client_ctx, client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -277,6 +277,6 @@ class TestWebsiteParamfileAndQuery:
         # through the general handler (measured).
         ref = tmp_path / "empty.txt"
         ref.write_text("")
-        rc = cli.main(["website", f"file://{ref}"], ctx=unused_ctx())
+        rc = cli.main(["website", f"file://{ref}"], ctx=built_client_ctx())
         assert rc == 255
         assert "string index out of range" in capsys.readouterr().err

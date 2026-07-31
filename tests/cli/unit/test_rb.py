@@ -4,7 +4,9 @@ The rb exit-code shape (aws-cli RbCommand): usage errors - a non-s3 path, a
 key part, rejected ARN forms - are 252; a ``--force`` whose inner ``rm
 --recursive`` fails is rc **255** (aws raises RuntimeError into the general
 handler) without attempting the bucket delete; everything after delete_bucket
-starts is rc 1 with one ``remove_bucket failed:`` line.
+starts is rc 1 with one ``remove_bucket failed:`` line. The wrapping is by
+return code only: an exception out of the inner rm - its own rc-255 report -
+escapes unwrapped, exactly as aws's does.
 """
 
 from __future__ import annotations
@@ -193,6 +195,28 @@ class TestForce:
         assert (
             "boto3-s3: [ERROR]: remove_bucket failed: Unable to delete all objects in the "
             "bucket, bucket will not be deleted." in result.stderr
+        )
+        assert calls == []
+
+    def test_an_inner_rm_255_escapes_unwrapped(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's RbCommand._force wraps a nonzero *return code* in its
+        # RuntimeError; an exception out of the inner rm - its own rc-255
+        # report - propagates to the outer handler untouched, so
+        # `remove_bucket failed:` never appears. Measured on the pinned aws-cli
+        # with an invalid [s3] value, which the inner rm now reads like aws's.
+        config = tmp_path / "config"
+        config.write_text(
+            "[default]\nregion = us-east-1\ns3 =\n  preferred_transfer_client = bogus\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        client, calls = make_recording_client([])
+        result = run_cli_in_process(["rb", "s3://b", "--force"], ctx=client_ctx(client))
+        assert result.rc == 255
+        assert result.stderr == (
+            'boto3-s3: [ERROR]: Invalid value: "bogus" for configuration option: '
+            '"preferred_transfer_client". Supported values are: auto, classic, crt\n'
         )
         assert calls == []
 

@@ -528,6 +528,118 @@ class TestFioOptions:
         }
 
 
+class TestCrtRegionPosture:
+    """Where the CRT client's region comes from (design/crt.md section 6).
+
+    boto3 reads it off the built client; aws-cli resolves its own region chain,
+    which yields ``None`` where botocore invents ``aws-global`` - and ``None``
+    is what awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
+    value is the caller's declaration and rides verbatim.
+    """
+
+    def test_the_default_reads_the_clients_region(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(region="eu-west-1"), None)  # pyright: ignore[reportArgumentType]
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["region"] == "eu-west-1"
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["region_name"] == "eu-west-1"
+
+    def test_a_declared_region_overrides_the_clients(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
+            None,
+            region="ap-northeast-1",
+        )
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["region"] == "ap-northeast-1"
+
+    def test_a_declared_absent_region_reaches_the_crt_factory(self, stubs: CrtStubs) -> None:
+        # The whole point: botocore handed this client `aws-global`, but the
+        # caller's chain resolved nothing, and None is what the CRT factory
+        # must see (where the real awscrt asserts).
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
+            None,
+            region=None,
+        )
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["region"] is None
+
+    def test_the_singleton_pin_compares_the_declared_value(self, stubs: CrtStubs) -> None:
+        # Two clients botocore resolved identically, declaring different
+        # regions: the second must not ride the first one's CRT client.
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
+            None,
+            region="us-east-1",
+        )
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
+                None,
+                region="us-west-2",
+            )
+            is None
+        )
+
+    def test_the_same_declaration_reuses_the_singleton(self, stubs: CrtStubs) -> None:
+        for _ in range(2):
+            assert crtsupport.create_crt_transfer_manager(
+                FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
+                None,
+                region=None,
+            )
+        assert len(stubs.create_kwargs) == 1
+
+
+class TestMaterializeCrtEngine:
+    """The eager-construction seam ``rm`` uses: build the engine, use nothing."""
+
+    def test_explicit_crt_builds_the_client(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        set_optimized(monkeypatch, False)  # the host must not decide this one
+        config = TransferConfig(preferred_transfer_client="crt")
+        crtsupport.materialize_crt_engine(FakeClient(), config, region=None)  # pyright: ignore[reportArgumentType]
+        assert stubs.lock_names == ["boto3-s3"]
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["region"] is None
+
+    @pytest.mark.parametrize("preferred", ["classic", "auto"])
+    def test_a_classic_selection_builds_nothing(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch, preferred: str
+    ) -> None:
+        # 'auto' resolves to classic on a host the CRT is not tuned for.
+        set_optimized(monkeypatch, False)
+        config = TransferConfig(preferred_transfer_client=preferred)
+        crtsupport.materialize_crt_engine(FakeClient(), config)  # pyright: ignore[reportArgumentType]
+        assert stubs.create_kwargs == []
+        assert stubs.lock_names == []
+
+    def test_no_config_at_all_is_the_auto_default(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        set_optimized(monkeypatch, False)
+        crtsupport.materialize_crt_engine(FakeClient(), None)  # pyright: ignore[reportArgumentType]
+        assert stubs.create_kwargs == []
+
+
+class TestCallerEndpoint:
+    """The explicit-endpoint pin belongs to the client the endpoint produced."""
+
+    def test_the_matching_client_keeps_it(self) -> None:
+        vpce = "https://bucket.vpce-0abc.s3.us-east-1.vpce.amazonaws.com"
+        client = FakeClient(endpoint=vpce)
+        assert crtsupport.caller_endpoint(client, vpce) == vpce  # pyright: ignore[reportArgumentType]
+
+    def test_another_client_drops_it(self) -> None:
+        client = FakeClient(endpoint=AWS_ENDPOINT)
+        assert crtsupport.caller_endpoint(client, "https://other.example.com") is None  # pyright: ignore[reportArgumentType]
+
+    def test_no_explicit_endpoint_stays_none(self) -> None:
+        assert crtsupport.caller_endpoint(FakeClient(), None) is None  # pyright: ignore[reportArgumentType]
+
+
 class TestBotocoreSession:
     """`_botocore_session` preference: caller's session, boto3 default, fresh.
 

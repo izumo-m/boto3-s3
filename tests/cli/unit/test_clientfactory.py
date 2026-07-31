@@ -69,6 +69,87 @@ class TestBuildClient:
         s3 = clientfactory.build_s3(_parse([]))
         assert s3._crt_allow_absent_credentials is True  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.parametrize(
+        ("argv", "env", "expected"),
+        [
+            ([], {"AWS_REGION": "eu-west-1"}, "eu-west-1"),
+            (["--region", "ap-northeast-1"], {"AWS_REGION": "eu-west-1"}, "ap-northeast-1"),
+            ([], {}, None),
+        ],
+        ids=["env", "explicit-wins", "nothing-resolves"],
+    )
+    def test_build_s3_declares_aws_clis_resolved_region_for_the_crt_engine(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        env: dict[str, str],
+        expected: str | None,
+    ) -> None:
+        # aws-cli resolves the CRT region from its own region chain, so an
+        # environment that resolves nothing declares None - where botocore
+        # hands the *client* the `aws-global` pseudo-region and the CRT would
+        # never see the absence (design/crt.md section 6).
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        s3 = clientfactory.build_s3(_parse(argv))
+        assert s3._crt_region == expected  # pyright: ignore[reportPrivateUsage]
+        if expected is None:
+            # The contrast that makes the declaration necessary at all.
+            assert s3.client().meta.region_name == "aws-global"
+
+    def test_the_region_chain_is_walked_once_per_invocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The chain's last link is the EC2 IMDS probe, which on a host with no
+        # region configured and no metadata service answering costs seconds -
+        # so walking it once per client instead of once per invocation was
+        # measurably slower than aws. `build_s3` resolves it and threads the
+        # answer into every client it hands out; the answer cannot change
+        # mid-invocation, so this is a pure saving.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        real_resolve = clientfactory._resolve_region  # pyright: ignore[reportPrivateUsage]
+        walks: list[str | None] = []
+
+        def counting_resolve(explicit: str | None, session: Any) -> Any:
+            resolved = real_resolve(explicit, session)
+            walks.append(resolved)
+            return resolved
+
+        monkeypatch.setattr(clientfactory, "_resolve_region", counting_resolve)
+        s3 = clientfactory.build_s3(_parse([]))
+        first, second = s3.client(), s3.client()
+        assert walks == [None]  # the one walk, and it resolved nothing
+        # Threading it changes no outcome: both clients land where the chain
+        # said, which for an unresolved region is botocore's `aws-global`.
+        assert first.meta.region_name == second.meta.region_name == "aws-global"
+
+    def test_an_explicitly_threaded_region_reaches_the_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The threading seam itself. A supplied region wins; a supplied None -
+        # the chain's own answer when nothing resolves, which no `args.region`
+        # can express - must land exactly where the unthreaded call lands,
+        # never send the client back through the chain.
+        args = _parse([])
+        assert clientfactory.build_client(args, region="sa-east-1").meta.region_name == "sa-east-1"
+        assert (
+            clientfactory.build_client(args, region=None).meta.region_name
+            == clientfactory.build_client(args).meta.region_name
+        )
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert clientfactory.build_client(args, region=None).meta.region_name == "aws-global"
+
     def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
         # Every CLI-built session registers the library's fast_parse_timestamp
         # on its response-parser factory before any client exists; listing

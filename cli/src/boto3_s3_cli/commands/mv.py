@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import TYPE_CHECKING
 
 # Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch) -
 # or up front when auto-prompt builds the full command model.
@@ -20,9 +19,6 @@ from boto3_s3 import (
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
-
-if TYPE_CHECKING:
-    from mypy_boto3_s3 import S3Client
 
 _VALIDATE_ENV_VAR = "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS"
 
@@ -63,10 +59,10 @@ class MvCommand(Command):
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
-        ``--validate-same-s3-paths`` resolution / access-point warning.
-        The resolving branch of ``_validate_same_paths`` builds the S3 client
-        before the guard it precedes (the rest of the run reuses it); on every
-        other route the errors above are reported before any client exists.
+        ``--validate-same-s3-paths`` resolution / access-point warning - all
+        after the S3 client is built (``classify_paths``), the way aws orders
+        them, so an unusable region reports the *s3* endpoint's failure rather
+        than the resolver's s3control.
         Resolution failures keep their class: an unresolvable path 252, a
         failing s3control/sts call its translated category (a
         ClientError-caused failure 254, a transport failure 255).
@@ -83,9 +79,8 @@ class MvCommand(Command):
                 operation="mv",
             )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
-        client: S3Client | None = None
         if paths_type == "s3s3":
-            client = self._validate_same_paths(args, ctx, head.s3, src, dest)
+            self._validate_same_paths(args, ctx, head.s3, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
         if src_type == "local" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
@@ -100,8 +95,7 @@ class MvCommand(Command):
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
 
         s3 = head.s3
-        if client is None:
-            client = s3.client()
+        client = head.client
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
         # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
@@ -124,6 +118,9 @@ class MvCommand(Command):
             args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
         )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="mv")
         # After the [s3] runtime config: aws validates --case-conflict against
         # S3 Express past the transfer manager whose creation loads the
         # config, so a bad [s3] value beats the invalid-mode 252 (measured
@@ -150,14 +147,12 @@ class MvCommand(Command):
     @staticmethod
     def _validate_same_paths(
         args: argparse.Namespace, ctx: Context, s3: S3, src: str, dest: str
-    ) -> S3Client | None:
+    ) -> None:
         """The mv s3->s3 validation block (aws-cli's ``_validate_path_args`` head).
 
         Always: the textual onto-itself guard on the keyless-normalized URIs
         (the form aws prints - ``mv s3://b/k s3://b`` reports ``s3://b/``),
-        ``--recursive`` included; on the resolving branch below the S3 client
-        is built before that guard, so its construction failure is what an
-        unusable region reports. When validation is on (the flag, or the
+        ``--recursive`` included. When validation is on (the flag, or the
         env variable set to ``true`` case-insensitively - aws-cli's
         ``ensure_boolean``, so ``TRUE`` / ``True`` count too, any other value
         off) and the *keys* match, both sides resolve
@@ -172,9 +167,10 @@ class MvCommand(Command):
         goes to stderr and the move proceeds (non-matching keys return before
         the warning branch).
 
-        Returns the S3 client the resolving branch builds ahead of the guard
-        (``None`` otherwise) so ``run`` reuses it rather than building a
-        second one.
+        A pure validator: the run's S3 client is already built (aws's
+        ``S3Command._run_main`` slot, ``classify_paths``), which is why an
+        unusable region reports the *s3* endpoint's failure rather than the
+        s3control endpoint the resolver below would otherwise reach first.
         """
         norm_src = S3Storage.normalize_s3_uri(src)
         norm_dest = S3Storage.normalize_s3_uri(dest)
@@ -183,22 +179,10 @@ class MvCommand(Command):
         resolving = same_key and (
             args.validate_same_s3_paths or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true"
         )
-        # aws builds its s3 client in S3Command._run_main, so a region the s3
-        # client cannot use (an empty one -> "Invalid endpoint:
-        # https://s3..amazonaws.com") must fail there and not on the resolver's
-        # s3control (whose endpoint would name s3-control). aws builds it ahead
-        # of *all* the validation ported here, so under an empty region its 255
-        # preempts the usage errors too (the guard below without the flag, the
-        # local-local pair, the streaming path); this CLI keeps validation
-        # first and reports those as 252, a recorded divergence for that
-        # region shape alone (design/cli.md section 5.8). Elsewhere the
-        # narrowing costs nothing: a merely absent region builds fine, since s3
-        # falls back to the global endpoint where s3control raises NoRegion.
-        client = s3.client() if resolving else None
         if S3Storage.same_path(norm_src, norm_dest):
             raise ValidationError(message, operation="mv")
         if not same_key:
-            return None
+            return
         if resolving:
             src_resolver = S3PathResolver(
                 s3control_client=ctx.service_client(
@@ -218,7 +202,6 @@ class MvCommand(Command):
                         raise ValidationError(message, operation="mv")
         elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
             sys.stderr.write(_VALIDATE_WARNING)
-        return client
 
 
 __all__ = ["MvCommand"]

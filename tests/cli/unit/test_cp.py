@@ -4,7 +4,7 @@ The rc shape (design/cli.md section 6): pre-pipeline errors
 keep their class - usage errors 252 (path types, SSE-C pairing, streaming
 with --recursive / --no-overwrite, ``--metadata`` parsing, blob decoding,
 the S3 Express case-conflict rejection), the bare integer conversion and
-the missing local source 255 (both before the client factory) - while
+the missing local source 255 - while
 everything the transfer pipeline raises is rc 1 (``<kind> failed:`` per
 item, one ``fatal error:`` for run-killers - a non-integer
 ``--expected-size`` and a missing stdin included), and a warnings-only run
@@ -25,6 +25,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.harness import built_client_ctx
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -72,12 +73,12 @@ class TestUsageErrors:
         assert "Unknown options: --annotation-copy-mode,deferred" in capsys.readouterr().err
 
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["cp", "a.txt", "b.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "a.txt", "b.txt"], ctx=built_client_ctx())
         assert rc == 252
         assert "Error: Invalid argument type" in capsys.readouterr().err
 
     def test_streaming_with_recursive_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["cp", "-", "s3://b/k", "--recursive"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "-", "s3://b/k", "--recursive"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Streaming currently is only compatible with non-recursive cp commands"
@@ -87,7 +88,7 @@ class TestUsageErrors:
     def test_streaming_download_rejects_no_overwrite(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["cp", "s3://b/k", "-", "--no-overwrite"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "s3://b/k", "-", "--no-overwrite"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "--no-overwrite parameter is not supported for streaming downloads"
@@ -111,7 +112,7 @@ class TestUsageErrors:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        rc = cli.main(["cp", str(src), "s3://b/k", *argv_extra], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", str(src), "s3://b/k", *argv_extra], ctx=built_client_ctx())
         assert rc == 252
         assert token in capsys.readouterr().err
 
@@ -122,7 +123,7 @@ class TestUsageErrors:
         src.write_bytes(b"x")
         rc = cli.main(
             ["cp", str(src), "s3://b/k", "--sse-c-copy-source", "--sse-c-copy-source-key", "Zm9v"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert "--sse-c-copy-source is only supported for copy operations." in (
@@ -187,11 +188,11 @@ class TestGeneralErrors:
         )
         assert rc == 255
 
-    def test_missing_local_source_is_255_before_the_factory(
+    def test_missing_local_source_is_255(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = str(tmp_path / "nope.txt")
-        rc = cli.main(["cp", missing, "s3://b/k"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", missing, "s3://b/k"], ctx=built_client_ctx())
         assert rc == 255
         assert f"The user-provided path {missing} does not exist." in capsys.readouterr().err
 
@@ -754,7 +755,7 @@ class TestChecksumOptions:
         # alike).
         rc = cli.main(
             ["cp", "s3://b/k", str(tmp_path / "f"), "--checksum-algorithm", "CRC32"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -770,7 +771,7 @@ class TestChecksumOptions:
         src.write_bytes(b"x")
         rc = cli.main(
             ["cp", str(src), "s3://b/k", "--checksum-mode", "ENABLED"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (

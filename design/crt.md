@@ -249,11 +249,35 @@ keys).
   rc 1 - where aws is rc 0 (avoiding a charter violation; e2e:
   `test_crt_ignores_classic_only_config`).
 
-cp / mv / sync call `transferargs.resolve_transfer_config(ctx, s3,
-paths_type=...)`. The test-injected `ctx.transfer_config` always takes precedence
-(preserving the existing determinization lever). The reading of `[s3]` is placed
-**after** the usage (252) and source-absent (255) validations (an
-invalid `[s3]` value loses to either).
+cp / mv / sync **and rm** call `transferargs.resolve_transfer_config(ctx, s3,
+paths_type=...)` - all four are `S3TransferCommand`s in aws, so all four read
+`[s3]` (rm passes `paths_type="s3"`, which is not `s3s3` and therefore honors
+`preferred` like any other route). The test-injected `ctx.transfer_config`
+always takes precedence (preserving the existing determinization lever). The
+reading of `[s3]` is placed **after** the usage (252) and source-absent (255)
+validations (an invalid `[s3]` value loses to either) and **before** everything
+the run itself does - for rm that includes the bucket-less enumerating
+synthesis, which an invalid `[s3]` value therefore preempts (measured).
+
+### Materializing the engine (`materialize_transfer_engine`)
+
+aws builds the transfer manager immediately after that read
+(`_get_transfer_manager`), before it decides anything about the run, so a CRT
+selection pays the whole construction - the cross-process lock and
+`create_s3_crt_client` - even for a `--dryrun` that transfers nothing. The
+library builds its manager lazily, at the first submit, which would put those
+failures inside the transfer span (rc 1) instead of ahead of it (rc 255). So
+all four commands call `transferargs.materialize_transfer_engine` at aws's
+slot; it delegates to `S3.materialize_crt_engine`, which builds the engine the
+effective `TransferConfig` selects and drops it (a no-op when that engine is
+classic; the CRT client is a process-wide singleton, so the transfer that
+follows reuses whatever was built).
+
+For rm this is construction without use: the deletes still never ride the
+engine (section 6). aws's rm builds the same client and does use it, so paying
+the construction is what makes the failure surfaces identical - the alternative,
+synthesizing awscrt's assertion ourselves, would rest the parity on a
+hand-written mirror of a third-party `assert`.
 
 ### Entering the CRT engine without credentials
 
@@ -296,6 +320,36 @@ measured byte-for-byte. A download or a sync fails earlier, at the botocore
 listing / HeadObject call, with `fatal error: Unable to locate credentials` on
 both tools.
 
+### Where the CRT region comes from
+
+boto3 takes the CRT client's region from the built client
+(`client.meta.region_name`); aws-cli takes it from its own region chain
+(`TransferManagerFactory._resolve_region`: `--region`, else the session's
+config variable), which answers `None` when nothing is configured. The two
+agree everywhere except that last case, where botocore has already handed the
+*botocore* client S3's `aws-global` pseudo-region - so boto3's source can never
+be `None`, and `awscrt.s3.S3Client`'s `assert isinstance(region, str)` is
+unreachable.
+
+Same split as the credentials posture above: the library keeps boto3's source
+and the CLI declares its own, through `S3(crt_region=...)`
+(`clientfactory.build_s3` passes `_resolve_region(args.region, session)`, the
+identical chain every CLI client is built with), threaded to
+`create_crt_transfer_manager(region=...)`. The parameter's default is the
+sentinel `CLIENT_REGION`, because `None` is a *meaningful* declaration here -
+"the chain resolved nothing" - and must be distinguishable from "not declared".
+The declared value is also what the singleton's compatibility check pins, so
+two clients declaring different regions never share one CRT client.
+
+The failure that then arrives is awscrt's own bare `AssertionError`, which
+carries no message. `main`'s dispatcher deliberately re-raises `AssertionError`
+(an internal-invariant violation, and the test doubles' unexpected-call guards
+depend on it), so the conversion to aws's rc-255 empty report is scoped to the
+one call site where aws's behavior is known and measured -
+`materialize_transfer_engine`. `cli._write_error` carries the matching
+rendering: an empty detail prints `boto3-s3: [ERROR]:` with **no** trailing
+space, aws's `format_error_message` branch.
+
 ## 5. Charter treatment
 
 The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
@@ -307,8 +361,12 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
-- **Deletion stays on its established non-CRT routes**: under CRT configuration,
-  single rm keeps its blind `DeleteObject`, recursive rm and S3-side
+- **Deletes never ride the CRT engine, but rm builds it**: under CRT
+  configuration rm constructs the CRT client exactly as aws does - the same
+  cross-process lock, the same `create_s3_crt_client` call, so its
+  construction-time failures match - and then deletes through its established
+  non-CRT routes regardless: single rm keeps its blind `DeleteObject`,
+  recursive rm and S3-side
   `sync --delete` keep `S3Deleter`'s batched `DeleteObjects`, and local-side
   sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
   These are the accepted deletion paths documented in deleter.md section 4;
@@ -322,26 +380,20 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   from how credentials are handled. A user can observe it, so it is recorded
   in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
   (testing.md section 9's recording rule); the mechanism stays here.
-- **CRT configured x no resolvable region**: a measured divergence, **deferred
-  to a follow-up task** rather than accepted - rc 255 against our rc 1 is
-  precisely what the exit-code charter and
-  [`aws-differences.md`](../docs/cli/aws-differences.md) section 1 promise
-  equal, so this is an open bug, not a blessed deviation.
-  aws's factory hands `create_s3_crt_client` whatever its
-  region chain answered, unvalidated, so an unresolved region reaches
+- **CRT configured x no resolvable region**: aligned, no longer a divergence.
+  aws's factory hands `create_s3_crt_client` whatever its region chain
+  answered, unvalidated, so an unresolved region reaches
   `awscrt.s3.S3Client`'s `assert isinstance(region, str)`; the bare
   `AssertionError` reaches aws's general handler and prints an **empty** report
   (`aws: [ERROR]:`) at rc 255. It fires for every command whose architecture
-  builds a transfer manager - `cp` / `mv` / `sync` **and** `rm` - and
-  independently of whether credentials exist. Ours derives the region from the
-  built client, where botocore has already resolved S3's `aws-global`
-  pseudo-region, so the CRT client is created and the run proceeds. Aligning it
-  would need `rm` to resolve the `[s3]` runtime config, which it does not do at
-  all today (an invalid `[s3] preferred_transfer_client` is rc 255 on aws's
-  `rm` and unnoticed on ours), plus aws's empty-message rendering
-  (`format_error_message` returns a bare `<prog>: [ERROR]:` with no trailing
-  space). Both are wider than the credentials work above, which is why they
-  are a follow-up rather than part of it.
+  builds a transfer manager - `cp` / `mv` / `sync` **and** `rm` - independently
+  of whether credentials exist, and `--dryrun` / `--quiet` do not save it. This
+  CLI now reaches the same assertion: it declares aws's chain-resolved region
+  (section 4, "Where the CRT region comes from") instead of the built client's
+  `aws-global`, builds the engine at aws's slot (section 4, "Materializing the
+  engine") so `rm` and the dryrun routes get there too, converts the bare
+  `AssertionError` at that one call site, and renders the empty report with
+  aws's byte shape.
 - **awscrt absent x explicit crt**: an area that cannot arise because aws bundles
   awscrt. Our awscrt is an opt-in extra (`boto3-s3-cli[crt]` ->
   `boto3-s3[crt]` -> `boto3[crt]`, transfer.md section 9).

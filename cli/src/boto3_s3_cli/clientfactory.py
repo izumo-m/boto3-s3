@@ -10,8 +10,9 @@ path validation needs (section 5.8). Everything here reaches the AWS SDK.
 from __future__ import annotations
 
 import argparse
+import enum
 import os
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
@@ -24,6 +25,20 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
+
+
+class _RegionUnresolved(enum.Enum):
+    """The type behind `_UNRESOLVED` (the sentinel shape `boto3_s3.crtsupport`
+    uses for its own region posture: a single-member enum, so a type checker
+    narrows ``str | None | Literal[...]`` on an identity test)."""
+
+    TOKEN = "unresolved"
+
+
+# `build_client(region=...)` default: "not supplied - walk the region chain
+# yourself". Distinct from a supplied ``None``, which is the chain's own answer
+# when nothing resolves and must NOT send the caller back through it.
+_UNRESOLVED: Final = _RegionUnresolved.TOKEN
 
 
 def _pin_python_sigv4_signers() -> None:
@@ -137,14 +152,27 @@ def build_session(args: argparse.Namespace) -> Boto3Session:
 
 
 def build_s3(args: argparse.Namespace) -> S3:
-    """Build the command's `S3`, binding client and config reads to one session."""
+    """Build the command's `S3`, binding client and config reads to one session.
+
+    The region chain is walked **once** here and threaded into every client
+    this `S3` hands out. It is the invocation's most expensive resolution: its
+    last link is the EC2 IMDS probe, which on a host with no region configured
+    and no metadata service answering costs seconds - and the chain's answer
+    cannot change within one invocation, since the env, the bound session's
+    config and IMDS are all fixed by then. The same value is what the CRT
+    posture below declares, so client and engine can never disagree on it.
+    """
     from boto3_s3 import S3
 
     session = build_session(args)
+    region = _resolve_region(
+        args.region,
+        session._session,  # pyright: ignore[reportPrivateUsage]
+    )
 
     class CliS3(S3):
         def client(self) -> S3Client:
-            return build_client(args, session=session)
+            return build_client(args, session=session, region=region)
 
     # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
@@ -160,11 +188,18 @@ def build_s3(args: argparse.Namespace) -> S3:
     # rather than falling back to classic. The library defaults to boto3's
     # opposite rule; the aws-faithful entry is this layer's (design/crt.md
     # section 4).
+    # crt_region: aws-cli resolves the CRT region from its own region chain
+    # (the same `_resolve_region` every client here is built with), which
+    # yields None when nothing is configured - where botocore would hand the
+    # client the `aws-global` pseudo-region. Declaring the chain's answer is
+    # what lets awscrt's own region assertion fire, as it does under aws
+    # (design/crt.md section 6).
     return CliS3(
         session=session,
         endpoint_url=args.endpoint_url,
         wait_on_interrupt=False,
         crt_allow_absent_credentials=True,
+        crt_region=region,
     )
 
 
@@ -399,13 +434,20 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     )
 
 
-def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
+def build_client(
+    args: argparse.Namespace,
+    *,
+    session: Boto3Session | None = None,
+    region: str | None | Literal[_RegionUnresolved.TOKEN] = _UNRESOLVED,
+) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
     ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - ``resolve_profile``);
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``);
+    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``), unless
+    *region* supplies the chain's already-computed answer (what `build_s3`
+    threads in so one invocation walks the chain - and its IMDS probe - once);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
     kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
     the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
@@ -484,7 +526,9 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
         config = Config(**overrides)
         return session.client(
             "s3",
-            region_name=_resolve_region(args.region, botocore_session),
+            region_name=(
+                _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
+            ),
             endpoint_url=args.endpoint_url,
             verify=_resolve_verify(args, botocore_session),
             config=config,

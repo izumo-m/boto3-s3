@@ -22,7 +22,13 @@ from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.harness import (
+    built_client_ctx,
+    client_ctx,
+    run_cli_in_process,
+    run_recorded,
+    unused_ctx,
+)
 from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
@@ -211,8 +217,8 @@ class TestExitCodeShape:
     def test_non_integer_page_size_is_rc_255(self) -> None:
         # aws converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255. It converts at
-        # parse time, so 255 wins even over rm's 252 path check, and no
-        # client is ever built.
+        # parse time, so 255 wins even over rm's 252 path check - and over the
+        # client build, which is the only later thing that could fail first.
         def factory(_args: Any) -> Any:
             raise AssertionError("client factory must not be called")
 
@@ -241,13 +247,14 @@ class TestExitCodeShape:
 
     def test_empty_bucket_enumerating_paths_fail_at_the_listing(self) -> None:
         # Recursive / keyless forms die at ListObjectsV2's client-side
-        # validation - fatal rc 1 even under --dryrun (measured); synthesized
-        # ahead of any client, so the factory must stay uncalled.
+        # validation - fatal rc 1 even under --dryrun (measured). The client is
+        # built first (aws's order) but the message is synthesized, so no call
+        # is ever made.
         for argv in (
             ["rm", "s3:///key", "--recursive", "--dryrun"],
             ["rm", "s3://", "--dryrun"],
         ):
-            result = run_cli_in_process(argv, ctx=unused_ctx())
+            result = run_cli_in_process(argv, ctx=built_client_ctx())
             assert result.rc == 1, argv
             assert result.stderr.startswith("fatal error: Parameter validation failed")
             assert "Invalid bucket name" in result.stderr

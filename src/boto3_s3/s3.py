@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import producers, transferplan
+from boto3_s3 import crtsupport, producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -712,6 +712,17 @@ class S3:
     credentials delegate that has nothing to resolve, and the failure surfaces
     from inside it instead. Only the CLI distribution, which owes ``aws s3``
     output parity, sets it (design/crt.md section 4).
+
+    ``crt_region`` is the third, and names where the CRT engine's region comes
+    from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
+    own ``meta.region_name``; an explicit value is the application's already
+    resolved region and rides verbatim. The distinction only shows when nothing
+    resolves a region at all: botocore then invents the ``aws-global``
+    pseudo-region for the client, while aws-cli's own region chain yields
+    ``None`` and awscrt refuses to build (its ``assert isinstance(region,
+    str)``). Passing ``crt_region=None`` declares that absence and reproduces
+    that refusal; again only the CLI distribution sets it (design/crt.md
+    section 6).
     """
 
     def __init__(
@@ -723,6 +734,7 @@ class S3:
         transfer_config: TransferConfig | None = None,
         wait_on_interrupt: bool = True,
         crt_allow_absent_credentials: bool = False,
+        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
@@ -730,6 +742,7 @@ class S3:
         self._transfer_config = transfer_config
         self._wait_on_interrupt = wait_on_interrupt
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        self._crt_region: crtsupport.CrtRegion = crt_region
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -775,6 +788,44 @@ class S3:
                 # through s3_errors. A set-but-unusable setting is
                 # InvalidConfigError's definition (design/exceptions.md).
                 raise InvalidConfigError(str(exc)) from exc
+
+    def materialize_crt_engine(
+        self, client: S3Client, *, transfer_config: TransferConfig | None = None
+    ) -> None:
+        """Build the CRT transfer engine now, for an operation that will not use it.
+
+        ``aws s3 rm`` constructs its transfer manager before deciding anything
+        about the run, so the engine's construction-time failures - awscrt
+        refusing a client with no region above all - belong to the command, not
+        to the deletes. `rm` here deletes through ``DeleteObject`` and never
+        rides the engine, so an application that owes ``aws s3`` parity calls
+        this to pay the same construction (cross-process lock included) at the
+        same point and simply drops the result.
+
+        The engine is chosen from *transfer_config* (this instance's
+        ``transfer_config`` when none is given) with the same rule the transfer
+        ops apply, so a classic selection - explicit, or ``auto`` on a host the
+        CRT is not tuned for - makes this a no-op. Nothing is returned: the CRT
+        client is a process-wide singleton and a later transfer on a compatible
+        client reuses it.
+        """
+        config = transfer_config if transfer_config is not None else self._transfer_config
+        # Deferred: absent on floor boto3 (pre-CRT), like the transfer engine's.
+        from boto3.exceptions import InvalidCrtTransferConfigError
+
+        try:
+            crtsupport.materialize_crt_engine(
+                client,
+                config,
+                endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
+                session=self._session,
+                allow_absent_credentials=self._crt_allow_absent_credentials,
+                region=self._crt_region,
+            )
+        except InvalidCrtTransferConfigError as exc:
+            # boto3's explicit-'crt' config validation, kept inside the taxonomy
+            # exactly as the transfer engine does (design/exceptions.md).
+            raise ValidationError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -1132,6 +1183,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
@@ -1350,6 +1402,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         with transferrer:
@@ -1697,6 +1750,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         deletes = _SyncDeletes(

@@ -20,6 +20,7 @@ from boto3_s3 import (
     BatchError,
     CaseConflictMode,
     CopyPropsMode,
+    InvalidConfigError,
     InvalidValueError,
     LocalStorage,
     S3Storage,
@@ -49,6 +50,8 @@ from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
     from boto3_s3_cli.commands.base import Context
@@ -409,7 +412,12 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 
 
 class TransferPaths(NamedTuple):
-    """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
+    """The classified head of a cp/mv/sync invocation (the path-type gate's input).
+
+    ``client`` is the run's S3 client, already built: aws constructs it in
+    ``S3Command._run_main`` ahead of every path validation, so `classify_paths`
+    does too and each command consumes it rather than building its own.
+    """
 
     page_size: int | None
     progress_frequency: int
@@ -419,6 +427,7 @@ class TransferPaths(NamedTuple):
     dest_type: str
     paths_type: str  # "locals3" | "s3local" | "s3s3" on the CLI surface
     s3: S3
+    client: S3Client
 
 
 def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) -> TransferPaths:
@@ -435,9 +444,18 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
     paramfile (252) -> the session profile resolution (255: aws binds the
     profile at startup, so a bad ``--profile`` beats every post-parse usage
-    error) -> the local-local pair gate (252). Only this shared, order-stable
-    prefix lives here - the stream / checksum / SSE-C checks that follow differ
-    in relative order per command and stay with each command.
+    error) -> **the S3 client build** -> the local-local pair gate (252). Only
+    this shared, order-stable prefix lives here - the stream / checksum / SSE-C
+    checks that follow differ in relative order per command and stay with each
+    command.
+
+    The client build sits at aws's own slot: everything above is aws's parse
+    layer, which runs before ``S3Command._run_main`` creates the client, and
+    everything below is the ``add_paths`` validation, which runs after. So an
+    empty region - the one shape whose client cannot be built (``Invalid
+    endpoint: https://s3..amazonaws.com``, rc 255) - preempts every usage error
+    the family reports, while a merely absent region builds fine (S3's global
+    endpoint fallback) and leaves those 252s exactly where they were.
     """
     globalargs.validate_query(args)
     clientfactory.validate_endpoint_url(args)
@@ -450,6 +468,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     # proceed. The stream route's int() coercion still runs at submit time.
     expand_option_paramfile(args, "expected_size", operation=operation)
     s3 = ctx.s3(args)
+    client = s3.client()
     src, dest = args.paths
     src_type = identify_type(src)
     dest_type = identify_type(dest)
@@ -464,6 +483,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
         dest_type,
         src_type + dest_type,
         s3,
+        client,
     )
 
 
@@ -811,6 +831,35 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)
 
 
+def materialize_transfer_engine(
+    s3: S3, client: S3Client, transfer_config: Any, *, operation: str
+) -> None:
+    """aws's transfer-manager construction slot, for every command that has one.
+
+    aws builds the manager (``TransferManagerFactory.create_transfer_manager``)
+    right after reading ``[s3]`` and before it decides anything about the run,
+    so a CRT selection pays its whole construction there - the cross-process
+    lock and ``create_s3_crt_client`` - even for a ``--dryrun`` that transfers
+    nothing, and even for ``rm``, whose deletes never ride the engine here. Call
+    it at that slot so the same failures land at the same point.
+
+    The one failure it converts is awscrt's own ``assert isinstance(region,
+    str)``, which fires when the region chain resolved nothing (`clientfactory`
+    declares the chain's answer as the CRT region). aws catches it in its
+    general handler, which formats a bare ``AssertionError`` as an empty rc-255
+    report; this CLI re-raises ``AssertionError`` everywhere else (an
+    internal-invariant bug, and the test doubles' unexpected-call guards depend
+    on it), so the conversion is scoped to this one call site and keeps the
+    empty message verbatim.
+    """
+    try:
+        s3.materialize_crt_engine(client, transfer_config=transfer_config)
+    except AssertionError as exc:
+        # InvalidConfigError -> rc 255, aws's general handler; str(exc) is ''
+        # for a bare assert, which the error writer renders without a detail.
+        raise InvalidConfigError(str(exc), operation=operation) from exc
+
+
 def build_printer(
     args: argparse.Namespace, progress_frequency: int, *, only_show_errors: bool = False
 ) -> TransferPrinter:
@@ -894,6 +943,7 @@ __all__ = [
     "finish_transfer",
     "identify_type",
     "is_s3express_path",
+    "materialize_transfer_engine",
     "path_storage",
     "resolve_case_conflict",
     "resolve_locations",

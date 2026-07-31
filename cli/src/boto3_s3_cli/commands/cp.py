@@ -32,7 +32,9 @@ class CpCommand(Command):
         ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
         parsing (a readable
         ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), path types, the checksum/path-format pairing,
+        paramfile quirk), then the S3 client build (which an empty region
+        fails at 255, ahead of every usage error below), then path types,
+        the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
         *download* with ``--no-overwrite``, and the S3
@@ -86,7 +88,7 @@ class CpCommand(Command):
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
 
         s3 = head.s3
-        client = s3.client()
+        client = head.client
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
         # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
@@ -134,6 +136,9 @@ class CpCommand(Command):
                 args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
             )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="cp")
         # After the [s3] runtime config: aws validates --case-conflict against
         # S3 Express while building the run's instructions, past the transfer
         # manager whose creation loads the config - so a bad [s3] value beats

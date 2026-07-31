@@ -1632,6 +1632,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -1656,6 +1657,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1693,6 +1695,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1720,6 +1723,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(session)
             return object()
@@ -1753,6 +1757,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(allow_absent_credentials)
             return object()
@@ -1781,6 +1786,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
@@ -1796,11 +1802,10 @@ class TestEngineSelection:
 
         # boto3 semantics: a None from the CRT factory (lock held elsewhere,
         # incompatible singleton) silently selects classic.
-        monkeypatch.setattr(
-            crtsupport,
-            "create_crt_transfer_manager",
-            lambda c, cfg, *, endpoint=None, session=None, allow_absent_credentials=False: None,
-        )
+        def fake_create(_client: Any, _config: Any, **_kwargs: Any) -> Any:
+            return None
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
         assert isinstance(manager, TransferManager)

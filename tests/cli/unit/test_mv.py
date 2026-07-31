@@ -3,9 +3,9 @@
 The rc shape (design/cli.md section 6): mv is
 cp with the onto-itself guard family in front - the local-local pair, any
 ``-`` path, the onto-itself shapes (recursive included), and the
-checksum/path-format pairing are all 252 before any client factory runs
-(only the resolving branch of ``--validate-same-s3-paths`` builds a client
-ahead of them, mirroring aws's construction order);
+checksum/path-format pairing are all 252, and every one of them runs after
+the client is built - aws's construction order, which the whole transfer
+family now mirrors;
 ``--validate-same-s3-paths`` resolution failures keep their class (an
 unresolvable path 252, a failing s3control/sts call 254 via the kept
 ClientError cause); the access-point warning goes to stderr without
@@ -24,6 +24,7 @@ from boto3.s3.transfer import TransferConfig
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.harness import built_client_ctx
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
@@ -99,7 +100,7 @@ def _head_response() -> dict[str, Any]:
 
 class TestUsageErrors:
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "a.txt", "b.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "a.txt", "b.txt"], ctx=built_client_ctx())
         assert rc == 252
         err = capsys.readouterr().err
         assert "usage: boto3-s3 mv" in err
@@ -112,7 +113,7 @@ class TestUsageErrors:
     def test_any_stream_path_is_252(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(argv, ctx=_failing_factory_ctx())
+        rc = cli.main(argv, ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Streaming currently is only compatible with non-recursive cp commands"
@@ -122,32 +123,32 @@ class TestUsageErrors:
     def test_two_streams_hit_the_path_type_error_first(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["mv", "-", "-"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "-", "-"], ctx=built_client_ctx())
         assert rc == 252
         assert "Error: Invalid argument type" in capsys.readouterr().err
 
     def test_onto_itself_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "s3://b/k.txt", "s3://b/k.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/k.txt", "s3://b/k.txt"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Cannot mv a file onto itself: s3://b/k.txt - s3://b/k.txt" in capsys.readouterr().err
         )
 
     def test_onto_itself_implied_basename(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "s3://b/d/a.txt", "s3://b/d/"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/d/a.txt", "s3://b/d/"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/d/a.txt - s3://b/d/" in capsys.readouterr().err
 
     def test_onto_itself_keyless_destination_is_normalized(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["mv", "s3://b/k.txt", "s3://b"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/k.txt", "s3://b"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/k.txt - s3://b/" in capsys.readouterr().err
 
     def test_onto_itself_applies_to_recursive_too(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The aws-cli's faithful false positive (rc 252).
-        rc = cli.main(["mv", "--recursive", "s3://b/d", "s3://b/"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "--recursive", "s3://b/d", "s3://b/"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/d - s3://b/" in capsys.readouterr().err
 
@@ -156,7 +157,7 @@ class TestUsageErrors:
     ) -> None:
         rc = cli.main(
             ["mv", "s3://b/k", str(tmp_path / "f"), "--checksum-algorithm", "CRC32"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -172,7 +173,7 @@ class TestUsageErrors:
         src.write_bytes(b"x")
         rc = cli.main(
             ["mv", str(src), "s3://b/k", "--checksum-mode", "ENABLED"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -184,18 +185,18 @@ class TestUsageErrors:
     def test_expected_size_is_not_an_mv_option(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(
             ["mv", "s3://b/k", "s3://b/k2", "--expected-size", "5"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert "Unknown options" in capsys.readouterr().err
 
 
 class TestGeneralErrors:
-    def test_missing_local_source_is_255_before_the_factory(
+    def test_missing_local_source_is_255(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = tmp_path / "no-such.txt"
-        rc = cli.main(["mv", str(missing), "s3://b/k"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", str(missing), "s3://b/k"], ctx=built_client_ctx())
         assert rc == 255
         assert f"The user-provided path {missing} does not exist." in capsys.readouterr().err
 

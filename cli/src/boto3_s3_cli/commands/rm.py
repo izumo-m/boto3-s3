@@ -112,7 +112,10 @@ class RmCommand(Command):
         ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
-        with the exit codes kept. Nothing maps to 254 here.
+        with the exit codes kept. Nothing maps to 254 here. Ahead of all of
+        that sit the client build and the ``[s3]`` runtime config, at aws's own
+        slots: an empty region is 255 before every check below, and an invalid
+        ``[s3]`` value 255 after the path check but before the rest.
         """
         # The aws parse-to-validation order (measured, design/cli.md section 6):
         # the --query compile (252) leads, then the --endpoint-url scheme check
@@ -125,6 +128,13 @@ class RmCommand(Command):
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         s3 = ctx.s3(args)
+        # aws's S3Command._run_main builds the client before _convert_path_args
+        # and before every path validation, so an empty region ("Invalid
+        # endpoint: https://s3..amazonaws.com", rc 255) preempts the fileb
+        # decode, the path-type 252, and the bucket-less synthesis below. A
+        # merely absent region builds fine (S3's global endpoint fallback), so
+        # those keep their codes.
+        client = s3.client()
         if isinstance(args.paths, bytes):
             # Intentional aws-cli bug parity: S3TransferCommand decodes a
             # positional fileb:// back through the filesystem encoding before
@@ -142,14 +152,23 @@ class RmCommand(Command):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
 
+        # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
+        # builds a transfer manager exactly like cp - after the path check above
+        # (which a bad [s3] value loses to) and before everything below (which it
+        # beats, the bucket-less synthesis included). The deletes never ride the
+        # engine here (design/crt.md section 6), but its construction failures
+        # are aws's, so they must land at aws's point.
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")
+
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
         if not bucket_part and (args.recursive or not key_part):
             # The enumerating bucket-less forms (keyless service root, or
             # --recursive): aws sends Bucket="" to the listing and botocore's
             # client-side validation makes it a fatal rc 1, --dryrun included
-            # (measured). Synthesized with aws's wording before any client
-            # exists, keeping the fake-driven paths (rb --force's inner rm
-            # included) deterministic; the blind single delete instead rides
+            # (measured). Synthesized with aws's wording rather than dialed,
+            # keeping the fake-driven paths (rb --force's inner rm included)
+            # deterministic; the blind single delete instead rides
             # to the API via build_s3_storage below - its dryrun records at
             # rc 0 and its live run fails per-key, exactly aws's shapes.
             if not args.quiet:
@@ -160,7 +179,7 @@ class RmCommand(Command):
         # Outposts bucket) raise ValidationError through main -> rc 252,
         # matching aws; the bucket-less blind single delete flows through
         # build_s3_storage's carve-out instead of failing validation.
-        storage = transferargs.build_s3_storage(target, client=s3.client(), page_size=page_size)
+        storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).
         item_filter = filters.compile_filter(

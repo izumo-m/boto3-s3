@@ -37,7 +37,7 @@ from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands import mb
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
-from tests.utils.harness import unused_ctx
+from tests.utils.harness import built_client_ctx, unused_ctx
 
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
@@ -522,16 +522,155 @@ class TestUnresolvedConfigReports:
             "boto3-s3: [ERROR]: preferred_transfer_client is set to crt but awscrt is ...\n"
         )
 
+    def test_an_empty_message_writes_the_prefix_alone(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's error formatter branches on a falsy message before it builds
+        # the spaced form, so the prefix carries NO trailing space (measured:
+        # a bare AssertionError from awscrt's region check renders exactly
+        # this). The rc-255 general handler envelopes nothing, so nothing can
+        # refill the detail.
+        cli._write_error("", rc=255)
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]:\n"
+
+    def test_a_whitespace_only_message_keeps_awss_spaced_form(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws tests the message for falsiness BEFORE stripping it, so a
+        # whitespace-only message is not the empty branch: it takes the spaced
+        # form and strips to nothing inside it, leaving the trailing space.
+        # Not a case any handler here produces - pinned because the ordering
+        # it proves is the one an empty message with a code depends on.
+        cli._write_error("  \n ", rc=255)
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: \n"
+
+    def test_an_empty_message_with_a_code_keeps_the_envelope(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The other half of that ordering: aws's handler envelopes first and
+        # its formatter tests the result, so an empty detail under a code
+        # renders the envelope - stripped of the space the empty detail left,
+        # never the prefix alone. Unreachable today (only rc 252 / 253 carry a
+        # code, and both always carry a message); the mechanism is aws's.
+        monkeypatch.setattr(cli, "_enhanced_envelope", True)
+        cli._write_error("", rc=252)
+        assert (
+            capsys.readouterr().err == "boto3-s3: [ERROR]: An error occurred (ParamValidation):\n"
+        )
+
+
+class TestEmptyRegionPreemptsTheCommands:
+    """An empty region fails at the client, ahead of everything a command checks.
+
+    aws builds its s3 client in ``S3Command._run_main`` - before the fileb
+    positional decode, before the path-type gate, and before every
+    ``add_paths`` validation - so an *empty* region (``AWS_REGION=``), the one
+    shape whose client cannot be built, reports ``Invalid endpoint:
+    https://s3..amazonaws.com`` at rc 255 instead of any of them. Measured on
+    the pinned aws-cli for every row below; identical bytes but for the program
+    name and the leading blank line aws prints, both class-1 rules of the
+    parity normalization (design/testing.md section 9).
+
+    The contrast is an *absent* region, where the client builds on S3's global
+    endpoint and every usage error keeps its own code - pinned by
+    `TestValidationOrder.test_local_local_stays_252_in_a_regionless_env` and by
+    the per-command suites, which all run region-ful.
+    """
+
+    _REPORT = "boto3-s3: [ERROR]: Invalid endpoint: https://s3..amazonaws.com\n"
+
+    @pytest.fixture(autouse=True)
+    def _empty_region(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Present-wins, an empty value included - the region chain aws walks.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.setenv(var, "")
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["cp", "{file}", "{dir}/g.txt"], id="cp-local-local-252"),
+            pytest.param(["sync", "{dir}", "{dir}/out"], id="sync-local-local-252"),
+            pytest.param(["rm", "{file}"], id="rm-local-path-252"),
+            pytest.param(["mv", "-", "s3://b/k"], id="mv-streaming-252"),
+            pytest.param(["cp", "-", "s3://b/k", "--recursive"], id="cp-streaming-252"),
+            pytest.param(["mv", "s3://b/k", "s3://b/k"], id="mv-onto-itself-252"),
+            pytest.param(
+                ["cp", "{file}", "s3://b/k", "--sse-c", "AES256"], id="cp-sse-c-pairing-252"
+            ),
+            pytest.param(
+                ["cp", "{file}", "s3://b/k", "--checksum-mode", "ENABLED"],
+                id="cp-checksum-pairing-252",
+            ),
+            pytest.param(
+                ["sync", "s3://b--use1-az1--x-s3/p", "{dir}"], id="sync-directory-bucket-252"
+            ),
+            pytest.param(["cp", "{missing}", "s3://b/k"], id="cp-missing-source-255"),
+            pytest.param(["rm", "s3://"], id="rm-bucket-less-keyless-rc1"),
+            pytest.param(["rm", "s3://", "--recursive"], id="rm-bucket-less-recursive-rc1"),
+            pytest.param(["rm", "s3://b/k", "--dryrun"], id="rm-dryrun"),
+            pytest.param(["rm", "s3://b/k", "--quiet"], id="rm-quiet"),
+            pytest.param(["rb", "s3://b", "--force"], id="rb-force"),
+            # The non-transfer commands already built their client first; they
+            # are the controls that the slot is one rule, not four.
+            pytest.param(["ls", "s3://b"], id="ls"),
+            pytest.param(["mb", "s3://b"], id="mb"),
+            pytest.param(["presign", "s3://b/k"], id="presign"),
+        ],
+    )
+    def test_the_client_failure_wins(
+        self, argv: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        resolved = [
+            token.format(file=source, dir=tmp_path, missing=tmp_path / "nope.txt") for token in argv
+        ]
+        assert cli.main(resolved) == 255, resolved
+        assert capsys.readouterr().err == self._REPORT
+
+    def test_it_precedes_rms_positional_fileb_decode(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rm decodes a readable ``fileb://`` positional back through the
+        # filesystem encoding (aws's `_convert_path_args`), and aws runs that
+        # decode *after* `S3Command._run_main` has built the client - so
+        # undecodable bytes under an empty region are the endpoint's 255, not
+        # the decode's. This is the pairing that pins the client ahead of the
+        # decode; with it after, both are 255 but the text diverges.
+        ref = tmp_path / "path.bin"
+        ref.write_bytes(b"\xff")
+        assert cli.main(["rm", f"fileb://{ref}"]) == 255
+        assert capsys.readouterr().err == self._REPORT
+
+    @pytest.mark.parametrize("command", ["ls", "website"])
+    def test_it_also_precedes_the_positional_bytes_crash(
+        self, command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # ls / website mishandle a readable ``fileb://`` positional (aws's own
+        # bug, rc 255 with a TypeError / AttributeError message). aws builds
+        # the client before that handling, so an empty region reports the
+        # endpoint instead - the reason those two build theirs at the top of
+        # ``run()`` too.
+        ref = tmp_path / "path.bin"
+        ref.write_bytes(b"s3://b")
+        argv = [command, f"fileb://{ref}"]
+        if command == "website":
+            argv += ["--index-document", "index.html"]
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == self._REPORT
+
 
 class TestValidationOrder:
-    """The order in which cp / mv / sync run their pre-client validations is
+    """The order in which cp / mv / sync run their path validations is
     exit-code-significant: aws-cli ``_validate_path_args`` checks the missing
     local source (a bare RuntimeError -> 255) right after the checksum/path
     pairing and *before* SSE-C / the S3 Express directory-bucket check (252).
     When more than one would fail, that order decides the exit code. aws v2
     returns 255 for all of these (the missing source wins).
 
-    These fire before the client factory, so no Context / network is needed.
+    All of them sit after the client build (aws's order) and none reaches the
+    network, so the default Context - real factories, no injected client -
+    serves.
     """
 
     _MISSING = "/nonexistent_src_for_validation_order_test.txt"
@@ -893,7 +1032,7 @@ class TestCountedOptionTokens:
     ) -> None:
         # aws: `s3 sync --exclude -h a b` leaves `a b` as the two paths, so
         # the local-to-local pair is what fails, not the option.
-        assert cli.main(["sync", option, "-h", "a", "b"], ctx=unused_ctx()) == 252
+        assert cli.main(["sync", option, "-h", "a", "b"], ctx=built_client_ctx()) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
@@ -916,7 +1055,7 @@ class TestCountedOptionTokens:
         # argparse classifies `-1` as a plain token rather than an option, so
         # the hook's count applies to a token it would have taken anyway; aws
         # lands on the same synopsis failure as the dash-led cases (measured).
-        assert cli.main(["sync", "--exclude", "-1", "a", "b"], ctx=unused_ctx()) == 252
+        assert cli.main(["sync", "--exclude", "-1", "a", "b"], ctx=built_client_ctx()) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"
@@ -1096,7 +1235,7 @@ class TestNegativeNumberClassification:
         )
 
     def test_it_reaches_a_positional_too(self, capsys: pytest.CaptureFixture[str]) -> None:
-        assert cli.main(["cp", "-1x", "s3://b/"], ctx=unused_ctx()) == 255
+        assert cli.main(["cp", "-1x", "s3://b/"], ctx=built_client_ctx()) == 255
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: The user-provided path -1x does not exist.\n"
         )
@@ -1108,7 +1247,7 @@ class TestNegativeNumberClassification:
         # `--exclude` consumes A and O alike through the `aws_nargs` hook, so
         # the classification never decides anything for it: all three shapes
         # leave `a b` as the paths and fail the same synopsis check.
-        assert cli.main(["sync", "--exclude", value, "a", "b"], ctx=unused_ctx()) == 252
+        assert cli.main(["sync", "--exclude", value, "a", "b"], ctx=built_client_ctx()) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "usage: boto3-s3 sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>\n"

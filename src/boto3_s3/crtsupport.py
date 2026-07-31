@@ -35,6 +35,13 @@ client (design/crt.md):
   that wants aws-cli's posture rather than boto3's (see
   `create_crt_transfer_manager`); ``boto3-s3-cli`` is the caller that sets it
   and the default keeps every library caller boto3-faithful.
+- **region**: boto3 takes the CRT region from the built client, aws-cli from
+  its own region chain - which resolves to ``None`` where botocore invents the
+  ``aws-global`` pseudo-region, and ``None`` is what trips awscrt's own
+  ``assert isinstance(region, str)``. The ``region`` argument carries a
+  caller's already-resolved value (``None`` included); the `CLIENT_REGION`
+  default keeps boto3's source. ``boto3-s3-cli`` is again the caller that sets
+  it (design/crt.md section 6).
 
 Nothing here imports awscrt or ``s3transfer.crt`` at module import time; the
 classic path never pays for them (design/imports.md).
@@ -42,9 +49,10 @@ classic path never pays for them (design/imports.md).
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final, Literal
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -54,16 +62,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CLIENT_REGION",
     "PROCESS_LOCK_NAME",
+    "CrtRegion",
     "acquire_process_lock",
+    "caller_endpoint",
     "create_crt_transfer_manager",
     "has_crt_s3transfer",
     "has_minimum_crt_version",
     "is_optimized_for_system",
+    "materialize_crt_engine",
+    "selects_crt",
     "should_use_crt",
 ]
 
 PROCESS_LOCK_NAME = "boto3-s3"
+
+
+class _CrtRegionSource(enum.Enum):
+    """The type behind `CLIENT_REGION`.
+
+    A single-member enum rather than a bare ``object()`` so type checkers can
+    narrow ``str | None | Literal[...]`` on an identity test - the standard
+    typed-sentinel shape. Never instantiated by callers; `CLIENT_REGION` is
+    the one member.
+    """
+
+    CLIENT = "client"
+
+
+# Default of every CRT ``region`` posture here: take the region from the built
+# client (client.meta.region_name), boto3's own source. Distinct from None,
+# which is a *declared* absent region - what makes awscrt refuse to build.
+CLIENT_REGION: Final = _CrtRegionSource.CLIENT
+
+# A caller's CRT region declaration: a concrete region, a declared-absent
+# ``None``, or `CLIENT_REGION` for "not declared - read it off the client".
+CrtRegion = str | None | Literal[_CrtRegionSource.CLIENT]
 
 _MINIMUM_CRT_VERSION = (0, 19, 18)
 
@@ -103,7 +138,7 @@ class _CrtS3Client:
         self,
         crt_client: Any,
         process_lock: Any,
-        region: str,
+        region: str | None,
         endpoint_url: str | None,
         cred_wrapper: Any | None,
         verify: Any,
@@ -233,6 +268,21 @@ def should_use_crt(preferred: str) -> bool:
     return False
 
 
+def selects_crt(config: Any | None) -> bool:
+    """Whether *config* selects the CRT engine, with boto3's rule and defaults.
+
+    No config - or one carrying no ``preferred_transfer_client`` - is boto3's
+    ``'auto'``. ``'classic'`` short-circuits *before* `should_use_crt`, so an
+    explicitly classic run never raises the missing-awscrt error an explicit
+    ``'crt'`` does. Shared by the transfer engine and `materialize_crt_engine`
+    so the two cannot answer differently.
+    """
+    preferred = getattr(config, "preferred_transfer_client", None) or "auto"
+    if str(preferred).lower() == "classic":
+        return False
+    return should_use_crt(str(preferred))
+
+
 def create_crt_transfer_manager(
     client: S3Client,
     config: Any | None,
@@ -240,6 +290,7 @@ def create_crt_transfer_manager(
     endpoint: str | None = None,
     session: Session | None = None,
     allow_absent_credentials: bool = False,
+    region: CrtRegion = CLIENT_REGION,
 ) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
 
@@ -268,6 +319,12 @@ def create_crt_transfer_manager(
     ``session`` is the caller's boto3 session (``S3.session`` threads it via
     the ``Transferrer``); the CRT request serializer is built from it rather
     than a fresh one - see ``_botocore_session`` for why that matters.
+
+    ``region`` is the caller's already-resolved CRT region. `CLIENT_REGION`
+    (the default) reads it off the client, boto3's own source; an explicit
+    value - ``None`` included - is used verbatim, which is how aws-cli's region
+    chain reaches awscrt's ``assert isinstance(region, str)`` instead of
+    botocore's invented ``aws-global``.
     """
     if config is None:
         # CRTTransferManager itself accepts config=None but dereferences it at
@@ -279,12 +336,22 @@ def create_crt_transfer_manager(
         from boto3_s3.transferconfig import TransferConfig
 
         config = TransferConfig()
-    crt_s3_client = _get_crt_s3_client(client, config, endpoint, session)
+    crt_s3_client = _get_crt_s3_client(client, config, endpoint, session, region)
     if not _is_compatible_request(
-        client, crt_s3_client, endpoint, allow_absent_credentials=allow_absent_credentials
+        client,
+        crt_s3_client,
+        endpoint,
+        allow_absent_credentials=allow_absent_credentials,
+        region=region,
     ):
         return None
-    assert crt_s3_client is not None
+    if crt_s3_client is None:
+        # Unreachable: `_is_compatible_request` refuses a None singleton, so
+        # the branch above already returned. Narrowed with a plain `if` rather
+        # than an `assert` because the CLI converts an `AssertionError` raised
+        # anywhere under this call into aws's empty rc-255 region report - a
+        # broken invariant here would masquerade as an unresolved region.
+        return None
     from s3transfer.crt import CRTTransferManager
 
     kwargs: dict[str, Any] = {
@@ -312,13 +379,68 @@ def create_crt_transfer_manager(
     return CRTTransferManager(**kwargs)
 
 
+def materialize_crt_engine(
+    client: S3Client,
+    config: Any | None,
+    *,
+    endpoint: str | None = None,
+    session: Session | None = None,
+    allow_absent_credentials: bool = False,
+    region: CrtRegion = CLIENT_REGION,
+) -> None:
+    """Build the engine *config* selects now, for a caller that will not transfer.
+
+    ``aws s3 rm`` constructs its transfer manager before it knows whether the
+    run deletes anything, so every construction-time failure - awscrt's own
+    ``assert isinstance(region, str)`` on an unresolved region above all -
+    surfaces there rather than inside the operation. This library's ``rm``
+    deletes through ``DeleteObject`` and never rides the engine, so it pays the
+    same construction here (cross-process lock included) and drops the result.
+
+    A config that selects the classic engine - explicitly, or through ``auto``
+    on a host the CRT is not tuned for - makes this a no-op. Nothing is
+    returned: the CRT client is a process-wide singleton, so a later transfer
+    on a compatible client reuses whatever this built.
+    """
+    if not selects_crt(config):
+        return
+    create_crt_transfer_manager(
+        client,
+        config,
+        endpoint=endpoint,
+        session=session,
+        allow_absent_credentials=allow_absent_credentials,
+        region=region,
+    )
+
+
+def caller_endpoint(client: S3Client, endpoint: str | None) -> str | None:
+    """The caller's explicit endpoint, kept only for the client built from it.
+
+    The pin belongs to the client the endpoint produced: pinning an
+    application-level endpoint onto a client that came from somewhere else (an
+    ``S3Storage`` carrying its own) would dial one host with another's
+    credentials and region, where the classic lane simply uses that client.
+    botocore stores an explicit ``endpoint_url`` verbatim on ``meta``, so
+    equality identifies the right client; any other one falls back to the host
+    heuristic on its own endpoint (`_derive_endpoint`).
+    """
+    if endpoint is not None and client.meta.endpoint_url != endpoint:
+        return None
+    return endpoint
+
+
 def _get_crt_s3_client(
-    client: S3Client, config: Any | None, endpoint: str | None, session: Session | None
+    client: S3Client,
+    config: Any | None,
+    endpoint: str | None,
+    session: Session | None,
+    region: CrtRegion,
 ) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(client, config, endpoint, session)
+            serializer, crt_s3_client = _initialize(client, config, endpoint, session, region)
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
     return _crt_s3_client
@@ -348,8 +470,22 @@ def _botocore_session(session: Session | None) -> Any:
     return BotocoreSession()
 
 
+def _resolve_region(client: S3Client, region: CrtRegion) -> str | None:
+    """The region this request's CRT client is (or must be) pinned to.
+
+    `CLIENT_REGION` means the caller declared nothing, so the client's own
+    resolved region answers - boto3's rule. Any other value is the caller's
+    declaration and rides verbatim, ``None`` included.
+    """
+    return client.meta.region_name if region is CLIENT_REGION else region
+
+
 def _initialize(
-    client: S3Client, config: Any | None, endpoint: str | None, session: Session | None
+    client: S3Client,
+    config: Any | None,
+    endpoint: str | None,
+    session: Session | None,
+    region_source: CrtRegion,
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
@@ -365,7 +501,7 @@ def _initialize(
         # Another process of this application holds the CRT client; classic.
         return None, None
 
-    region = client.meta.region_name
+    region = _resolve_region(client, region_source)
     endpoint_url = _resolve_endpoint(client, endpoint)
     # The caller's client Config rides into the serializer's nested botocore
     # client (the serializer merges signature_version=UNSIGNED on top). Without
@@ -430,6 +566,7 @@ def _is_compatible_request(
     endpoint: str | None,
     *,
     allow_absent_credentials: bool = False,
+    region: CrtRegion = CLIENT_REGION,
 ) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
     TLS-``verify`` / Config-shape pins.
@@ -447,11 +584,13 @@ def _is_compatible_request(
     `create_crt_transfer_manager`. It relaxes exactly one branch - a client
     with no credentials against a singleton that also has none - and never
     the region / endpoint / verify / Config pins, which protect a *second*
-    client from riding the first one's baked-in wiring.
+    client from riding the first one's baked-in wiring. ``region`` must be the
+    same declaration the singleton was built under, so the region pin compares
+    like with like (`_resolve_region`).
     """
     if crt_s3_client is None:
         return False
-    if client.meta.region_name != crt_s3_client.region:
+    if _resolve_region(client, region) != crt_s3_client.region:
         return False
     if _resolve_endpoint(client, endpoint) != crt_s3_client.endpoint_url:
         return False

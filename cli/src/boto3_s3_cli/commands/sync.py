@@ -51,7 +51,7 @@ class SyncCommand(Command):
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket on either
         side 252 ("Cannot use sync command with a directory bucket.") - all
-        before any S3 client exists. A missing local source exits 255; the
+        after the S3 client is built, the way aws orders them. A missing local source exits 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
         sides (rootless anchoring; design/sync.md section 1).
         """
@@ -94,7 +94,7 @@ class SyncCommand(Command):
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
 
         s3 = head.s3
-        client = s3.client()
+        client = head.client
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
@@ -116,6 +116,9 @@ class SyncCommand(Command):
             args.filters, src=src_location, dest=dest_location, dir_op=True
         )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:

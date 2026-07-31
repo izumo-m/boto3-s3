@@ -48,6 +48,13 @@ Two of those parse loosely rather than strictly.
 `cp` / `mv` / `sync` read transfer settings from the profile's `[s3]` section in
 `~/.aws/config`, exactly as `aws s3` reads it.
 
+`rm` reads and validates the same section, and builds the transfer engine
+`preferred_transfer_client` names, because `aws s3 rm` does — so an unusable
+value fails identically. But only that one key reaches anything here: this
+command's deletes never ride the transfer engine (see
+[`aws-differences.md`](./aws-differences.md)), so the numeric keys below tune
+nothing about `rm`, where under `aws` they do.
+
 | Key | Effect |
 | --- | --- |
 | `max_concurrent_requests` | how many transfers run at once |
@@ -69,6 +76,8 @@ takes the file-I/O options that carry them (`aws` bundles a fork that does).
 
 An invalid value is a configuration error, exit code 255. It is reported after
 usage errors, so a command that is also malformed reports that instead.
+`--quiet` does not hide it — the report comes from the error handler, not from
+the result lines.
 
 ### Choosing the transfer engine
 

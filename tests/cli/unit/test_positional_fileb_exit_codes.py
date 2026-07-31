@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from boto3_s3_cli import cli
-from tests.utils.harness import unused_ctx
+from tests.utils.harness import built_client_ctx
 
 
 @pytest.mark.parametrize(
@@ -33,7 +33,7 @@ def test_readable_positional_fileb_keeps_command_specific_aws_bug(
 
     result = cli.main(
         [command, f"fileb://{ref}"],
-        ctx=unused_ctx(),
+        ctx=built_client_ctx(),
     )
 
     assert result == expected_rc

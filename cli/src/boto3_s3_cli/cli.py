@@ -196,11 +196,22 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     occurred (<Code>) when calling ...` in its own text, and aws's general
     rc-255 handler formats nothing.
 
-    The message is stripped first, like aws's error formatter: the multi-line
-    reports assembled below end with the newline their usage block carries, and
-    it must not surface as a trailing blank line. A message that carries its own
-    embedded `[ERROR]` line (the missing-subcommand report) therefore renders as
-    two prefixed lines, enveloped or not, exactly as aws's does.
+    The three steps below are aws's own sequence, and their order is
+    observable. Its handler builds the enveloped message first and hands the
+    result to `format_error_message`, which **then** tests the message for
+    falsiness and only **then** strips it. So: an empty detail that a code
+    envelopes still renders the envelope (stripped of the space the empty
+    detail left), while a detail that is empty *and* uncoded renders the prefix
+    alone, with **no** trailing space - the branch aws takes before it ever
+    builds the spaced form. The failure that reaches that branch is awscrt's
+    bare region assertion, which the CRT construction converts at rc 255, and
+    the rc-255 general handler envelopes nothing.
+
+    Stripping last is what keeps the multi-line reports clean: they end with
+    the newline their usage block carries, which must not surface as a trailing
+    blank line. A message carrying its own embedded `[ERROR]` line (the
+    missing-subcommand report) therefore renders as two prefixed lines,
+    enveloped or not, exactly as aws's does.
     """
     detail = str(message)
     if code is None:
@@ -210,7 +221,6 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
             report = _unresolved_config_report(message)
             if report is not None:
                 code, detail = report
-    detail = detail.strip()
     # The degradation is the renderer's, so it costs any code its envelope
     # while leaving the message the handler built - aws's fallback writes the
     # extracted `Message`, hints included. Only the rc-252 family can be
@@ -221,7 +231,10 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     # for the same reason.
     if code is not None and _enhanced_envelope:
         detail = f"An error occurred ({code}): {detail}"
-    sys.stderr.write(f"boto3-s3: [ERROR]: {detail}\n")
+    if not detail:
+        sys.stderr.write("boto3-s3: [ERROR]:\n")
+        return
+    sys.stderr.write(f"boto3-s3: [ERROR]: {detail.strip()}\n")
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):

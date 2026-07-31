@@ -82,7 +82,13 @@ are visible, or make no difference to the result.
 - **Deletes never ride the CRT engine.** With
   `preferred_transfer_client = crt`, `aws` routes each `rm` — and each S3-side
   `sync --delete` — through its CRT client, while here they keep their
-  `DeleteObject` / batched `DeleteObjects` requests. Same objects deleted, same
+  `DeleteObject` / batched `DeleteObjects` requests. The CRT client itself is
+  still built: `rm` constructs it exactly as `aws` does, taking its own
+  host-wide CRT slot exactly as `aws` takes its own (the two slots are separate
+  and never contend), so a configuration the CRT refuses fails the same way —
+  the client simply carries no deletes. One consequence: the numeric `[s3]`
+  tuning keys shape `aws`'s deletes and not this command's, since only its
+  transfers ride the engine those keys configure. Same objects deleted, same
   exit code; the one place it shows in the output is a failure the CRT reports
   differently, such as credentials that cannot be resolved: `aws` prints its
   CRT delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` (preceded by

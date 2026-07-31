@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         all_of,
         any_of,
     )
+    from boto3_s3.crtsupport import CLIENT_REGION, CrtRegion
     from boto3_s3.deleter import S3_DELETE_BATCH, S3Deleter
     from boto3_s3.etagcompare import EtagComparison
     from boto3_s3.exceptions import (
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
     __version__: str
 
 __all__ = [
+    "CLIENT_REGION",
     "S3",
     "S3_DELETE_BATCH",
     "AccessDeniedError",
@@ -113,6 +115,7 @@ __all__ = [
     "ConfigSection",
     "ConfigurationError",
     "CopyPropsMode",
+    "CrtRegion",
     "DestOnlyPair",
     "EtagComparison",
     "FileFilter",
@@ -241,6 +244,8 @@ _EXPORT_HOMES: dict[str, str] = {
     "Location": "boto3_s3.storage",
     "Storage": "boto3_s3.storage",
     "StorageCapability": "boto3_s3.storage",
+    "CLIENT_REGION": "boto3_s3.crtsupport",
+    "CrtRegion": "boto3_s3.crtsupport",
     "CancelToken": "boto3_s3.types",
     "AnnotationCopyMode": "boto3_s3.types",
     "CancelMode": "boto3_s3.types",

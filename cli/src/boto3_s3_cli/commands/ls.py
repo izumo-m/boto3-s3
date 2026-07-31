@@ -74,6 +74,12 @@ class LsCommand(Command):
         page_size = parse_integer_option(args.page_size, operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
+        # Everything above is aws's parse layer; the client comes next, in
+        # aws's own slot (S3Command._run_main), ahead of all path handling. So
+        # an empty region is its "Invalid endpoint" 255 rather than the bytes
+        # crash just below, and a merely absent region still builds.
+        s3 = ctx.s3(args)
+        client = s3.client()
         # Intentional aws-cli bug parity: a readable positional fileb:// is
         # still bytes here. Calling bytes.startswith(str) raises TypeError,
         # which the general handler maps to 255.
@@ -87,8 +93,7 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
-        s3 = ctx.s3(args)
-        storage = S3Storage(target, client=s3.client(), page_size=page_size)
+        storage = S3Storage(target, client=client, page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 

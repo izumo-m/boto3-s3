@@ -15,7 +15,7 @@ S3().cp("local.txt", "s3://bucket/key")
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
    transfer_config=None, wait_on_interrupt=True,
-   crt_allow_absent_credentials=False)
+   crt_allow_absent_credentials=False, crt_region=CLIENT_REGION)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -37,6 +37,15 @@ S3(session=None, *, endpoint_url=None, config=None,
   to the classic engine and reports `Unable to locate credentials`; `True`
   attempts the transfer and lets it fail inside the CRT credentials delegate,
   which is what `aws s3` does. Only reproducing aws's output needs it.
+- **`crt_region`** — where the CRT transfer engine takes its region from.
+  `CLIENT_REGION` (the default) reads it off the client that was built, which
+  is what boto3 does. Passing your own already-resolved region uses that value
+  instead, `None` included — and `None` is the whole point: when nothing
+  configures a region, botocore quietly gives the client the `aws-global`
+  pseudo-region, while `aws s3` resolves its own chain to `None` and awscrt
+  then refuses to build a client at all. Only reproducing that refusal needs
+  it. Like the flag above it does nothing unless
+  `TransferConfig.preferred_transfer_client` selects the CRT engine.
 
 ## 2. Which client a location uses
 

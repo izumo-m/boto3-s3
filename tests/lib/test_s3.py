@@ -7,6 +7,7 @@ import io
 import os
 import threading
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import boto3
@@ -15,6 +16,7 @@ from botocore.config import Config
 from botocore.exceptions import ProfileNotFound
 
 from boto3_s3 import (
+    CLIENT_REGION,
     S3,
     CancelledError,
     CancelToken,
@@ -473,6 +475,99 @@ class TestCrtAbsentCredentialsPosture:
         with pytest.raises(_StopTransferError):
             self._run(s3, tmp_path, route)
         assert _captured_transferrer_kwargs["crt_allow_absent_credentials"] is allow
+
+
+class TestCrtRegionPosture:
+    """``crt_region`` reaches every route that builds a Transferrer.
+
+    Same reason as the credentials posture above: the declared region - a
+    ``None`` that says "the chain resolved nothing" included - is what makes
+    ``boto3-s3-cli`` reproduce ``aws s3``'s CRT construction failure
+    (design/crt.md section 6), and a route that forgot to thread it would
+    silently fall back to the client's ``aws-global``.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize(
+        "declared", [CLIENT_REGION, None, "eu-west-1"], ids=["default", "absent", "explicit"]
+    )
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        declared: Any,
+    ) -> None:
+        s3 = S3() if declared is CLIENT_REGION else S3(crt_region=declared)
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_region"] is declared
+
+
+class TestMaterializeCrtEngine:
+    """`S3.materialize_crt_engine` hands the instance's postures to crtsupport.
+
+    The seam ``rm`` uses to pay ``aws s3``'s transfer-manager construction
+    without transferring; the postures it forwards are what make that
+    construction fail where aws's does.
+    """
+
+    def test_the_instance_postures_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[dict[str, Any]] = []
+
+        def fake(client: Any, config: Any, **kwargs: Any) -> None:
+            seen.append({"client": client, "config": config, **kwargs})
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        endpoint = "https://minio.example.com"
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=endpoint))
+        config = TransferConfig(preferred_transfer_client="crt")
+        session = boto3.Session()
+        s3 = S3(
+            session=session,
+            endpoint_url=endpoint,
+            crt_allow_absent_credentials=True,
+            crt_region=None,
+        )
+        s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert seen == [
+            {
+                "client": client,
+                "config": config,
+                "endpoint": endpoint,
+                "session": session,
+                "allow_absent_credentials": True,
+                "region": None,
+            }
+        ]
+
+    def test_the_instance_transfer_config_is_the_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+        monkeypatch.setattr(
+            crtsupport,
+            "materialize_crt_engine",
+            lambda _client, config, **_kwargs: seen.append(config),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert seen == [config]
 
 
 class TestModuleLevelConvenienceSignatures:

@@ -479,6 +479,15 @@ fills it in).
 | `--bucket-name-prefix PREFIX` | `Prefix` of `ListBuckets` for bucket listing (ineffective in object listing = same as aws) |
 | `--bucket-region REGION` | `BucketRegion` of `ListBuckets` for bucket listing (same as above) |
 
+Like every `aws s3` subcommand, ls builds its S3 client in
+`S3Command._run_main` - after the parse layer (the `--query` compile, the
+endpoint scheme check, the positional and `--page-size` paramfile expansions,
+the `--page-size` coercion, the bucket-filter paramfiles) and **before** any
+path handling. This CLI builds it at the same point, which is what puts an
+empty region's `Invalid endpoint` 255 ahead of the readable-`fileb://`
+positional crash (design/aws-cli-option-handling.md section 2) rather than
+behind it; `website` shares the slot.
+
 When the target has no bucket name (`boto3-s3 ls` / `ls s3://`), it lists **all
 buckets**. The CLI normalizes every empty-bucket target to the bare `s3://`
 service root first - including `s3:///k`, whose leftover key aws-cli also drops
@@ -510,7 +519,27 @@ scheme 252 -> the `--cli-read/connect-timeout` conversions 255 ->
 `--page-size` paramfile expansion 252 -> its conversion 255 ->
 session profile 255, so `rm badpath --profile <bad>` is the profile's 255,
 like aws; `ls` and `presign` share the query/endpoint/timeout/paramfile/conversion
-prefix for their integer options). The target has 3 forms
+prefix for their integer options).
+
+rm is an `S3TransferCommand` in aws, so it follows the family's construction
+order (section 5.7) even though its deletes go nowhere near a transfer manager:
+the S3 client is built right after the session profile - before the fileb
+positional decode and before the path check above, so an empty region is 255
+ahead of both - and the `[s3]` runtime config is read and the transfer engine
+materialized right after that path check, before the bucket-less form below.
+An invalid `[s3]` value is therefore 255 for every rm form, `--quiet` included
+(the report comes from the error handler, not the result printer), while still
+losing to the path-type 252. A CRT selection builds the CRT client there and
+never uses it ([`crt.md`](./crt.md) sections 4 and 6). Only
+`preferred_transfer_client` reaches anything: the resolved `TransferConfig` is
+consumed by the engine construction alone and is not threaded into `S3.rm`,
+which takes no transfer config, so the numeric `[s3]` keys stay inert for
+deletes. That is a divergence from aws, whose rm really is tuned by them
+because its deletes ride the manager - the same divergence the deletion routing
+already records ([`crt.md`](./crt.md) section 6), not a new one, since none of
+those keys is observable in rc or output.
+
+The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
 aws-cli's behavior):
 
@@ -548,8 +577,9 @@ testing.md).
 
 An empty bucket URI (`rm s3://` / `rm s3:///key`) is not a usage error but
 **rc 1** (aws sends `Bucket=""` to the API and it fails botocore's client-side
-validation). A recursive run with 0 matches is rc 0 and silent (unlike
-ls's rc 1, there is no equivalent of `_check_no_objects`).
+validation) - unless the client build or the `[s3]` read above already failed,
+both of which preempt it. A recursive run with 0 matches is rc 0 and silent
+(unlike ls's rc 1, there is no equivalent of `_check_no_objects`).
 
 ### 5.3 `mb`
 
@@ -642,6 +672,14 @@ and, on success, **outputs nothing** and is rc 0. The only options are
 WebsiteConfiguration is sent as-is** (it passes client-side validation; rejection
 is the server's responsibility = same as aws).
 
+Like every `aws s3` subcommand, website builds its S3 client in
+`S3Command._run_main` - after the parse layer (the `--query` compile, the
+endpoint scheme check, the positional and document-option paramfile expansions)
+and **before** any path handling. This CLI builds it at the same point, which is
+what puts an empty region's `Invalid endpoint` 255 ahead of the readable-`fileb://`
+positional crash below rather than behind it (the same slot `ls` uses; both were
+measured).
+
 Path handling follows the same procedure as aws's `_get_bucket_name`: `s3://` is
 optional -> strip **exactly one trailing slash** -> treat the whole remainder as
 the bucket name. Because aws **keeps a key (`s3://b/some/key`) folded into the
@@ -681,6 +719,41 @@ which of the two names to adopt, the bucket-root normalization of a keyless
 `s3://bucket` - are derived by `boto3_s3.transferplan` (a port of aws's
 `FileFormat`), shared between the CLI and the library. The filter bases are a
 separate derivation (`filters.py`, aws's `rootdir` - like aws keeps its two).
+
+**The construction order of the transfer family** (cp / mv / sync / rm - aws's
+`S3TransferCommand` subclasses) is a mirror of aws's own, because it decides
+exit codes. Every boundary below was measured against the pinned aws-cli in
+both directions (each step preempting every later one, and losing to every
+earlier one):
+
+1. **The parse layer** - `--query`, `--endpoint-url`, the paramfile
+   expansions, the integer coercions, the session profile. aws settles all of
+   it before `_run_main` runs at all, so it beats everything below (`cp ...
+   --page-size abc` is the coercion's 255, `--profile nosuch` the profile's,
+   even when the client of step 2 cannot be built).
+2. **The S3 client** - aws's `S3Command._run_main`, which every `aws s3`
+   subcommand inherits. Built in `classify_paths` (cp / mv / sync) and right
+   after `ctx.s3(args)` in rm's `run()`. The only shape that fails here is an
+   *empty* region (`AWS_REGION=`, `AWS_DEFAULT_REGION=`, or a config
+   `region =`), whose endpoint resolves to `https://s3..amazonaws.com` -> 255,
+   preempting every check below. A merely *absent* region builds fine on S3's
+   global endpoint, which is why those checks keep their own codes in a
+   region-less environment.
+3. **The fileb positional decode** (rm only, section 5.2) - aws's
+   `_convert_path_args`.
+4. **All path validation** - aws's `add_paths`: the path-type gate, streaming,
+   mv's onto-itself guard and resolver, the checksum / SSE-C pairings, the
+   missing local source, the `s3local` destination pre-create, sync's
+   directory-bucket rejection. Which of these a command runs, and in what
+   relative order, is the one thing the family does not share; each is recorded
+   with its command.
+5. **The `[s3]` runtime config and the transfer manager** - aws's
+   `_get_transfer_manager`: `transferargs.resolve_transfer_config` (an invalid
+   `[s3]` value is 255) then `transferargs.materialize_transfer_engine`, which
+   pays a CRT selection's whole construction even for a `--dryrun`
+   ([`crt.md`](./crt.md) section 4).
+6. **The run** - aws's `CommandArchitecture`: the `--case-conflict` x S3
+   Express rejection (252), then the transfer itself.
 
 **The declaration surface is the full aws-cli ARG_TABLE**:
 `--recursive` `--dryrun` `--quiet` `--only-show-errors` `--no-progress`
@@ -786,19 +859,21 @@ unlike the options above - the one value family the coercions beat) -> cp's
 **`--expected-size` paramfile (252)** -> **session
 profile resolution (255**, aws binds the profile at startup, so a bad
 `--profile` beats every post-parse usage error; an unresolvable *region*
-does NOT fail here - aws defers it to request time) -> route type / streaming
+does NOT fail here - aws defers it to client construction) -> **client
+creation** (step 2 above: 255 on an empty region, 253 unresolvable / 255
+invalid-config otherwise, section 6) -> route type / streaming
 constraints (252) -> **checksum path
 type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
 ...` 252 - shared with mv) -> **a nonexistent single local
-src (255, before the client factory**, equivalent to aws's bare RuntimeError.
+src (255**, equivalent to aws's bare RuntimeError.
 `-` is excluded. aws-cli `_validate_path_args` checks this right after the
 checksum pairing and *before* SSE-C, so the 255 wins when both fail) -> **the
 s3local `--recursive` destination-directory pre-create (255** on an OSError -
 the dir_op half of the same `_validate_path_args`; sync shares it,
-unconditionally) -> the SSE-C pair / `--case-conflict` Express branch (252)
--> client creation (253 unresolvable / 255 invalid-config, section 6) ->
-`S3().cp(...)`.
+unconditionally) -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
+the transfer-manager construction (255 on a CRT client the region cannot build)
+-> the `--case-conflict` Express branch (252) -> `S3().cp(...)`.
 **`finish_transfer` - wrapping the `--expected-size` conversion and `S3().cp`
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
@@ -860,8 +935,8 @@ stays "cp commands" even for mv. `mv - -` hits the local->local usage error
 first).
 
 **mv-specific validation** (for s3s3, in `run()` after `classify_paths` has
-built the session-backed `S3`. Only the resolving branch of step 2 creates a
-client, and it does so before step 1's guard):
+built the session-backed `S3` **and its client** - step 2 of the family's
+construction order in section 5.7):
 
 1. **The same-path guard** (always): if the keyless-normalized URI (`s3://b` ->
    `s3://b/`) matches `S3Storage.same_path` (an exact match, or a `/`-terminated dest
@@ -887,20 +962,13 @@ client, and it does so before step 1's guard):
    `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
    alias is also 252 (the wording is verbatim from aws-cli). A ClientError from
    s3control / sts keeps `__cause__` and is **254** (aws is also 254 on
-   a GetCallerIdentity failure). **The main S3 client is built first** (and
-   reused by the rest of the run): aws creates its s3 client in
-   `S3Command._run_main`, so a region the client cannot use (an empty
-   `AWS_REGION` / `AWS_DEFAULT_REGION` / config `region =` -> `Invalid
-   endpoint: https://s3..amazonaws.com`, 255) fails on the s3 endpoint rather
-   than s3control's. aws builds it ahead of **all** the validation ported
-   here, not just this branch, so under an empty region its 255 also preempts
-   the usage errors above - the guard of step 1 without the flag, the
-   local-local pair, the streaming path. This CLI keeps validation first and
-   reports those as 252, which leaves those empty-region shapes divergent: a
-   **recorded residual**, awaiting a ruling on whether client construction
-   may precede usage-error validation. Nothing else is affected, because a
-   merely *absent* region builds fine (s3 falls back to the global endpoint,
-   s3control has no such fallback -> the `NoRegion` 253 of section 6).
+   a GetCallerIdentity failure). Because the main S3 client already exists by
+   the time this branch runs, an empty region reports the *s3* endpoint's
+   failure (`Invalid endpoint: https://s3..amazonaws.com`, 255) rather than the
+   s3control endpoint this resolver would otherwise reach first; a merely
+   *absent* region builds the s3 client fine and lands on s3control's `NoRegion`
+   253 instead (section 6), which is the contrast that keeps the early build
+   from swallowing it.
 3. **A warning** (validation off and same_key and either side is an access-point form
    = `pathresolver.has_underlying_s3_path`): the aws-cli-worded permanent warning
    (`warning: Provided s3 paths may resolve to same underlying s3 object(s) ...`)
@@ -948,8 +1016,8 @@ recursive and has no streaming form). `add_transfer_arguments(include_recursive=
 
 **Validation order** (the shared section 5.7 head first - the `--query`
 compile, the endpoint scheme check, the interleaved paramfile loads /
-coercions, `--metadata`, the session profile - then, before the client
-factory):
+coercions, `--metadata`, the session profile, then the client build - and
+after all of that):
 
 1. Integer-option conversion (255; part of the shared head above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
@@ -1057,6 +1125,12 @@ credentials` when it lands on the listing a recursive run opens with (sync,
 The program-name prefix is rewritten on aws's side before the comparison
 (class 1), and alternate `--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
+An **empty** message renders as the prefix alone - `boto3-s3: [ERROR]:` with
+**no trailing space** - because aws's `format_error_message` branches on a
+falsy message before it builds the spaced form. The one failure that reaches
+it is awscrt's bare region assertion ([`crt.md`](./crt.md) section 4), and
+nothing can refill the detail there: only the 252 / 253 families carry an
+envelope code.
 
 Of aws's **two other rc-253 handlers**, only one is reachable here.
 `PagerErrorHandler` (`Pager`) belongs to the output pager, which this CLI does

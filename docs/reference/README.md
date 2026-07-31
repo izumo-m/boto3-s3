@@ -16,7 +16,8 @@ their area but are not indexed here.
 ## Pages
 
 - [`s3.md`](./s3.md) — the `S3` object: its constructor, the `client` /
-  `resolve` / `aws_config` seams, thread safety, and subclassing.
+  `resolve` / `aws_config` / `materialize_crt_engine` seams, thread safety, and
+  subclassing.
 - [`operations/README.md`](./operations/README.md) — what the nine operations
   share: the location forms they accept, the module-level functions that wrap
   the methods, the parameters that recur across them, and the end-of-run error
@@ -62,10 +63,12 @@ that wraps it is documented on the same page.
 - [`CancelToken`](./results.md#canceltoken)
 - [`CaseConflictMode`](./options.md#caseconflictmode)
 - [`ChecksumComparison`](./comparator.md#checksumcomparison)
+- [`CLIENT_REGION`](./s3.md#client_region)
 - [`Comparator`](./comparator.md#comparator)
 - [`ConfigSection`](./misc.md#configsection)
 - [`ConfigurationError`](./exceptions.md#configurationerror)
 - [`CopyPropsMode`](./options.md#copypropsmode)
+- [`CrtRegion`](./s3.md#crtregion)
 - [`cp`](./operations/cp.md#s3cp)
 - [`DestOnlyPair`](./comparator.md#destonlypair)
 - [`EtagComparison`](./comparator.md#etagcomparison)

@@ -77,13 +77,33 @@ def client_ctx(client: Any) -> Context:
 
 def unused_ctx() -> Context:
     """A ``Context`` for paths that must fail before client construction: the
-    factory fails the test if it is ever called."""
+    factory fails the test if it is ever called.
+
+    Only the parse layer qualifies (``--query``, the paramfile loads, the
+    integer coercions, the profile resolution). Every command builds its client
+    right after that, at aws's own slot, so a check that fires later needs
+    `built_client_ctx` instead."""
     from boto3_s3_cli.commands.base import Context
 
     def _unused_factory(_args: Any) -> Any:
         raise AssertionError("client factory must not be called")
 
     return Context(client_factory=_unused_factory)
+
+
+def built_client_ctx() -> Context:
+    """A ``Context`` for paths that build the client and then fail without using it.
+
+    The counterpart of `unused_ctx` for every check past aws's client-build
+    slot - the path-type gates, the onto-itself guard, the checksum / SSE-C
+    pairings, the missing local source, ``rm``'s bucket-less synthesis. The
+    factory hands out a recording client scripted with nothing, so the
+    "unexpected call" guard simply moves from construction to the first API
+    call (the root conftest fails the test on an exhausted recorder)."""
+    from tests.utils.recorder import make_recording_client
+
+    client, _calls = make_recording_client([])
+    return client_ctx(client)
 
 
 def run_recorded(

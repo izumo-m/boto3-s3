@@ -56,6 +56,12 @@ class WebsiteCommand(Command):
         paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
+        # Everything above is aws's parse layer; the client comes next, in
+        # aws's own slot (S3Command._run_main), ahead of all path handling. So
+        # an empty region is its "Invalid endpoint" 255 rather than the bytes
+        # crash just below, and a merely absent region still builds.
+        s3 = ctx.s3(args)
+        client = s3.client()
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
@@ -80,11 +86,10 @@ class WebsiteCommand(Command):
         if path.endswith("/"):
             path = path[:-1]
 
-        s3 = ctx.s3(args)
         # build_s3_storage keeps the strict ARN rejections; its bucket-less
         # carve-out is what keeps "s3:///k" from failing S3Storage.validate
         # before the rejection below can shape it aws's way.
-        storage = transferargs.build_s3_storage(f"s3://{path}", client=s3.client())
+        storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
         if path.endswith("/") or storage.key:
             # aws hands the whole remainder to PutBucketWebsite as the Bucket
             # and lets botocore's name regex reject it (rc 252). S3Storage

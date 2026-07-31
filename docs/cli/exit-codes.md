@@ -126,6 +126,8 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream, 0 otherwise | the value is read only on the streaming route |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
+| a region set to an empty value, with a bad path or option pairing too | 255 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint (a region merely *unset* builds fine, so those checks keep their own codes) |
+| an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 
 All of this matches `aws s3`, including the orderings above.

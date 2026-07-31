@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakemodel import model_meta
-from tests.utils.harness import unused_ctx
+from tests.utils.harness import built_client_ctx, unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -292,7 +292,7 @@ class TestParamfileExpansion:
         # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
         ref = tmp_path / "u.bin"
         ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=unused_ctx())
+        rc = cli.main(["ls", f"fileb://{ref}"], ctx=built_client_ctx())
         assert rc == 255
         assert "startswith first arg must be bytes" in capsys.readouterr().err
 
