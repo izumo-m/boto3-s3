@@ -4,12 +4,44 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
+from typing import Any, ClassVar, cast
 
 # Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import Boto3S3Error, S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
+
+
+class _AppendTagsAction(argparse.Action):
+    """Append one ``KEY VALUE`` pair, carrying aws's token count as a marker.
+
+    Stock ``append`` behavior (the value stays argparse's own shape - a list
+    of two-item lists, which ``run`` unpacks as pairs) plus ``aws_nargs``:
+    aws declares TAGS with a token count, so both tokens are taken however
+    they look (``mb --tags -k -v`` tags the bucket ``-k=-v``). The parser base
+    class reads the marker and reproduces that on every supported Python
+    (``cli._ParamValidationArgumentParser._match_argument``), which stock
+    argparse only does from 3.12 on. The real ``nargs=2`` stays, so a missing
+    token still reports aws's ``expected 2 arguments``.
+    """
+
+    # The count aws declares; not an argparse attribute.
+    aws_nargs: ClassVar[int] = 2
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        # The typeshed base signature; nargs is 2, so at runtime *values* is
+        # always a two-item list of str.
+        pairs: list[list[str]] = getattr(namespace, self.dest, None) or []
+        pairs.append(cast("list[str]", values))
+        setattr(namespace, self.dest, pairs)
 
 
 class MbCommand(Command):
@@ -20,10 +52,16 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to create")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
-        parser.add_argument("--tags", action="append", nargs=2, metavar=("KEY", "VALUE"))
+        parser.add_argument(
+            "--tags",
+            action=_AppendTagsAction,
+            nargs=2,
+            metavar=("KEY", "VALUE"),
+            help="tag to attach to the new bucket; repeatable",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Create the bucket and return an ``aws s3 mb``-style exit code.
@@ -35,14 +73,14 @@ class MbCommand(Command):
         one ``make_bucket failed:`` line (aws catches every create_bucket
         exception locally, even request-time credential errors; an
         unclassified exception here falls to the dispatcher's handler chain -
-        the taxonomy classifies the known failures, docs/exceptions.md). The key part
+        the taxonomy classifies the known failures, design/exceptions.md). The key part
         of the path is silently dropped, exactly like aws. aws builds the client
         before validating the path (``S3Command._run_main``), so a
         client-construction failure (bad ``--profile`` / unresolved credentials /
         region) takes precedence over a path usage error - we build it first to
         match (253/255 wins over the 252).
         """
-        # Parse-time head (measured, docs/cli.md section 6): the --query compile
+        # Parse-time head (measured, design/cli.md section 6): the --query compile
         # (252), the --endpoint-url scheme check (252), and the positional
         # paramfile expansion (252) all precede the client build - they beat a
         # bad --profile (255) the way aws's parse-time load-cli-arg does.

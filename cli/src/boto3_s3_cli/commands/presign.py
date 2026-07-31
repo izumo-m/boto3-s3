@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boto3_s3 import S3Storage
 from boto3_s3_cli import clientfactory, globalargs, output
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -24,29 +24,38 @@ class PresignCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``presign``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>")
+        parser.add_argument("path", metavar="<S3Uri>", help="the object to sign a URL for")
         # No type=int: a non-integer must exit 255 like aws's bare int()
         # conversion (parse_integer_option, commands/base.py). Not
         # range-validated either: aws signs any value (0 / negative / over
         # S3's 604800 maximum); S3 rejects only when the URL is *used*.
-        parser.add_argument("--expires-in", default=3600, metavar="<seconds>")
+        parser.add_argument(
+            "--expires-in",
+            default=3600,
+            metavar="<seconds>",
+            help="how long the URL stays valid (default 3600)",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Print the presigned URL and return an ``aws s3``-style exit code.
 
-        Exit-code shape (docs/cli.md section 6): pure client-side
+        Exit-code shape (design/cli.md section 6): pure client-side
         computation, so rc 1 cannot happen and no S3 request is sent (a
         deferred credential resolution - an assume-role profile - can still
-        dial STS during signing, whose ClientError maps to 254) - 0 on success, 252 for
-        botocore's client-side parameter validation (empty bucket or key,
-        surfaced as the library's ValidationError through main), 253 for
+        dial STS during signing, whose ClientError maps to 254). 0 on
+        success; 252 for the strict aws-cli path rejections (the unsupported
+        ARN families) and for botocore's client-side parameter validation
+        while signing (an absent key, and an empty bucket - the bare
+        ``s3://`` service root and the bucket-less ``s3:///k``, which aws
+        splits into Bucket="" plus a key rather than refusing up front),
+        both surfaced as the library's ValidationError through main; 253 for
         client construction's unresolvable credentials / region (its other
         botocore failures - a bad ``--profile``, partial credentials - are
-        255), 255 for a non-integer ``--expires-in``.
+        255); 255 for a non-integer ``--expires-in``.
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then
         # the paramfile expansions (252, the positional path and --expires-in)
         # precede the bare int() coercion (255).
@@ -60,10 +69,12 @@ class PresignCommand(Command):
         assert expires_in is not None
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
-        # there is no path-type check here; S3Storage takes both forms too.
+        # there is no path-type check here; build_s3_storage reads both forms
+        # the same way. It keeps the strict ARN rejections and carves out the
+        # bucket-less key-carrying form, which aws signs with Bucket="" and
+        # lets botocore's bad-bucket-name validation refuse.
         s3 = ctx.s3(args)
-        storage = S3Storage(args.path, client=s3.client())
-        storage.validate()
+        storage = transferargs.build_s3_storage(args.path, client=s3.client())
         url = s3.presign(storage, expires_in=expires_in)
         output.uni_write(sys.stdout, url + "\n")
         return 0

@@ -19,10 +19,10 @@ objects (a checksum is independent of encryption, unlike an ETag). The cost is
 one ``GetObjectAttributes`` round-trip per object compared (plus continuation
 pages only when a many-part COMPOSITE ``ObjectParts`` listing truncates).
 
-This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.checksumcompare import
-ChecksumComparison``), and is **not** part of the package's lazy root re-export. It
-imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
+This is a standalone, opt-in building block: it lives in its own module and is
+reachable either from the package root (``from boto3_s3 import ChecksumComparison``)
+or by submodule path (``from boto3_s3.checksumcompare import ChecksumComparison``).
+It imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
 ``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
 checksums - are all deferred into the construct / compute paths.
 
@@ -162,7 +162,7 @@ class ChecksumComparison(ContentComparison):
         self._dest_storage = s3.resolve(dest)
         # Build each S3 side's client now (get_client memoizes): the decides
         # may run on a ParallelFilter pool, and a lazy first build there would
-        # race boto3's non-thread-safe client construction (docs/s3.md). An
+        # race boto3's non-thread-safe client construction (design/s3.md). An
         # eager build here is what keeps the strategy's documented
         # thread-safety true for S3Storage sides passed without a client.
         for side in (self._src_storage, self._dest_storage):
@@ -298,7 +298,7 @@ def _fetch_remote(
         # Transport / credential failures are not a per-object "indeterminate"
         # (swallowing NoCredentialsError would silently copy everything): they
         # abort the sync, translated per the exception contract
-        # (docs/exceptions.md - the public API never leaks a raw botocore error).
+        # (design/exceptions.md - the public API never leaks a raw botocore error).
         raise translate_boto_error(exc, operation="sync", bucket=bucket, key=key) from exc
 
 

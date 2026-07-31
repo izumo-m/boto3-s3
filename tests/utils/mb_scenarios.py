@@ -10,7 +10,7 @@ Same contract as ``rm_scenarios`` with the bucket-lifecycle extras:
   ``harness.capture_bucket_state`` - goldens record both;
 - stdout shares rm's sorted normalization (mb lines carry no timestamps).
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally. mb's shape: usage errors (no scheme, a ``--x-s3``
 directory bucket) are 252; everything after the operation starts is rc 1
 (``make_bucket failed:``), never 254.

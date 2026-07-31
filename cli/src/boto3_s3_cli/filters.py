@@ -36,7 +36,7 @@ import fnmatch
 import os
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from boto3_s3 import GlobPattern, globsieve
 from boto3_s3.globsieve import Matcher, PatternKind
@@ -71,7 +71,22 @@ class AppendFilterAction(argparse.Action):
 
     The aws-cli ``AppendFilter`` equivalent: both options share ``dest``
     (``filters``) so the rule order is exactly the command-line order.
+
+    aws declares both options with ``nargs=1``, which has two visible effects:
+    a missing value is worded ``expected 1 argument``, and the following token
+    is taken as the pattern however it looks (``--exclude '-foo*'``).
+    ``aws_nargs`` marks that count - the same marker ``mb``'s ``--tags``
+    carries for its pair of tokens - and the parser base class
+    (``cli._ParamValidationArgumentParser``) reads it for both effects: its
+    message translation for the wording, its ``_match_argument`` hook for the
+    token. ``nargs`` itself stays unspecified: the action then keeps receiving
+    a plain string, and a real ``nargs=1`` would consume a dash-led token only
+    on Python 3.12+, so it is the hook rather than the declaration that makes
+    the behavior aws's on every supported version.
     """
+
+    # The count aws declares; not an argparse attribute.
+    aws_nargs: ClassVar[int] = 1
 
     def __call__(
         self,
@@ -94,8 +109,20 @@ def add_filter_arguments(parser: argparse.ArgumentParser) -> None:
     One shared ordered ``filters`` dest: the interleaved order carries
     aws-cli's last-match-wins semantics (this module's docstring).
     """
-    parser.add_argument("--exclude", action=AppendFilterAction, dest="filters", metavar="PATTERN")
-    parser.add_argument("--include", action=AppendFilterAction, dest="filters", metavar="PATTERN")
+    parser.add_argument(
+        "--exclude",
+        action=AppendFilterAction,
+        dest="filters",
+        metavar="PATTERN",
+        help="leave out keys matching PATTERN; repeatable, last match wins",
+    )
+    parser.add_argument(
+        "--include",
+        action=AppendFilterAction,
+        dest="filters",
+        metavar="PATTERN",
+        help="bring back keys matching PATTERN; repeatable, last match wins",
+    )
 
 
 def _storage_base(storage: object, dir_op: bool) -> str:

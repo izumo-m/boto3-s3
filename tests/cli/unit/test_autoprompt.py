@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import locale
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,32 @@ from boto3_s3_cli.commands.base import Context
 
 _REGIONS = ["us-east-1", "us-west-2", "eu-west-1"]
 _PROFILES = ["default", "minio", "prod"]
+
+
+def _undecodable_config() -> bytes | None:
+    """A config body the config reader's own encoding cannot decode.
+
+    ``configparser.read`` opens with the locale encoding - as botocore's config
+    read does, which is why the CLI matches it - so *which* bytes are
+    undecodable is a property of the host, not a constant: 0xe9 is invalid
+    UTF-8 but a plain "e-acute" under Windows's cp1252. Probe the encoding
+    actually in force; ``None`` where it decodes every byte (latin-1, cp437),
+    which leaves nothing for a decode-failure test to use.
+    """
+    encoding = locale.getpreferredencoding(False)
+    for byte in (b"\xe9", b"\x81", b"\xff"):
+        try:
+            byte.decode(encoding)
+        except UnicodeDecodeError:
+            return b"[default]\ncli_auto_prompt = caf" + byte + b"\n"
+    return None
+
+
+_UNDECODABLE_CONFIG = _undecodable_config()
+_NEEDS_UNDECODABLE = pytest.mark.skipif(
+    _UNDECODABLE_CONFIG is None,
+    reason=f"{locale.getpreferredencoding(False)} decodes every byte",
+)
 
 
 def _completer() -> c.AutoCompleter:
@@ -161,7 +189,7 @@ class TestCompletionEngine:
 
 
 # --------------------------------------------------------------------------- #
-# Reachability: usability tuning over the faithful port (docs/autoprompt.md section 2) #
+# Reachability: usability tuning over the faithful port (design/autoprompt.md section 2) #
 # --------------------------------------------------------------------------- #
 
 
@@ -207,7 +235,7 @@ class TestCompletionReachability:
     def test_options_complete_after_a_non_path_like_second_positional(self) -> None:
         # A bare local name as the second positional (no path character)
         # still offers options - aws drops it on a path-likeness heuristic; we
-        # keep completing (usability first, docs/autoprompt.md section 3).
+        # keep completing (usability first, design/autoprompt.md section 3).
         assert _names("cp s3://a outdir --st")[0] == "--storage-class"
         assert _names("sync s3://a outdir --ex")[:2] == ["--exact-timestamps", "--exclude"]
         all_opts = _names("cp s3://a outdir --")
@@ -218,11 +246,11 @@ class TestCompletionReachability:
         assert _names("cp s3://a outdir --storage-class ")[0] == "STANDARD"
 
     def test_unknown_option_among_positionals_still_offers(self) -> None:
-        # Never offer less than aws (docs/autoprompt.md section 1): aws treats a
+        # Never offer less than aws (design/autoprompt.md section 1): aws treats a
         # `--`-containing unparsed token as path-like and offers options, so an
         # unknown --option sitting among the positionals must not suppress the
         # menu (regression guard for the relaxed second-positional gate,
-        # docs/autoprompt.md section 3).
+        # design/autoprompt.md section 3).
         assert "--recursive" in _names("cp s3://a --bogus s3://b --")
 
     def test_bare_command_offers_options(self) -> None:
@@ -257,14 +285,9 @@ class TestCompletionReachability:
 
 
 def _argparse_options(parser: argparse.ArgumentParser) -> set[str]:
-    """Every option string a parser declares, minus the -h/--help action."""
+    """Every option string a parser declares."""
     actions = parser._actions  # pyright: ignore[reportPrivateUsage]
-    return {
-        opt
-        for action in actions
-        if action.option_strings and "--help" not in action.option_strings
-        for opt in action.option_strings
-    }
+    return {opt for action in actions if action.option_strings for opt in action.option_strings}
 
 
 class TestModelReflectsParser:
@@ -289,7 +312,7 @@ class TestModelReflectsParser:
 class TestIntNargsParsing:
     """`_consume_value`'s integer-nargs branch (`mb --tags KEY VALUE`) - a
     deliberate improvement over aws's parser, whose fall-through binds KEY to
-    the path positional while VALUE is still owed (docs/autoprompt.md
+    the path positional while VALUE is still owed (design/autoprompt.md
     section 2). Do not "re-align" these to the aws behavior."""
 
     def test_owed_value_keeps_the_param_context(self) -> None:
@@ -363,12 +386,24 @@ class TestAutoPromptWiring:
         assert rc == 252
         assert prompter.seen == []  # the prompt ran (empty seed) - the 252 is post-prompt
 
-    def test_help_takes_precedence_over_prompt(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_help_token_takes_precedence_over_prompt(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's _NO_AUTO_PROMPT_ARGS is the raw `help` token (and `--version`),
+        # so a requested prompt still yields to it.
         prompter = _FakePrompter(["--version"])
-        rc = cli.main(["--cli-auto-prompt", "--help"], ctx=Context(auto_prompter=prompter))
+        rc = cli.main(["--cli-auto-prompt", "help"], ctx=Context(auto_prompter=prompter))
         assert rc == 0
         assert prompter.seen is None  # never prompted
         assert "usage:" in capsys.readouterr().out.lower()
+
+    def test_help_option_is_prompted_like_any_unknown_option(self) -> None:
+        # `--help` is not a token this CLI knows, so it does not suppress the
+        # prompt (aws behaves the same: only the `help` token is in its list).
+        prompter = _FakePrompter(["--version"])
+        rc = cli.main(["--cli-auto-prompt", "ls", "--help"], ctx=Context(auto_prompter=prompter))
+        assert rc == 0
+        assert prompter.seen == ["ls", "--help"]  # seeded and prompted
 
     def test_debug_handlers_detach_during_prompt_and_restore(
         self, capsys: pytest.CaptureFixture[str]
@@ -454,22 +489,26 @@ class TestAutoPromptModeResolution:
         assert prompter.seen == ["cp", "s3://a"]
         assert rc == 0
 
-    def test_non_utf8_config_does_not_crash(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    @_NEEDS_UNDECODABLE
+    def test_undecodable_config_does_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The auto-prompt mode resolution runs on every command and reads
-        # ~/.aws/config; a non-UTF-8 file must be read as "off", not crash with an
-        # uncaught UnicodeDecodeError (regression: configparser.read raises it,
-        # and it is not a configparser.Error).
+        # A config the reader's encoding cannot decode must not crash the run
+        # with an uncaught UnicodeDecodeError (regression: configparser.read
+        # raises it, and it is not a configparser.Error). The dispatcher's
+        # config scan now rejects the file upstream, the way botocore does, so
+        # this pins the scan's outcome; the resolution's own tolerance for the
+        # same input - which the scan makes unreachable on this path - is
+        # pinned directly by TestScopedConfigReadTolerance below.
+        assert _UNDECODABLE_CONFIG is not None
         monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         config = tmp_path / "config"
-        config.write_bytes(b"[default]\ncli_auto_prompt = caf\xe9\n")  # latin-1, invalid UTF-8
+        config.write_bytes(_UNDECODABLE_CONFIG)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        # A parse-level usage error (invalid choice, rc 252) still runs the
-        # upstream auto-prompt config read; it must read the non-UTF-8 file as
-        # "off", not raise UnicodeDecodeError. (Using a parse error keeps the
-        # assertion off build_client, which reads the same broken config itself.)
-        assert cli.main(["no-such-command"]) == 252
+        assert cli.main(["no-such-command"]) == 255
+        assert capsys.readouterr().err == (
+            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
+        )
 
     def test_config_file_named_profile_section(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -512,12 +551,12 @@ class TestAutoPromptModeResolution:
         assert prompter.seen is None  # --no-cli-auto-prompt wins -> off -> 252
         assert rc == 252
 
-    def test_help_beats_env_on(
+    def test_help_token_beats_env_on(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on")
         prompter = _FakePrompter(["--version"])
-        rc = cli.main(["--help"], ctx=Context(auto_prompter=prompter))
+        rc = cli.main(["help"], ctx=Context(auto_prompter=prompter))
         assert prompter.seen is None
         assert rc == 0
         assert "usage:" in capsys.readouterr().out.lower()
@@ -585,6 +624,56 @@ class TestScopedConfigFileChoice:
     ) -> None:
         self._seed_fallback_config(monkeypatch, tmp_path)
         monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
+        assert resolve._read_scoped_cli_auto_prompt("default") == "on"
+
+
+class TestScopedConfigReadTolerance:
+    """A config this read cannot parse answers "absent", never a traceback.
+
+    `cli._main`'s config scan rejects such a file upstream now, so on the
+    normal dispatch this is defensive - it covers a config rewritten between
+    the two reads, and any direct caller. Exercised directly because that
+    upstream scan makes it unreachable through `main`.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(b"[[[broken\n", id="not-ini"),
+            pytest.param(_UNDECODABLE_CONFIG, marks=_NEEDS_UNDECODABLE, id="undecodable"),
+        ],
+    )
+    def test_an_unparseable_config_reads_as_absent(
+        self, content: bytes, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The two failures configparser raises: a MissingSectionHeaderError
+        # (a configparser.Error) and a UnicodeDecodeError (which is not one).
+        config = tmp_path / "config"
+        config.write_bytes(content)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        assert resolve._read_scoped_cli_auto_prompt("default") is None
+
+    def test_an_unreadable_config_reads_as_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        config.chmod(0o000)
+        if os.access(config, os.R_OK):  # running as root: the mode is advisory
+            pytest.skip("cannot make a file unreadable for this user")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        try:
+            assert resolve._read_scoped_cli_auto_prompt("default") is None
+        finally:
+            config.chmod(0o644)
+
+    def test_a_readable_config_is_still_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The contrast: the tolerance must not be a blanket "always absent".
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
         assert resolve._read_scoped_cli_auto_prompt("default") == "on"
 
 

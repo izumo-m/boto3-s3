@@ -1,9 +1,9 @@
 """The lazy command table must not drift from the command classes.
 
-Stage 1 renders the top-level ``--help`` and validates the subcommand name
+Stage 1 renders the top-level help page and validates the subcommand name
 from ``cli._COMMAND_TABLE`` alone - without importing any command module - so
 the table duplicates each class's ``name`` / ``help`` on purpose
-(docs/imports.md section 2 item 4). These cases import everything and pin the
+(design/imports.md section 2 item 4). These cases import everything and pin the
 two sides against each other, and pin stage 1's rendering against the full
 tree's.
 """
@@ -11,11 +11,12 @@ tree's.
 from __future__ import annotations
 
 from boto3_s3_cli import cli
+from boto3_s3_cli.autoprompt.model import subparser_map
 
 
 class TestCommandTable:
     def test_table_covers_the_documented_commands(self) -> None:
-        # Literal pin (docs/cli.md section 1): the class-consistency test
+        # Literal pin (design/cli.md section 1): the class-consistency test
         # below reads the same table it checks, so a silently dropped command
         # would still pass it.
         assert sorted(cli._COMMAND_TABLE) == [
@@ -42,3 +43,40 @@ class TestCommandTable:
         # The stub tree and the full tree must render byte-identical top-level
         # help: the user cannot tell the lazy dispatch from the eager build.
         assert cli._build_stage1_parser().format_help() == cli.build_parser().format_help()
+
+    def test_help_displays_the_subcommand_placeholder(self) -> None:
+        # The displayed name is `<subcommand>`, matching what this command's
+        # level is called in aws (`aws s3 <subcommand>`) and what the usage
+        # block in every top-level error says. The rejection message says a
+        # bare `subcommand` instead - argparse names a positional after its
+        # dest - which TestTopLevelErrorText pins.
+        for parser in (cli._build_stage1_parser(), cli.build_parser()):
+            help_text = parser.format_help()
+            assert "<subcommand> ...\n" in help_text
+            assert "<command>" not in help_text
+
+    def test_no_parser_declares_a_help_option(self) -> None:
+        # Like aws, the `help` token is the only route to a help page: no
+        # parser carries a help option, so no usage line shows `[-h]` and no
+        # option list shows `-h, --help`. Both trees' subparsers are covered
+        # too, and the declared options are checked alongside the rendered
+        # text: stage 1's stubs render identically either way, so a stray help
+        # action there would show up in nothing but the action list.
+        trees = [cli._build_stage1_parser(), cli.build_parser()]
+        parsers = [
+            *trees,
+            *(subparser for tree in trees for subparser in subparser_map(tree).values()),
+            *(
+                builder(name, cli._load_command(name)())
+                for name in cli._COMMAND_TABLE
+                for builder in (cli._build_command_parser, cli._build_command_parse_parser)
+            ),
+        ]
+        for parser in parsers:
+            actions = parser._actions  # pyright: ignore[reportPrivateUsage]
+            declared = {opt for action in actions for opt in action.option_strings}
+            assert not declared & {"-h", "--help"}
+            rendered = parser.format_help() + parser.format_usage()
+            assert "[-h]" not in rendered
+            assert "-h, --help" not in rendered
+            assert "--help" not in rendered

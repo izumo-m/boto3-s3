@@ -1,4 +1,4 @@
-"""Degradation contract for installs without awscrt (docs/transfer.md section 9).
+"""Degradation contract for installs without awscrt (design/transfer.md section 9).
 
 The dev environment is always CRT-present (the dev dependency group installs
 ``botocore[crt]`` so the parity tiers run under aws v2's condition), while

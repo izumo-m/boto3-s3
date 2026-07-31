@@ -1,6 +1,6 @@
 """Unit tests for the ``rm`` subcommand: output matrix, exit-code shape, filters.
 
-The rm exit-code shape differs from ls (docs/cli.md section 6): usage errors
+The rm exit-code shape differs from ls (design/cli.md section 6): usage errors
 (non-s3 path, rejected ARNs) are 252, but every error after the operation
 starts is rc 1 - per-key failures as ``delete failed:`` lines, run-killing
 errors as one ``fatal error:`` line - never 254.
@@ -22,10 +22,26 @@ from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.harness import (
+    built_client_ctx,
+    client_ctx,
+    run_cli_in_process,
+    run_recorded,
+    unused_ctx,
+)
 from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
+
+
+def _real_client_ctx() -> Context:
+    # A real botocore client (still offline: the client-side parameter
+    # validation under test fires before any connection is attempted).
+    import boto3
+
+    return Context(
+        client_factory=lambda _args: boto3.session.Session().client("s3", region_name="us-east-1")
+    )
 
 
 def _obj(key: str, size: int = 1) -> dict[str, Any]:
@@ -201,8 +217,8 @@ class TestExitCodeShape:
     def test_non_integer_page_size_is_rc_255(self) -> None:
         # aws converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255. It converts at
-        # parse time, so 255 wins even over rm's 252 path check, and no
-        # client is ever built.
+        # parse time, so 255 wins even over rm's 252 path check - and over the
+        # client build, which is the only later thing that could fail first.
         def factory(_args: Any) -> Any:
             raise AssertionError("client factory must not be called")
 
@@ -213,12 +229,35 @@ class TestExitCodeShape:
         assert "invalid literal for int()" in result.stderr
 
     def test_empty_bucket_with_key_is_rc_1_delete_failed(self) -> None:
-        # aws sends Bucket="" to DeleteObject and botocore fails client-side:
-        # shaped as a per-key failure, not a usage error.
-        result = run_cli_in_process(["rm", "s3:///key"], ctx=client_ctx(object()))
+        # aws sends Bucket="" onward and botocore fails client-side at the
+        # delete submit: shaped as a per-key failure, not a usage error. A
+        # real (offline) client is required - the parameter validation IS the
+        # behavior under test, and it fires before any connection.
+        result = run_cli_in_process(["rm", "s3:///key"], ctx=_real_client_ctx())
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3:///key ")
         assert "Invalid bucket name" in result.stderr
+
+    def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:
+        # The dryrun never reaches the submit-time validation: aws prints the
+        # dryrun record and exits 0 (measured).
+        result = run_cli_in_process(["rm", "s3:///key", "--dryrun"], ctx=client_ctx(object()))
+        assert result.rc == 0
+        assert result.stdout == "(dryrun) delete: s3:///key\n"
+
+    def test_empty_bucket_enumerating_paths_fail_at_the_listing(self) -> None:
+        # Recursive / keyless forms die at ListObjectsV2's client-side
+        # validation - fatal rc 1 even under --dryrun (measured). The client is
+        # built first (aws's order) but the message is synthesized, so no call
+        # is ever made.
+        for argv in (
+            ["rm", "s3:///key", "--recursive", "--dryrun"],
+            ["rm", "s3://", "--dryrun"],
+        ):
+            result = run_cli_in_process(argv, ctx=built_client_ctx())
+            assert result.rc == 1, argv
+            assert result.stderr.startswith("fatal error: Parameter validation failed")
+            assert "Invalid bucket name" in result.stderr
 
 
 class TestFilterWiring:
@@ -289,6 +328,15 @@ class TestAppendFilterAction:
             GlobPattern(PatternKind.INCLUDE, "c"),
         ]
 
+    def test_a_dash_led_pattern_reaches_the_filter_list(self) -> None:
+        # Through the parser the dispatch really parses with: aws's nargs=1
+        # consumption, reproduced by the parser base class, makes the token a
+        # pattern rather than a missing value or a positional.
+        parser = cli._build_command_parse_parser("rm", cli._load_command("rm")())
+        args = parser.parse_args(["s3://b/p", "--recursive", "--exclude", "-foo*"])
+        assert args.filters == [GlobPattern(PatternKind.EXCLUDE, "-foo*")]
+        assert args.paths == "s3://b/p"
+
     def test_compile_filter_none_for_no_patterns(self) -> None:
         target = S3Storage("s3://b")
         assert filters.compile_filter(None, src=target, dest=target, dir_op=True) is None
@@ -335,7 +383,7 @@ class TestScanInterruptPolicy:
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the command module's binding: rm.py imports S3Storage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.rm.S3Storage", _Recording)
+        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.S3Storage", _Recording)
         client, _calls = make_recording_client([{}])
         assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=client_ctx(client)) == 0
         assert scan_waits == [False]

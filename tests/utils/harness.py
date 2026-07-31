@@ -77,13 +77,33 @@ def client_ctx(client: Any) -> Context:
 
 def unused_ctx() -> Context:
     """A ``Context`` for paths that must fail before client construction: the
-    factory fails the test if it is ever called."""
+    factory fails the test if it is ever called.
+
+    Only the parse layer qualifies (``--query``, the paramfile loads, the
+    integer coercions, the profile resolution). Every command builds its client
+    right after that, at aws's own slot, so a check that fires later needs
+    `built_client_ctx` instead."""
     from boto3_s3_cli.commands.base import Context
 
     def _unused_factory(_args: Any) -> Any:
         raise AssertionError("client factory must not be called")
 
     return Context(client_factory=_unused_factory)
+
+
+def built_client_ctx() -> Context:
+    """A ``Context`` for paths that build the client and then fail without using it.
+
+    The counterpart of `unused_ctx` for every check past aws's client-build
+    slot - the path-type gates, the onto-itself guard, the checksum / SSE-C
+    pairings, the missing local source, ``rm``'s bucket-less synthesis. The
+    factory hands out a recording client scripted with nothing, so the
+    "unexpected call" guard simply moves from construction to the first API
+    call (the root conftest fails the test on an exhausted recorder)."""
+    from tests.utils.recorder import make_recording_client
+
+    client, _calls = make_recording_client([])
+    return client_ctx(client)
 
 
 def run_recorded(
@@ -458,7 +478,7 @@ def presign_scope_mask_region(argv: Sequence[str]) -> str | None:
     The scope carries whatever region botocore signed with: the environment
     default (``AWS_REGION`` / ``AWS_DEFAULT_REGION``) unless *argv* passes an
     explicit ``--region``. Masking the environment default keeps a golden
-    stable across e2e runs in any region (docs/testing.md endpoint policy
+    stable across e2e runs in any region (design/testing.md endpoint policy
     step 1), while an explicit ``--region`` stays raw so its region is still
     compared verbatim (that region is the point of the scenario). When the
     two coincide the explicit one wins - nothing is masked - so the
@@ -634,11 +654,17 @@ def assert_stderr_tokens(
 ) -> None:
     """Assert each token appears in *stderr* (substring check, never equality).
 
-    aws-cli and boto3-s3 wrap error text differently, so stderr is only ever
-    probed for stable tokens (error codes, option names). ``require_empty``
-    additionally asserts *stderr* is exactly empty - the one thing a token
-    list cannot express (a ``--quiet`` contract: an empty token tuple asserts
-    nothing at all, so a reappearing error line would pass silently).
+    A limitation of this tier, not a relaxation of parity: a live run's stderr
+    carries environment-dependent content (endpoint hosts, request ids,
+    timings), so e2e probes stable tokens (error codes, option names) rather
+    than comparing bytes. The byte-level criterion (design/testing.md section
+    9) is carried by the unit tier, whose expectations are the pinned aws's own
+    measured bytes.
+
+    ``require_empty`` additionally asserts *stderr* is exactly empty - the one
+    thing a token list cannot express (a ``--quiet`` contract: an empty token
+    tuple asserts nothing at all, so a reappearing error line would pass
+    silently).
     """
     if require_empty and stderr != "":
         pytest.fail(f"[{scenario}] {side} stderr must be empty but was:\n{stderr}")

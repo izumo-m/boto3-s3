@@ -4,7 +4,7 @@ Same contract as ``mb_scenarios`` (sibling bucket, ``pre_create`` start
 state, ``capture_bucket_state`` end state, rm's sorted stdout normalization)
 plus a ``seed`` layout for the non-empty cases.
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally. rb's shape: usage errors (no scheme, a key part)
 are 252; a ``--force`` whose inner rm fails is **255** (aws's RuntimeError
 into the general handler); everything after delete_bucket starts is rc 1

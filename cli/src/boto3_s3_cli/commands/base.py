@@ -271,7 +271,7 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     (0 lists nothing - ls's empty listing exits 1, rm and the transfers 0;
     a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
-    family, whose post-start errors are uniformly 1 - docs/cli.md sections
+    family, whose post-start errors are uniformly 1 - design/cli.md sections
     5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare
     ``int()`` conversion, not argparse's 252 (``parse_integer_option``
     converts at ``run()`` start). The default is ``None`` like aws-cli's,
@@ -279,13 +279,20 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     pages at its own default) - an explicit 1000 here would be a wire
     divergence.
     """
-    parser.add_argument("--page-size", default=None)
+    parser.add_argument(
+        "--page-size", default=None, help="how many keys to request per listing page"
+    )
 
 
 def add_request_payer_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--request-payer`` (optional value; ``requester`` is the only one)."""
     parser.add_argument(
-        "--request-payer", nargs="?", const="requester", choices=["requester"], default=None
+        "--request-payer",
+        nargs="?",
+        const="requester",
+        choices=["requester"],
+        default=None,
+        help="confirm you accept the request and data transfer charges",
     )
 
 

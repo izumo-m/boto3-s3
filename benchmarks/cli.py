@@ -26,7 +26,7 @@ def _log(message: str) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks",
-        description="boto3-s3 performance benchmarks (see docs/benchmark.md).",
+        description="boto3-s3 performance benchmarks (see design/benchmark.md).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

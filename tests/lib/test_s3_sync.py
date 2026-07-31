@@ -290,7 +290,7 @@ class TestSyncUpload:
         assert copied[0].dest_info is not None and copied[0].dest_info.key == "p/a.txt"
 
     def test_copy_new_result_has_no_dest_info(self, tmp_path: Path) -> None:
-        # docs/opresult.md: only an update pairs with a pre-existing
+        # design/opresult.md: only an update pairs with a pre-existing
         # destination entry; a new-file record carries dest_info=None.
         src = tmp_path / "src"
         _write(src, "new.txt", b"xx")
@@ -582,6 +582,24 @@ class TestSyncUpload:
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
         assert keys == ["p/extra.txt"]
 
+    def test_unrecognized_case_conflict_mode_is_refused_outside_the_gate_scope(
+        self, tmp_path: Path
+    ) -> None:
+        # The conversion runs ahead of the gate's scope checks, so a bad value
+        # fails an upload sync too - a run the gate itself never covers.
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                str(src),
+                S3Storage("s3://bucket/p", client=client),
+                transfer_config=_SERIAL,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert calls == []
+
 
 class TestSyncDownload:
     def test_downloads_only_when_local_is_newer(self, tmp_path: Path) -> None:
@@ -656,7 +674,7 @@ class TestSyncDownload:
     ) -> None:
         # The rejection guards the source side too, and sits after the s3local
         # dest-dir creation - aws creates the directory and then fails
-        # validation (measured; sync.md section 6) - but before any listing.
+        # validation (measured; design/sync.md section 6) - but before any listing.
         out = tmp_path / "out"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
@@ -786,6 +804,24 @@ class TestSyncDownload:
         assert len(notices) == 1
         assert str(notices[0].error).startswith("warning: Skipping bucket/d/a.txt -> ")
 
+    def test_unrecognized_case_conflict_mode_raises_validation_error(self, tmp_path: Path) -> None:
+        # An unrecognized value is a caller error in the Boto3S3Error family,
+        # not the enum's raw ValueError (design/exceptions.md), and it is
+        # refused before a single request goes out.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                str(tmp_path / "out"),
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "sync"
+        assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
+        assert calls == []
+
 
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
@@ -835,7 +871,7 @@ class TestParallelFilter:
         assert _pool_window(cast("Executor", object())) == 16
 
     def test_cancel_token_aborts_the_pooled_path(self, tmp_path: Path) -> None:
-        # docs/sync.md: cancel_token is polled between pairs on the pooled dispatch
+        # design/sync.md: cancel_token is polled between pairs on the pooled dispatch
         # too, not only on the serial loop.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx")

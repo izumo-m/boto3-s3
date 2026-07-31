@@ -12,10 +12,10 @@ from boto3_s3 import (
     Boto3S3Error,
     OpOutcome,
     OpResult,
-    S3Storage,
     ValidationError,
 )
 from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -51,7 +51,7 @@ class _DeletePrinter:
         if self._quiet:
             return
         # The printed line needs the full object key; a delete record's
-        # compare_key is the operation-relative form (docs/opresult.md), and
+        # compare_key is the operation-relative form (design/opresult.md), and
         # the listed entry always rides on src_info.
         info = result.src_info
         key = info.key if info is not None else result.compare_key
@@ -78,12 +78,24 @@ class RmCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rm``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
-        parser.add_argument("--dryrun", action="store_true")
-        parser.add_argument("--quiet", action="store_true")
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument("paths", metavar="<S3Uri>", help="the object or prefix to delete")
+        parser.add_argument(
+            "--dryrun",
+            action="store_true",
+            help="report what would be deleted without deleting anything",
+        )
+        parser.add_argument(
+            "--quiet", action="store_true", help="do not print per-item result lines"
+        )
+        parser.add_argument(
+            "--recursive", action="store_true", help="delete every object under the prefix"
+        )
         add_request_payer_argument(parser)
-        parser.add_argument("--only-show-errors", action="store_true")
+        parser.add_argument(
+            "--only-show-errors",
+            action="store_true",
+            help="print only errors and warnings, no result lines",
+        )
         filters.add_filter_arguments(parser)
         add_page_size_argument(parser)
 
@@ -95,14 +107,17 @@ class RmCommand(Command):
         every classified (``Boto3S3Error``) failure after the operation
         starts is rc 1 (an unclassified exception falls to the dispatcher's
         handler chain instead - the taxonomy promises classification for the
-        known failures, docs/exceptions.md): per-key failures
+        known failures, design/exceptions.md): per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
-        with the exit codes kept. Nothing maps to 254 here.
+        with the exit codes kept. Nothing maps to 254 here. Ahead of all of
+        that sit the client build and the ``[s3]`` runtime config, at aws's own
+        slots: an empty region is 255 before every check below, and an invalid
+        ``[s3]`` value 255 after the path check but before the rest.
         """
-        # The aws parse-to-validation order (measured, docs/cli.md section 6):
+        # The aws parse-to-validation order (measured, design/cli.md section 6):
         # the --query compile (252) leads, then the --endpoint-url scheme check
         # (252), then the paramfile expansions (252, positional path and
         # --page-size) beat the integer coercion (255), which beats the session
@@ -113,6 +128,13 @@ class RmCommand(Command):
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
         s3 = ctx.s3(args)
+        # aws's S3Command._run_main builds the client before _convert_path_args
+        # and before every path validation, so an empty region ("Invalid
+        # endpoint: https://s3..amazonaws.com", rc 255) preempts the fileb
+        # decode, the path-type 252, and the bucket-less synthesis below. A
+        # merely absent region builds fine (S3's global endpoint fallback), so
+        # those keep their codes.
+        client = s3.client()
         if isinstance(args.paths, bytes):
             # Intentional aws-cli bug parity: S3TransferCommand decodes a
             # positional fileb:// back through the filesystem encoding before
@@ -130,27 +152,34 @@ class RmCommand(Command):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
 
+        # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
+        # builds a transfer manager exactly like cp - after the path check above
+        # (which a bad [s3] value loses to) and before everything below (which it
+        # beats, the bucket-less synthesis included). The deletes never ride the
+        # engine here (design/crt.md section 6), but its construction failures
+        # are aws's, so they must land at aws's point.
+        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")
+
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
-            # aws sends Bucket="" to the API and botocore's client-side
-            # validation fails the task -> rc 1: shaped like a
-            # per-key failure on the blind single path, a fatal error on the
-            # enumerating paths. S3Storage.validate() would reject "s3:///k" as a
-            # ValidationError (252-shaped), so handle the form before construction
-            # to keep this path at rc 1.
-            message = usage.invalid_bucket_name_message()
+        if not bucket_part and (args.recursive or not key_part):
+            # The enumerating bucket-less forms (keyless service root, or
+            # --recursive): aws sends Bucket="" to the listing and botocore's
+            # client-side validation makes it a fatal rc 1, --dryrun included
+            # (measured). Synthesized with aws's wording rather than dialed,
+            # keeping the fake-driven paths (rb --force's inner rm included)
+            # deterministic; the blind single delete instead rides
+            # to the API via build_s3_storage below - its dryrun records at
+            # rc 0 and its live run fails per-key, exactly aws's shapes.
             if not args.quiet:
-                if key_part and not args.recursive:
-                    sys.stderr.write(f"delete failed: {target} {message}\n")
-                else:
-                    sys.stderr.write(f"fatal error: {message}\n")
+                sys.stderr.write(f"fatal error: {usage.invalid_bucket_name_message()}\n")
             return 1
 
         # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
-        # Outposts bucket) raise ValidationError from S3Storage.validate (deferred
-        # from the now non-raising construction) through main -> rc 252, matching aws.
-        storage = S3Storage(target, client=s3.client(), page_size=page_size)
-        storage.validate()
+        # Outposts bucket) raise ValidationError through main -> rc 252,
+        # matching aws; the bucket-less blind single delete flows through
+        # build_s3_storage's carve-out instead of failing validation.
+        storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).
         item_filter = filters.compile_filter(

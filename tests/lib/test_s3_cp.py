@@ -16,7 +16,7 @@ import io
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -29,7 +29,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from boto3_s3.iostorage import IOStorage
+from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.producers import CaseConflictGate
 from boto3_s3.s3 import S3
@@ -537,7 +537,7 @@ class TestDownloadRoute:
         # predates the knob entirely and the getattr guard reads that as None
         # - patched here, since the current botocore always carries the
         # attribute. The HEAD must go out without ChecksumMode (the
-        # era-appropriate wire shape, docs/overview.md section 2), not raise.
+        # era-appropriate wire shape, docs/compatibility.md), not raise.
         client, calls = make_recording_client([head_response(), get_response()])
         monkeypatch.setattr(client.meta.config, "response_checksum_validation", None, raising=False)
         S3().cp(
@@ -560,6 +560,18 @@ class TestDownloadRoute:
         # originating ClientError stays on the DIRECT __cause__ - the
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
+
+    def test_named_404_code_is_not_rewritten(self, tmp_path: Path) -> None:
+        # aws-cli's filegenerator rewrites only `Error.Code == '404'` (the
+        # bare HeadObject miss); an endpoint that names a code over HTTP 404
+        # (NoSuchBucket) surfaces the original error, not the key-missing
+        # wording.
+        client, _ = make_recording_client([client_error("NoSuchBucket", 404, "HeadObject")])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        message = str(excinfo.value)
+        assert "NoSuchBucket" in message
+        assert "does not exist" not in message
 
     def test_bucketless_service_root_source_reaches_the_listing_not_silent_zero(
         self, tmp_path: Path
@@ -933,6 +945,31 @@ class TestStreamRoutes:
             S3().cp(str(tmp_path / "in.txt"), IOStorage(io.BytesIO()))
         assert "the other must be s3://" in str(down.value)
 
+    def test_stream_peer_validation_is_attributed_to_cp(self) -> None:
+        # The peer's validate() failure carries cp like every other rejection
+        # on this route - the stream route serves cp only.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(IOStorage(io.BytesIO(b"x")), S3Storage("s3:///key", client=client))
+        assert (excinfo.value.operation, excinfo.value.key) == ("cp", "key")
+        assert calls == []
+
+    def test_missing_stdio_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # StdioStorage.open names no operation of its own (it serves cp and mv
+        # alike), so the eager open on this route stamps cp - the only
+        # operation the route serves - in both directions.
+        client, calls = make_recording_client([])
+        monkeypatch.setattr("sys.stdin", None)
+        with pytest.raises(ValidationError, match="stdin is required") as up:
+            S3().cp(StdioStorage(), S3Storage("s3://b/k", client=client))
+        assert up.value.operation == "cp"
+        monkeypatch.setattr("sys.stdout", None)
+        with pytest.raises(ValidationError, match="stdout is required") as down:
+            S3().cp(S3Storage("s3://b/k", client=client), StdioStorage())
+        assert down.value.operation == "cp"
+        # The open precedes every request, so nothing was asked of S3.
+        assert calls == []
+
     def test_stream_cancel_token_stops_before_open(self) -> None:
         # The stream route honors cancel_token like the non-stream route: a
         # pre-cancelled token raises before the fileobj is opened or submitted,
@@ -1123,6 +1160,86 @@ class TestCaseConflictGate:
             gate.blocks(twin, transferrer)
         assert excinfo.value.operation == "mv"
         assert str(excinfo.value).startswith("Failed to download b/cc/a.txt -> ")
+
+    def test_unrecognized_mode_raises_validation_error(self, tmp_path: Path) -> None:
+        # An unrecognized value is a caller error in the Boto3S3Error family,
+        # not the enum's raw ValueError (design/exceptions.md), and it is
+        # refused before a single request goes out.
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/cc/", client=client),
+                str(tmp_path / "out"),
+                recursive=True,
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert type(excinfo.value) is ValidationError
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "cp"
+        assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
+        assert calls == []
+
+    def test_unrecognized_mode_reports_the_running_operation(self, tmp_path: Path) -> None:
+        # cp and mv share the transfer path, so the refusal carries the running
+        # operation rather than a hardcoded "cp".
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().mv(
+                S3Storage("s3://b/cc/", client=client),
+                str(tmp_path / "out"),
+                recursive=True,
+                transfer_config=_CASE_CONFLICT_CONFIG,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert excinfo.value.operation == "mv"
+        assert calls == []
+
+    def test_unrecognized_mode_is_refused_outside_the_gate_scope(self, tmp_path: Path) -> None:
+        # The conversion runs ahead of the gate's scope checks, so a bad value
+        # fails a non-recursive upload too - a run the gate itself never covers.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert calls == []
+
+    def test_unrecognized_mode_is_refused_on_the_stream_route(self) -> None:
+        # The stream route builds no gate at all, but it reads the option so
+        # that no cp escapes the check - refused before the stream is opened.
+        buf = io.BytesIO(b"x")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                IOStorage(buf),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                **cast(TransferOptions, {"case_conflict": "skipp"}),
+            )
+        assert str(excinfo.value) == "Invalid case_conflict value: 'skipp'"
+        assert excinfo.value.operation == "cp"
+        assert calls == []
+
+    def test_none_mode_reads_as_unspecified(self, tmp_path: Path) -> None:
+        # An explicit None is unspecified (an is-None check: None only, not any
+        # falsy value), like copy_props - a permissive caller still transfers.
+        out = tmp_path / "out"
+        client, calls = make_recording_client([_cc_listing(), get_response(), get_response()])
+        S3().cp(
+            S3Storage("s3://b/cc/", client=client),
+            str(out),
+            recursive=True,
+            transfer_config=_CASE_CONFLICT_CONFIG,
+            **cast(TransferOptions, {"case_conflict": None}),
+        )
+        assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
 
     def _build_gate(
         self, dest: LocalStorage, item_filter: FileFilter | None = None

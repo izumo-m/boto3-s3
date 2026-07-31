@@ -19,7 +19,7 @@ on both sides (aws's converter has the same unguarded cast).
 ``s3 =`` INI syntax, ``AWS_CONFIG_FILE`` and ``--profile`` all behave like
 aws. The engine decision tree over the parsed config is
 ``resolve_transfer_client`` below (a port of aws-cli
-``TransferManagerFactory._compute_transfer_client_type``; docs/crt.md
+``TransferManagerFactory._compute_transfer_client_type``; design/crt.md
 section 4), driven from ``commands/transferargs.resolve_transfer_config``.
 """
 
@@ -359,6 +359,18 @@ def build_transfer_config(
             # _validate_crt_transfer_config (a failed run where aws exits 0).
             continue
         kwargs[ctor_key] = runtime_config[rc_key]
+    if crt and "multipart_chunksize" in scoped:
+        # aws-cli sends no per-request threshold on the CRT lane, and aws-c-s3
+        # falls back to the client part size when none arrives - so an explicit
+        # ``multipart_chunksize`` IS aws's effective threshold (the ``[s3]``
+        # ``multipart_threshold`` key is ignored there, like aws). The
+        # installed s3transfer always stamps the config's *resolved* threshold
+        # onto every CRT put, so leaving it unset would stamp the 8 MiB boto3
+        # default and multipart a file aws single-puts; pinning it to the part
+        # size restores aws's request sequence. With no explicit chunksize the
+        # stamped 8 MiB default equals aws-c-s3's default part size - the same
+        # effective cutoff - so no pin is needed.
+        kwargs["multipart_threshold"] = runtime_config["multipart_chunksize"]
     config = TransferConfig(**kwargs)
     if not crt:
         # Classic-only tuning aws-cli applies solely to its classic

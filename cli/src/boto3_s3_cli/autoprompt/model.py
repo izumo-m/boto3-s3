@@ -114,14 +114,6 @@ class CompletionModel:
         return list(self._globals.values())
 
 
-def _is_help(action: argparse.Action) -> bool:
-    # Our CLI exposes -h/--help (argparse) but no `help` subcommand; aws-cli is
-    # the reverse (a `help` subcommand, no --help global). Neither tool's help
-    # mechanism is in the other's candidate set, and help is charter-exempt
-    # (overview.md section 3 exception 1), so it is excluded from completion entirely.
-    return "--help" in action.option_strings or "-h" in action.option_strings
-
-
 def _arg_from_action(action: argparse.Action) -> ArgData:
     # argparse sets nargs=0 for store_true/store_false and our --version action;
     # those consume no value, so the parser must see them as 'boolean'.
@@ -168,11 +160,11 @@ def build_model() -> CompletionModel:
 
     # The subparsers action is the top parser's only positional, so the
     # `not option_strings` guard skips it along with any positional; globals are
-    # exactly the top-level options minus help.
+    # exactly the top-level options.
     global_option_strings: set[str] = set()
     globals_: dict[str, ArgData] = {}
     for action in _actions(parser):
-        if _is_help(action) or not action.option_strings:
+        if not action.option_strings:
             continue
         global_option_strings.update(action.option_strings)
         arg = _arg_from_action(action)
@@ -183,8 +175,6 @@ def build_model() -> CompletionModel:
         options: dict[str, ArgData] = {}
         positionals: list[ArgData] = []
         for action in _actions(subparser):
-            if _is_help(action):
-                continue
             if not action.option_strings:
                 positionals.append(_arg_from_action(action))
             elif not set(action.option_strings) & global_option_strings:

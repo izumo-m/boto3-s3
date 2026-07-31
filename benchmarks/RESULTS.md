@@ -4,7 +4,7 @@ A curated log of officially recorded baseline runs (newest first). The raw
 sample data lives in the git-ignored `benchmarks/results/` JSONL files on the
 measuring host; this file preserves the headline numbers with their exact
 revision and environment so they survive across hosts and cleanups. Metric
-definitions (net, ratio, flags) are in [docs/benchmark.md](../docs/benchmark.md).
+definitions (net, ratio, flags) are in [design/benchmark.md](../design/benchmark.md).
 
 ## 2026-07-21 - fast timestamp parsing
 
@@ -128,4 +128,4 @@ Notes:
   aws s3" goal within noise.
 - In-process absolute levels on this host vary by tens of percent between
   runs under different host load; within-run spreads are the stable signal
-  (docs/benchmark.md "Reading the numbers").
+  (design/benchmark.md "Reading the numbers").

@@ -315,8 +315,12 @@ class TransferType(enum.Enum):
 class OpOutcome(enum.Enum):
     """Per-item outcome. ``FAILED`` maps to CLI exit code 1, ``WARNED`` to 2.
 
-    ``SKIPPED`` is an informational, non-warning skip (e.g. sync up-to-date,
-    a ``no_overwrite`` rejection) and does not affect the exit code.
+    ``SKIPPED`` is an informational, non-warning skip and does not affect the
+    exit code: a ``cp`` / ``mv`` that ``no_overwrite`` stopped from replacing
+    an existing destination, or a glacier-blocked source passed over under
+    ``ignore_glacier_warnings``. ``sync`` emits none - a pair it finds up to
+    date produces no record at all, and its ``no_overwrite`` drops the whole
+    update lane instead of skipping pairs one by one.
     ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only
@@ -357,7 +361,7 @@ class CopyPropsMode(enum.Enum):
     `ALL` additionally carries S3 object annotations and needs an SDK with the
     annotations model - botocore >= 1.43.31 and s3transfer >= 0.19; on an older
     SDK the transfer engine refuses it up front with a `ConfigurationError`
-    (every other mode degrades silently there, docs/transfer.md section 4).
+    (every other mode degrades silently there, design/transfer.md section 4).
     Multipart annotation staging is selected separately by
     `AnnotationCopyMode`.
     """
@@ -403,11 +407,11 @@ class OpResult:
     record beside the SUCCEEDED one (transfer.md section 8). Submitted
     transfers emit from the engine's worker threads; non-submitting records -
     dryrun, skips, notices - emit inline on the calling thread
-    (docs/opresult.md). Keep the callback fast and non-raising either way.
+    (design/opresult.md). Keep the callback fast and non-raising either way.
     A single type keyed by ``transfer_type`` (the verb). The ``src_*`` trio describes the object
     acted on (a transfer's source, or a delete's removed object); the ``dest_*``
     trio the destination side. The fields, the ``src`` / ``dest`` convention, and
-    which operation populates which field are documented in docs/opresult.md.
+    which operation populates which field are documented in design/opresult.md.
 
     ``dest_info`` is ``None`` for ``cp`` / ``mv``, which never list the
     destination; only ``sync`` populates it (the pre-existing object the copy
@@ -504,7 +508,7 @@ class TransferOptions(TypedDict, total=False):
     downloads to a *local* destination - a ``cp`` / ``mv`` download into a
     custom (open-route) backend has no existence probe and overwrites (the
     backend owns its key space; ``sync`` still skips destination-present pairs
-    from its listing - docs/transfer.md section 12). `annotation_copy_mode`
+    from its listing - design/transfer.md section 12). `annotation_copy_mode`
     affects only multipart S3-to-S3 copies under `copy_props=ALL`; it defaults
     to `PRELOAD_MEMORY` for aws-cli parity.
     """

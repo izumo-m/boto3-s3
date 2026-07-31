@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import io
 import threading
+from collections.abc import Collection
+from importlib.metadata import version
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3.storage import sieve_pages
+from tests.utils.fakemodel import model_meta
 from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -52,6 +55,11 @@ class _FakePaginator:
         return iter(self._pages)
 
 
+# What a current botocore's ListBuckets models. The fakes below carry it unless
+# a test asks for an older model: a subset, or None for no input shape at all.
+_LIST_BUCKETS_MEMBERS = frozenset({"Prefix", "BucketRegion"})
+
+
 class _FakeS3Client:
     def __init__(
         self,
@@ -59,6 +67,7 @@ class _FakeS3Client:
         error: Exception | None = None,
         head_response: dict[str, Any] | None = None,
         head_error: Exception | None = None,
+        list_buckets_members: Collection[str] | None = _LIST_BUCKETS_MEMBERS,
     ) -> None:
         self._pages = pages or []
         self._error = error
@@ -67,6 +76,8 @@ class _FakeS3Client:
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
         self.head_calls: list[dict[str, Any]] = []
+        # The ListBuckets filter gate reads the model, so the fake carries one.
+        self.meta = model_meta({"ListBuckets": list_buckets_members})
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -91,9 +102,14 @@ def _storage(
     url: str = "s3://bucket/prefix/",
     page_size: int = 1000,
     fetch_owner: bool = False,
+    list_buckets_members: Collection[str] | None = _LIST_BUCKETS_MEMBERS,
 ) -> tuple[S3Storage, _FakeS3Client]:
     client = _FakeS3Client(
-        pages=pages, error=error, head_response=head_response, head_error=head_error
+        pages=pages,
+        error=error,
+        head_response=head_response,
+        head_error=head_error,
+        list_buckets_members=list_buckets_members,
     )
     return S3Storage(url, client=client, page_size=page_size, fetch_owner=fetch_owner), client
 
@@ -429,6 +445,22 @@ def _bucket_entry(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": MTIME}
 
 
+class _NoPaginatorClient:
+    """A botocore < 1.34.162 client: no ListBuckets paginator, and a
+    ListBuckets model with no input shape at all."""
+
+    def __init__(self) -> None:
+        self.list_buckets_calls = 0
+        self.meta = model_meta({"ListBuckets": None})
+
+    def can_paginate(self, name: str) -> bool:
+        return False
+
+    def list_buckets(self, **kwargs: Any) -> dict[str, Any]:
+        self.list_buckets_calls += 1
+        return {"Buckets": [_bucket_entry("alpha")]}
+
+
 class TestListBuckets:
     """The S3 service root is a separate operation - ``list_buckets`` (``ListBuckets``),
     not ``scan`` (which is object listing / openable entities)."""
@@ -471,25 +503,68 @@ class TestListBuckets:
         assert client.paginator_names == ["list_objects_v2"]
 
     def test_falls_back_to_unpaginated_list_buckets_below_the_floor(self) -> None:
-        # botocore < 1.34.162 has no ListBuckets paginator; list_buckets must fall
-        # back to a single list_buckets() call (filters inert) rather than crash
-        # with OperationNotPageableError.
-        class _NoPaginatorClient:
-            def __init__(self) -> None:
-                self.list_buckets_calls = 0
-
-            def can_paginate(self, name: str) -> bool:
-                return False
-
-            def list_buckets(self, **kwargs: Any) -> dict[str, Any]:
-                self.list_buckets_calls += 1
-                return {"Buckets": [_bucket_entry("alpha")]}
-
+        # botocore < 1.34.162 has no ListBuckets paginator; an unfiltered listing
+        # must fall back to a single list_buckets() call rather than crash with
+        # OperationNotPageableError.
         client = _NoPaginatorClient()
         storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
-        results = list(storage.list_buckets(name_prefix="al"))
+        results = list(storage.list_buckets())
         assert client.list_buckets_calls == 1
         assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
+
+    @pytest.mark.parametrize("filters", [{"name_prefix": "al"}, {"region": "us-west-2"}])
+    def test_filters_below_the_paginator_floor_are_refused(self, filters: dict[str, str]) -> None:
+        # That old a botocore models no ListBuckets input shape at all, so the
+        # fallback call cannot carry a filter: a filtered listing must fail
+        # rather than answer with the account's whole bucket list.
+        client = _NoPaginatorClient()
+        storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError):
+            list(storage.list_buckets(**filters))
+        assert client.list_buckets_calls == 0
+
+    @pytest.mark.parametrize("filters", [{"name_prefix": ""}, {"region": ""}])
+    def test_empty_filters_are_not_a_request(self, filters: dict[str, str]) -> None:
+        # "" is not a filter (aws-cli's truthiness check): nothing is sent, so
+        # no input member is needed and the sub-floor fallback still lists.
+        client = _NoPaginatorClient()
+        storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
+        results = list(storage.list_buckets(**filters))
+        assert client.list_buckets_calls == 1
+        assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
+
+    @pytest.mark.parametrize("filters", [{"name_prefix": "al"}, {"region": "us-west-2"}])
+    def test_filters_the_model_cannot_carry_are_refused(self, filters: dict[str, str]) -> None:
+        # botocore 1.34.162 through 1.35.41 paginates ListBuckets but models
+        # neither filter input; sending one there fails botocore's own param
+        # validation, so the request is refused first - as a ConfigurationError
+        # (the SDK floor lacks the capability), not a ValidationError.
+        storage, client = _storage([], url="s3://", list_buckets_members=set())
+        with pytest.raises(ConfigurationError) as exc_info:
+            list(storage.list_buckets(**filters))
+        message = str(exc_info.value)
+        assert "1.35.42" in message
+        assert version("botocore") in message
+        assert exc_info.value.operation == "ls"
+        assert client.calls == []
+
+    def test_prefix_only_model_carries_name_prefix_and_refuses_region(self) -> None:
+        # Each filter rides its own input member, so a model with one of the two
+        # serves that filter and refuses the other.
+        storage, client = _storage([], url="s3://", list_buckets_members={"Prefix"})
+        list(storage.list_buckets(name_prefix="al"))
+        assert client.calls[0]["Prefix"] == "al"
+        with pytest.raises(ConfigurationError):
+            list(storage.list_buckets(region="us-west-2"))
+        assert len(client.calls) == 1
+
+    def test_bucket_region_only_model_carries_region_and_refuses_name_prefix(self) -> None:
+        storage, client = _storage([], url="s3://", list_buckets_members={"BucketRegion"})
+        list(storage.list_buckets(region="us-west-2"))
+        assert client.calls[0]["BucketRegion"] == "us-west-2"
+        with pytest.raises(ConfigurationError):
+            list(storage.list_buckets(name_prefix="al"))
+        assert len(client.calls) == 1
 
 
 class TestScanErrorMapping:
@@ -512,7 +587,7 @@ class TestScanErrorMapping:
         # A lazily-built default client whose construction fails - e.g.
         # AWS_PROFILE naming a missing profile - surfaces as the documented
         # InvalidConfigError refinement (a set-but-unusable configuration,
-        # docs/exceptions.md section 3), not the raw botocore error.
+        # design/exceptions.md section 3), not the raw botocore error.
         import boto3
 
         def boom(*args: Any, **kwargs: Any) -> Any:
@@ -541,7 +616,7 @@ class TestScanErrorMapping:
     ) -> None:
         # NoCredentials/NoRegion keep the PLAIN ConfigurationError - the CLI
         # maps that to aws's dedicated rc 253, while the InvalidConfigError
-        # refinement maps to the general 255 (docs/exceptions.md section 3).
+        # refinement maps to the general 255 (design/exceptions.md section 3).
         import boto3
         from botocore.exceptions import NoCredentialsError
 
@@ -566,7 +641,7 @@ class TestScanErrorMapping:
     def test_unknown_code_widens_on_http_status(
         self, status: int | None, category: type[Boto3S3Error]
     ) -> None:
-        # docs/exceptions.md section 3: a code not in the table falls back to
+        # design/exceptions.md section 3: a code not in the table falls back to
         # HTTP-status widening - 5xx -> TransportError, no usable status ->
         # the base Boto3S3Error.
         meta: dict[str, Any] = {"HTTPStatusCode": status} if status is not None else {}
@@ -580,7 +655,7 @@ class TestScanErrorMapping:
         assert type(exc_info.value) is category
 
     def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
-        # docs/exceptions.md section 2: KeyboardInterrupt is never wrapped.
+        # design/exceptions.md section 2: KeyboardInterrupt is never wrapped.
         from boto3_s3.s3storage import s3_errors
 
         with pytest.raises(KeyboardInterrupt):
@@ -685,6 +760,20 @@ class TestConstructor:
         with pytest.raises(ValidationError):
             S3Storage("s3:///key").validate()
 
+    def test_key_without_bucket_rejection_carries_the_key(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage("s3:///key").validate()
+        assert exc_info.value.key == "key"
+        assert exc_info.value.bucket is None
+
+    def test_direct_validate_leaves_the_operation_unset(self) -> None:
+        # The storage does not know which operation is about to use it; the
+        # operation layer stamps the name (see test_s3.py). A caller invoking
+        # validate() directly keeps the documented operation=None.
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage("s3:///key").validate()
+        assert exc_info.value.operation is None
+
 
 class TestArnBuckets:
     """ARN-shaped bucket parts split like aws-cli's ``find_bucket_key``.
@@ -734,6 +823,22 @@ class TestArnBuckets:
         )
         with pytest.raises(ValidationError, match="Outpost Bucket"):
             S3Storage(f"s3://{arn}").validate()
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap",
+            "arn:aws:s3-outposts:us-west-2:123456789012:"
+            "outpost/op-01234567890123456/bucket/my-bucket",
+        ],
+    )
+    def test_rejections_carry_the_whole_arn_as_the_bucket(self, arn: str) -> None:
+        # The whole ARN identifies what was rejected, whatever the constructor's
+        # splitters made of it.
+        with pytest.raises(ValidationError) as exc_info:
+            S3Storage(f"s3://{arn}/some/key").validate()
+        assert exc_info.value.bucket == arn
+        assert exc_info.value.key is None
 
 
 class TestResolveRouting:

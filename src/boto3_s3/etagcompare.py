@@ -16,9 +16,9 @@ would carry:
   multipart upload - so the reconstruction needs the multipart part size
   (the ``part_size`` argument, default ``DEFAULT_PART_SIZE``).
 
-This is a standalone, opt-in building block: it lives in its own module, is
-imported by submodule path (``from boto3_s3.etagcompare import EtagComparison``), and
-is **not** part of the package's lazy root re-export. Like
+This is a standalone, opt-in building block: it lives in its own module and is
+reachable either from the package root (``from boto3_s3 import EtagComparison``) or
+by submodule path (``from boto3_s3.etagcompare import EtagComparison``). Like
 ``comparator`` it imports no AWS SDK module at import time; the one
 SDK touch - mirroring s3transfer's ``ChunksizeAdjuster`` so the reconstructed
 part size matches what an actual upload would chunk - is deferred into the

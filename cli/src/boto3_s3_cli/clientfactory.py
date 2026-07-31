@@ -2,7 +2,7 @@
 
 The execution half of the global-option surface ``globalargs``
 registers: ``build_client`` turns the connection / auth values into the
-boto3 S3 client the library consumes (``docs/aws-cli-option-handling.md``
+boto3 S3 client the library consumes (``design/aws-cli-option-handling.md``
 section 5), and ``build_service_client`` builds the non-S3 clients ``mv``'s
 path validation needs (section 5.8). Everything here reaches the AWS SDK.
 """
@@ -10,13 +10,14 @@ path validation needs (section 5.8). Everything here reaches the AWS SDK.
 from __future__ import annotations
 
 import argparse
+import enum
 import os
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
+from boto3_s3_cli import configfiles
 
 if TYPE_CHECKING:
     from boto3.session import Session as Boto3Session
@@ -24,6 +25,20 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
+
+
+class _RegionUnresolved(enum.Enum):
+    """The type behind `_UNRESOLVED` (the sentinel shape `boto3_s3.crtsupport`
+    uses for its own region posture: a single-member enum, so a type checker
+    narrows ``str | None | Literal[...]`` on an identity test)."""
+
+    TOKEN = "unresolved"
+
+
+# `build_client(region=...)` default: "not supplied - walk the region chain
+# yourself". Distinct from a supplied ``None``, which is the chain's own answer
+# when nothing resolves and must NOT send the caller back through it.
+_UNRESOLVED: Final = _RegionUnresolved.TOKEN
 
 
 def _pin_python_sigv4_signers() -> None:
@@ -57,8 +72,7 @@ def _pin_python_sigv4_signers() -> None:
 def resolve_profile(args: argparse.Namespace) -> str | None:
     """The profile to open the session with (aws-cli precedence).
 
-    ``--profile`` (truthy only) > the first env var of
-    ``PROFILE_ENV_VARS`` that is *present* > ``None``
+    ``--profile`` (truthy only) > ``configfiles.env_profile`` > ``None``
     (boto3 then falls back to the ``default`` profile). The ``--profile`` guard is
     aws-cli's truthy test (its ``_handle_top_level_args`` binds the profile only
     ``if getattr(args, 'profile', False)``), so an empty ``--profile ""`` is
@@ -71,10 +85,7 @@ def resolve_profile(args: argparse.Namespace) -> str | None:
     """
     if args.profile:
         return args.profile
-    for name in PROFILE_ENV_VARS:
-        if name in os.environ:
-            return os.environ[name]
-    return None
+    return configfiles.env_profile()
 
 
 def validate_endpoint_url(args: argparse.Namespace) -> None:
@@ -141,24 +152,55 @@ def build_session(args: argparse.Namespace) -> Boto3Session:
 
 
 def build_s3(args: argparse.Namespace) -> S3:
-    """Build the command's `S3`, binding client and config reads to one session."""
+    """Build the command's `S3`, binding client and config reads to one session.
+
+    The region chain is walked **once** here and threaded into every client
+    this `S3` hands out. It is the invocation's most expensive resolution: its
+    last link is the EC2 IMDS probe, which on a host with no region configured
+    and no metadata service answering costs seconds - and the chain's answer
+    cannot change within one invocation, since the env, the bound session's
+    config and IMDS are all fixed by then. The same value is what the CRT
+    posture below declares, so client and engine can never disagree on it.
+    """
     from boto3_s3 import S3
 
     session = build_session(args)
+    region = _resolve_region(
+        args.region,
+        session._session,  # pyright: ignore[reportPrivateUsage]
+    )
 
     class CliS3(S3):
         def client(self) -> S3Client:
-            return build_client(args, session=session)
+            return build_client(args, session=session, region=region)
 
     # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
     # (aws dies immediately); the library default keeps waiting.
     # endpoint_url: build_client already applies it to every client this S3
     # hands out (the client() override), so the S3-level copy only feeds the
-    # CRT lane's explicit-endpoint pin (docs/crt.md) - without it, an
+    # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    return CliS3(session=session, endpoint_url=args.endpoint_url, wait_on_interrupt=False)
+    # crt_allow_absent_credentials=True: aws-cli hands its CRT client a
+    # credentials delegate built from whatever the session resolved, ``None``
+    # included, so a credential-less CRT upload fails inside the delegate
+    # rather than falling back to classic. The library defaults to boto3's
+    # opposite rule; the aws-faithful entry is this layer's (design/crt.md
+    # section 4).
+    # crt_region: aws-cli resolves the CRT region from its own region chain
+    # (the same `_resolve_region` every client here is built with), which
+    # yields None when nothing is configured - where botocore would hand the
+    # client the `aws-global` pseudo-region. Declaring the chain's answer is
+    # what lets awscrt's own region assertion fire, as it does under aws
+    # (design/crt.md section 6).
+    return CliS3(
+        session=session,
+        endpoint_url=args.endpoint_url,
+        wait_on_interrupt=False,
+        crt_allow_absent_credentials=True,
+        crt_region=region,
+    )
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
@@ -176,6 +218,14 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     as aws, rc 255). Only the CLI corrects this; the library
     (``S3.client``'s ``boto3.client`` fallback) keeps stock botocore order on
     purpose - the same library=boto3 / CLI=aws split as the profile chain.
+
+    A ``BadIMDSRequestError`` reads as no region. aws-cli carries its own copy
+    of botocore's region fetcher for exactly one added catch: botocore's
+    swallows only the retries-exceeded failure, so a metadata service that
+    rejects the token request outright - anything answering at the IMDS address
+    that is not EC2's service - escapes as that error and fails the whole
+    invocation (rc 255) where aws logs it and walks on with an unresolved
+    region.
     """
     if explicit is not None:
         return explicit
@@ -185,7 +235,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         EnvironmentProvider,
         ScopedConfigProvider,
     )
-    from botocore.utils import IMDSRegionProvider
+    from botocore.utils import BadIMDSRequestError, IMDSRegionProvider
 
     # botocore-stubs types ChainProvider's `providers` as Sequence[BaseProvider],
     # but IMDSRegionProvider (botocore.utils) is not declared a BaseProvider there
@@ -197,7 +247,53 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         ScopedConfigProvider(config_var_name="region", session=session),
         IMDSRegionProvider(session),
     ]
-    return ChainProvider(providers=providers).provide()
+    try:
+        return ChainProvider(providers=providers).provide()
+    except BadIMDSRequestError:
+        # The IMDS probe is the chain's last link, so its failure and an
+        # exhausted chain are the same answer.
+        return None
+
+
+def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession) -> bool | str:
+    """The TLS trust source, resolved to an explicit value for every CLI client.
+
+    ``--no-verify-ssl`` -> ``False``, ``--ca-bundle`` -> that path, then the
+    two fallbacks botocore itself would walk if the value were left ``None``:
+    the ``ca_bundle`` config variable (``AWS_CA_BUNDLE`` env or the profile's
+    ``ca_bundle`` key, read off the *same* session the client is built from, so
+    the resolved profile is honored) and the ``REQUESTS_CA_BUNDLE`` env var
+    (botocore's ``EndpointCreator._get_verify_value``, present-wins so an empty
+    value keeps its "verification off" meaning). Nothing set lands on the
+    bundle botocore would have used at request time - certifi's, or botocore's
+    own ``cacert.pem`` where certifi is absent, which is why this asks
+    ``get_cert_path`` rather than importing certifi.
+
+    Resolving here rather than passing ``None`` is what gives the CRT engine a
+    CA file: ``create_s3_crt_client(verify=None)`` means the *platform* trust
+    store, so a ``None`` that classic silently resolved to certifi left the two
+    engines trusting different roots. aws-cli has the same split in reverse
+    (its CRT lane resolves its bundled ``cacert.pem`` explicitly, ``factory.py``
+    ``_resolve_verify``, while its classic clients ride the botocore chain);
+    resolving once, up front, keeps both of *our* engines on the file classic
+    was already using - and keeps every CLI-built client on one value, which
+    the CRT singleton's verify compatibility check requires.
+    """
+    if args.no_verify_ssl:
+        return False
+    if args.ca_bundle is not None:
+        return cast("str", args.ca_bundle)
+    configured = botocore_session.get_config_variable("ca_bundle")
+    if configured is not None:
+        return cast("str", configured)
+    requests_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
+    if requests_bundle is not None:
+        return requests_bundle
+    # Present at the botocore floor (docs/compatibility.md); True means "the
+    # default bundle" and is exactly what botocore resolves per request.
+    from botocore.httpsession import get_cert_path
+
+    return cast("str", get_cert_path(True))
 
 
 def build_service_client(
@@ -212,7 +308,7 @@ def build_service_client(
     aws-cli's ``S3PathResolver.from_session``: a plain ``create_client`` carrying
     only the profile session, the caller's region choice (the source side
     passes ``--source-region``, the destination ``--region``, sts none),
-    and the ``--no-verify-ssl`` / ``--ca-bundle`` verify setting - no endpoint
+    and the resolved TLS ``verify`` setting (`_resolve_verify`) - no endpoint
     override. aws binds ``--region`` into the session itself at startup
     (clidriver's ``set_config_variable``), so a ``create_client`` with no
     ``region_name`` still lands in ``--region``; mirror that by falling back
@@ -233,11 +329,6 @@ def build_service_client(
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
-    verify: bool | str | None
-    if args.no_verify_ssl:
-        verify = False
-    else:
-        verify = args.ca_bundle
     # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
     # a bad --profile); translate them so the credential/region 253 split
     # survives - untranslated they would fall to the dispatcher's generic
@@ -271,7 +362,7 @@ def build_service_client(
             region_name=_resolve_region(
                 region if region is not None else args.region, botocore_session
             ),
-            verify=verify,
+            verify=_resolve_verify(args, botocore_session),
             config=Config(**service_overrides),
         )
     except (NoCredentialsError, NoRegionError) as exc:
@@ -356,20 +447,29 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     )
 
 
-def build_client(args: argparse.Namespace, *, session: Boto3Session | None = None) -> S3Client:
+def build_client(
+    args: argparse.Namespace,
+    *,
+    session: Boto3Session | None = None,
+    region: str | None | Literal[_RegionUnresolved.TOKEN] = _UNRESOLVED,
+) -> S3Client:
     """Build the boto3 S3 client from the connection/auth globals (section 5).
 
     ``--profile`` selects the session (falling back to the ``AWS_PROFILE`` >
     ``AWS_DEFAULT_PROFILE`` env chain, aws-cli order - ``resolve_profile``);
     the region resolves through aws-cli's chain (``--region`` > ``AWS_REGION`` >
-    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``);
+    ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``), unless
+    *region* supplies the chain's already-computed answer (what `build_s3`
+    threads in so one invocation walks the chain - and its IMDS probe - once);
     ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
-    kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` map to
-    ``verify``. The client is handed to the library through ``S3Storage`` - the
-    library never rebuilds connection settings itself.
+    kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
+    the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
+    value so both transfer engines trust the same roots). The client is handed
+    to the library through ``S3Storage`` - the library never rebuilds
+    connection settings itself.
     """
-    # Importing boto3 drags in botocore and s3transfer. The top-level
-    # --help/--version exits return before this normal-dispatch path.
+    # Importing boto3 drags in botocore and s3transfer. The informational exits
+    # (`--version`, the help token) return before this normal-dispatch path.
     import boto3
     import botocore.session
     from botocore import UNSIGNED
@@ -383,12 +483,6 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
     # and for direct callers - botocore would otherwise raise a bare
     # ValueError at client creation.
     validate_endpoint_url(args)
-
-    verify: bool | str | None
-    if args.no_verify_ssl:
-        verify = False
-    else:
-        verify = args.ca_bundle  # a path, or None to use the default trust store
 
     # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
     # signers) left - only the generic query-protocol "v2" - while stock
@@ -445,9 +539,11 @@ def build_client(args: argparse.Namespace, *, session: Boto3Session | None = Non
         config = Config(**overrides)
         return session.client(
             "s3",
-            region_name=_resolve_region(args.region, botocore_session),
+            region_name=(
+                _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
+            ),
             endpoint_url=args.endpoint_url,
-            verify=verify,
+            verify=_resolve_verify(args, botocore_session),
             config=config,
         )
     except (NoCredentialsError, NoRegionError) as exc:

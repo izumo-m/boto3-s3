@@ -23,7 +23,7 @@ Engine choices (parity-driven):
 
 - The engine follows ``TransferConfig.preferred_transfer_client`` with
   boto3's own semantics (``'auto'`` default; ``'auto'``/``'crt'`` resolve
-  through ``crtsupport``, docs/crt.md): the classic
+  through ``crtsupport``, design/crt.md): the classic
   ``s3transfer.manager.TransferManager`` unless the CRT manager is selected,
   and unconditionally classic for a copy run - the CRT manager has no copy,
   the same rule boto3 and aws-cli apply to s3->s3. The public
@@ -81,6 +81,7 @@ from s3transfer.upload import UploadSubmissionTask
 from boto3_s3 import crtsupport, requestparams
 from boto3_s3.exceptions import (
     AccessDeniedError,
+    BatchError,
     Boto3S3Error,
     CancelledError,
     ConfigurationError,
@@ -268,7 +269,7 @@ def _allow_if_none_match() -> None:
         copy_cls.COMPLETE_MULTIPART_ARGS.append("IfNoneMatch")
 
 
-# Back-compat (supported floor botocore 1.31, docs/overview.md section 2):
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md):
 # IfNoneMatch reached the S3 write ops only in later botocore - PutObject and
 # CompleteMultipartUpload in 1.35.16, CopyObject in 1.41.0. Below those,
 # --no-overwrite is rejected up front (here for the library, and in the CLI for
@@ -318,7 +319,7 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
     return None
 
 
-# Feature-level degradation (docs/overview.md section 2): S3 object
+# Feature-level degradation (docs/compatibility.md): S3 object
 # annotations reached botocore's S3 model in 1.43.31 and upstream s3transfer's
 # copy handling in 0.19. Both are introspected by member presence
 # (version-agnostic); the versions below only name the hint in the refusal
@@ -450,7 +451,7 @@ class _ResponseCapture:
     added - never colliding with another operation's capture or with a handler the
     application put on a shared client. The events engine has no lock, so a capture
     operation needs exclusive use of its client for the operation's span
-    (docs/s3.md).
+    (design/s3.md).
 
     ``_WRITE_OPS`` are the terminal object-writing operations observed - the
     intermediate multipart calls (CreateMultipartUpload / UploadPart /
@@ -627,7 +628,7 @@ class Transferrer:
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
-    the completion win; docs/opresult.md). The rollup counters are
+    the completion win; design/opresult.md). The rollup counters are
     approximate while transfers are in flight and exact after the `with`
     block exits.
 
@@ -667,6 +668,8 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt_endpoint: str | None = None,
+        crt_allow_absent_credentials: bool = False,
+        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
@@ -706,7 +709,7 @@ class Transferrer:
         # untyped caller ("") hits the invalid-value error below instead of
         # silently running with the default.
         # copy_props=ALL gate: annotations need a capable SDK; every other
-        # mode degrades silently on an old one (docs/transfer.md section 4).
+        # mode degrades silently on an old one (design/transfer.md section 4).
         self._copy_props = CopyPropsMode.DEFAULT
         self._annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
         if transfer_type is TransferType.COPY:
@@ -718,7 +721,7 @@ class Transferrer:
             except ValueError as exc:
                 # A bad value must not leak the enum's raw ValueError past the
                 # public API (the exception model keeps every error in the
-                # Boto3S3Error family, docs/exceptions.md); the CLI never gets
+                # Boto3S3Error family, design/exceptions.md); the CLI never gets
                 # here, having validated copy_props against its choices.
                 raise ValidationError(
                     f"Invalid copy_props value: {copy_props!r}", operation=operation
@@ -751,6 +754,14 @@ class Transferrer:
         # the CRT engine so it pins a custom endpoint the host heuristic would
         # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
         self._crt_endpoint = crt_endpoint
+        # aws-cli's posture on a client that resolved no credentials: enter the
+        # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
+        # boto3's classic fallback, which every library caller keeps.
+        self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
+        # off the client, boto3's source); a declared None is what reaches
+        # awscrt's own region assertion, as aws-cli's region chain does.
+        self._crt_region: crtsupport.CrtRegion = crt_region
         # The caller's boto3 session (S3.session), threaded to the CRT engine
         # so its request serializer reuses the warm session instead of paying
         # a fresh one per process (crtsupport._botocore_session); None = the
@@ -1255,7 +1266,7 @@ class Transferrer:
             # Transfer-time breadcrumb: names the engine actually built for
             # this run (CRTTransferManager vs the classic TransferManager),
             # after any CRT->classic fallback. Lets --debug distinguish a real
-            # CRT transfer from a silent classic fallback (docs/testing.md).
+            # CRT transfer from a silent classic fallback (design/testing.md).
             logger.debug("transfer engine: %s", type(manager).__name__)
             if self._capture_response:
                 # Registered once, before the first submit; drained per item by
@@ -1272,6 +1283,9 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
+        ``crt_allow_absent_credentials`` and ``crt_region`` are the
+        caller-declared posture departures from boto3's rules available here,
+        and apply only when the caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1282,24 +1296,13 @@ class Transferrer:
             # flag is library-only (no aws-cli equivalent), so no parity impact.
             logger.debug("transfer engine: classic forced by capture_response")
             return None
-        preferred = getattr(self._transfer_config, "preferred_transfer_client", None) or "auto"
-        if str(preferred).lower() == "classic":
-            return None
-        if not crtsupport.should_use_crt(str(preferred)):
+        if not crtsupport.selects_crt(self._transfer_config):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
         _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
-        # The explicit endpoint pin belongs to the client built from it: the
-        # run's client is the route-selected one (an S3Storage may carry its
-        # own), and pinning the S3-level endpoint onto a storage-supplied
-        # client would dial one endpoint with another's credentials and
-        # region (the classic lane just uses that client). botocore stores
-        # an explicit endpoint_url verbatim on meta, so equality identifies
-        # a client this S3 built; any other client falls back to the
-        # host heuristic on its *own* endpoint (`_derive_endpoint`).
-        endpoint = self._crt_endpoint
-        if endpoint is not None and self._client.meta.endpoint_url != endpoint:
-            endpoint = None
+        # The run's client is the route-selected one (an S3Storage may carry its
+        # own), so the S3-level endpoint pin only applies to the client it built.
+        endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
         # Deferred: absent on floor boto3 (pre-CRT); reached only on the CRT lane.
         from boto3.exceptions import InvalidCrtTransferConfigError
 
@@ -1309,11 +1312,13 @@ class Transferrer:
                 self._transfer_config,
                 endpoint=endpoint,
                 session=self._session,
+                allow_absent_credentials=self._crt_allow_absent_credentials,
+                region=self._crt_region,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig
             # options set): a caller-argument problem, kept inside the taxonomy
-            # like the copy_props ValueError above - docs/exceptions.md carves
+            # like the copy_props ValueError above - design/exceptions.md carves
             # out exactly one pass-through (MissingDependencyException), and
             # this is not it.
             raise ValidationError(str(exc), operation=self._operation) from exc
@@ -1333,7 +1338,7 @@ class Transferrer:
         # boto3-faithful (boto3's own TransferManager does the same): we do not
         # restore the client, because it may be shared and unregistering could
         # disrupt a concurrent transfer. Run parallel operations with one client
-        # per thread (docs/s3.md thread-safety note).
+        # per thread (design/s3.md thread-safety note).
         return TransferManager(self._client, config=config, executor_cls=executor_cls)
 
     @property
@@ -1495,6 +1500,24 @@ class Transferrer:
             # __cause__ (exceptions.md section 2.1). A pass-through
             # Boto3S3Error keeps whatever cause it already has.
             error.__cause__ = exc
+        # Best-effort attribution: fill what the raiser could not know, never
+        # overwrite what it did. A family error raised in-pipeline passes
+        # through the translation unchanged, so this is where the run's context
+        # reaches it - a backend's open / read / write, the stream storages'
+        # missing-stdio check, and this module's own subscribers that raise
+        # unnamed (_DirectoryCreator / _FsyncDest); a translated error already
+        # carries these values.
+        if error.operation is None:
+            error.operation = self._operation
+        # bucket and key fill as a pair, never one alone: a raiser that named
+        # only the key placed it in its own address space (translate_os_error's
+        # local path, which leaves bucket unset by contract), and pairing this
+        # item's bucket with it would invent a mixed address. A BatchError is
+        # skipped outright - it stands for a whole run, and its coordinates are
+        # pinned as always-None (docs/reference/exceptions.md).
+        if error.bucket is None and error.key is None and not isinstance(error, BatchError):
+            error.bucket = item.dest_bucket or item.src_bucket
+            error.key = item.dest_key or item.src_key
         with self._lock:
             self._failed += 1
             if self._first_error is None:
@@ -1900,7 +1923,7 @@ class _ExcludeAnnotationDirective:
     - a botocore whose CopyObject lacks ``AnnotationDirective`` cannot send
       the parameter at all - the injection is skipped silently and copies
       behave like pre-annotations aws-cli (feature-level degradation,
-      docs/overview.md section 2);
+      docs/compatibility.md);
     - on a multipart copy, an s3transfer without the directive in its create
       blacklist would forward it to CreateMultipartUpload (no such member)
       and fail - the multipart path does not carry annotations anyway, so the

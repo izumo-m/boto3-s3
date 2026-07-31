@@ -252,5 +252,5 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
 
 
 # Package-internal: the mappers are consumed by producers/transfer only and
-# carry no documented surface (docs/imports.md).
+# carry no documented surface (design/imports.md).
 __all__: list[str] = []

@@ -12,7 +12,7 @@ The delete cases port the missing intent of aws-cli's CRT rm/sync tests at the
 CLI-observable boundary. For S3 deletion, boto3-s3 deliberately keeps its
 established ``DeleteObject`` / batched ``S3Deleter`` routes rather than
 aws-cli's per-key CRT DELETE requests; download sync-delete removes local files
-on both sides (docs/deleter.md). The contract here is rc, output, and end-state
+on both sides (design/deleter.md). The contract here is rc, output, and end-state
 parity rather than S3 transport identity.
 """
 

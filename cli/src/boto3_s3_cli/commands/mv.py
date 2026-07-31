@@ -46,20 +46,26 @@ class MvCommand(Command):
         ``--validate-same-s3-paths`` (and no ``--expected-size`` - mv has no
         streaming form)."""
         transferargs.add_transfer_arguments(parser)
-        parser.add_argument("--validate-same-s3-paths", action="store_true")
+        parser.add_argument(
+            "--validate-same-s3-paths",
+            action="store_true",
+            help="resolve access points before checking that source and destination differ",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Move and return an ``aws s3 mv``-style exit code.
 
-        The shape is cp's (docs/cli.md section 6) with mv's own usage errors in
+        The shape is cp's (design/cli.md section 6) with mv's own usage errors in
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
-        ``--validate-same-s3-paths`` resolution / access-point warning -
-        all before any S3 client exists. Resolution failures keep their
-        class: an unresolvable path 252, a failing s3control/sts call its
-        translated category (a ClientError-caused failure 254, a transport
-        failure 255).
+        ``--validate-same-s3-paths`` resolution / access-point warning - all
+        after the S3 client is built (``classify_paths``), the way aws orders
+        them, so an unusable region reports the *s3* endpoint's failure rather
+        than the resolver's s3control.
+        Resolution failures keep their class: an unresolvable path 252, a
+        failing s3control/sts call its translated category (a
+        ClientError-caused failure 254, a transport failure 255).
         """
         head = transferargs.classify_paths(args, ctx, operation="mv")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -87,13 +93,11 @@ class MvCommand(Command):
             # destination is created during validation (pre-pipeline rc 255).
             transferargs.create_local_dest_dir(dest, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
-        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
 
         s3 = head.s3
-        client = s3.client()
+        client = head.client
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (docs/overview.md
+        # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
         transferargs.validate_no_overwrite_supported(
             args.no_overwrite, paths_type, client, operation="mv"
@@ -114,6 +118,15 @@ class MvCommand(Command):
             args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
         )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="mv")
+        # After the [s3] runtime config: aws validates --case-conflict against
+        # S3 Express past the transfer manager whose creation loads the
+        # config, so a bad [s3] value beats the invalid-mode 252 (measured
+        # on cp; mv shares aws's S3TransferCommand shape).
+        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
+        options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:
@@ -153,18 +166,24 @@ class MvCommand(Command):
         aws's standing warning
         goes to stderr and the move proceeds (non-matching keys return before
         the warning branch).
+
+        A pure validator: the run's S3 client is already built (aws's
+        ``S3Command._run_main`` slot, ``classify_paths``), which is why an
+        unusable region reports the *s3* endpoint's failure rather than the
+        s3control endpoint the resolver below would otherwise reach first.
         """
         norm_src = S3Storage.normalize_s3_uri(src)
         norm_dest = S3Storage.normalize_s3_uri(dest)
         message = f"Cannot mv a file onto itself: {norm_src} - {norm_dest}"
-        if S3Storage.same_path(norm_src, norm_dest):
-            raise ValidationError(message, operation="mv")
-        if not S3Storage.same_key(norm_src, norm_dest):
-            return
-        enabled = (
+        same_key = S3Storage.same_key(norm_src, norm_dest)
+        resolving = same_key and (
             args.validate_same_s3_paths or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true"
         )
-        if enabled:
+        if S3Storage.same_path(norm_src, norm_dest):
+            raise ValidationError(message, operation="mv")
+        if not same_key:
+            return
+        if resolving:
             src_resolver = S3PathResolver(
                 s3control_client=ctx.service_client(
                     "s3control", args, s3, region=args.source_region

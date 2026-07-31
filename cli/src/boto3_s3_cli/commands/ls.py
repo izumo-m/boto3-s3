@@ -27,20 +27,40 @@ class LsCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``ls``-specific arguments to its subparser."""
-        parser.add_argument("paths", nargs="?", default="s3://", metavar="<S3Uri>")
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument(
+            "paths",
+            nargs="?",
+            default="s3://",
+            metavar="<S3Uri>",
+            help="prefix to list; omit it to list every bucket",
+        )
+        parser.add_argument(
+            "--recursive", action="store_true", help="list every key under the prefix"
+        )
         add_page_size_argument(parser)
         add_request_payer_argument(parser)
-        parser.add_argument("--human-readable", action="store_true")
-        parser.add_argument("--summarize", action="store_true")
+        parser.add_argument(
+            "--human-readable", action="store_true", help="show sizes in KiB / MiB / GiB"
+        )
+        parser.add_argument(
+            "--summarize", action="store_true", help="append the total object count and size"
+        )
         # Bucket-listing filters (ListBuckets Prefix / BucketRegion); accepted but
         # inert for object listings, like aws-cli.
-        parser.add_argument("--bucket-name-prefix", metavar="PREFIX")
-        parser.add_argument("--bucket-region", metavar="REGION")
+        parser.add_argument(
+            "--bucket-name-prefix",
+            metavar="PREFIX",
+            help="when listing buckets, keep only names starting with PREFIX",
+        )
+        parser.add_argument(
+            "--bucket-region",
+            metavar="REGION",
+            help="when listing buckets, keep only those in REGION",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # JMESPath compile (252) leads, then the --endpoint-url scheme check
         # (252), then each option at its own slot in aws's option-table order -
         # the positional, then --page-size (paramfile load 252, then the bare
@@ -54,6 +74,12 @@ class LsCommand(Command):
         page_size = parse_integer_option(args.page_size, operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
+        # Everything above is aws's parse layer; the client comes next, in
+        # aws's own slot (S3Command._run_main), ahead of all path handling. So
+        # an empty region is its "Invalid endpoint" 255 rather than the bytes
+        # crash just below, and a merely absent region still builds.
+        s3 = ctx.s3(args)
+        client = s3.client()
         # Intentional aws-cli bug parity: a readable positional fileb:// is
         # still bytes here. Calling bytes.startswith(str) raises TypeError,
         # which the general handler maps to 255.
@@ -67,8 +93,7 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
-        s3 = ctx.s3(args)
-        storage = S3Storage(target, client=s3.client(), page_size=page_size)
+        storage = S3Storage(target, client=client, page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
 

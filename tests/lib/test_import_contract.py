@@ -1,11 +1,11 @@
 """Import contract: what importing ``boto3_s3`` is allowed to load.
 
 The public surface is re-exported lazily (PEP 562 ``__getattr__`` in
-``boto3_s3/__init__.py``; policy in ``docs/imports.md``). These tests pin the
+``boto3_s3/__init__.py``; policy in ``design/imports.md``). These tests pin the
 contract that motivates it:
 
 - ``import boto3_s3`` (and pure helpers like ``globsieve``) load **no** AWS
-  SDK module (docs/imports.md section 1).
+  SDK module (design/imports.md section 1).
 
 Module-loading cases run in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -64,7 +64,7 @@ class TestLibraryImportContract:
         )
 
     def test_types_alone_stays_pure(self) -> None:
-        # docs/imports.md section 1 item 2 names types among the pure modules: the
+        # design/imports.md section 1 item 2 names types among the pure modules: the
         # record/enum definitions must not drag in the SDK on import.
         _run_fresh(
             """
@@ -75,7 +75,7 @@ class TestLibraryImportContract:
         )
 
     def test_exceptions_alone_stays_pure(self) -> None:
-        # docs/imports.md section 1 item 2 names exceptions among the pure modules: the
+        # design/imports.md section 1 item 2 names exceptions among the pure modules: the
         # taxonomy is plain Python and must stay SDK-free on import.
         _run_fresh(
             """
@@ -160,7 +160,7 @@ class TestLazyExports:
     def test_type_checking_imports_mirror_the_export_map(self) -> None:
         # getattr resolution runs through _EXPORT_HOMES and never sees the
         # TYPE_CHECKING block, so the three-way agreement promised in
-        # docs/imports.md section 3 needs a source-level check: the block
+        # design/imports.md section 3 needs a source-level check: the block
         # must import exactly the _EXPORT_HOMES names, each from its home
         # module, and annotate the special-cased __version__.
         import boto3_s3
@@ -187,7 +187,7 @@ class TestLazyExports:
         assert annotated == ["__version__"]
 
     def test_every_root_export_is_in_its_home_module_all(self) -> None:
-        # The two-tier surface contract (docs/imports.md): a root export must
+        # The two-tier surface contract (design/imports.md): a root export must
         # also appear in its home module's __all__, so `from boto3_s3.types
         # import *` and the root agree on what is public. getattr-based
         # resolution above cannot catch a home-__all__ omission.

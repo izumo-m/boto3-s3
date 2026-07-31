@@ -23,6 +23,7 @@ import os
 import re
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import boto3
@@ -78,7 +79,7 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
 # (aws's dedicated rc-253 handlers); the present-but-unusable configuration
 # family below refines to InvalidConfigError (aws's general handler, rc 255) -
-# the same split point as the CLI's clientfactory (docs/exceptions.md section
+# the same split point as the CLI's clientfactory (design/exceptions.md section
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator
 # lists only the known config shapes and keeps anything unlisted at the base.
@@ -119,7 +120,7 @@ S3_CODE_CATEGORIES: dict[str, type[Boto3S3Error]] = {
 
 # Resource types the S3 data plane cannot serve through these operations;
 # ``aws s3`` rejects them at parse time (ParamValidation -> rc 252) and the
-# exit-code charter (docs/overview.md section 3) has us reject them the same way.
+# exit-code charter (design/overview.md section 3) has us reject them the same way.
 _S3_OBJECT_LAMBDA_ARN_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3-object-lambda:[a-z\-0-9]+:[0-9]{12}:"
     r"accesspoint[/:][a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
@@ -163,7 +164,7 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     The strict checks - the
     unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
     parse-time 252), and a key with
-    no bucket (whose aws handling varies per command - docs/cli.md) - are
+    no bucket (whose aws handling varies per command - design/cli.md) - are
     deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
@@ -334,6 +335,42 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
             )
         )
     return infos
+
+
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md): the
+# ListBuckets Prefix / BucketRegion input parameters arrived in botocore
+# 1.35.42, so below that a bucket filter cannot ride the request at all - an
+# unsent filter would answer a filtered listing with every bucket the account
+# has. Asking for one is therefore refused up front, ahead of botocore's own
+# opaque param validation. Drop this gate once the floor reaches 1.35.42.
+_BUCKET_FILTERS_MIN_BOTOCORE = "1.35.42"
+
+
+def _bucket_filters_unsupported_reason(
+    client: S3Client, *, name_prefix: str | None, region: str | None
+) -> str | None:
+    """Why the installed SDK cannot carry the requested bucket filters, or ``None``.
+
+    ``name_prefix`` / ``region`` ride the ``ListBuckets`` ``Prefix`` /
+    ``BucketRegion`` input members, so the client's S3 model must define the
+    ones actually requested. Membership is introspected directly
+    (version-agnostic - a botocore old enough to lack the operation's input
+    shape altogether reads as no members), while the returned message names the
+    minimum version as a hint. An unfiltered listing needs neither member, so
+    it is never probed. Returns ``None`` when the listing is supported.
+    """
+    if not name_prefix and not region:
+        return None
+    members = getattr(
+        client.meta.service_model.operation_model("ListBuckets").input_shape, "members", {}
+    )
+    if (name_prefix and "Prefix" not in members) or (region and "BucketRegion" not in members):
+        return (
+            "--bucket-name-prefix / --bucket-region require botocore >= "
+            f"{_BUCKET_FILTERS_MIN_BOTOCORE} for ListBuckets (Prefix / BucketRegion); "
+            f"the installed botocore is {version('botocore')}."
+        )
+    return None
 
 
 class S3Storage(Storage):
@@ -601,18 +638,33 @@ class S3Storage(Storage):
         wants the rejection). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
+
+        The rejections carry what identifies the offending location: the whole
+        ARN for the two ARN forms - taken from the match here, not from
+        ``bucket``, which holds only the part before the first ``/`` for any
+        ARN family the splitters above do not recognize - and the orphaned key
+        for the bucket-less form. ``operation`` stays unset: the storage does
+        not know which operation is about to use it, and the operation layer
+        fills it in (``s3._validate_storage``).
         """
         rest = self._uri.partition("://")[2]
-        if _S3_OBJECT_LAMBDA_ARN_RE.match(rest):
+        object_lambda = _S3_OBJECT_LAMBDA_ARN_RE.match(rest)
+        if object_lambda is not None:
             raise ValidationError(
-                "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead."
+                "s3 commands do not support S3 Object Lambda resources. "
+                "Use s3api commands instead.",
+                bucket=object_lambda["bucket"],
             )
-        if _S3_OUTPOST_BUCKET_ARN_RE.match(rest):
+        outpost_bucket = _S3_OUTPOST_BUCKET_ARN_RE.match(rest)
+        if outpost_bucket is not None:
             raise ValidationError(
-                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead."
+                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead.",
+                bucket=outpost_bucket["bucket"],
             )
         if not self._bucket and self._key:
-            raise ValidationError(f"s3:// URL has a key but no bucket: {self._uri!r}")
+            raise ValidationError(
+                f"s3:// URL has a key but no bucket: {self._uri!r}", key=self._key
+            )
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.
@@ -624,7 +676,7 @@ class S3Storage(Storage):
         ``ConfigurationError`` for unresolvable credentials / region, its
         ``InvalidConfigError`` refinement for a set-but-unusable
         ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
-        botocore error (docs/exceptions.md
+        botocore error (design/exceptions.md
         section 1).
         """
         if self._client is None:
@@ -636,7 +688,7 @@ class S3Storage(Storage):
                     # A malformed endpoint from the environment
                     # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
                     # BotoCoreError - the same hole S3.client() plugs
-                    # (docs/exceptions.md).
+                    # (design/exceptions.md).
                     raise InvalidConfigError(str(exc)) from exc
         return self._client
 
@@ -745,22 +797,30 @@ class S3Storage(Storage):
         ever yields buckets. The page size is the storage's own ``page_size``
         (constructor config, shared with the object listing). ``name_prefix`` /
         ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
-        when falsy, aws-cli's truthiness check). Below the ListBuckets-paginator
-        floor (botocore 1.34.162) it falls back to one unpaginated
-        ``list_buckets()``, where these filters are simply never sent (inert). The
-        ``Prefix`` / ``BucketRegion`` input parameters landed later still (botocore
-        1.35.42), so on a paginating botocore that predates them (1.34.162 through
-        1.35.41) passing ``name_prefix`` / ``region`` raises a
-        ``ParamValidationError`` (docs/overview.md section 2). Errors surface on the
-        consumer's pull.
+        when falsy, aws-cli's truthiness check). Each requires a botocore whose
+        ``ListBuckets`` can carry it (the input parameters landed in 1.35.42);
+        requesting one where the model has no such member raises
+        ``ConfigurationError`` naming that version, so a filtered listing either
+        filters or fails (docs/compatibility.md). An unfiltered listing needs
+        neither member: below the ListBuckets-paginator floor (botocore
+        1.34.162) it falls back to one unpaginated ``list_buckets()``. Errors
+        surface on the consumer's pull.
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
+            reason = _bucket_filters_unsupported_reason(
+                client, name_prefix=name_prefix, region=region
+            )
+            if reason is not None:
+                # The environment (SDK floor) lacks the capability, not the
+                # caller's arguments: a ConfigurationError. s3_errors translates
+                # botocore exceptions only, so this reaches the caller as raised.
+                raise ConfigurationError(reason, operation="ls")
             if not client.can_paginate("list_buckets"):
                 # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
-                # late-2024 addition (botocore 1.34.162); its Prefix / BucketRegion
-                # input parameters came later still (botocore 1.35.42). Drop this
-                # branch once the floor reaches the paginator.
+                # late-2024 addition (botocore 1.34.162), so an older botocore has
+                # only the single unpaginated call to list with. Drop this branch
+                # once the floor reaches the paginator.
                 yield from _page_to_bucket_infos(client.list_buckets(), self)
                 return
             paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
@@ -784,8 +844,9 @@ class S3Storage(Storage):
         uniformly (``LocalStorage`` resolves an absolute ``info.key`` to its
         file), and a typical custom backend's too (its ``key`` equals
         ``compare_key`` - the relative address its ``open`` is
-        required to resolve; docs/storage.md section 2). The body is **read-only and forward-only**
-        (no ``seek``); it supports the context-manager / ``read`` / ``close``
+        required to resolve; design/storage.md section 2). The body is
+        **read-only and forward-only** (no ``seek``); it supports the
+        context-manager / ``read`` / ``close``
         protocol. ``size`` is unused for reads. Errors from the ``GetObject`` (a
         missing key, denied access) translate to the library taxonomy; an error
         raised *later* while reading the streamed body (a read timeout, a broken

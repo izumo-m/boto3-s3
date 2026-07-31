@@ -10,14 +10,14 @@ Adapted from the aws-cli source in three ways. First the root token: aws
 normalizes the executable to ``'aws'`` and nests services under it; we normalize
 to ``ROOT`` with the subcommands directly
 beneath. Second, ``_handle_positional`` is tuned for completion *usability* over
-a byte-faithful port (the auto-prompt UI is charter-exempt - ``docs/autoprompt.md``
+a byte-faithful port (the auto-prompt UI is charter-exempt - ``design/autoprompt.md``
 section 2): a value typed for an option before any positional keeps ``current_param`` on
 that option, and a token after a filled positional slot (cp/mv/sync take two
 paths) keeps the command's options live (the surplus token still lands in
 ``unparsed_items``; what changed is that the option set stays returned).
 Third, ``_consume_value`` handles an *integer* ``nargs``
 (``mb --tags KEY VALUE``), which aws's parser lacks - a deliberate improvement
-over the original behavior (docs/autoprompt.md section 3). Pure Python (no ``prompt_toolkit``).
+over the original behavior (design/autoprompt.md section 3). Pure Python (no ``prompt_toolkit``).
 """
 
 from __future__ import annotations
@@ -169,7 +169,7 @@ class CLIParser:
             # keep `current_param` until the count is met, so the owed value
             # keeps its (silent, free-text) completion context and the token
             # after a complete pair binds to the positional correctly
-            # (docs/autoprompt.md section 3).
+            # (design/autoprompt.md section 3).
             counted: list[str] = []
             while len(counted) < nargs and remaining_parts and remaining_parts != [WORD_BOUNDARY]:
                 if remaining_parts[0].startswith("--"):
@@ -286,7 +286,7 @@ class CLIParser:
             # (cp/mv/sync take two) fell into unparsed_items and stopped
             # completing. Returning the option set lets those options parse
             # normally - name completion, value completion, and dedup all work.
-            # (Usability tuning - docs/autoprompt.md section 2.)
+            # (Usability tuning - design/autoprompt.md section 2.)
             return self._index.arg_names(lineage=state.lineage, command_name=state.current_command)
 
     def _get_positional_argname(self, state: _ParseState) -> str | None:

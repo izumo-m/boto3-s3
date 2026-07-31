@@ -10,6 +10,7 @@ delete on dryrun / filter / skip / warn / failure).
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import GlobFilter
 from boto3_s3.exceptions import BatchError, ValidationError
-from boto3_s3.iostorage import IOStorage
+from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import OpOutcome, OpResult, TransferProgress, TransferType
@@ -75,6 +76,31 @@ class TestStreams:
         assert [(r.transfer_type, r.outcome) for r in results] == [
             (TransferType.MOVE, OpOutcome.DRYRUN)
         ]
+
+    def test_missing_stdout_fails_the_item_attributed_to_mv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A stream destination opens inside a transfer worker (the s3open arm),
+        # so StdioStorage's missing-stdio ValidationError is a per-item failure,
+        # not a pre-flight raise. The storage names no operation, so the run
+        # fills its own - "mv" here, never cp - plus the item's coordinates.
+        monkeypatch.setattr("sys.stdout", None)
+        client, calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as excinfo:
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                StdioStorage(),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert str(error) == "stdout is required for this operation, but is not available."
+        assert (error.operation, error.bucket, error.key) == ("mv", "b", "d/a.txt")
+        assert excinfo.value.__cause__ is error
 
     def test_stream_source_rejected(self) -> None:
         with pytest.raises(ValidationError, match="mv does not support a stream source"):
@@ -173,6 +199,41 @@ class TestUploadMove:
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert all(result.transfer_type is TransferType.MOVE for result in results)
 
+    def test_failed_local_delete_keeps_its_local_attribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The source delete names the failing entry in the local address space:
+        # a filesystem path in key, no bucket (exceptions.md). The engine's
+        # per-item fill must not pair the S3 destination's bucket with that
+        # path, so bucket and key are filled together or not at all. The path
+        # is the walk entry's own key, so it keeps the FileInfo separator
+        # convention (os.sep normalized to "/"), not the host form.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x" * 7)
+
+        def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(os, "remove", refuse)
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().mv(
+                str(src),
+                S3Storage("s3://bucket/up/", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["PutObject"]  # the upload itself succeeded
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert (error.operation, error.bucket, error.key) == (
+            "delete",
+            None,
+            str(src).replace(os.sep, "/"),
+        )
+
     def test_filtered_out_files_are_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
 
         (tmp_path / "keep.txt").write_bytes(b"k")
@@ -212,7 +273,7 @@ class TestUploadMove:
         self, tmp_path: Path
     ) -> None:
         # aws removes only the moved files, never the directories they leave
-        # empty behind (docs/transfer.md) - a recursive local mv is not rmdir.
+        # empty behind (design/transfer.md) - a recursive local mv is not rmdir.
         src_root = tmp_path / "tree"
         sub = src_root / "sub"
         sub.mkdir(parents=True)
@@ -233,7 +294,7 @@ class TestUploadMove:
 
 class TestDownloadMove:
     def test_progress_reports_the_move_kind(self, tmp_path: Path) -> None:
-        # docs/transfer.md: every reporting channel relabels to MOVE -
+        # design/transfer.md: every reporting channel relabels to MOVE -
         # results/warnings/dryrun are pinned elsewhere; this pins progress.
         client, _ = make_recording_client([head_response(), get_response(), {}])
         progress: list[TransferProgress] = []
@@ -352,7 +413,7 @@ class TestDownloadMove:
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         # The bytes still arrived (aws ditto): only the move failed - and a
-        # non-SUCCEEDED result reports zero bytes regardless (docs/opresult.md).
+        # non-SUCCEEDED result reports zero bytes regardless (design/opresult.md).
         assert results[0].bytes_transferred == 0
         assert (tmp_path / "out.txt").read_bytes() == b"payload"
 

@@ -131,7 +131,7 @@ def test_sync_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path
                 )
 
         assert ours.result.rc == aws.result.rc, (
-            f"[{scenario.name}] exit-code parity broken (charter, docs/overview.md section 3):\n"
+            f"[{scenario.name}] exit-code parity broken (charter, design/overview.md section 3):\n"
             f"  ours rc={ours.result.rc} stderr={ours.result.stderr.strip()!r}\n"
             f"  aws  rc={aws.result.rc} stderr={aws.result.stderr.strip()!r}"
         )

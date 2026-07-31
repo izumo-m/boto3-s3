@@ -2,7 +2,7 @@
 
 This is the only mode where the pinned ``aws`` binary can be compared
 against ``boto3-s3`` - both are timed as whole processes (startup included;
-the report subtracts the ``startup_minimal`` probe, see docs/benchmark.md)
+the report subtracts the ``startup_minimal`` probe, see design/benchmark.md)
 against the same MinIO endpoint, interleaved A/B so host drift cancels in
 the ratio.
 

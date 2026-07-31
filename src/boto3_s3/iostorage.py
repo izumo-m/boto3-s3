@@ -269,7 +269,9 @@ class StdioStorage(IOStorage):
     by ``mode`` at ``open`` time, so a single instance serves either direction and
     picks up a redirected ``sys.stdin`` / ``sys.stdout``. If the selected process
     stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
-    worker can receive an unusable file object.
+    worker can receive an unusable file object; the error carries no operation
+    name, which the operation that invoked the storage fills in (a direct call
+    leaves it ``None``).
     """
 
     scheme: ClassVar[str] = "stdio"
@@ -284,18 +286,15 @@ class StdioStorage(IOStorage):
             stdin = sys.stdin
             if stdin is None:
                 # A runtime-state precondition (no stdin in this process), so
-                # ValidationError; raised in-pipeline, rc 1 either way.
-                raise ValidationError(
-                    "stdin is required for this operation, but is not available.",
-                    operation="cp",
-                )
+                # ValidationError; raised in-pipeline, rc 1 either way. The
+                # operation name is left unset: this storage does not know which
+                # operation opened it (cp and mv both can), so the operation
+                # layer stamps its own name.
+                raise ValidationError("stdin is required for this operation, but is not available.")
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
         stdout = sys.stdout
         if stdout is None:
-            raise ValidationError(
-                "stdout is required for this operation, but is not available.",
-                operation="cp",
-            )
+            raise ValidationError("stdout is required for this operation, but is not available.")
         return cast("BinaryIO", _WriteOnly(getattr(stdout, "buffer", stdout)))
 
 

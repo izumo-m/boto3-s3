@@ -5,7 +5,7 @@ The public surface below is re-exported lazily (PEP 562 module ``__getattr__``):
 (``boto3`` alone drags in ``s3transfer`` via its ``compat`` module, ~80ms).
 Each symbol is imported on first attribute access instead, so a program pays
 only for the operations it actually touches. The contract is pinned by
-``tests/lib/test_import_contract.py``; the policy lives in ``docs/imports.md``.
+``tests/lib/test_import_contract.py``; the policy lives in ``design/imports.md``.
 
 Type checkers resolve the same names through the ``TYPE_CHECKING`` block, so
 the laziness is invisible to them.
@@ -14,6 +14,9 @@ the laziness is invisible to them.
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from boto3_s3.awsclicompare import AwsCliComparison
+    from boto3_s3.awsconfig import AwsConfig, ConfigSection
+    from boto3_s3.checksumcompare import ChecksumComparison
     from boto3_s3.comparator import (
         Comparator,
         DestOnlyPair,
@@ -25,7 +28,9 @@ if TYPE_CHECKING:
         all_of,
         any_of,
     )
-    from boto3_s3.deleter import S3Deleter
+    from boto3_s3.crtsupport import CLIENT_REGION, CrtRegion
+    from boto3_s3.deleter import S3_DELETE_BATCH, S3Deleter
+    from boto3_s3.etagcompare import EtagComparison
     from boto3_s3.exceptions import (
         AccessDeniedError,
         BatchError,
@@ -38,7 +43,7 @@ if TYPE_CHECKING:
         TransportError,
         ValidationError,
     )
-    from boto3_s3.globsieve import GlobFilter, GlobPattern
+    from boto3_s3.globsieve import GlobFilter, GlobPattern, PatternKind
     from boto3_s3.iostorage import IOStorage, StdioStorage
     from boto3_s3.localstorage import (
         LocalFileGenerator,
@@ -92,19 +97,27 @@ if TYPE_CHECKING:
     __version__: str
 
 __all__ = [
+    "CLIENT_REGION",
     "S3",
+    "S3_DELETE_BATCH",
     "AccessDeniedError",
     "AnnotationCopyMode",
+    "AwsCliComparison",
+    "AwsConfig",
     "BatchError",
     "Boto3S3Error",
     "CancelMode",
     "CancelToken",
     "CancelledError",
     "CaseConflictMode",
+    "ChecksumComparison",
     "Comparator",
+    "ConfigSection",
     "ConfigurationError",
     "CopyPropsMode",
+    "CrtRegion",
     "DestOnlyPair",
+    "EtagComparison",
     "FileFilter",
     "FileInfo",
     "FileKind",
@@ -126,6 +139,7 @@ __all__ = [
     "OpResult",
     "PairFilter",
     "ParallelFilter",
+    "PatternKind",
     "ProgressCallback",
     "ResultCallback",
     "S3Deleter",
@@ -175,6 +189,10 @@ __all__ = [
 # fallback, but the root ``__all__`` carries symbols only.
 _EXPORT_HOMES: dict[str, str] = {
     "TransferConfig": "boto3_s3.transferconfig",
+    "AwsCliComparison": "boto3_s3.awsclicompare",
+    "AwsConfig": "boto3_s3.awsconfig",
+    "ConfigSection": "boto3_s3.awsconfig",
+    "ChecksumComparison": "boto3_s3.checksumcompare",
     "Comparator": "boto3_s3.comparator",
     "DestOnlyPair": "boto3_s3.comparator",
     "MergedPair": "boto3_s3.comparator",
@@ -185,6 +203,8 @@ _EXPORT_HOMES: dict[str, str] = {
     "all_of": "boto3_s3.comparator",
     "any_of": "boto3_s3.comparator",
     "S3Deleter": "boto3_s3.deleter",
+    "S3_DELETE_BATCH": "boto3_s3.deleter",
+    "EtagComparison": "boto3_s3.etagcompare",
     "AccessDeniedError": "boto3_s3.exceptions",
     "BatchError": "boto3_s3.exceptions",
     "Boto3S3Error": "boto3_s3.exceptions",
@@ -197,6 +217,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "ValidationError": "boto3_s3.exceptions",
     "GlobFilter": "boto3_s3.globsieve",
     "GlobPattern": "boto3_s3.globsieve",
+    "PatternKind": "boto3_s3.globsieve",
     "IOStorage": "boto3_s3.iostorage",
     "StdioStorage": "boto3_s3.iostorage",
     "LocalFileGenerator": "boto3_s3.localstorage",
@@ -223,6 +244,8 @@ _EXPORT_HOMES: dict[str, str] = {
     "Location": "boto3_s3.storage",
     "Storage": "boto3_s3.storage",
     "StorageCapability": "boto3_s3.storage",
+    "CLIENT_REGION": "boto3_s3.crtsupport",
+    "CrtRegion": "boto3_s3.crtsupport",
     "CancelToken": "boto3_s3.types",
     "AnnotationCopyMode": "boto3_s3.types",
     "CancelMode": "boto3_s3.types",

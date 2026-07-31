@@ -21,7 +21,7 @@ effect deliberately not taken. So unrelated boto3 use elsewhere in the
 process never changes boto3-s3's parsing, and boto3-s3 never changes the
 application's - in either direction.
 
-This module is SDK-backed by declaration (docs/imports.md): it imports
+This module is SDK-backed by declaration (design/imports.md): it imports
 boto3 at module top.
 """
 

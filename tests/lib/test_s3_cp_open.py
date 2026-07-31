@@ -25,6 +25,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter, producers
 from boto3_s3.exceptions import (
     BatchError,
+    Boto3S3Error,
     CancelledError,
     NotFoundError,
     ValidationError,
@@ -153,7 +154,7 @@ class _MemStorage(Storage):
 class _ArrivalOrderMem(_MemStorage):
     """Yields entries in dict insertion order - deliberately unsorted - to pin
     that the non-sync consumers take the backend's arrival order (a plain
-    ``SCAN`` side has no ordering guarantee; docs/storage.md section 3)."""
+    ``SCAN`` side has no ordering guarantee; design/storage.md section 3)."""
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         yield [
@@ -225,7 +226,7 @@ class TestOpenUploadRoute:
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
 
     def test_upload_guesses_content_type_from_the_entry_key(self) -> None:
-        # Open-route uploads are shaped like local ones (docs/transfer.md
+        # Open-route uploads are shaped like local ones (design/transfer.md
         # section 12): the default guess reads the entry's key, so a custom
         # backend's .jpg lands as image/jpeg without the backend doing
         # anything. Only a true stream (no filename) skips the guess.
@@ -265,7 +266,7 @@ class TestOpenUploadRoute:
         assert "big.bin" in str(warned.error)
 
     def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
-        # sync is the only order-sensitive consumer (docs/storage.md section 3):
+        # sync is the only order-sensitive consumer (design/storage.md section 3):
         # a recursive cp consumes a custom backend's entries exactly as its
         # scan yields them - deliberately NOT sorted here - with no reordering
         # anywhere in scan()'s prefetch or the submit loop.
@@ -488,7 +489,7 @@ class TestOpenDownloadRoute:
         )
         assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
-        # docs/opresult.md: a WARNED record still carries the run's storages.
+        # design/opresult.md: a WARNED record still carries the run's storages.
         assert results[0].src_storage is not None
         assert results[0].src_storage.as_text() == "s3://b/cold"
         assert results[0].dest_storage is dest
@@ -540,13 +541,13 @@ class TestOpenDownloadRoute:
 
 
 class TestOpenRouteContracts:
-    """Cross-cutting open-route guarantees (docs/transfer.md sections 11-12,
-    docs/storage.md): validation order, no_overwrite semantics, per-item
+    """Cross-cutting open-route guarantees (design/transfer.md sections 11-12,
+    design/storage.md): validation order, no_overwrite semantics, per-item
     failure isolation, handle ownership, and the local-only gates that must
     NOT apply to a custom destination."""
 
     def test_validate_runs_before_the_backend_or_s3_is_touched(self) -> None:
-        # docs/storage.md: operations call the backend's validate() up front,
+        # design/storage.md: operations call the backend's validate() up front,
         # so a malformed location fails before any scan/open/API call.
         class _InvalidMem(_MemStorage):
             def validate(self) -> None:
@@ -560,7 +561,7 @@ class TestOpenRouteContracts:
         assert src.opens == []
 
     def test_upload_no_overwrite_carries_if_none_match(self) -> None:
-        # docs/transfer.md: opens3 guards no_overwrite exactly like a built-in
+        # design/transfer.md: opens3 guards no_overwrite exactly like a built-in
         # upload - conditionally, on the wire.
         src = _MemStorage({"": b"x" * 3}, location="mem://data/a.txt")
         client, calls = make_recording_client([{}])
@@ -574,7 +575,7 @@ class TestOpenRouteContracts:
         assert calls[0].params["IfNoneMatch"] == "*"
 
     def test_download_no_overwrite_has_no_guard_on_a_custom_destination(self) -> None:
-        # docs/transfer.md: s3open has no exists-gate - the backend owns its
+        # design/transfer.md: s3open has no exists-gate - the backend owns its
         # key space, so an existing key is simply overwritten (no HEAD-side
         # skip, no IfNoneMatch anywhere).
         store: dict[str, bytes] = {"": b"old"}
@@ -590,7 +591,7 @@ class TestOpenRouteContracts:
         assert store == {"": b"payload"}
 
     def test_mv_commit_failure_keeps_the_s3_source(self) -> None:
-        # docs/transfer.md: mv deletes the source only after the item
+        # design/transfer.md: mv deletes the source only after the item
         # succeeds - a failed backend commit must leave the S3 object alone.
         store: dict[str, bytes] = {}
         dest = _CommitFailMem(store, location="mem://data/out.bin")
@@ -608,7 +609,7 @@ class TestOpenRouteContracts:
         assert store == {}
 
     def test_backend_failure_fails_the_item_and_the_run_continues(self) -> None:
-        # docs/transfer.md: an open/write failure on one item is that item's
+        # design/transfer.md: an open/write failure on one item is that item's
         # FAILED record - the run moves on to the next item instead of dying.
         class _FirstOpenFailMem(_MemStorage):
             def open(
@@ -643,8 +644,51 @@ class TestOpenRouteContracts:
         assert ops(calls) == ["ListObjectsV2", "GetObject", "GetObject"]
         assert store == {"b.txt": b"BBB"}
 
+    def test_per_item_attribution_fills_only_what_the_backend_left_unset(self) -> None:
+        # exceptions.md: attribution on a per-item failure is best-effort - the
+        # run supplies the operation and the item's coordinates a family error
+        # raised in-pipeline could not know, and overwrites nothing the backend
+        # authored itself. The error object passes through as-is either way.
+        # bucket and key move as a pair, and a BatchError takes neither.
+        class _OpenFailMem(_MemStorage):
+            def __init__(self, error: Boto3S3Error) -> None:
+                super().__init__({}, location="mem://data/out.bin")
+                self._error = error
+
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                raise self._error
+
+        unattributed = ValidationError("backend refused the open")
+        authored = ValidationError(
+            "backend refused the open", operation="custom", bucket="own-b", key="own-k"
+        )
+        # A composite backend driving a nested library run can raise this one:
+        # it stands for a whole run, so it takes the operation name but never an
+        # item's coordinates (the reference pins those as always None).
+        nested = BatchError("1 of 1 transfers failed", succeeded=0, failed=1, warned=0, skipped=0)
+        cases: list[tuple[Boto3S3Error, tuple[str | None, str | None, str | None]]] = [
+            (unattributed, ("mv", "b", "d/a.txt")),
+            (authored, ("custom", "own-b", "own-k")),
+            (nested, ("mv", None, None)),
+        ]
+        for error, expected in cases:
+            client, calls = make_recording_client([head_response(), get_response()])
+            results: list[OpResult] = []
+            with pytest.raises(BatchError):
+                S3().mv(
+                    S3Storage("s3://b/d/a.txt", client=client),
+                    _OpenFailMem(error),
+                    transfer_config=_SYNC,
+                    on_result=results.append,
+                )
+            assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+            assert results[0].error is error
+            assert (error.operation, error.bucket, error.key) == expected
+
     def test_upload_closes_the_source_reader(self) -> None:
-        # docs/transfer.md: the route closes every fileobj the backend's
+        # design/transfer.md: the route closes every fileobj the backend's
         # open() returned - the writer side is pinned by the commit-on-close
         # tests; this pins the reader handle.
         readers: list[io.BytesIO] = []
@@ -665,7 +709,7 @@ class TestOpenRouteContracts:
         assert [reader.closed for reader in readers] == [True]
 
     def test_local_only_gates_do_not_apply_to_a_custom_destination(self) -> None:
-        # docs/transfer.md: the case-conflict and parent-reference gates guard
+        # design/transfer.md: the case-conflict and parent-reference gates guard
         # the local filesystem; a custom backend owns its key space, so case
         # twins and dot-dot segments land verbatim.
         store: dict[str, bytes] = {}

@@ -7,7 +7,7 @@ import os
 
 # Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch) -
 # or up front when auto-prompt builds the full command model.
-from boto3_s3 import NotFoundError, S3Storage, StdioStorage, ValidationError
+from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -27,12 +27,14 @@ class CpCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Copy and return an ``aws s3 cp``-style exit code.
 
-        Exit-code shape (docs/cli.md section 5.7/6): pre-pipeline errors
+        Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
         keep their class, in aws's measured head order - the
         ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
         parsing (a readable
         ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), path types, the checksum/path-format pairing,
+        paramfile quirk), then the S3 client build (which an empty region
+        fails at 255, ahead of every usage error below), then path types,
+        the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
         *download* with ``--no-overwrite``, and the S3
@@ -84,13 +86,11 @@ class CpCommand(Command):
             # failure is aws's pre-pipeline rc 255, not the pipeline's rc 1.
             transferargs.create_local_dest_dir(dest, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
-        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
 
         s3 = head.s3
-        client = s3.client()
+        client = head.client
         # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (docs/overview.md
+        # writes; reject up front (rc 252) on an older one (design/overview.md
         # section 2). Placed after the client exists so its model can be probed.
         transferargs.validate_no_overwrite_supported(
             args.no_overwrite, paths_type, client, operation="cp"
@@ -109,13 +109,11 @@ class CpCommand(Command):
                 recursive=False,
             )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            dest_s3 = S3Storage(f"s3://{dest}", client=client)
-            dest_s3.validate()  # permissive construction; reject bad forms pre-pipeline
-            dest_location = dest_s3
+            # Strict aws-cli validation with the measured bucket-less
+            # carve-out (a dryrun stream upload to s3:///k is aws rc 0).
+            dest_location = transferargs.build_s3_storage(f"s3://{dest}", client=client)
         elif dest == "-":
-            src_s3 = S3Storage(src, client=client)
-            src_s3.validate()  # permissive construction; reject bad forms pre-pipeline
-            src_location = src_s3
+            src_location = transferargs.build_s3_storage(src, client=client)
             dest_location = StdioStorage()
         else:
             src_location, dest_location = transferargs.resolve_locations(
@@ -138,6 +136,16 @@ class CpCommand(Command):
                 args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
             )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="cp")
+        # After the [s3] runtime config: aws validates --case-conflict against
+        # S3 Express while building the run's instructions, past the transfer
+        # manager whose creation loads the config - so a bad [s3] value beats
+        # the invalid-mode 252 (measured: `Invalid size value: nope` rc 255
+        # wins over `--case-conflict skip` on a directory bucket).
+        case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
+        options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
         printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)
@@ -147,9 +155,12 @@ class CpCommand(Command):
             # a bare int() at submit time, stdin resolves when first needed.
             # aws only ever converts --expected-size on the streaming-upload
             # route (UploadStreamRequestSubmitter); on every other route the
-            # value is untouched and ignored, so a non-integer there stays rc 0.
+            # value is untouched and ignored, so a non-integer there stays
+            # rc 0 - and a dryrun never converts either (aws branches to the
+            # dryrun record before building the live subscribers, so
+            # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None
-            if src == "-" and args.expected_size is not None:
+            if src == "-" and args.expected_size is not None and not args.dryrun:
                 expected_size = int(args.expected_size)
             s3.cp(
                 src_location,  # type: ignore[arg-type]

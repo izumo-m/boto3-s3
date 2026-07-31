@@ -1,9 +1,11 @@
 """Unit tests for the ``boto3-s3 mv`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): mv is
+The rc shape (design/cli.md section 6): mv is
 cp with the onto-itself guard family in front - the local-local pair, any
 ``-`` path, the onto-itself shapes (recursive included), and the
-checksum/path-format pairing are all 252 before any client factory runs;
+checksum/path-format pairing are all 252, and every one of them runs after
+the client is built - aws's construction order, which the whole transfer
+family now mirrors;
 ``--validate-same-s3-paths`` resolution failures keep their class (an
 unresolvable path 252, a failing s3control/sts call 254 via the kept
 ClientError cause); the access-point warning goes to stderr without
@@ -15,13 +17,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.utils.harness import built_client_ctx
 from tests.utils.recorder import ApiCall, make_recording_client
 
 _SYNC = TransferConfig(use_threads=False)
@@ -97,7 +100,7 @@ def _head_response() -> dict[str, Any]:
 
 class TestUsageErrors:
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "a.txt", "b.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "a.txt", "b.txt"], ctx=built_client_ctx())
         assert rc == 252
         err = capsys.readouterr().err
         assert "usage: boto3-s3 mv" in err
@@ -110,7 +113,7 @@ class TestUsageErrors:
     def test_any_stream_path_is_252(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(argv, ctx=_failing_factory_ctx())
+        rc = cli.main(argv, ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Streaming currently is only compatible with non-recursive cp commands"
@@ -120,32 +123,32 @@ class TestUsageErrors:
     def test_two_streams_hit_the_path_type_error_first(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["mv", "-", "-"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "-", "-"], ctx=built_client_ctx())
         assert rc == 252
         assert "Error: Invalid argument type" in capsys.readouterr().err
 
     def test_onto_itself_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "s3://b/k.txt", "s3://b/k.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/k.txt", "s3://b/k.txt"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Cannot mv a file onto itself: s3://b/k.txt - s3://b/k.txt" in capsys.readouterr().err
         )
 
     def test_onto_itself_implied_basename(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["mv", "s3://b/d/a.txt", "s3://b/d/"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/d/a.txt", "s3://b/d/"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/d/a.txt - s3://b/d/" in capsys.readouterr().err
 
     def test_onto_itself_keyless_destination_is_normalized(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["mv", "s3://b/k.txt", "s3://b"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "s3://b/k.txt", "s3://b"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/k.txt - s3://b/" in capsys.readouterr().err
 
     def test_onto_itself_applies_to_recursive_too(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The aws-cli's faithful false positive (rc 252).
-        rc = cli.main(["mv", "--recursive", "s3://b/d", "s3://b/"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", "--recursive", "s3://b/d", "s3://b/"], ctx=built_client_ctx())
         assert rc == 252
         assert "Cannot mv a file onto itself: s3://b/d - s3://b/" in capsys.readouterr().err
 
@@ -154,7 +157,7 @@ class TestUsageErrors:
     ) -> None:
         rc = cli.main(
             ["mv", "s3://b/k", str(tmp_path / "f"), "--checksum-algorithm", "CRC32"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -170,7 +173,7 @@ class TestUsageErrors:
         src.write_bytes(b"x")
         rc = cli.main(
             ["mv", str(src), "s3://b/k", "--checksum-mode", "ENABLED"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -182,18 +185,18 @@ class TestUsageErrors:
     def test_expected_size_is_not_an_mv_option(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(
             ["mv", "s3://b/k", "s3://b/k2", "--expected-size", "5"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert "Unknown options" in capsys.readouterr().err
 
 
 class TestGeneralErrors:
-    def test_missing_local_source_is_255_before_the_factory(
+    def test_missing_local_source_is_255(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = tmp_path / "no-such.txt"
-        rc = cli.main(["mv", str(missing), "s3://b/k"], ctx=_failing_factory_ctx())
+        rc = cli.main(["mv", str(missing), "s3://b/k"], ctx=built_client_ctx())
         assert rc == 255
         assert f"The user-provided path {missing} does not exist." in capsys.readouterr().err
 
@@ -331,6 +334,104 @@ class TestValidateSamePaths:
         assert rc == 0
         assert s3control.calls == []
         assert sts.calls == 0
+
+
+class TestValidateSamePathsClientOrder:
+    """Which client fails first when the resolving branch cannot build one.
+
+    aws creates its s3 client in ``S3Command._run_main``, ahead of the
+    ``add_paths`` validation that reaches ``S3PathResolver``, so an unusable
+    region is the *s3* endpoint's failure - resolving through s3control first
+    would name ``s3-control`` in the same report. These run the real client
+    factories (no injected Context); an empty region fails at construction, so
+    nothing reaches the network, and a merely absent one still lands on
+    s3control, the only region-less failure this surface reaches.
+
+    Measured against the pinned aws-cli with an isolated HOME: identical bytes
+    but for the program name and the leading blank line aws prints, both
+    class-1 rules of the parity normalization (design/testing.md section 9).
+    """
+
+    _ALIASES: ClassVar[list[str]] = [
+        "mv",
+        "s3://a-s3alias/k",
+        "s3://b-s3alias/k",
+        "--validate-same-s3-paths",
+    ]
+    _INVALID_S3_ENDPOINT = "boto3-s3: [ERROR]: Invalid endpoint: https://s3..amazonaws.com\n"
+    _NO_REGION = (
+        "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
+        ' You can also configure your region by running "aws configure".\n'
+    )
+
+    @staticmethod
+    def _empty_region(monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.setenv(var, "")
+
+    def test_an_empty_region_env_fails_on_the_s3_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._empty_region(monkeypatch)
+        assert cli.main(self._ALIASES) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_an_empty_region_in_the_config_file_fails_the_same_way(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The other link of the region chain aws walks, same outcome.
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion =\n")
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert cli.main(self._ALIASES) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_the_client_precedes_even_the_onto_itself_guard(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's client exists before the guard runs, so with the flag on the
+        # same key an unusable region beats the 252 (measured).
+        self._empty_region(monkeypatch)
+        argv = ["mv", "s3://a-s3alias/k", "s3://a-s3alias/k", "--validate-same-s3-paths"]
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == self._INVALID_S3_ENDPOINT
+
+    def test_an_endpoint_url_leaves_s3control_to_fail_on_the_region(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --endpoint-url reaches only the s3 client, so it masks the empty
+        # region there while s3control - which takes no override - still
+        # resolves an unusable endpoint: the early build must not swallow the
+        # later client's failure. Measured on both tools; the refused port is
+        # never dialed, the endpoint resolution fails first.
+        self._empty_region(monkeypatch)
+        argv = [*self._ALIASES, "--endpoint-url", "http://127.0.0.1:1"]
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: Invalid endpoint: https://s3-control..amazonaws.com\n"
+        )
+
+    def test_an_absent_region_still_reports_s3controls_no_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The contrast that keeps the pre-built client from swallowing the 253:
+        # with no region anywhere, s3 falls back to the global endpoint and
+        # builds, and s3control (which has no such fallback) raises NoRegion.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert cli.main(self._ALIASES) == 253
+        assert capsys.readouterr().err == self._NO_REGION
 
 
 class TestSuccessShapes:

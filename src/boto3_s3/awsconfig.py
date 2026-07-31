@@ -46,10 +46,10 @@ Resolution rules:
   boundary), matching ``aws``.
 
 Like ``boto3_s3.etagcompare`` this is a standalone, opt-in building block:
-imported by submodule path (``from boto3_s3.awsconfig import AwsConfig``), **not**
-part of the package's lazy root re-export, and SDK-free at import time - boto3 /
+re-exported at the package root, equally reachable by submodule path
+(``from boto3_s3.awsconfig import AwsConfig``), and SDK-free at import time - boto3 /
 botocore are loaded lazily on the read path, so ``import boto3_s3.awsconfig``
-stays free of the SDK tax (import contract, docs/imports.md). The parse is
+stays free of the SDK tax (import contract, design/imports.md). The parse is
 botocore's ``full_config``, which merges the credentials file's profile values
 into the map: a key set only in ``~/.aws/credentials`` - secrets included - is
 therefore reachable through these getters, exactly as ``aws configure get``
@@ -240,7 +240,7 @@ class AwsConfig:
         resolution, without installing a global default as a side effect).
         """
         # Deferred: importing boto3 drags in botocore + s3transfer (~100ms), so
-        # only an actual config read pays it (import contract, docs/imports.md).
+        # only an actual config read pays it (import contract, design/imports.md).
         import boto3
         from botocore.exceptions import BotoCoreError
 

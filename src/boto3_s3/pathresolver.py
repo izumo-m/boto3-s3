@@ -16,7 +16,7 @@ string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
 ``is_s3express_path`` - are callable without any client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
-This module stays SDK-free at import time (docs/imports.md): the first path
+This module stays SDK-free at import time (design/imports.md): the first path
 *split* lazily pulls in ``s3storage`` (and with it ``botocore.exceptions``),
 and a client is touched only when a resolution actually calls one.
 """

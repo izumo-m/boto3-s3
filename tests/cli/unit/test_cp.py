@@ -1,10 +1,10 @@
 """Unit tests for the ``boto3-s3 cp`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): pre-pipeline errors
+The rc shape (design/cli.md section 6): pre-pipeline errors
 keep their class - usage errors 252 (path types, SSE-C pairing, streaming
 with --recursive / --no-overwrite, ``--metadata`` parsing, blob decoding,
 the S3 Express case-conflict rejection), the bare integer conversion and
-the missing local source 255 (both before the client factory) - while
+the missing local source 255 - while
 everything the transfer pipeline raises is rc 1 (``<kind> failed:`` per
 item, one ``fatal error:`` for run-killers - a non-integer
 ``--expected-size`` and a missing stdin included), and a warnings-only run
@@ -25,6 +25,7 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.harness import built_client_ctx
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -72,12 +73,12 @@ class TestUsageErrors:
         assert "Unknown options: --annotation-copy-mode,deferred" in capsys.readouterr().err
 
     def test_local_to_local_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["cp", "a.txt", "b.txt"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "a.txt", "b.txt"], ctx=built_client_ctx())
         assert rc == 252
         assert "Error: Invalid argument type" in capsys.readouterr().err
 
     def test_streaming_with_recursive_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["cp", "-", "s3://b/k", "--recursive"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "-", "s3://b/k", "--recursive"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "Streaming currently is only compatible with non-recursive cp commands"
@@ -87,7 +88,7 @@ class TestUsageErrors:
     def test_streaming_download_rejects_no_overwrite(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["cp", "s3://b/k", "-", "--no-overwrite"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", "s3://b/k", "-", "--no-overwrite"], ctx=built_client_ctx())
         assert rc == 252
         assert (
             "--no-overwrite parameter is not supported for streaming downloads"
@@ -111,7 +112,7 @@ class TestUsageErrors:
     ) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
-        rc = cli.main(["cp", str(src), "s3://b/k", *argv_extra], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", str(src), "s3://b/k", *argv_extra], ctx=built_client_ctx())
         assert rc == 252
         assert token in capsys.readouterr().err
 
@@ -122,7 +123,7 @@ class TestUsageErrors:
         src.write_bytes(b"x")
         rc = cli.main(
             ["cp", str(src), "s3://b/k", "--sse-c-copy-source", "--sse-c-copy-source-key", "Zm9v"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert "--sse-c-copy-source is only supported for copy operations." in (
@@ -187,11 +188,11 @@ class TestGeneralErrors:
         )
         assert rc == 255
 
-    def test_missing_local_source_is_255_before_the_factory(
+    def test_missing_local_source_is_255(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = str(tmp_path / "nope.txt")
-        rc = cli.main(["cp", missing, "s3://b/k"], ctx=_failing_factory_ctx())
+        rc = cli.main(["cp", missing, "s3://b/k"], ctx=built_client_ctx())
         assert rc == 255
         assert f"The user-provided path {missing} does not exist." in capsys.readouterr().err
 
@@ -220,6 +221,81 @@ class TestPipelineErrors:
         assert rc == 1
         assert "upload failed:" in captured.err
         assert "An error occurred (NoSuchBucket)" in captured.err
+
+    def test_no_credentials_in_the_pipeline_stays_bare(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's rc-253 handlers never see a failure the transfer pipeline
+        # catches, so the per-item record carries botocore's own text with no
+        # `An error occurred (NoCredentials)` envelope and no `aws login` hint,
+        # at rc 1 (measured: `s3 cp <file> s3://b/k` with no credentials).
+        from botocore.exceptions import NoCredentialsError
+
+        # Run from the source's own directory: what the line names is aws's
+        # relative form, not this test's subject, and a Windows runner puts the
+        # temporary directory on a different drive from the repository - where
+        # no relative path exists at all.
+        monkeypatch.chdir(tmp_path)
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        ctx, _ = _recording_ctx([NoCredentialsError()])
+        rc = cli.main(["cp", str(src), "s3://b/k"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err == (
+            f"upload failed: .{os.sep}a.txt to s3://b/k Unable to locate credentials\n"
+        )
+
+    def test_bucketless_upload_fails_per_item(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws sends Bucket="" onward and botocore's client-side validation
+        # fails the upload at submit time: a per-item `upload failed:` line,
+        # rc 1 (measured). A real (offline) client is required - the
+        # parameter validation IS the behavior under test, and it fires
+        # before any connection.
+        import boto3
+
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        ctx = Context(client_factory=lambda _args: client)
+        rc = cli.main(["cp", str(src), "s3:///k"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "upload failed:" in captured.err
+        assert "Invalid bucket name" in captured.err
+
+    def test_bucketless_upload_dryrun_is_rc_0(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The dryrun never reaches the submit-time validation: aws prints the
+        # dryrun record and exits 0 (measured).
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(["cp", str(src), "s3:///k", "--dryrun"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert " to s3:///k" in captured.out
+        assert captured.out.startswith("(dryrun) upload: ")
+        assert calls == []
+
+    def test_bucketless_download_is_fatal_even_dryrun(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The blind single download HEADs first, and Bucket="" dies at
+        # botocore's client-side validation - fatal rc 1, --dryrun included
+        # (measured).
+        import boto3
+
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        ctx = Context(client_factory=lambda _args: client)
+        rc = cli.main(["cp", "s3:///k", str(tmp_path / "x"), "--dryrun"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.err.startswith("fatal error: Parameter validation failed")
+        assert "Invalid bucket name" in captured.err
 
     def test_bad_grants_shape_is_a_fatal_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -384,6 +460,8 @@ class TestSourceRegionWiring:
                 "us-east-1",
                 "--endpoint-url",
                 "http://main-endpoint",
+                "--ca-bundle",
+                "/ca/bundle.pem",
             ],
             ctx=ctx,
         )
@@ -394,6 +472,13 @@ class TestSourceRegionWiring:
         # aws-cli ClientFactory: --source-region replaces the region and drops
         # the --endpoint-url override for the source client.
         assert (source_args.region, source_args.endpoint_url) == ("eu-west-3", None)
+        # Everything else rides over untouched. The TLS settings matter beyond
+        # tidiness: build_client resolves `verify` per client, and a source
+        # client resolving a different value than the destination would make
+        # the CRT singleton reject the second one and silently fall back to
+        # classic (crtsupport._is_compatible_request).
+        assert source_args.ca_bundle == "/ca/bundle.pem"
+        assert source_args.no_verify_ssl == main_args.no_verify_ssl
 
     def test_without_source_region_one_client_serves_both_sides(self) -> None:
         ctx, namespaces = self._factory_recording_ctx()
@@ -488,6 +573,20 @@ class TestStreaming:
         captured = capsys.readouterr()
         assert rc == 1
         assert "fatal error: invalid literal for int()" in captured.err
+
+    def test_expected_size_non_integer_dryrun_stays_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A dryrun never reaches the submit-time int(): aws branches to the
+        # dryrun record before building the live subscribers (measured:
+        # `cp - s3://b/k --expected-size abc --dryrun` is rc 0).
+        monkeypatch.setattr("sys.stdin", _StdinShim(b"x"))
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(["cp", "-", "s3://bucket/k", "--expected-size", "abc", "--dryrun"], ctx=ctx)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "(dryrun) upload: - to s3://bucket/k" in captured.out
+        assert calls == []
 
     def test_unexpected_pipeline_exception_is_a_fatal_error(
         self,
@@ -661,7 +760,7 @@ class TestChecksumOptions:
         # alike).
         rc = cli.main(
             ["cp", "s3://b/k", str(tmp_path / "f"), "--checksum-algorithm", "CRC32"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -677,7 +776,7 @@ class TestChecksumOptions:
         src.write_bytes(b"x")
         rc = cli.main(
             ["cp", str(src), "s3://b/k", "--checksum-mode", "ENABLED"],
-            ctx=_failing_factory_ctx(),
+            ctx=built_client_ctx(),
         )
         assert rc == 252
         assert (
@@ -836,6 +935,11 @@ class TestCaseConflict:
 
 class TestS3ExpressCaseConflict:
     def test_skip_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The rejection fires after the client and the [s3] runtime config
+        # (aws validates it while building the run's instructions, past the
+        # transfer manager - so a bad [s3] value beats this 252, measured),
+        # but before any request: the recording client must stay uncalled.
+        ctx, calls = _recording_ctx([])
         rc = cli.main(
             [
                 "cp",
@@ -845,10 +949,42 @@ class TestS3ExpressCaseConflict:
                 "--case-conflict",
                 "skip",
             ],
-            ctx=_failing_factory_ctx(),
+            ctx=ctx,
         )
         assert rc == 252
         assert "`skip` is not a valid value" in capsys.readouterr().err
+        assert calls == []
+
+    def test_bad_runtime_config_beats_the_rejection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: with `[s3] multipart_threshold = nope` in the profile, aws
+        # reports `Invalid size value: nope` (rc 255) instead of the
+        # directory-bucket `--case-conflict skip` 252 - the runtime config
+        # loads with the transfer manager, ahead of the instruction-time
+        # case-conflict validation. No injected transfer config here: the
+        # [s3] read must really happen.
+        config = tmp_path / "config"
+        config.write_text("[default]\ns3 =\n  multipart_threshold = nope\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        client, calls = make_recording_client([])
+        ctx = Context(client_factory=lambda _args: client)
+        rc = cli.main(
+            [
+                "cp",
+                "s3://bucket--usw2-az1--x-s3/",
+                "out",
+                "--recursive",
+                "--case-conflict",
+                "skip",
+            ],
+            ctx=ctx,
+        )
+        err = capsys.readouterr().err
+        assert rc == 255
+        assert "Invalid size value: nope" in err
+        assert "case-conflict" not in err
+        assert calls == []
 
     def test_warn_emits_the_standing_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

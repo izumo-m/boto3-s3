@@ -1,6 +1,6 @@
 """Unit tests for the ``boto3-s3 website`` subcommand (dispatch + exit codes).
 
-The rc shape (docs/cli.md section 6): **no local catch** - unlike mb/rb,
+The rc shape (design/cli.md section 6): **no local catch** - unlike mb/rb,
 server rejections keep their ClientError cause and exit 254 through main;
 botocore's client-side parameter validation and aws's
 fold-the-key-into-the-bucket-name rejection are 252; success prints
@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, unused_ctx
+from tests.utils.harness import built_client_ctx, client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -153,6 +153,27 @@ class TestWebsiteExitCodeShape:
         assert rc == 252
         assert "Invalid bucket name" in capsys.readouterr().err
 
+    def test_bucketless_key_folds_into_the_bucket_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # website does not split: the whole scheme-stripped remainder is the
+        # bucket name, so aws rejects the name "/k" (measured) rather than the
+        # bucket-less URI form.
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
+        assert rc == 252
+        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert client.calls == []
+
+    def test_bucketless_key_schemeless_folds_into_the_bucket_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", "/k", "--index-document", "i.html"], ctx=client_ctx(client))
+        assert rc == 252
+        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert client.calls == []
+
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -256,6 +277,6 @@ class TestWebsiteParamfileAndQuery:
         # through the general handler (measured).
         ref = tmp_path / "empty.txt"
         ref.write_text("")
-        rc = cli.main(["website", f"file://{ref}"], ctx=unused_ctx())
+        rc = cli.main(["website", f"file://{ref}"], ctx=built_client_ctx())
         assert rc == 255
         assert "string index out of range" in capsys.readouterr().err

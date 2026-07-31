@@ -137,7 +137,7 @@ class TestUpload:
 
     def test_result_has_no_extra_info(self, tmp_path: Path) -> None:
         # s3transfer discards the PutObject response, so an upload surfaces no
-        # result ETag (docs/transfer.md).
+        # result ETag (design/transfer.md).
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
@@ -943,7 +943,7 @@ class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
     (aws's manager-context behavior, measured live: a mid-listing fatal
     leaves every queued transfer unrun), and each revoked item reports one
-    CANCELLED record naming the fatal (docs/opresult.md)."""
+    CANCELLED record naming the fatal (design/opresult.md)."""
 
     def test_fatal_mid_enumeration_cancels_queued_transfers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1605,7 +1605,7 @@ class TestStreams:
 
 
 class TestEngineSelection:
-    """``preferred_transfer_client`` resolution at the manager seam (docs/crt.md)."""
+    """``preferred_transfer_client`` resolution at the manager seam (design/crt.md)."""
 
     def _transferrer(self, kind: TransferType, config: Any) -> Transferrer:
         client, _ = make_recording_client([])
@@ -1626,7 +1626,13 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -1645,7 +1651,13 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1677,7 +1689,13 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1699,7 +1717,13 @@ class TestEngineSelection:
         seen: list[Any] = []
 
         def fake_create(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(session)
             return object()
@@ -1716,13 +1740,53 @@ class TestEngineSelection:
         transferrer._get_manager()
         assert seen == [caller_session]
 
+    @pytest.mark.parametrize("allow", [False, True], ids=["library-default", "cli-opt-in"])
+    def test_absent_credentials_posture_is_threaded_to_crtsupport(
+        self, monkeypatch: pytest.MonkeyPatch, allow: bool
+    ) -> None:
+        # The library default is boto3's (classic without credentials); only a
+        # caller that asks - boto3-s3-cli - gets aws-cli's CRT entry.
+        from boto3_s3 import crtsupport
+
+        seen: list[bool] = []
+
+        def fake_create(
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
+        ) -> Any:
+            seen.append(allow_absent_credentials)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])
+        kwargs: dict[str, Any] = {"crt_allow_absent_credentials": True} if allow else {}
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            **kwargs,
+        )
+        transferrer._get_manager()
+        assert seen == [allow]
+
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
         from boto3_s3 import crtsupport
 
         def boom(
-            client: Any, config: Any, *, endpoint: str | None = None, session: Any | None = None
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
@@ -1738,11 +1802,10 @@ class TestEngineSelection:
 
         # boto3 semantics: a None from the CRT factory (lock held elsewhere,
         # incompatible singleton) silently selects classic.
-        monkeypatch.setattr(
-            crtsupport,
-            "create_crt_transfer_manager",
-            lambda c, cfg, *, endpoint=None, session=None: None,
-        )
+        def fake_create(_client: Any, _config: Any, **_kwargs: Any) -> Any:
+            return None
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
         assert isinstance(manager, TransferManager)
@@ -1791,7 +1854,7 @@ class TestResponseCaptureExpectGate:
 
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
-        # The module is a documented submodule-path surface (docs/transfer.md):
+        # The module is a documented submodule-path surface (design/transfer.md):
         # the engine pair, the Warner protocol its `warner` seam returns, and
         # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
         # section 4). A symbol added or dropped must be a deliberate
@@ -1885,7 +1948,7 @@ class TestConditionalWriteSupport:
 
 
 class TestAnnotationsCopySupport:
-    """The copy_props=ALL SDK gate (docs/transfer.md section 4).
+    """The copy_props=ALL SDK gate (design/transfer.md section 4).
 
     Annotations need botocore's S3 model (CopyObject.AnnotationDirective,
     1.43.31) and s3transfer's own multipart handling (the directive in
@@ -1975,7 +2038,7 @@ class TestAnnotationsCopySupport:
         # A bad copy_props string fails the enum conversion; the constructor
         # translates it to a Boto3S3Error-family ValidationError rather than
         # leaking the enum's raw ValueError past the public API
-        # (docs/exceptions.md). The CLI never reaches here (choices-validated).
+        # (design/exceptions.md). The CLI never reaches here (choices-validated).
         client = self._capable_client()
         with pytest.raises(ValidationError, match="copy_props"):
             Transferrer(

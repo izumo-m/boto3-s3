@@ -15,7 +15,8 @@ import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import unused_ctx
+from tests.utils.fakemodel import model_meta
+from tests.utils.harness import built_client_ctx, unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -35,6 +36,9 @@ class _FakeS3Client:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
+        # The ListBuckets filter gate reads the model, so the fake carries the
+        # one a current botocore has.
+        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -168,7 +172,7 @@ class TestLsAllBuckets:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # argparse exits 2 on a bad choice; main absorbs it and remaps to
-        # aws-cli's 252 (exit-code charter, docs/cli.md section 6).
+        # aws-cli's 252 (exit-code charter, design/cli.md section 6).
         assert cli.main(["ls", "--color", "bogus", "s3://bucket/p/"]) == 252
         assert "--color" in capsys.readouterr().err
 
@@ -288,7 +292,7 @@ class TestParamfileExpansion:
         # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
         ref = tmp_path / "u.bin"
         ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=unused_ctx())
+        rc = cli.main(["ls", f"fileb://{ref}"], ctx=built_client_ctx())
         assert rc == 255
         assert "startswith first arg must be bytes" in capsys.readouterr().err
 
@@ -364,3 +368,36 @@ class TestScanInterruptPolicy:
         ctx, _client = _fake_ctx([{"Contents": []}])
         assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
         assert scan_waits == [False]
+
+
+class TestTimestampFormat:
+    """`cli_timestamp_format` is validated, but neither value moves this output.
+
+    On aws the setting swaps botocore's timestamp parser for one that keeps the
+    wire string (`wire`) or hands back an ISO-8601 string (`iso8601`), and its
+    `s3` customization then re-parses whichever it got with a general date
+    parser before rendering local time - so both settings, and the unset
+    default, print the same line. Measured against the pinned aws-cli on a live
+    endpoint: `ls`, `ls --recursive`, the all-buckets listing and
+    `--human-readable --summarize` were byte-identical under `wire`, `iso8601`
+    and no setting at all. This CLI therefore only implements the validation
+    (design/cli.md section 6); the pin here is that the accepted values leave
+    the listing alone.
+    """
+
+    @pytest.mark.parametrize("value", ["wire", "iso8601", None], ids=["wire", "iso8601", "unset"])
+    def test_the_accepted_values_render_the_same_line(
+        self,
+        tmp_path: Path,
+        value: str | None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = tmp_path / "config"
+        setting = "" if value is None else f"cli_timestamp_format = {value}\n"
+        config.write_text(f"[default]\n{setting}")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        ctx, _ = _fake_ctx([{"Contents": [_obj("p/a.txt", 3)]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        date = _MTIME.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        assert capsys.readouterr().out == f"{date}          3 a.txt\n"

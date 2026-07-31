@@ -7,8 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import NoRegionError
 
-from boto3_s3 import Boto3S3Error, InvalidConfigError, InvalidValueError, ValidationError
+from boto3_s3 import (
+    Boto3S3Error,
+    ConfigurationError,
+    InvalidConfigError,
+    InvalidValueError,
+    ValidationError,
+)
 from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.cli import exit_code_for
 
@@ -49,9 +56,99 @@ class TestBuildClient:
         # single session build_s3 made - nothing built a second one.
         assert sessions == [s3.session]
         # The S3-level endpoint copy feeds the CRT lane's explicit-endpoint
-        # pin (docs/crt.md); it must be the same string build_client applies,
+        # pin (design/crt.md); it must be the same string build_client applies,
         # so the Transferrer's meta-equality gate recognizes the CLI client.
         assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
+
+    def test_build_s3_takes_aws_clis_posture_on_absent_credentials(self) -> None:
+        # aws-cli hands its CRT client a credentials delegate built from
+        # whatever the session resolved - None included - so a credential-less
+        # CRT upload fails inside the delegate rather than dropping to classic.
+        # The library keeps boto3's opposite default; the CLI opts in
+        # (design/crt.md section 4).
+        s3 = clientfactory.build_s3(_parse([]))
+        assert s3._crt_allow_absent_credentials is True  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize(
+        ("argv", "env", "expected"),
+        [
+            ([], {"AWS_REGION": "eu-west-1"}, "eu-west-1"),
+            (["--region", "ap-northeast-1"], {"AWS_REGION": "eu-west-1"}, "ap-northeast-1"),
+            ([], {}, None),
+        ],
+        ids=["env", "explicit-wins", "nothing-resolves"],
+    )
+    def test_build_s3_declares_aws_clis_resolved_region_for_the_crt_engine(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        env: dict[str, str],
+        expected: str | None,
+    ) -> None:
+        # aws-cli resolves the CRT region from its own region chain, so an
+        # environment that resolves nothing declares None - where botocore
+        # hands the *client* the `aws-global` pseudo-region and the CRT would
+        # never see the absence (design/crt.md section 6).
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        s3 = clientfactory.build_s3(_parse(argv))
+        assert s3._crt_region == expected  # pyright: ignore[reportPrivateUsage]
+        if expected is None:
+            # The contrast that makes the declaration necessary at all.
+            assert s3.client().meta.region_name == "aws-global"
+
+    def test_the_region_chain_is_walked_once_per_invocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The chain's last link is the EC2 IMDS probe, which on a host with no
+        # region configured and no metadata service answering costs seconds -
+        # so walking it once per client instead of once per invocation was
+        # measurably slower than aws. `build_s3` resolves it and threads the
+        # answer into every client it hands out; the answer cannot change
+        # mid-invocation, so this is a pure saving.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        real_resolve = clientfactory._resolve_region  # pyright: ignore[reportPrivateUsage]
+        walks: list[str | None] = []
+
+        def counting_resolve(explicit: str | None, session: Any) -> Any:
+            resolved = real_resolve(explicit, session)
+            walks.append(resolved)
+            return resolved
+
+        monkeypatch.setattr(clientfactory, "_resolve_region", counting_resolve)
+        s3 = clientfactory.build_s3(_parse([]))
+        first, second = s3.client(), s3.client()
+        assert walks == [None]  # the one walk, and it resolved nothing
+        # Threading it changes no outcome: both clients land where the chain
+        # said, which for an unresolved region is botocore's `aws-global`.
+        assert first.meta.region_name == second.meta.region_name == "aws-global"
+
+    def test_an_explicitly_threaded_region_reaches_the_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The threading seam itself. A supplied region wins; a supplied None -
+        # the chain's own answer when nothing resolves, which no `args.region`
+        # can express - must land exactly where the unthreaded call lands,
+        # never send the client back through the chain.
+        args = _parse([])
+        assert clientfactory.build_client(args, region="sa-east-1").meta.region_name == "sa-east-1"
+        assert (
+            clientfactory.build_client(args, region=None).meta.region_name
+            == clientfactory.build_client(args).meta.region_name
+        )
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert clientfactory.build_client(args, region=None).meta.region_name == "aws-global"
 
     def test_cli_sessions_install_the_fast_timestamp_parser(self) -> None:
         # Every CLI-built session registers the library's fast_parse_timestamp
@@ -196,6 +293,34 @@ class TestBuildClient:
         client = clientfactory.build_client(_parse([]))
         assert client.meta.region_name == "ap-southeast-2"
 
+    def test_a_rejected_imds_probe_reads_as_no_region(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore's region fetcher swallows only the retries-exceeded failure,
+        # so a service answering the IMDS address that is not EC2's - it
+        # rejects the token request outright - raises BadIMDSRequestError out
+        # of the chain. aws-cli carries its own fetcher for exactly that catch,
+        # so on such a host aws resolves no region and runs on; escaping here
+        # would instead fail every invocation at the client build (rc 255).
+        import botocore.awsrequest
+        import botocore.utils
+
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        token_request = botocore.awsrequest.AWSRequest(
+            method="PUT", url="http://169.254.169.254/latest/api/token"
+        )
+
+        class _RejectingIMDS:
+            def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+            def provide(self) -> str:
+                raise botocore.utils.BadIMDSRequestError(token_request)
+
+        monkeypatch.setattr(botocore.utils, "IMDSRegionProvider", _RejectingIMDS)
+        # The unresolved-region client, exactly as with no service answering.
+        assert clientfactory.build_client(_parse([])).meta.region_name == "aws-global"
+
     def test_us_east_1_resolves_regional_endpoint(self) -> None:
         # aws v2 resolves us-east-1 to the regional endpoint, not the legacy
         # global one (aws-cli functional-test expectations); build_client pins
@@ -236,7 +361,7 @@ class TestBuildClient:
         # (region set `*`) - measured against aws 2.36.1, whose MRAP presign
         # signs AWS4-ECDSA-P256-SHA256. The s3v4 pin stands down when a
         # positional names an MRAP ARN; the dev environment's awscrt (always
-        # present, docs/testing.md section 4) then signs SigV4a offline.
+        # present, design/testing.md section 4) then signs SigV4a offline.
         args = _parse(["--region", "us-east-1"])
         args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
         client = clientfactory.build_client(args)
@@ -486,6 +611,31 @@ class TestBuildClient:
 
 
 class TestBuildServiceClient:
+    def test_regionless_s3control_raises_no_region_keeping_the_cause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The production seam behind the enveloped `NoRegion` report
+        # (test_exit_codes.py TestUnresolvedConfigReports): s3control has no
+        # global-endpoint fallback - unlike s3 and sts, which is why this is the
+        # only region-less failure the mapped `aws s3` surface can reach, via
+        # mv's --validate-same-s3-paths. The report's aws code is named off the
+        # botocore exception the translation keeps as `__cause__`, so dropping
+        # that link would silently cost the envelope; and the plain
+        # ConfigurationError (not the InvalidConfigError refinement) is what
+        # carries the rc.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        # No region left anywhere, so botocore would otherwise probe the EC2
+        # metadata service (the last link of aws's region chain).
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        with pytest.raises(ConfigurationError) as excinfo:
+            clientfactory.build_service_client("s3control", _parse([]))
+        assert type(excinfo.value) is ConfigurationError
+        assert isinstance(excinfo.value.__cause__, NoRegionError)
+        assert str(excinfo.value) == "You must specify a region."
+        assert exit_code_for(excinfo.value) == 253
+
     def test_timeouts_and_unsigned_are_inherited_like_from_session(self) -> None:
         # aws threads --cli-read-timeout / --cli-connect-timeout and
         # --no-sign-request through the session default client config at startup,
@@ -546,3 +696,219 @@ class TestBuildServiceClient:
             "sts", _parse(["--region", "eu-central-1"]), region=None
         )
         assert client.meta.region_name == "eu-central-1"
+
+
+def _client_verify(client: Any) -> Any:
+    """The TLS trust source a built client will actually use.
+
+    botocore records the resolved ``verify`` on the endpoint's HTTP session;
+    it is the same private attribute ``crtsupport._derive_verify`` reads to
+    wire the CRT client, so asserting on it covers both engines.
+    """
+    return client._endpoint.http_session._verify
+
+
+def _botocore_default_bundle() -> Any:
+    """The CA file botocore itself would use for a client that names none."""
+    from botocore.httpsession import get_cert_path
+
+    return get_cert_path(True)
+
+
+class TestVerifyResolution:
+    """The TLS trust source, resolved explicitly for every CLI-built client.
+
+    Left as ``None``, botocore resolves it per request while
+    ``create_s3_crt_client`` falls back to the *platform* trust store - so the
+    two transfer engines would trust different roots (design/crt.md). Every
+    step below therefore has to land on a concrete value, and the same one for
+    every client the run builds.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_host_ca_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The moto isolation fixture does not scrub these; a developer's own
+        # AWS_CA_BUNDLE would otherwise decide the "nothing set" cases.
+        monkeypatch.delenv("AWS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+
+    def test_no_verify_ssl_disables_verification(self) -> None:
+        assert _client_verify(clientfactory.build_client(_parse(["--no-verify-ssl"]))) is False
+
+    def test_no_verify_ssl_beats_a_ca_bundle(self, tmp_path: Path) -> None:
+        # aws-cli's resolve_verify_ssl only looks at --ca-bundle when
+        # --no-verify-ssl is absent.
+        bundle = tmp_path / "ca.pem"
+        bundle.write_text("")
+        argv = ["--no-verify-ssl", "--ca-bundle", str(bundle)]
+        assert _client_verify(clientfactory.build_client(_parse(argv))) is False
+
+    def test_ca_bundle_flag_beats_the_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bundle = tmp_path / "flag.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(tmp_path / "env.pem"))
+        client = clientfactory.build_client(_parse(["--ca-bundle", str(bundle)]))
+        assert _client_verify(client) == str(bundle)
+
+    def test_aws_ca_bundle_env_is_honored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AWS_CA_BUNDLE reaches botocore as the `ca_bundle` config variable,
+        # which botocore already folded into the client at construction (so it
+        # reached both engines before the explicit resolution too). Resolving
+        # up front must not drop it - only the nothing-set case was ever
+        # engine-dependent.
+        bundle = tmp_path / "env.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+        assert _client_verify(clientfactory.build_client(_parse([]))) == str(bundle)
+
+    def test_profile_ca_bundle_key_is_honored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Read off the session the client is built from, so the *resolved*
+        # profile decides (a session-less read would take the default one).
+        bundle = tmp_path / "profile.pem"
+        bundle.write_text("")
+        config_file = tmp_path / "config"
+        config_file.write_text(f"[default]\n[profile tls]\nca_bundle = {bundle}\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        assert _client_verify(clientfactory.build_client(_parse([]))) == _botocore_default_bundle()
+        client = clientfactory.build_client(_parse(["--profile", "tls"]))
+        assert _client_verify(client) == str(bundle)
+
+    def test_requests_ca_bundle_env_still_applies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore's own last fallback before its default bundle
+        # (EndpointCreator._get_verify_value). Resolving up front must not drop
+        # it, or a working classic setup would silently change trust anchors.
+        bundle = tmp_path / "requests.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+        assert _client_verify(clientfactory.build_client(_parse([]))) == str(bundle)
+
+    def test_aws_ca_bundle_beats_requests_ca_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(tmp_path / "aws.pem"))
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "requests.pem"))
+        client = clientfactory.build_client(_parse([]))
+        assert _client_verify(client) == str(tmp_path / "aws.pem")
+
+    def test_nothing_set_resolves_botocore_s_own_bundle(self) -> None:
+        # Not True and not None: the concrete file botocore would have opened
+        # at request time (certifi's, or botocore's own where certifi is
+        # absent - which is why the expectation is asked of botocore).
+        verify = _client_verify(clientfactory.build_client(_parse([])))
+        assert verify == _botocore_default_bundle()
+        assert Path(verify).is_file()
+
+    def test_every_client_of_a_run_resolves_the_same_value(self) -> None:
+        # The CRT singleton refuses a later client whose verify differs
+        # (crtsupport._is_compatible_request), so a per-client difference
+        # would silently downgrade the second transfer to classic. The
+        # --source-region client rides the same build_client path.
+        args = _parse([])
+        destination = clientfactory.build_client(args)
+        source_args = argparse.Namespace(**vars(args))
+        source_args.region = "eu-west-1"
+        source_args.endpoint_url = None
+        source = clientfactory.build_client(source_args)
+        service = clientfactory.build_service_client("sts", args, region="us-east-1")
+        assert _client_verify(destination) == _botocore_default_bundle()
+        assert _client_verify(source) == _client_verify(destination)
+        assert _client_verify(service) == _client_verify(destination)
+
+    def test_no_verify_ssl_reaches_the_service_clients_too(self) -> None:
+        client = clientfactory.build_service_client(
+            "sts", _parse(["--no-verify-ssl"]), region="us-east-1"
+        )
+        assert _client_verify(client) is False
+
+
+class TestCrtTrustSource:
+    """What the resolved ``verify`` becomes once the CRT engine is wired.
+
+    ``create_s3_crt_client`` is stubbed (the CRT cannot be exercised
+    in-process); the assertion is on the kwargs it receives, following
+    tests/lib/test_crtsupport.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_host_ca_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AWS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+
+    def _stub_crt(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        s3transfer_crt = pytest.importorskip("s3transfer.crt")
+        create_kwargs: list[dict[str, Any]] = []
+
+        def create_client(**kwargs: Any) -> Any:
+            create_kwargs.append(kwargs)
+            return object()
+
+        class Serializer:
+            def __init__(self, session: Any, client_kwargs: dict[str, Any]) -> None: ...
+
+        class Manager:
+            def __init__(self, **kwargs: Any) -> None: ...
+
+        # The real BotocoreCRTCredentialsWrapper stays in place: the process
+        # lock, the CRT client and the transfer manager are the parts that
+        # cannot run in-process, and the singleton's identity check calls the
+        # wrapper.
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda _name: object())
+        monkeypatch.setattr(s3transfer_crt, "create_s3_crt_client", create_client)
+        monkeypatch.setattr(s3transfer_crt, "BotocoreCRTRequestSerializer", Serializer)
+        monkeypatch.setattr(s3transfer_crt, "CRTTransferManager", Manager)
+        return create_kwargs
+
+    @pytest.fixture(autouse=True)
+    def _reset_crt_singleton(self) -> Any:
+        from boto3_s3 import crtsupport
+
+        crtsupport._reset_for_tests()
+        yield
+        crtsupport._reset_for_tests()
+
+    def test_cli_client_gives_the_crt_the_classic_engine_s_ca_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import crtsupport
+
+        create_kwargs = self._stub_crt(monkeypatch)
+        client = clientfactory.build_client(_parse([]))
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None
+        [kwargs] = create_kwargs
+        assert kwargs["verify"] == _botocore_default_bundle()
+
+    def test_ca_bundle_flag_reaches_the_crt_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import crtsupport
+
+        bundle = tmp_path / "ca.pem"
+        bundle.write_text("")
+        create_kwargs = self._stub_crt(monkeypatch)
+        client = clientfactory.build_client(_parse(["--ca-bundle", str(bundle)]))
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None
+        [kwargs] = create_kwargs
+        assert kwargs["verify"] == str(bundle)
+
+    def test_a_plain_library_client_still_defers_to_the_platform_store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The library lane stays boto3-faithful: boto3 passes no verify to the
+        # CRT either, so a client built outside the CLI keeps mapping to None.
+        import boto3
+
+        from boto3_s3 import crtsupport
+
+        create_kwargs = self._stub_crt(monkeypatch)
+        client = boto3.client("s3", region_name="us-east-1")
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None
+        [kwargs] = create_kwargs
+        assert kwargs["verify"] is None

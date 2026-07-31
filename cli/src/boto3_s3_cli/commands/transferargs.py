@@ -20,6 +20,7 @@ from boto3_s3 import (
     BatchError,
     CaseConflictMode,
     CopyPropsMode,
+    InvalidConfigError,
     InvalidValueError,
     LocalStorage,
     S3Storage,
@@ -49,6 +50,8 @@ from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
     from boto3_s3_cli.commands.base import Context
@@ -116,60 +119,159 @@ def add_transfer_arguments(
     extras all three carry). ``--expected-size`` is cp-only (mv and sync
     reject streams); ``--recursive`` is cp/mv-only (sync is inherently
     recursive, and aws rejects the flag as an unknown option there)."""
-    parser.add_argument("paths", nargs=2, metavar="<path>")
-    parser.add_argument("--dryrun", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("paths", nargs=2, metavar="<path>", help="source and destination location")
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="report what would happen without transferring or deleting anything",
+    )
+    parser.add_argument("--quiet", action="store_true", help="do not print per-item result lines")
     if include_recursive:
-        parser.add_argument("--recursive", action="store_true")
+        parser.add_argument(
+            "--recursive",
+            action="store_true",
+            help="act on every file or object under the source",
+        )
     filters.add_filter_arguments(parser)
-    parser.add_argument("--acl", choices=_ACL_CHOICES)
     parser.add_argument(
-        "--follow-symlinks", action="store_true", dest="follow_symlinks", default=True
+        "--acl", choices=_ACL_CHOICES, help="canned ACL to apply to the written object"
     )
-    parser.add_argument("--no-follow-symlinks", action="store_false", dest="follow_symlinks")
     parser.add_argument(
-        "--no-guess-mime-type", action="store_false", dest="guess_mime_type", default=True
+        "--follow-symlinks",
+        action="store_true",
+        dest="follow_symlinks",
+        default=True,
+        help="follow symbolic links when walking a local directory (default)",
     )
-    parser.add_argument("--sse", nargs="?", const="AES256", choices=["AES256", "aws:kms"])
-    parser.add_argument("--sse-c", nargs="?", const="AES256", choices=["AES256"])
-    parser.add_argument("--sse-c-key")
-    parser.add_argument("--sse-kms-key-id")
-    parser.add_argument("--sse-c-copy-source", nargs="?", const="AES256", choices=["AES256"])
-    parser.add_argument("--sse-c-copy-source-key")
-    parser.add_argument("--storage-class", choices=_STORAGE_CLASS_CHOICES)
-    parser.add_argument("--grants", nargs="+")
-    parser.add_argument("--website-redirect")
-    parser.add_argument("--content-type")
-    parser.add_argument("--cache-control")
-    parser.add_argument("--content-disposition")
-    parser.add_argument("--content-encoding")
-    parser.add_argument("--content-language")
-    parser.add_argument("--expires")
-    parser.add_argument("--source-region")
-    parser.add_argument("--only-show-errors", action="store_true")
-    parser.add_argument("--no-progress", action="store_false", dest="progress", default=True)
+    parser.add_argument(
+        "--no-follow-symlinks",
+        action="store_false",
+        dest="follow_symlinks",
+        help="do not follow symbolic links when walking a local directory",
+    )
+    parser.add_argument(
+        "--no-guess-mime-type",
+        action="store_false",
+        dest="guess_mime_type",
+        default=True,
+        help="do not infer Content-Type from the file extension on upload",
+    )
+    parser.add_argument(
+        "--sse",
+        nargs="?",
+        const="AES256",
+        choices=["AES256", "aws:kms"],
+        help="server-side encryption for the written object",
+    )
+    parser.add_argument(
+        "--sse-c",
+        nargs="?",
+        const="AES256",
+        choices=["AES256"],
+        help="encrypt the written object with a customer-provided key",
+    )
+    parser.add_argument(
+        "--sse-c-key", help="the customer-provided key; use fileb:// to read raw bytes"
+    )
+    parser.add_argument("--sse-kms-key-id", help="KMS key to use with --sse aws:kms")
+    parser.add_argument(
+        "--sse-c-copy-source",
+        nargs="?",
+        const="AES256",
+        choices=["AES256"],
+        help="the S3 copy source is encrypted with a customer-provided key",
+    )
+    parser.add_argument(
+        "--sse-c-copy-source-key",
+        help="the copy source's customer-provided key; use fileb:// for raw bytes",
+    )
+    parser.add_argument(
+        "--storage-class",
+        choices=_STORAGE_CLASS_CHOICES,
+        help="storage class for the written object",
+    )
+    parser.add_argument(
+        "--grants", nargs="+", help="explicit grants, as Permission=Grantee arguments"
+    )
+    parser.add_argument(
+        "--website-redirect", help="where a website request for the object is redirected"
+    )
+    parser.add_argument("--content-type", help="Content-Type for the written object")
+    parser.add_argument("--cache-control", help="Cache-Control for the written object")
+    parser.add_argument("--content-disposition", help="Content-Disposition for the written object")
+    parser.add_argument("--content-encoding", help="Content-Encoding for the written object")
+    parser.add_argument("--content-language", help="Content-Language for the written object")
+    parser.add_argument("--expires", help="Expires date for the written object")
+    parser.add_argument("--source-region", help="region of the source bucket of an S3-to-S3 copy")
+    parser.add_argument(
+        "--only-show-errors",
+        action="store_true",
+        help="print only errors and warnings, no progress or result lines",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_false",
+        dest="progress",
+        default=True,
+        help="do not display transfer progress",
+    )
     # No type=int (parse_integer_option converts at run() start -> 255
     # like aws's bare int(), not argparse's 252).
-    parser.add_argument("--progress-frequency", default=0)
-    parser.add_argument("--progress-multiline", action="store_true")
-    add_page_size_argument(parser)
-    parser.add_argument("--ignore-glacier-warnings", action="store_true")
-    parser.add_argument("--force-glacier-transfer", action="store_true")
-    add_request_payer_argument(parser)
-    parser.add_argument("--metadata")
     parser.add_argument(
-        "--copy-props", choices=["none", "metadata-directive", "default", "all"], default="default"
+        "--progress-frequency", default=0, help="minimum seconds between progress redraws"
     )
-    parser.add_argument("--metadata-directive", choices=["COPY", "REPLACE"])
+    parser.add_argument(
+        "--progress-multiline",
+        action="store_true",
+        help="print each progress update on its own line instead of redrawing one",
+    )
+    add_page_size_argument(parser)
+    parser.add_argument(
+        "--ignore-glacier-warnings",
+        action="store_true",
+        help="do not warn about objects skipped because they are archived",
+    )
+    parser.add_argument(
+        "--force-glacier-transfer",
+        action="store_true",
+        help="attempt the transfer even for archived objects",
+    )
+    add_request_payer_argument(parser)
+    parser.add_argument("--metadata", help="user metadata for the written object, as JSON")
+    parser.add_argument(
+        "--copy-props",
+        choices=["none", "metadata-directive", "default", "all"],
+        default="default",
+        help="which source properties an S3-to-S3 copy carries over",
+    )
+    parser.add_argument(
+        "--metadata-directive",
+        choices=["COPY", "REPLACE"],
+        help="whether an S3-to-S3 copy keeps or replaces the source metadata",
+    )
     if include_expected_size:
         # No type=int: a non-integer fails the bare int() at submit time like
         # aws (an in-pipeline fatal, rc 1 - not 255).
-        parser.add_argument("--expected-size")
-    parser.add_argument("--no-overwrite", action="store_true")
+        parser.add_argument(
+            "--expected-size",
+            help="size in bytes of a streamed upload, so multipart can be planned",
+        )
     parser.add_argument(
-        "--case-conflict", choices=["ignore", "skip", "warn", "error"], default="ignore"
+        "--no-overwrite",
+        action="store_true",
+        help="skip, without failing, anything that already exists at the destination",
     )
-    parser.add_argument("--checksum-mode", choices=["ENABLED"])
+    parser.add_argument(
+        "--case-conflict",
+        choices=["ignore", "skip", "warn", "error"],
+        default="ignore",
+        help="what to do when destinations differ only by letter case",
+    )
+    parser.add_argument(
+        "--checksum-mode",
+        choices=["ENABLED"],
+        help="verify the object's stored checksum when downloading",
+    )
     # This set matches the pinned aws-cli's CHECKSUM_ALGORITHM choices verbatim
     # (its subcommands.py). An older installed `aws` (e.g. 2.31.x) rejects
     # SHA512 / XXHASH* because that build predates them - a version skew, not a
@@ -188,6 +290,7 @@ def add_transfer_arguments(
             "XXHASH3",
             "XXHASH128",
         ],
+        help="checksum algorithm to compute for the written object",
     )
 
 
@@ -309,7 +412,12 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 
 
 class TransferPaths(NamedTuple):
-    """The classified head of a cp/mv/sync invocation (the path-type gate's input)."""
+    """The classified head of a cp/mv/sync invocation (the path-type gate's input).
+
+    ``client`` is the run's S3 client, already built: aws constructs it in
+    ``S3Command._run_main`` ahead of every path validation, so `classify_paths`
+    does too and each command consumes it rather than building its own.
+    """
 
     page_size: int | None
     progress_frequency: int
@@ -319,6 +427,7 @@ class TransferPaths(NamedTuple):
     dest_type: str
     paths_type: str  # "locals3" | "s3local" | "s3s3" on the CLI surface
     s3: S3
+    client: S3Client
 
 
 def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) -> TransferPaths:
@@ -335,9 +444,18 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
     paramfile (252) -> the session profile resolution (255: aws binds the
     profile at startup, so a bad ``--profile`` beats every post-parse usage
-    error) -> the local-local pair gate (252). Only this shared, order-stable
-    prefix lives here - the stream / checksum / SSE-C checks that follow differ
-    in relative order per command and stay with each command.
+    error) -> **the S3 client build** -> the local-local pair gate (252). Only
+    this shared, order-stable prefix lives here - the stream / checksum / SSE-C
+    checks that follow differ in relative order per command and stay with each
+    command.
+
+    The client build sits at aws's own slot: everything above is aws's parse
+    layer, which runs before ``S3Command._run_main`` creates the client, and
+    everything below is the ``add_paths`` validation, which runs after. So an
+    empty region - the one shape whose client cannot be built (``Invalid
+    endpoint: https://s3..amazonaws.com``, rc 255) - preempts every usage error
+    the family reports, while a merely absent region builds fine (S3's global
+    endpoint fallback) and leaves those 252s exactly where they were.
     """
     globalargs.validate_query(args)
     clientfactory.validate_endpoint_url(args)
@@ -350,6 +468,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     # proceed. The stream route's int() coercion still runs at submit time.
     expand_option_paramfile(args, "expected_size", operation=operation)
     s3 = ctx.s3(args)
+    client = s3.client()
     src, dest = args.paths
     src_type = identify_type(src)
     dest_type = identify_type(dest)
@@ -364,6 +483,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
         dest_type,
         src_type + dest_type,
         s3,
+        client,
     )
 
 
@@ -446,7 +566,7 @@ def validate_no_overwrite_supported(
     conditional-write parameter for this route - the upload/copy parallel of the
     streaming rejection. Only ``locals3`` (upload) and ``s3s3`` (copy) send
     ``IfNoneMatch``; ``s3local`` (download) and ``sync`` never do, so they stay
-    usable on an old botocore (back-compat floor, docs/overview.md section 2)."""
+    usable on an old botocore (back-compat floor, docs/compatibility.md)."""
     if not no_overwrite or paths_type not in ("locals3", "s3s3"):
         return
     reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")
@@ -611,13 +731,11 @@ def resolve_locations(
     """
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
-        # Construction is permissive (non-raising); validate the strict aws-cli
-        # forms here so a usage error (rc 252) still precedes the transfer
-        # pipeline. The CLI's process-fatal Ctrl-C posture is not a storage
-        # concern: build_s3 declares it once (S3's wait_on_interrupt).
-        storage = S3Storage(arg, client=client_for, page_size=page_size)
-        storage.validate()
-        return storage
+        # build_s3_storage applies the strict aws-cli validation (rc 252
+        # ahead of the pipeline) with the measured bucket-less carve-out. The
+        # CLI's process-fatal Ctrl-C posture is not a storage concern:
+        # build_s3 declares it once (S3's wait_on_interrupt).
+        return build_s3_storage(arg, client=client_for, page_size=page_size)
 
     def _local(path: str) -> LocalStorage:
         return LocalStorage(path, follow_symlinks=args.follow_symlinks)
@@ -647,6 +765,52 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
 
 
+class _BucketlessS3Storage(S3Storage):
+    """A key-carrying bucket-less s3 URI (``s3:///k``) riding onward.
+
+    aws has no up-front rejection for the form: it sends Bucket="" toward the
+    API and each command fails wherever that first bites. ``S3Storage.validate``
+    (which the library entry re-runs via ``_validate_storage``) would instead
+    refuse the form as a 252-shaped ``ValidationError``, so this override is
+    what lets it ride, and the failure that follows is aws's own. Measured
+    against the pinned aws-cli: on the transfer family botocore's client-side
+    validation makes the blind single download's HeadObject and every listing
+    fatal (rc 1, ``--dryrun`` included), a live upload/copy fails per item at
+    submit time, and a dryrun upload never reaches the submit at all (rc 0);
+    ``presign`` fails the same validation while signing (rc 252). ``website``
+    never reaches botocore - it folds the whole remainder into the bucket name
+    like aws does and rejects it itself - and needs the pass-through only to
+    get that far. The ARN rejections this override skips cannot apply to a
+    bucket-less URI.
+    """
+
+    def validate(self) -> None:
+        """aws-faithful pass-through: botocore validates at request time."""
+
+
+def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:
+    """An ``S3Storage`` for a CLI s3 path, validated the aws-cli way.
+
+    Shared by the transfer family, ``rm``, ``presign`` and ``website``. The
+    strict aws-cli rejections (the unsupported ARN families) fire here, ahead
+    of the pipeline (rc 252, aws's parse-time parity); the bucket-less
+    key-carrying form is the one carve-out, flowing through
+    ``_BucketlessS3Storage`` so aws's stage-shaped failures fall out of the
+    normal machinery.
+
+    The split reads *arg* exactly as the ``S3Storage`` constructor reads it -
+    the ``s3://`` scheme optional, access-point ARNs kept whole - so the
+    scheme-less path ``presign`` accepts (``/k``) is recognized as the same
+    carve-out its ``s3:///k`` spelling is.
+    """
+    bucket, key = S3Storage.split_bucket_key(S3Storage.strip_scheme(arg))
+    if not bucket and key:
+        return _BucketlessS3Storage(arg, client=client, page_size=page_size)
+    storage = S3Storage(arg, client=client, page_size=page_size)
+    storage.validate()
+    return storage
+
+
 def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     """The transfer config for this run: the injected one, else from ``[s3]``.
 
@@ -665,6 +829,35 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     runtime_config = runtimeconfig.RuntimeConfig().build_config(**scoped)
     resolved = runtimeconfig.resolve_transfer_client(runtime_config, paths_type=paths_type)
     return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)
+
+
+def materialize_transfer_engine(
+    s3: S3, client: S3Client, transfer_config: Any, *, operation: str
+) -> None:
+    """aws's transfer-manager construction slot, for every command that has one.
+
+    aws builds the manager (``TransferManagerFactory.create_transfer_manager``)
+    right after reading ``[s3]`` and before it decides anything about the run,
+    so a CRT selection pays its whole construction there - the cross-process
+    lock and ``create_s3_crt_client`` - even for a ``--dryrun`` that transfers
+    nothing, and even for ``rm``, whose deletes never ride the engine here. Call
+    it at that slot so the same failures land at the same point.
+
+    The one failure it converts is awscrt's own ``assert isinstance(region,
+    str)``, which fires when the region chain resolved nothing (`clientfactory`
+    declares the chain's answer as the CRT region). aws catches it in its
+    general handler, which formats a bare ``AssertionError`` as an empty rc-255
+    report; this CLI re-raises ``AssertionError`` everywhere else (an
+    internal-invariant bug, and the test doubles' unexpected-call guards depend
+    on it), so the conversion is scoped to this one call site and keeps the
+    empty message verbatim.
+    """
+    try:
+        s3.materialize_crt_engine(client, transfer_config=transfer_config)
+    except AssertionError as exc:
+        # InvalidConfigError -> rc 255, aws's general handler; str(exc) is ''
+        # for a bare assert, which the error writer renders without a detail.
+        raise InvalidConfigError(str(exc), operation=operation) from exc
 
 
 def build_printer(
@@ -686,7 +879,7 @@ def build_printer(
 
 
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
-    """Run the library call and derive the aws exit code (docs/cli.md section 6).
+    """Run the library call and derive the aws exit code (design/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
@@ -750,6 +943,7 @@ __all__ = [
     "finish_transfer",
     "identify_type",
     "is_s3express_path",
+    "materialize_transfer_engine",
     "path_storage",
     "resolve_case_conflict",
     "resolve_locations",

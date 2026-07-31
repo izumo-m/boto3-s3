@@ -3,7 +3,7 @@
 Everything ``boto3_s3_cli`` imports from ``boto3_s3`` must be public: a name
 imported from the package root must be in ``boto3_s3.__all__`` (or be a
 submodule), and a name imported from a submodule must be in that module's
-``__all__`` - the documented building-block surfaces (docs/cli.md section 3).
+``__all__`` - the documented building-block surfaces (design/cli.md section 3).
 Attribute access through a module alias (``globsieve.compile``,
 ``crtsupport.should_use_crt``) is held to the same bar. A library-side rename
 or privatization then fails here, at the boundary, instead of at a user's

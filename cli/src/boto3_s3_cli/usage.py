@@ -1,9 +1,10 @@
 """aws-parity usage / error strings shared across subcommands.
 
-Most of these strings are part of the stderr contract (the parity tests
-compare them token-for-token against aws); ``invalid_bucket_name_message`` is
-the exception - only its rc is contractual and its text is a simplified form
-(its docstring). Each wording has exactly one home here and the commands
+These strings are aws's own bytes: the output parity charter binds them, and
+the parity tests compare them against what the pinned aws writes.
+``invalid_bucket_name_message`` is the one exception - a simplified form, and
+a **recorded deviation** from that charter rather than free text (its
+docstring). Each wording has exactly one home here and the commands
 interpolate only their own name or value.
 """
 
@@ -44,8 +45,11 @@ def invalid_bucket_name_message(name: str = "") -> str:
     botocore raises a ``ParamValidationError`` whose str form is ``"Parameter
     validation failed:"`` + newline + a report, and aws prints that report in
     full (it continues ``: Bucket name must match the regex ...``). We reproduce
-    only the leading ``Invalid bucket name "<name>"`` line: the charter pins the
-    rc (mb / rb 1, website 252), this stderr text is non-contractual, and the
-    version-fragile regex tail is deliberately omitted.
+    only the leading ``Invalid bucket name "<name>"`` line, dropping the
+    botocore-version-fragile regex tail. That truncation is a **recorded
+    deviation** from the output parity charter, not a free choice
+    (design/aws-cli-option-handling.md section 6,
+    docs/cli/aws-differences.md section 2); the rc is unaffected
+    (mb / rb 1, website 252).
     """
     return f'Parameter validation failed:\nInvalid bucket name "{name}"'

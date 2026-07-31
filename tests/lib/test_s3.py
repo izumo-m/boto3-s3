@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import os
 import threading
+from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import boto3
@@ -13,16 +16,20 @@ from botocore.config import Config
 from botocore.exceptions import ProfileNotFound
 
 from boto3_s3 import (
+    CLIENT_REGION,
     S3,
     CancelledError,
     CancelToken,
     FileKind,
     InvalidConfigError,
+    IOStorage,
     LocalStorage,
+    NotFoundError,
     S3Storage,
     TransferConfig,
     ValidationError,
 )
+from tests.utils.fakemodel import model_meta
 
 _MTIME = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -41,6 +48,9 @@ class _FakeS3Client:
     def __init__(self, pages: list[dict[str, Any]]) -> None:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
+        # The ListBuckets filter gate reads the model, so the fake carries the
+        # one a current botocore has.
+        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, _name: str) -> bool:
         return True
@@ -189,6 +199,91 @@ class TestUnknownTransferOption:
         assert type(ei.value) is ValidationError
 
 
+class TestValidationOperationAttribution:
+    """A location the storage rejects names the operation that ran the check.
+
+    ``Storage.validate`` sees the location but not its caller, so the operation
+    layer stamps its own name; ``operation=None`` stays reserved for a check the
+    caller ran itself (docs/reference/exceptions.md).
+    """
+
+    @pytest.mark.parametrize(
+        ("operation", "call"),
+        [
+            ("ls", lambda s3, _dest: s3.ls("s3:///key", on_entry=lambda _info: None)),
+            ("rm", lambda s3, _dest: s3.rm("s3:///key")),
+            ("cp", lambda s3, dest: s3.cp("s3:///key", dest)),
+            ("mv", lambda s3, dest: s3.mv("s3:///key", dest)),
+            ("sync", lambda s3, dest: s3.sync("s3:///key", dest)),
+        ],
+    )
+    def test_each_entry_path_stamps_its_own_name(
+        self, operation: str, call: Callable[[S3, str], None], tmp_path: Any
+    ) -> None:
+        # One case per entry path: the single-target resolver (ls / rm), the
+        # shared cp/mv pipeline, and sync. "s3:///key" is the cheapest reject.
+        with pytest.raises(ValidationError) as exc_info:
+            call(S3(), str(tmp_path / "dest"))
+        assert exc_info.value.operation == operation
+        assert exc_info.value.key == "key"
+
+    @pytest.mark.parametrize(
+        ("operation", "call"),
+        [
+            ("cp", lambda s3, src: s3.cp(src, "s3:///key")),
+            ("mv", lambda s3, src: s3.mv(src, "s3:///key")),
+            ("sync", lambda s3, src: s3.sync(src, "s3:///key")),
+        ],
+    )
+    def test_the_destination_side_is_stamped_too(
+        self, operation: str, call: Callable[[S3, str], None], tmp_path: Any
+    ) -> None:
+        # Both sides of a transfer are attributed, not just the source: a local
+        # source validates as a no-op, so only the destination's check can raise
+        # here.
+        src = tmp_path / "src"
+        src.mkdir()
+        with pytest.raises(ValidationError) as exc_info:
+            call(S3(), str(src))
+        assert exc_info.value.operation == operation
+        assert exc_info.value.key == "key"
+
+    def test_a_non_validation_failure_is_stamped_too(self) -> None:
+        # A custom backend's validate() may raise any family member, so the
+        # attribution is not ValidationError-specific.
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise NotFoundError("the backend location is gone")
+
+        with pytest.raises(NotFoundError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value.operation == "ls"
+
+    def test_an_operation_the_backend_named_is_kept(self) -> None:
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise ValidationError("the backend said no", operation="backend-op")
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value.operation == "backend-op"
+
+    def test_the_original_error_and_its_cause_survive(self) -> None:
+        # The stamping re-raises the same object, so a backend's own chaining
+        # is not flattened into a new exception.
+        cause = RuntimeError("underneath")
+        error = ValidationError("the backend said no")
+
+        class _Failing(S3Storage):
+            def validate(self) -> None:
+                raise error from cause
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
+        assert exc_info.value is error
+        assert exc_info.value.__cause__ is cause
+
+
 class TestClientSeam:
     """``S3.client`` builds a fresh client from session / endpoint_url / config."""
 
@@ -217,7 +312,7 @@ class TestClientSeam:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A build failure - e.g. AWS_PROFILE naming a missing profile - raises
-        # the translated error (docs/exceptions.md section 3), not the raw
+        # the translated error (design/exceptions.md section 3), not the raw
         # botocore one. ProfileNotFound refines to InvalidConfigError, not the
         # plain ConfigurationError base; pin the exact type because the CLI
         # maps this refinement to rc 255 (vs 253 for the base).
@@ -305,18 +400,19 @@ class _StopTransferError(Exception):
 
 
 @pytest.fixture
-def _captured_transfer_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Capture the ``transfer_config`` a transfer would build its Transferrer with.
+def _captured_transferrer_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Capture the keyword arguments a transfer would build its Transferrer with.
 
-    Patches ``Transferrer.__init__`` to record the kwarg and raise, so the test
+    Patches ``Transferrer.__init__`` to record them and raise, so the test
     stops at construction - before the plan submits anything to S3.
     """
     import boto3_s3.s3 as s3mod
 
     captured: dict[str, Any] = {}
 
-    def spy(_self: Any, _kind: Any, _client: Any, *, transfer_config: Any = None, **_: Any) -> None:
-        captured["transfer_config"] = transfer_config
+    def spy(_self: Any, _kind: Any, _client: Any, **kwargs: Any) -> None:
+        captured.clear()
+        captured.update(kwargs)
         raise _StopTransferError
 
     monkeypatch.setattr(s3mod.Transferrer, "__init__", spy)
@@ -327,29 +423,172 @@ class TestTransferConfigDefault:
     """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins."""
 
     def test_instance_default_reaches_the_transferrer(
-        self, _captured_transfer_config: dict[str, Any], tmp_path: Any
+        self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
         marker = TransferConfig()
         with pytest.raises(_StopTransferError):
             S3(transfer_config=marker).cp(str(src), "s3://bucket/key")
-        assert _captured_transfer_config["transfer_config"] is marker
+        assert _captured_transferrer_kwargs["transfer_config"] is marker
 
     def test_per_call_overrides_instance_default(
-        self, _captured_transfer_config: dict[str, Any], tmp_path: Any
+        self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
         instance_tc, call_tc = TransferConfig(), TransferConfig()
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
-        assert _captured_transfer_config["transfer_config"] is call_tc
+        assert _captured_transferrer_kwargs["transfer_config"] is call_tc
+
+
+class TestCrtAbsentCredentialsPosture:
+    """``crt_allow_absent_credentials`` reaches every route that builds a Transferrer.
+
+    The flag is what makes ``boto3-s3-cli`` enter the CRT engine with no
+    credentials the way ``aws s3`` does (design/crt.md section 4); a route that
+    forgot to thread it would silently keep boto3's classic fallback there.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            # The streaming route builds its own Transferrer (s3.py `_cp_stream`).
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize("allow", [False, True], ids=["default", "opt-in"])
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        allow: bool,
+    ) -> None:
+        s3 = S3(crt_allow_absent_credentials=allow) if allow else S3()
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_allow_absent_credentials"] is allow
+
+
+class TestCrtRegionPosture:
+    """``crt_region`` reaches every route that builds a Transferrer.
+
+    Same reason as the credentials posture above: the declared region - a
+    ``None`` that says "the chain resolved nothing" included - is what makes
+    ``boto3-s3-cli`` reproduce ``aws s3``'s CRT construction failure
+    (design/crt.md section 6), and a route that forgot to thread it would
+    silently fall back to the client's ``aws-global``.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize(
+        "declared", [CLIENT_REGION, None, "eu-west-1"], ids=["default", "absent", "explicit"]
+    )
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        declared: Any,
+    ) -> None:
+        s3 = S3() if declared is CLIENT_REGION else S3(crt_region=declared)
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_region"] is declared
+
+
+class TestMaterializeCrtEngine:
+    """`S3.materialize_crt_engine` hands the instance's postures to crtsupport.
+
+    The seam ``rm`` uses to pay ``aws s3``'s transfer-manager construction
+    without transferring; the postures it forwards are what make that
+    construction fail where aws's does.
+    """
+
+    def test_the_instance_postures_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[dict[str, Any]] = []
+
+        def fake(client: Any, config: Any, **kwargs: Any) -> None:
+            seen.append({"client": client, "config": config, **kwargs})
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        endpoint = "https://minio.example.com"
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=endpoint))
+        config = TransferConfig(preferred_transfer_client="crt")
+        session = boto3.Session()
+        s3 = S3(
+            session=session,
+            endpoint_url=endpoint,
+            crt_allow_absent_credentials=True,
+            crt_region=None,
+        )
+        s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert seen == [
+            {
+                "client": client,
+                "config": config,
+                "endpoint": endpoint,
+                "session": session,
+                "allow_absent_credentials": True,
+                "region": None,
+            }
+        ]
+
+    def test_the_instance_transfer_config_is_the_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import crtsupport
+
+        seen: list[Any] = []
+        monkeypatch.setattr(
+            crtsupport,
+            "materialize_crt_engine",
+            lambda _client, config, **_kwargs: seen.append(config),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert seen == [config]
+
+    def test_a_classic_selection_never_reads_the_crt_only_boto3_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Floor boto3 predates the CRT engine and carries no
+        # InvalidCrtTransferConfigError. Reading it ahead of the selection gate
+        # made this an ImportError on every classic run there - and every
+        # transfer command calls it, so the floor had no working transfer at
+        # all. Deleting the name is that floor, seen from the current SDK.
+        import boto3.exceptions
+
+        monkeypatch.delattr(boto3.exceptions, "InvalidCrtTransferConfigError", raising=False)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="classic")
+        # The no-op it is on the classic lane: no raise, nothing constructed.
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
 
 
 class TestModuleLevelConvenienceSignatures:
     """The module-level wrappers introspect as their method minus ``self``
-    (docs/s3.md): ``functools.wraps`` alone would expose the method's
+    (design/s3.md): ``functools.wraps`` alone would expose the method's
     signature *with* ``self`` through ``__wrapped__``."""
 
     def test_signature_strips_self(self) -> None:

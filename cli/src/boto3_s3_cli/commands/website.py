@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 
-from boto3_s3 import S3Storage, ValidationError
+from boto3_s3 import ValidationError
 from boto3_s3_cli import clientfactory, globalargs, usage
+from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
@@ -22,14 +23,20 @@ class WebsiteCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``website``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>")
-        parser.add_argument("--index-document", metavar="<suffix>")
-        parser.add_argument("--error-document", metavar="<key>")
+        parser.add_argument("paths", metavar="<S3Uri>", help="the bucket to configure")
+        parser.add_argument(
+            "--index-document",
+            metavar="<suffix>",
+            help="file name served for a request that names a directory",
+        )
+        parser.add_argument(
+            "--error-document", metavar="<key>", help="object returned when an error occurs"
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Put the website configuration and return an ``aws s3``-style exit code.
 
-        Exit-code shape (docs/cli.md section 6): no local catch - unlike
+        Exit-code shape (design/cli.md section 6): no local catch - unlike
         mb/rb, aws's WebsiteCommand lets PutBucketWebsite exceptions reach
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
@@ -38,7 +45,7 @@ class WebsiteCommand(Command):
         credentials / region is 253 (its other botocore failures - a bad
         ``--profile``, partial credentials - are 255).
         """
-        # aws's parse-time order (measured, docs/cli.md section 6): the --query
+        # aws's parse-time order (measured, design/cli.md section 6): the --query
         # compile (252) leads, then the --endpoint-url scheme check (252), then
         # the paramfile expansions (252) - the positional path and both document
         # options are all expanded at parse time - before the request is built.
@@ -49,6 +56,12 @@ class WebsiteCommand(Command):
         paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
+        # Everything above is aws's parse layer; the client comes next, in
+        # aws's own slot (S3Command._run_main), ahead of all path handling. So
+        # an empty region is its "Invalid endpoint" 255 rather than the bytes
+        # crash just below, and a merely absent region still builds.
+        s3 = ctx.s3(args)
+        client = s3.client()
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
@@ -73,16 +86,22 @@ class WebsiteCommand(Command):
         if path.endswith("/"):
             path = path[:-1]
 
-        s3 = ctx.s3(args)
-        storage = S3Storage(f"s3://{path}", client=s3.client())
-        storage.validate()
+        # build_s3_storage keeps the strict ARN rejections; its bucket-less
+        # carve-out is what keeps "s3:///k" from failing S3Storage.validate
+        # before the rejection below can shape it aws's way.
+        storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
         if path.endswith("/") or storage.key:
-            # S3Storage splits "b/k" where aws would send the whole string as
-            # the Bucket and let botocore's name regex reject it; reproduce
-            # the rejection (same rc, botocore-shaped message) here. An
-            # accesspoint ARN parses to a bucket with no key and passes
-            # through, exactly like aws. The endswith check catches "b//",
-            # whose leftover slash S3Storage's split would silently drop.
+            # aws hands the whole remainder to PutBucketWebsite as the Bucket
+            # and lets botocore's name regex reject it (rc 252). S3Storage
+            # splits it instead, which would hide that rejection, so the
+            # remainders the split disturbs are refused here from the unsplit
+            # path: whatever S3Storage read as a key ("b/some/key"), the
+            # bucket-less "/k" (whose split leaves no bucket at all), and
+            # "b//", whose leftover slash the split would silently drop. Every
+            # other name botocore refuses - a slash-free bad one, the empty
+            # bucket of "s3://" - survives the split intact and rides on to
+            # keep botocore's own text. An accesspoint ARN parses to a bucket
+            # with no key and passes through, exactly like aws.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),
                 operation="website",

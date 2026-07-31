@@ -15,7 +15,7 @@ deletes "successfully" either way, and per-key success/failure is preserved via
 in the DeleteObjects XML 1.0 body fall back to per-key ``DeleteObject``, matching
 aws-cli instead of failing their whole batch (control characters ride that
 route fine; an unpaired surrogate cannot be carried by the HTTP layer on
-either route - reachability of such keys is unverified, docs/deleter.md).
+either route - reachability of such keys is unverified, design/deleter.md).
 User-facing lines such as ``delete: s3://...`` are the CLI layer's job, fed by
 ``on_result``; the library only emits ``logging`` diagnostics.
 
@@ -400,7 +400,7 @@ class S3Deleter:
         capture_response reads ``Deleted[]`` (present only with ``Quiet=False``)
         into one slot per key: the entry minus its ``Key`` (already the result's
         key) plus the batch-wide ``RequestCharged`` - the shape a single
-        DeleteObject would return, hiding the batch wire form (docs/deleter.md).
+        DeleteObject would return, hiding the batch wire form (design/deleter.md).
         """
         charged = response.get("RequestCharged")
         slots: dict[str, dict[str, Any]] = {}

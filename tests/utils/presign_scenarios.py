@@ -6,7 +6,7 @@ identical inputs. Presign-specific points:
 
 - presign is **pure client-side computation** - no scenario contacts the
   server, every scenario replays in-process, and the rc shape is 0 / 252 /
-  255 only (1 and 254 cannot happen; docs/cli.md section 6).
+  255 only (1 and 254 cannot happen; design/cli.md section 6).
 - stdout is one URL, normalized by ``harness.normalize_presign_stdout``
   (endpoint + time/credential-dependent query values masked; param order,
   Expires, scope region, and the key path stay).
@@ -15,7 +15,7 @@ identical inputs. Presign-specific points:
   the endpoint accepts our signature, kept to scenarios whose outcome is
   time-stable (not the expires-edge ones, which would race the clock).
 
-Charter note (docs/overview.md section 3): the exit code is compared for *every*
+Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally.
 """
 
@@ -131,7 +131,7 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
-    # Head-order (docs/cli.md 5.7): the --endpoint-url scheme check (252)
+    # Head-order (design/cli.md 5.7): the --endpoint-url scheme check (252)
     # beats the bare int() coercion (255).
     PresignScenario(
         "presign_endpoint_beats_expires",

@@ -2,7 +2,7 @@
 
 Thanks for your interest in boto3-s3. This document covers local setup, the test
 suite, and the coding and commit conventions. For the project's purpose, scope,
-and design policy, start with [`docs/overview.md`](docs/overview.md).
+and design policy, start with [`design/overview.md`](design/overview.md).
 
 The project is in beta and preparing for 1.0. Changes that might break the
 public API or aws-cli compatibility must be discussed before implementation.
@@ -13,7 +13,7 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 
 - `src/boto3_s3/` — **`boto3-s3`**, the library.
 - `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
-- `tests/` — the test suite (see [`docs/testing.md`](docs/testing.md)).
+- `tests/` — the test suite (see [`design/testing.md`](design/testing.md)).
 - `docs/` — design and reference documentation.
 - `scripts/` — helpers for the e2e environment (the local MinIO stack and the
   pinned aws-cli install).
@@ -76,16 +76,19 @@ scripts/compose.sh down      # tear the stack down
 
 Goldens are the recorded real-aws behavior that the in-process suite replays.
 Regenerate them against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
-tests/cli/e2e`, and review the diff before committing. The full picture — test
-tiers, the exit-code charter, and the golden contract — is in
-[`docs/testing.md`](docs/testing.md).
+tests/cli/e2e`, and review the diff before committing.
+
+The commands above are the ones to run; [`design/testing.md`](design/testing.md) is
+where the reasoning lives — the test tiers, the exit-code charter's detection
+surface, the golden contract, and why the stack is pinned the way it is. It
+points back here rather than repeating the commands.
 
 ## Conventions
 
 - **Parity is the contract.** Behavior, options, and exit codes follow `aws s3`.
   When you add or change a subcommand or option, extend the matching scenarios
-  and tests so parity stays enforced (see [`docs/testing.md`](docs/testing.md)
-  and the exit-code charter in [`docs/overview.md`](docs/overview.md)).
+  and tests so parity stays enforced (see [`design/testing.md`](design/testing.md)
+  and the exit-code charter in [`design/overview.md`](design/overview.md)).
 - **Typed.** The library ships type information (`py.typed`); keep public APIs
   typed and basedpyright clean.
 - **English.** All version-controlled files are written in English.

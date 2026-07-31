@@ -40,7 +40,9 @@ cp   ls   mb   mv   presign   rb   rm   sync   website
 It takes the `aws s3` arguments and global options, reads the same `~/.aws`
 configuration, and treats an exit-code mismatch as a bug. Existing commands and
 scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
-handling, resulting S3 state, and exit codes are tested against `aws s3`.
+handling, resulting S3 state, and exit codes are tested against `aws s3`. The
+codes a script can branch on are listed in
+[`docs/cli/exit-codes.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/exit-codes.md).
 
 This CLI is the strict compatibility layer over the more permissive Python
 library. It applies aws-compatible path validation, configuration resolution,
@@ -157,16 +159,25 @@ boto3-s3 --profile prod --region eu-west-1 ls s3://my-bucket
 boto3-s3 ls s3://my-bucket --profile prod --region eu-west-1
 ```
 
-Transfer tuning is read from the profile's `[s3]` section in `~/.aws/config`
-(`max_concurrent_requests`, `multipart_threshold`, `multipart_chunksize`,
-`max_queue_size`, `max_bandwidth`, `io_chunksize`, `preferred_transfer_client`,
-plus the CRT-mode keys `target_bandwidth`, `should_stream`, `disk_throughput`,
-and `direct_io`), exactly as `aws s3` reads it.
+Transfer tuning comes from the profile's `[s3]` section in `~/.aws/config`,
+read as `aws s3` reads it (`max_concurrent_requests`, `multipart_threshold`,
+`multipart_chunksize`, `max_queue_size`, `max_bandwidth`, `io_chunksize`,
+`preferred_transfer_client`, plus the CRT-mode keys `target_bandwidth`,
+`should_stream`, `disk_throughput`, and `direct_io`); botocore's own
+`addressing_style`, `use_accelerate_endpoint`, `use_dualstack_endpoint` and
+`payload_signing_enabled` are honored from the same section. One caveat:
+`should_stream`, `disk_throughput` and `direct_io` are accepted and validated
+but have no effect, because no released s3transfer takes the file-I/O options
+that carry them (`aws` bundles a fork that does).
 
 `--debug` turns on wire-level logging with credentials (signatures, access-key
 ids, session tokens) masked by default.
 
-Run `boto3-s3 <command> --help` for a subcommand's full option list.
+What each key does, how the transfer engine is chosen, and the environment
+variables read are in
+[`configuration.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/configuration.md).
+
+Run `boto3-s3 <subcommand> help` for a subcommand's full option list.
 
 ## License
 

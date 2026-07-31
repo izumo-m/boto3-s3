@@ -1,6 +1,6 @@
 """The per-info transfer producers and gates cp / mv / sync share.
 
-The "producer" half of the transfer design (docs/transfer.md): turn a
+The "producer" half of the transfer design (design/transfer.md): turn a
 ``TransferPlan`` plus listing entries into
 ``TransferItem`` objects, running the aws-cli item
 gates on
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
@@ -608,6 +608,16 @@ def head_single(
         with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
+        # aws-cli's filegenerator rewrites only the bare HTTP-404 HeadObject
+        # miss (`Error.Code == '404'` - HeadObject has no body, so S3 sends
+        # the bare status). An endpoint that names a code (NoSuchBucket over
+        # HTTP 404) surfaces as-is in aws, so the translation passes through
+        # untouched here too. Duck-typed: this module never imports botocore,
+        # and a translated cause always carries the ClientError's dict.
+        raw_response = getattr(exc.__cause__, "response", None)
+        response = cast("dict[str, Any]", raw_response) if isinstance(raw_response, dict) else {}
+        if response.get("Error", {}).get("Code") != "404":
+            raise
         # Chain the originating ClientError directly: this aws-worded error
         # replaces the s3_errors translation wholesale, and the section 2.1
         # reachability guarantee (exceptions.md) promises the ClientError on
@@ -1018,6 +1028,26 @@ def open_download_item(
     )
 
 
+def case_conflict_mode(options: TransferOptions, *, operation: str) -> CaseConflictMode:
+    """Read ``case_conflict`` out of ``options`` as a ``CaseConflictMode``.
+
+    The member and its string value are both accepted; anything else is a
+    caller error reported as ``ValidationError``, so the enum's raw
+    ``ValueError`` never leaves the public API (design/exceptions.md), the
+    same translation the copy-props options get. Like those, the unspecified
+    check is is-None rather than falsy, so a permissive caller's explicit
+    ``None`` reads as the default while a present-but-empty value ("") still
+    fails the conversion.
+    """
+    raw = options.get("case_conflict")
+    if raw is None:
+        raw = CaseConflictMode.IGNORE
+    try:
+        return CaseConflictMode(raw)
+    except ValueError as exc:
+        raise ValidationError(f"Invalid case_conflict value: {raw!r}", operation=operation) from exc
+
+
 def cp_case_gate(
     plan: transferplan.TransferPlan,
     *,
@@ -1048,7 +1078,7 @@ def cp_case_gate(
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
     """
-    mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
+    mode = case_conflict_mode(options, operation=operation)
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
     # paths_type == "s3local" guarantees a LocalStorage destination here.
@@ -1081,7 +1111,7 @@ def sync_case_gate(
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
     ``s3open`` destination owns its key space and runs no such check.
     """
-    mode = CaseConflictMode(options.get("case_conflict", CaseConflictMode.IGNORE))
+    mode = case_conflict_mode(options, operation="sync")
     if (
         transfer_type is not TransferType.DOWNLOAD
         or mode is CaseConflictMode.IGNORE
@@ -1203,5 +1233,5 @@ def sync_transfer_item(
 
 
 # Package-internal: the shared producer/gate helpers are consumed by s3.py
-# only and carry no documented surface (docs/imports.md).
+# only and carry no documented surface (design/imports.md).
 __all__: list[str] = []

@@ -65,6 +65,57 @@ class TestIdentifyType:
         assert transferargs.identify_type("S3://bucket") == "local"
 
 
+class TestBuildS3Storage:
+    """The strict aws-cli validation plus its one bucket-less carve-out.
+
+    A key with no bucket must reach the API the way aws lets it (the
+    ``validate`` pass-through); every other malformed form must still be
+    rejected here, ahead of the pipeline.
+    """
+
+    def test_bucketless_key_skips_validation(self) -> None:
+        storage = transferargs.build_s3_storage("s3:///k", client=object())
+        assert (storage.bucket, storage.key) == ("", "k")
+        storage.validate()  # the carve-out: no up-front rejection
+
+    def test_bucketless_key_schemeless_skips_validation(self) -> None:
+        # presign takes the scheme-less spelling of the same URI; the split
+        # must read it as S3Storage's own constructor does.
+        storage = transferargs.build_s3_storage("/k", client=object())
+        assert (storage.bucket, storage.key) == ("", "k")
+        storage.validate()
+
+    def test_service_root_is_not_the_carve_out(self) -> None:
+        # No key, so nothing is carved out - and validate() accepts it.
+        storage = transferargs.build_s3_storage("s3://", client=object())
+        assert not isinstance(storage, transferargs._BucketlessS3Storage)
+        assert (storage.bucket, storage.key) == ("", "")
+        storage.validate()
+
+    def test_bucket_and_key_is_validated_normally(self) -> None:
+        storage = transferargs.build_s3_storage("b/k", client=object())
+        assert not isinstance(storage, transferargs._BucketlessS3Storage)
+        assert (storage.bucket, storage.key) == ("b", "k")
+
+    def test_object_lambda_arn_is_still_rejected(self) -> None:
+        arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"
+        with pytest.raises(ValidationError, match="S3 Object Lambda"):
+            transferargs.build_s3_storage(f"s3://{arn}/k", client=object())
+
+    def test_outposts_bucket_arn_is_still_rejected(self) -> None:
+        arn = (
+            "arn:aws:s3-outposts:us-west-2:123456789012:outpost/"
+            "op-01234567890123456/bucket/my-bucket"
+        )
+        with pytest.raises(ValidationError, match="Outpost Bucket ARNs"):
+            transferargs.build_s3_storage(f"s3://{arn}", client=object())
+
+    def test_accesspoint_arn_stays_whole_in_the_bucket(self) -> None:
+        arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
+        storage = transferargs.build_s3_storage(f"s3://{arn}", client=object())
+        assert (storage.bucket, storage.key) == (arn, "")
+
+
 class TestParamfile:
     """aws applies file:// (text) / fileb:// (binary) paramfile resolution to s3 args."""
 

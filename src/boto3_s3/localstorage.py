@@ -1129,7 +1129,7 @@ class LocalStorage(Storage):
         # fsyncs the file (and its parent directory) before deleting the S3 source,
         # closing the window where aws-cli / s3transfer delete the durable S3 copy
         # while the download is still only in the page cache. Read by the transfer
-        # engine off the destination storage; see ``docs/transfer.md`` section 11.
+        # engine off the destination storage; see ``design/transfer.md`` section 11.
         self._fsync = fsync
         # The directory-walk strategy (the default fast walk, or an app's). The
         # walker is stateless, so one instance may be shared across LocalStorage

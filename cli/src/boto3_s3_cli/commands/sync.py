@@ -26,22 +26,34 @@ class SyncCommand(Command):
         and has no streaming form - aws rejects both as unknown options),
         plus the strategy flags."""
         transferargs.add_transfer_arguments(parser, include_recursive=False)
-        parser.add_argument("--delete", action="store_true")
-        parser.add_argument("--size-only", action="store_true")
-        parser.add_argument("--exact-timestamps", action="store_true")
+        parser.add_argument(
+            "--delete",
+            action="store_true",
+            help="delete destination entries that are no longer in the source",
+        )
+        parser.add_argument(
+            "--size-only",
+            action="store_true",
+            help="compare by size alone, ignoring modification times",
+        )
+        parser.add_argument(
+            "--exact-timestamps",
+            action="store_true",
+            help="on download, treat any differing timestamp as a change",
+        )
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Sync and return an ``aws s3 sync``-style exit code.
 
-        The shape is cp's (docs/cli.md section 6) with sync's own usage errors in
+        The shape is cp's (design/cli.md section 6) with sync's own usage errors in
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket on either
         side 252 ("Cannot use sync command with a directory bucket.") - all
-        before any S3 client exists. A missing local source exits 255; the
+        after the S3 client is built, the way aws orders them. A missing local source exits 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
-        sides (rootless anchoring; sync.md section 1).
+        sides (rootless anchoring; design/sync.md section 1).
         """
         head = transferargs.classify_paths(args, ctx, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -82,7 +94,7 @@ class SyncCommand(Command):
         options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
 
         s3 = head.s3
-        client = s3.client()
+        client = head.client
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
@@ -95,7 +107,7 @@ class SyncCommand(Command):
             page_size=page_size,
         )
 
-        # One filter applied to both sides by S3.sync (sync.md section 1),
+        # One filter applied to both sides by S3.sync (design/sync.md section 1),
         # compiled with both sides as its bases: aws joins every pattern onto
         # the source AND destination rootdir and applies both joined forms to
         # every entry, which compile_filter reproduces (delegating to the
@@ -104,6 +116,9 @@ class SyncCommand(Command):
             args.filters, src=src_location, dest=dest_location, dir_op=True
         )
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
+        # aws builds the transfer manager here, before it decides anything about
+        # the run: a CRT selection pays its construction even for a --dryrun.
+        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:

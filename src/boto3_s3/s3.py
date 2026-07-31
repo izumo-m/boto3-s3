@@ -7,14 +7,16 @@ boto3 client lives on the ``S3Storage``; when its client is omitted it falls
 back to ``boto3.client("s3")``. The recommended construction is
 ``S3(session=boto3_s3.session())`` - the tuned session's clients parse
 response timestamps at C speed (`sessions.py`); a zero-config ``S3()``
-deliberately keeps plain ``boto3.client("s3")`` semantics, never consulting
-``boto3.DEFAULT_SESSION`` state to decide anything. To target a custom
+deliberately keeps plain ``boto3.client("s3")`` semantics, riding
+``boto3.DEFAULT_SESSION`` exactly as ``boto3.client`` itself does. What that
+session holds never decides whether the fast timestamp parser is installed:
+that follows only from which session was passed in (`sessions.py`). To target a custom
 endpoint / profile / region (e.g. MinIO) or a second account for S3-to-S3,
 pass an explicit ``S3Storage(uri, client=...)`` instead of a bare string.
 
 This module is SDK-backed by declaration: it imports boto3 at module top.
 Only the package root's lazy re-export keeps a bare ``import boto3_s3``
-SDK-free (docs/imports.md).
+SDK-free (design/imports.md).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import producers, transferplan
+from boto3_s3 import crtsupport, producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -123,6 +125,34 @@ def _validate_transfer_options(options: TransferOptions, *, operation: str) -> N
         raise ValidationError(
             f"Unknown transfer option(s): {', '.join(unknown)}", operation=operation
         )
+
+
+@contextmanager
+def _attributed_to(operation: str) -> Generator[None, None, None]:
+    """Stamp ``operation`` onto an unattributed family error leaving the block.
+
+    A storage-level method knows the location but not the operation that is
+    about to use it, so its errors would otherwise carry ``operation=None`` -
+    the value the contract reserves for "no single operation was in scope"
+    (docs/reference/exceptions.md). Only the operation layer knows the name, so
+    it fills it in here: the same exception object is re-raised (traceback and
+    ``__cause__`` survive), the name is written only when the error left it
+    unset (a backend that already attributed the failure keeps its own), and a
+    non-family exception passes through untouched. A caller invoking the
+    storage method itself still gets ``operation=None``.
+    """
+    try:
+        yield
+    except Boto3S3Error as exc:
+        if exc.operation is None:
+            exc.operation = operation
+        raise
+
+
+def _validate_storage(storage: Storage, *, operation: str) -> None:
+    """Run ``Storage.validate`` and attribute its failure to ``operation``."""
+    with _attributed_to(operation):
+        storage.validate()
 
 
 def _emit_result(
@@ -658,7 +688,10 @@ class S3:
     concurrently.
 
     ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
-    every operation this instance runs. ``True`` (the default): a
+    every operation this instance starts a scan for - ``ls``, ``rm``, the
+    ``cp`` / ``mv`` transfers and ``sync``. The operations with no enumeration
+    to reclaim (``mb`` / ``rb`` / ``presign`` / ``website``, and the streaming
+    ``cp`` route) never consult it. ``True`` (the default): a
     ``KeyboardInterrupt`` propagates only after the operation has reclaimed
     all of its resources (enumeration workers joined), so an app that catches
     the interrupt can keep calling operations. ``False``: the app treats
@@ -670,6 +703,26 @@ class S3:
     every other exception always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.wait_on_interrupt``.
+
+    ``crt_allow_absent_credentials`` is the second such posture declaration,
+    for the CRT transfer engine. ``False`` (the default) is boto3's rule: a
+    client that resolved no credentials never gets the CRT engine, so the
+    transfer runs classic and reports botocore's "Unable to locate
+    credentials". ``True`` is aws-cli's: the CRT client is built around a
+    credentials delegate that has nothing to resolve, and the failure surfaces
+    from inside it instead. Only the CLI distribution, which owes ``aws s3``
+    output parity, sets it (design/crt.md section 4).
+
+    ``crt_region`` is the third, and names where the CRT engine's region comes
+    from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
+    own ``meta.region_name``; an explicit value is the application's already
+    resolved region and rides verbatim. The distinction only shows when nothing
+    resolves a region at all: botocore then invents the ``aws-global``
+    pseudo-region for the client, while aws-cli's own region chain yields
+    ``None`` and awscrt refuses to build (its ``assert isinstance(region,
+    str)``). Passing ``crt_region=None`` declares that absence and reproduces
+    that refusal; again only the CLI distribution sets it (design/crt.md
+    section 6).
     """
 
     def __init__(
@@ -680,12 +733,16 @@ class S3:
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
         wait_on_interrupt: bool = True,
+        crt_allow_absent_credentials: bool = False,
+        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
         self._wait_on_interrupt = wait_on_interrupt
+        self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        self._crt_region: crtsupport.CrtRegion = crt_region
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -712,8 +769,10 @@ class S3:
         raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
         unresolvable credentials / region, its ``InvalidConfigError``
         refinement for a set-but-unusable ``AWS_PROFILE``, partial
-        credentials, or a malformed ``endpoint_url`` - never the raw botocore
-        error (docs/exceptions.md section 1).
+        credentials, or a malformed ``endpoint_url``, and the base
+        ``Boto3S3Error`` for any other botocore error, which the translator's
+        last clause claims - never the raw botocore
+        error (design/exceptions.md section 1).
         """
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
@@ -727,8 +786,52 @@ class S3:
                 # botocore rejects a malformed endpoint_url with a plain
                 # ValueError (not a BotoCoreError), which would leak raw
                 # through s3_errors. A set-but-unusable setting is
-                # InvalidConfigError's definition (docs/exceptions.md).
+                # InvalidConfigError's definition (design/exceptions.md).
                 raise InvalidConfigError(str(exc)) from exc
+
+    def materialize_crt_engine(
+        self, client: S3Client, *, transfer_config: TransferConfig | None = None
+    ) -> None:
+        """Build the CRT transfer engine now, for an operation that will not use it.
+
+        ``aws s3 rm`` constructs its transfer manager before deciding anything
+        about the run, so the engine's construction-time failures - awscrt
+        refusing a client with no region above all - belong to the command, not
+        to the deletes. `rm` here deletes through ``DeleteObject`` and never
+        rides the engine, so an application that owes ``aws s3`` parity calls
+        this to pay the same construction (cross-process lock included) at the
+        same point and simply drops the result.
+
+        The engine is chosen from *transfer_config* (this instance's
+        ``transfer_config`` when none is given) with the same rule the transfer
+        ops apply, so a classic selection - explicit, or ``auto`` on a host the
+        CRT is not tuned for - makes this a no-op. Nothing is returned: the CRT
+        client is a process-wide singleton and a later transfer on a compatible
+        client reuses it.
+        """
+        config = transfer_config if transfer_config is not None else self._transfer_config
+        if not crtsupport.selects_crt(config):
+            # The no-op a classic selection makes of the call below, taken here
+            # so the CRT-only boto3 name is imported on the CRT lane alone -
+            # floor boto3 predates the CRT engine and carries no such name,
+            # and every transfer command owing aws parity calls this.
+            return
+        # Deferred: absent on floor boto3 (pre-CRT), like the transfer engine's.
+        from boto3.exceptions import InvalidCrtTransferConfigError
+
+        try:
+            crtsupport.materialize_crt_engine(
+                client,
+                config,
+                endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
+                session=self._session,
+                allow_absent_credentials=self._crt_allow_absent_credentials,
+                region=self._crt_region,
+            )
+        except InvalidCrtTransferConfigError as exc:
+            # boto3's explicit-'crt' config validation, kept inside the taxonomy
+            # exactly as the transfer engine does (design/exceptions.md).
+            raise ValidationError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -790,10 +893,11 @@ class S3:
         ``ls`` dispatches to `S3Storage.list_buckets` (aws-cli's ``ls``
         splits the bucket listing from the object listing the same way), yielding
         one ``BUCKET``-kind entry per bucket (``mtime`` = creation date).
-        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing on
-        a botocore that models them (the back-compat floor's unpaginated
-        fallback cannot send them - `S3Storage.list_buckets`) and
-        are meaningless for an object listing; conversely ``recursive`` /
+        ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing
+        and are meaningless for an object listing; each requires a botocore
+        whose ``ListBuckets`` can carry it, and one that cannot raises
+        ``ConfigurationError`` naming the version it needs
+        (`S3Storage.list_buckets`); conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
         aws-cli). The listing page size (object listings, and bucket listings on a
         paginator-capable botocore - the floor's fallback issues one
@@ -866,7 +970,7 @@ class S3:
                     operation=operation,
                 )
             storage = S3Storage(target, client=self.client())
-        storage.validate()
+        _validate_storage(storage, operation=operation)
         return storage
 
     # -- byte transfer ----------------------------------------------------
@@ -945,7 +1049,7 @@ class S3:
         Results stream to ``on_result`` from the engine's worker threads for
         submitted transfers; non-submitting records - dryrun, skips, notices,
         and some warnings - are emitted inline on the calling thread
-        (docs/opresult.md). Callbacks must be fast and
+        (design/opresult.md). Callbacks must be fast and
         non-raising. Failures aggregate into ``BatchError`` with
         the first failure as ``__cause__``, warnings alone do not raise (the
         CLI derives exit code 2 from its warned count). Failures *before*
@@ -1024,8 +1128,8 @@ class S3:
         surfaces as a clear ``ValidationError`` instead of failing deep in the
         engine.
         """
-        src_storage.validate()
-        dest_storage.validate()
+        _validate_storage(src_storage, operation=operation)
+        _validate_storage(dest_storage, operation=operation)
         # A pre-cancelled token acts before this method's side effects: the
         # destination pre-create below, the case-gate's destination walk, and
         # any lazily-deferred client build (a caller-made S3Storage without a
@@ -1084,6 +1188,8 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
@@ -1246,21 +1352,29 @@ class S3:
         # non-stream loop does before pulling each item - a pre-cancelled
         # run transfers nothing and leaves a side-effecting stream untouched.
         _raise_if_cancelled(cancel_token, "cp")
+        # A stream is a single item with no destination tree, so no case-conflict
+        # gate is built here; the value is still read (and refused if bad) so
+        # every cp validates the option, whatever its paths - before the peer's
+        # client, the fileobj open, and the engine.
+        producers.case_conflict_mode(options, operation="cp")
         if src_is_stream:
             storage = self._stream_s3_peer(dest_storage)
             transfer_type = TransferType.UPLOAD
+            # dryrun reports the item without submitting it, so skip the open -
+            # like the open routes (open_upload_item / open_download_item),
+            # keeping a side-effecting stream untouched on a dry run. A live
+            # run opens eagerly here, unlike those routes' deferred handles:
+            # a stream storage wraps an already-open in-hand stream (no
+            # resource is acquired), it is a single item (nothing queues
+            # up), and StdioStorage's missing-stdio ValidationError keeps
+            # its documented in-pipeline slot - attributed to cp here, since
+            # the storage cannot know which operation opened it.
+            with _attributed_to("cp"):
+                src_fileobj = None if dryrun else src_storage.open(storage.key, "rb")
             item = TransferItem(
                 compare_key=storage.key,
                 size=expected_size,
-                # dryrun reports the item without submitting it, so skip the open -
-                # like the open routes (open_upload_item / open_download_item),
-                # keeping a side-effecting stream untouched on a dry run. A live
-                # run opens eagerly here, unlike those routes' deferred handles:
-                # a stream storage wraps an already-open in-hand stream (no
-                # resource is acquired), it is a single item (nothing queues
-                # up), and StdioStorage's missing-stdio ValidationError keeps
-                # its documented in-pipeline slot.
-                src_fileobj=None if dryrun else src_storage.open(storage.key, "rb"),
+                src_fileobj=src_fileobj,
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
                 src_display="-",
@@ -1269,12 +1383,14 @@ class S3:
         else:
             storage = self._stream_s3_peer(src_storage)
             transfer_type = TransferType.DOWNLOAD
+            # See the upload branch: a dry run never opens the stream.
+            with _attributed_to("cp"):
+                dest_fileobj = None if dryrun else dest_storage.open(storage.key, "wb")
             item = TransferItem(
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
                 src_key=storage.key,
-                # See the upload branch: a dry run never opens the stream.
-                dest_fileobj=None if dryrun else dest_storage.open(storage.key, "wb"),
+                dest_fileobj=dest_fileobj,
                 src_display=f"s3://{storage.bucket}/{storage.key}",
                 dest_display="-",
             )
@@ -1291,6 +1407,8 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         with transferrer:
@@ -1325,7 +1443,7 @@ class S3:
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        peer.validate()
+        _validate_storage(peer, operation="cp")
         return peer
 
     def mv(
@@ -1543,8 +1661,8 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        src_storage.validate()
-        dest_storage.validate()
+        _validate_storage(src_storage, operation="sync")
+        _validate_storage(dest_storage, operation="sync")
         # A pre-cancelled token acts before this method's side effects (the
         # destination pre-create below, any lazily-deferred client build - a
         # caller-made S3Storage without a client; resolve() above already
@@ -1637,6 +1755,8 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
+            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_region=self._crt_region,
             session=self._session,
         )
         deletes = _SyncDeletes(
@@ -1767,7 +1887,7 @@ class S3:
           (``"data"`` lists under ``"data/"``, so ``data-sibling.txt`` is not
           touched), folder markers included, deleted in batched
           ``DeleteObjects`` calls via `S3Deleter`; XML-incompatible keys fall
-          back to aws-cli's per-key ``DeleteObject`` route (docs/deleter.md).
+          back to aws-cli's per-key ``DeleteObject`` route (design/deleter.md).
         - **bucket root, non-recursive**: lists the whole bucket but deletes
           only zero-byte ``/``-terminated "folder marker" objects (any depth)
           - aws-cli's manual-folder sweep, not a full wipe.
@@ -1791,7 +1911,7 @@ class S3:
         worker thread on the batched path - keep the callback fast and
         non-raising). Item failures are aggregated: ``BatchError`` with rollup
         counts (first failure as ``__cause__``) once at the end, exit-code
-        model docs/exceptions.md section 4. Failures *before* any item work - e.g.
+        model design/exceptions.md section 4. Failures *before* any item work - e.g.
         the listing rejecting the bucket - raise their category error
         directly. `cancel_token` may be cancelled from `on_result`: graceful
         mode discards the unsent buffer and drains the in-flight delete batch;
@@ -1800,12 +1920,18 @@ class S3:
         """
         storage = self._resolve_s3_target(target, operation="rm")
         _raise_if_cancelled(cancel_token, "rm")
-        if not storage.bucket:
+        if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a
-            # bucketless service root cannot resolve to anything to delete. aws
-            # sends Bucket="" to the API and fails botocore's client-side
-            # validation (rc 1); reject up front the same way - a deterministic
-            # library-level check that does not depend on the client validating.
+            # bucketless enumerating target cannot resolve to anything to
+            # delete. aws sends Bucket="" to the listing and fails botocore's
+            # client-side validation (rc 1, dryrun included); reject up front
+            # the same way - a deterministic library-level check that does not
+            # depend on the client validating. The blind single delete (a key,
+            # not recursive - only reachable through a custom storage whose
+            # validate allows the form) is deliberately NOT checked: aws only
+            # fails it at submit time, so a dryrun records it at rc 0 and a
+            # live run fails per-key through the same client validation
+            # (measured shapes).
             raise ValidationError('Invalid bucket name "": rm requires a bucket', operation="rm")
         root = rm_filter_root(storage.key, recursive=recursive)
 
@@ -1963,7 +2089,7 @@ class S3:
         and duplicate keys (passed through for the server to reject, which is
         what the CLI's repeated ``--tags`` parity rests on). A single-call
         operation: failures raise their category error directly, never
-        ``BatchError`` (docs/exceptions.md section 4).
+        ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="mb")
         bucket = storage.bucket
@@ -1997,7 +2123,7 @@ class S3:
         and callers compose ``S3.rm(target, recursive=True)`` + ``S3.rb``
         the same way. A single-call operation: failures (``BucketNotEmpty``,
         ``NoSuchBucket``, ...) raise their category error directly, never
-        ``BatchError`` (docs/exceptions.md section 4).
+        ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="rb")
         bucket = storage.bucket
@@ -2024,7 +2150,10 @@ class S3:
         bucket or key fails botocore's client-side parameter validation ->
         `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
-        library's permissive superset.
+        library's permissive superset, and any other value is refused with
+        `ValidationError` before ``target`` is resolved or anything is
+        signed (otherwise a client method taking Bucket and Key would sign
+        an undocumented operation, and miss the SigV4 forcing below).
 
         The URL is signed with SigV4, matching ``aws s3 presign``. This
         matters because botocore, left to itself, still downgrades a default
@@ -2038,6 +2167,8 @@ class S3:
         (``s3v4a``) resolve to, and an unsigned client, are left as botocore
         chose them.
         """
+        if method not in ("get_object", "put_object"):
+            raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
         storage = self._resolve_s3_target(target, operation="presign")
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
@@ -2069,7 +2200,7 @@ class S3:
         server, exactly like aws. An empty bucket fails botocore's
         client-side parameter validation -> `ValidationError`. A
         single-call operation: failures raise their category error directly,
-        never ``BatchError`` (docs/exceptions.md section 4).
+        never ``BatchError`` (design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="website")
         config: WebsiteConfigurationTypeDef = {}
@@ -2144,7 +2275,7 @@ def _delegate(method: Callable[Concatenate[S3, _P], _R]) -> Callable[_P, _R]:
     # ``inspect.signature`` report the method's signature *with* ``self``. Pin
     # the self-stripped signature explicitly (it wins over ``__wrapped__``) so
     # runtime introspection matches the documented contract - the method's
-    # exact signature minus ``self`` (docs/s3.md) - for help generators and
+    # exact signature minus ``self`` (design/s3.md) - for help generators and
     # ``Signature.bind`` consumers, not just for type checkers.
     method_signature = inspect.signature(method)
     wrapper.__signature__ = method_signature.replace(  # pyright: ignore[reportAttributeAccessIssue]

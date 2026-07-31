@@ -20,8 +20,8 @@ lines:
   neither does this printer - piped output carries the same ``\\r`` segments
   (the golden normalization strips them). aws's ``~total (calculating...)``
   markers for a still-running enumeration are not reproduced (the library
-  has no enumeration-finished signal); console identity is non-contractual
-  (docs/aws-cli-option-handling.md section 6).
+  has no enumeration-finished signal) - one of the recorded progress-display
+  deviations (design/aws-cli-option-handling.md section 6).
 
 Rendering is decoupled from the transfer workers, aws-cli's results-pipeline
 shape (its ``ResultProcessor`` thread): the worker-side callbacks only update
@@ -42,12 +42,12 @@ One deliberate deviation from aws-cli: the queue is **bounded**
 slows a transfer for console output but grows memory without limit when the
 consumer stalls; here a consumer stalled long enough to fall ``_QUEUE_MAX``
 records behind (e.g. ``sync`` piped into a stopped pager) back-pressures the
-transfer instead (documented in docs/aws-cli-option-handling.md section 6).
+transfer instead (documented in design/aws-cli-option-handling.md section 6).
 
 Suppression matrix (rm's ``_DeletePrinter`` precedent): ``--quiet``
 builds no output at all - failures included, with one aws-matching
 exception: the case-conflict NOTICE advisories still print (aws writes
-them straight to stderr, bypassing its printers; docs/cli.md) - while the
+them straight to stderr, bypassing its printers; design/cli.md) - while the
 ``warned`` counter
 still feeds the exit code (rc 2; a failure's rc 1 comes from the library's
 ``BatchError``, so ``failed`` is observational only, kept exact all the
