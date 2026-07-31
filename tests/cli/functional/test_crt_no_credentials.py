@@ -45,7 +45,9 @@ if not crtsupport.has_crt_s3transfer():
 _DEAD_ENDPOINT = "http://127.0.0.1:1"
 _BUCKET = "boto3-s3-crt-nocreds"
 _RUN_CLI = "import sys; from boto3_s3_cli.cli import main; sys.exit(main())"
-_ADDRESS = re.compile(r" at 0x[0-9a-f]+>")
+# CPython renders the id in the platform's own width and case: lowercase on
+# Linux/macOS, zero-padded uppercase on Windows.
+_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+>")
 _TRACEBACK_BODY = re.compile(
     r"^(  |Traceback \(most recent call last\):|[A-Za-z_][\w.]*(Error|Exception)\b)"
 )

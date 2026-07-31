@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import locale
 import logging
 import os
 from pathlib import Path
@@ -30,6 +31,32 @@ from boto3_s3_cli.commands.base import Context
 
 _REGIONS = ["us-east-1", "us-west-2", "eu-west-1"]
 _PROFILES = ["default", "minio", "prod"]
+
+
+def _undecodable_config() -> bytes | None:
+    """A config body the config reader's own encoding cannot decode.
+
+    ``configparser.read`` opens with the locale encoding - as botocore's config
+    read does, which is why the CLI matches it - so *which* bytes are
+    undecodable is a property of the host, not a constant: 0xe9 is invalid
+    UTF-8 but a plain "e-acute" under Windows's cp1252. Probe the encoding
+    actually in force; ``None`` where it decodes every byte (latin-1, cp437),
+    which leaves nothing for a decode-failure test to use.
+    """
+    encoding = locale.getpreferredencoding(False)
+    for byte in (b"\xe9", b"\x81", b"\xff"):
+        try:
+            byte.decode(encoding)
+        except UnicodeDecodeError:
+            return b"[default]\ncli_auto_prompt = caf" + byte + b"\n"
+    return None
+
+
+_UNDECODABLE_CONFIG = _undecodable_config()
+_NEEDS_UNDECODABLE = pytest.mark.skipif(
+    _UNDECODABLE_CONFIG is None,
+    reason=f"{locale.getpreferredencoding(False)} decodes every byte",
+)
 
 
 def _completer() -> c.AutoCompleter:
@@ -462,19 +489,21 @@ class TestAutoPromptModeResolution:
         assert prompter.seen == ["cp", "s3://a"]
         assert rc == 0
 
-    def test_non_utf8_config_does_not_crash(
+    @_NEEDS_UNDECODABLE
+    def test_undecodable_config_does_not_crash(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # A non-UTF-8 config must not crash the run with an uncaught
-        # UnicodeDecodeError (regression: configparser.read raises it, and it
-        # is not a configparser.Error). The dispatcher's config scan now
-        # rejects the file upstream, the way botocore does, so this pins the
-        # scan's outcome; the resolution's own tolerance for the same input -
-        # which the scan makes unreachable on this path - is pinned directly by
-        # TestScopedConfigReadTolerance below.
+        # A config the reader's encoding cannot decode must not crash the run
+        # with an uncaught UnicodeDecodeError (regression: configparser.read
+        # raises it, and it is not a configparser.Error). The dispatcher's
+        # config scan now rejects the file upstream, the way botocore does, so
+        # this pins the scan's outcome; the resolution's own tolerance for the
+        # same input - which the scan makes unreachable on this path - is
+        # pinned directly by TestScopedConfigReadTolerance below.
+        assert _UNDECODABLE_CONFIG is not None
         monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         config = tmp_path / "config"
-        config.write_bytes(b"[default]\ncli_auto_prompt = caf\xe9\n")  # latin-1, invalid UTF-8
+        config.write_bytes(_UNDECODABLE_CONFIG)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
         assert cli.main(["no-such-command"]) == 255
         assert capsys.readouterr().err == (
@@ -609,8 +638,10 @@ class TestScopedConfigReadTolerance:
 
     @pytest.mark.parametrize(
         "content",
-        [b"[[[broken\n", b"[default]\ncli_auto_prompt = caf\xe9\n"],
-        ids=["not-ini", "non-utf8"],
+        [
+            pytest.param(b"[[[broken\n", id="not-ini"),
+            pytest.param(_UNDECODABLE_CONFIG, marks=_NEEDS_UNDECODABLE, id="undecodable"),
+        ],
     )
     def test_an_unparseable_config_reads_as_absent(
         self, content: bytes, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

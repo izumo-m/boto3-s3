@@ -18,6 +18,7 @@ are class-1 rules of the parity normalization - design/testing.md section 9).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -438,7 +439,9 @@ class TestUnparseableConfigFile:
         # so the message names a path the user can open (measured on aws).
         config.write_text("[[[broken\n")
         monkeypatch.setenv("BOTO3_S3_TEST_CONFIG_DIR", str(config.parent))
-        monkeypatch.setenv("AWS_CONFIG_FILE", "$BOTO3_S3_TEST_CONFIG_DIR/config")
+        # Joined with the host separator: the reported path is the expanded
+        # string itself, so a "/" written here would be what Windows reports.
+        monkeypatch.setenv("AWS_CONFIG_FILE", os.path.join("$BOTO3_S3_TEST_CONFIG_DIR", "config"))
         assert cli.main(["bogus"]) == 255
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
