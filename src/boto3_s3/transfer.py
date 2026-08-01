@@ -29,7 +29,8 @@ Engine choices (parity-driven):
   the same rule boto3 and aws-cli apply to s3->s3. The public
   ``transfer_config`` type is ``boto3_s3.transferconfig.TransferConfig``
   (boto3's subclass plus CRT tuning fields; defaults match aws-cli: 8 MiB
-  threshold/chunk, 10-way concurrency), and classic honors
+  threshold/chunk, 10-way concurrency, a 1000-deep download IO queue), and
+  classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
   (the CRT manager ignores the threading knobs, also like boto3).
 - Backpressure is s3transfer's own bounded executors: the submission queue
@@ -74,11 +75,10 @@ from urllib.parse import quote
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
-from s3transfer.manager import TransferConfig as S3TransferConfig
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
 
-from boto3_s3 import crtsupport, requestparams
+from boto3_s3 import crtsupport, requestparams, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     BatchError,
@@ -1329,7 +1329,11 @@ class Transferrer:
         _allow_inline_mpu_tagging()
         config: Any = self._transfer_config
         if config is None:
-            config = S3TransferConfig()
+            # The library's own defaults, not s3transfer's bare ones: an omitted
+            # config must land on exactly the values a default-constructed
+            # TransferConfig carries, or the two drift (they differ in the
+            # download IO queue depth).
+            config = transferconfig.TransferConfig()
         executor_cls = None
         if not getattr(config, "use_threads", True):
             executor_cls = NonThreadedExecutor

@@ -240,8 +240,13 @@ class TransferConfig(boto3.s3.transfer.TransferConfig):
 Each base parameter is forwarded to boto3 only when it is not `None`, so
 passing `None` is exactly equivalent to omitting the argument and lets the base
 class supply its own default across every supported boto3. The resulting
-defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, and a
-concurrency of 10. `use_threads=False` selects a non-threaded executor for the
+defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, a
+concurrency of 10, and a 1000-deep download IO queue. That last one is the sole
+default that leaves boto3's own value (100): it caps the read parts buffered
+for the disk writer, so boto3's figure would give a slow disk a tenth of
+`aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
+`boto3.s3.transfer.TransferConfig` keeps it, as it keeps all of boto3's
+defaults. `use_threads=False` selects a non-threaded executor for the
 classic engine, as in boto3.
 
 The library never reads the `[s3]` section of `~/.aws/config` — tuning comes

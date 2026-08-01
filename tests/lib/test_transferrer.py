@@ -1619,6 +1619,30 @@ class TestEngineSelection:
         manager = self._transferrer(TransferType.UPLOAD, None)._get_manager()
         assert isinstance(manager, TransferManager)
 
+    def test_omitted_config_carries_the_same_defaults_as_an_explicit_one(self) -> None:
+        # Regression: the omitted branch built s3transfer's bare TransferConfig,
+        # whose download IO queue depth is not the one boto3's class carries, so
+        # passing a default-constructed TransferConfig silently changed the
+        # transfer's buffering. Both branches must land on the same values.
+        omitted = self._transferrer(TransferType.DOWNLOAD, None)._get_manager().config
+        explicit = (
+            self._transferrer(TransferType.DOWNLOAD, LibraryTransferConfig())._get_manager().config
+        )
+        for field in (
+            "max_io_queue_size",
+            "max_request_concurrency",
+            "max_request_queue_size",
+            "multipart_threshold",
+            "multipart_chunksize",
+            "io_chunksize",
+            "num_download_attempts",
+            "max_in_memory_download_chunks",
+            "max_in_memory_upload_chunks",
+            "max_bandwidth",
+        ):
+            assert getattr(omitted, field) == getattr(explicit, field), field
+        assert omitted.max_io_queue_size == 1000
+
     def test_explicit_crt_delegates_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
 

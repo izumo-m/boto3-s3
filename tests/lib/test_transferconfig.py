@@ -1,10 +1,11 @@
 """`boto3_s3.TransferConfig` - the boto3 subclass with library settings.
 
 Pins the contract design/crt.md relies on: boto3's constructor surface is
-untouched (names, order, defaults, alias attributes, the UNSET sentinel that
-distinguishes "explicit" from "defaulted" values), the extras are keyword-only
-with `None` defaults, and a plain boto3 `TransferConfig` stays accepted by
-readers that fall back via `getattr`.
+untouched (names, order, defaults - bar the deliberately moved download IO
+queue depth - alias attributes, the UNSET sentinel that distinguishes
+"explicit" from "defaulted" values), the extras are keyword-only with `None`
+defaults, and a plain boto3 `TransferConfig` stays accepted by readers that
+fall back via `getattr`.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 import boto3_s3
+from boto3_s3 import crtsupport
 from boto3_s3.transferconfig import TransferConfig
 from boto3_s3.types import AnnotationCopyMode
 
@@ -64,11 +66,15 @@ class TestReExport:
 
 class TestBoto3Surface:
     def test_defaults_match_boto3(self) -> None:
+        # Every base default but the download IO queue depth, which departs on
+        # purpose (TestDownloadIoQueueDepth).
         ours = TransferConfig()
         theirs = Boto3TransferConfig()
         assert ours.multipart_threshold == theirs.multipart_threshold
         assert ours.multipart_chunksize == theirs.multipart_chunksize
         assert ours.max_concurrency == theirs.max_concurrency
+        assert ours.io_chunksize == theirs.io_chunksize
+        assert ours.num_download_attempts == theirs.num_download_attempts
         assert ours.preferred_transfer_client == "auto"
 
     def test_positional_args_keep_boto3_order(self) -> None:
@@ -95,6 +101,36 @@ class TestBoto3Surface:
         assert explicit.get_deep_attr("multipart_chunksize") == 16 * 1024 * 1024
         # Reads still resolve the default through __getattribute__.
         assert defaulted.multipart_chunksize == 8 * 1024 * 1024
+
+
+class TestDownloadIoQueueDepth:
+    """The one base default that leaves boto3's value for `aws s3`'s."""
+
+    def test_default_is_the_depth_aws_runs_at(self) -> None:
+        # s3transfer defaults the download IO queue to 1000 and aws-cli runs
+        # there (no [s3] key maps to it); boto3 alone dials it to 100, which
+        # would give a slow disk a tenth of aws's readahead.
+        config = TransferConfig()
+        assert config.max_io_queue_size == 1000
+        assert config.max_io_queue == 1000
+        # boto3's own class is untouched - a plain config still carries its 100,
+        # and readers accept one everywhere.
+        assert Boto3TransferConfig().max_io_queue_size == 100
+
+    def test_an_explicit_value_still_wins(self) -> None:
+        assert TransferConfig(max_io_queue=100).max_io_queue_size == 100
+        assert TransferConfig(max_io_queue=100).max_io_queue == 100
+
+    def test_the_moved_default_does_not_read_as_caller_supplied(self) -> None:
+        # It has to come from the DEFAULTS table rather than a forwarded ctor
+        # value: boto3's explicit-'crt' validation rejects every classic-only
+        # option whose deep attr left the UNSET sentinel, so forwarding it would
+        # fail each default-constructed crt run.
+        config = TransferConfig(preferred_transfer_client="crt")
+        if not hasattr(config, "get_deep_attr"):
+            pytest.skip("installed boto3 predates the CRT explicit-value sentinel")
+        assert config.get_deep_attr("max_io_queue_size") is TransferConfig.UNSET_DEFAULT
+        crtsupport._validate_crt_transfer_config(config)
 
 
 class TestPreferredTransferClient:

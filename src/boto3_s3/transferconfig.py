@@ -26,17 +26,34 @@ classic engine; `annotation_temp_dir` is consulted by the classic
 multipart-copy path whenever `copy_props=ALL` staging is set up, but used
 (as the tempfile location) only under `PRELOAD_TEMPFILE`. A plain
 `boto3.s3.transfer.TransferConfig` remains accepted everywhere a config is
-taken - readers fall back to `None` for the extra fields.
+taken - readers fall back to `None` for the extra fields (and keeps boto3's own
+defaults, including the one below).
+
+One base default departs from boto3: `max_io_queue` defaults to the value
+`aws s3` runs at rather than the one boto3 dials it down to. Names, order,
+semantics and the `UNSET_DEFAULT` sentinel that tells an explicit value from a
+defaulted one are boto3's throughout.
 """
 
 from __future__ import annotations
 
 import inspect
 import os
+from typing import Any
 
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 __all__ = ["TransferConfig"]
+
+# The library's download IO queue depth (s3transfer's ``max_io_queue_size``:
+# the cap on read parts buffered for the disk writer). s3transfer defaults it
+# to 1000 and aws-cli runs there - no ``[s3]`` key maps to it - while boto3
+# alone dials the same default down to 100, which would leave a slow disk
+# holding a tenth of aws's readahead. The buffered ceiling is this count x
+# ``io_chunksize`` (~256 MiB at the default 256 KiB) across the manager's
+# downloads - one shared io executor serves them all - and is reached only when
+# the disk lags the network; pass ``max_io_queue=100`` for boto3's ceiling.
+_MAX_IO_QUEUE = 1000
 
 # Back-compat (floor boto3 1.28, docs/compatibility.md): boto3's CRT
 # support added the ``preferred_transfer_client`` constructor parameter only in
@@ -52,14 +69,36 @@ _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
     "preferred_transfer_client" in inspect.signature(Boto3TransferConfig.__init__).parameters
 )
 
+# Back-compat (floor boto3 1.28): the ``DEFAULTS`` table the class below
+# overrides arrived with boto3's CRT support (~1.33). The floor's ctor carries
+# concrete defaults instead, so there the value has to be forwarded explicitly
+# - which is safe exactly there, because that boto3 has no CRT lane whose
+# validation would read a forwarded value as an explicitly-set classic-only
+# option (on a modern boto3 it would, which is why the table is the only way).
+# Drop this shim together with the one above once the floor passes 1.33.
+_BASE_HAS_DEFAULTS = hasattr(Boto3TransferConfig, "DEFAULTS")
+
 
 class TransferConfig(Boto3TransferConfig):
     """boto3's `TransferConfig` with library-only settings appended.
 
-    The base parameters keep boto3's exact names, order, and semantics; the
-    Extra settings are keyword-only and appended last, so existing boto3 code
-    works unchanged.
+    The base parameters keep boto3's exact names, order, and semantics, with
+    one deliberate departure: `max_io_queue` defaults to `aws s3`'s depth
+    instead of boto3's. The extra settings are keyword-only and appended last,
+    so existing boto3 code works unchanged.
     """
+
+    # boto3 resolves a defaulted base parameter through this table, leaving the
+    # ``UNSET_DEFAULT`` sentinel on the instance - so overriding an entry moves
+    # the default without making the value look caller-supplied, and a
+    # default-constructed config still passes the explicit-'crt' validation
+    # that rejects classic-only options. Both spellings are listed because
+    # boto3 keeps its alias and the s3transfer name in step.
+    DEFAULTS: dict[str, Any] = {  # noqa: RUF012 - ClassVar: boto3 declares it plainly
+        **getattr(Boto3TransferConfig, "DEFAULTS", {}),
+        "max_io_queue": _MAX_IO_QUEUE,
+        "max_io_queue_size": _MAX_IO_QUEUE,
+    }
 
     def __init__(
         self,
@@ -101,6 +140,10 @@ class TransferConfig(Boto3TransferConfig):
             )
             if value is not None
         }
+        if not _BASE_HAS_DEFAULTS and max_io_queue is None:
+            # Floor boto3: no DEFAULTS table to override, so the base ctor's own
+            # 100 would win. Forward the library default as if it were given.
+            base_kwargs["max_io_queue"] = _MAX_IO_QUEUE
         if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT and preferred_transfer_client is not None:
             # Same only-when-set rule as the loop above: an omitted value lets
             # the base ctor supply its own default ("auto" / its UNSET

@@ -57,8 +57,9 @@ s3.cp(src, dest, transfer_config=TransferConfig(multipart_chunksize=16 * 1024**2
 ```
 
 Its defaults match `aws s3`: an 8 MiB threshold, 8 MiB parts, 10 concurrent
-requests. Set it once on the `S3` object to apply everywhere, and per call to
-override.
+requests, and a 1000-deep download IO queue (boto3's own class buffers a tenth
+of that; see [`options.md`](../reference/options.md#transferconfig)). Set it
+once on the `S3` object to apply everywhere, and per call to override.
 
 **Unlike `aws s3`, the library never reads the `[s3]` section of
 `~/.aws/config`** — tuning comes only from `TransferConfig`. To reuse the values
