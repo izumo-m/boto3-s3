@@ -21,9 +21,10 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Six of section 2's entries
+does change from one `aws` release to the next. Seven of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
+engine, the line that closes a Ctrl-C caught mid-submission under the CRT
 engine, the one-line invalid-bucket-name report, the `--version` line, and two
 argument-parsing corners. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
@@ -99,6 +100,16 @@ are visible, or make no difference to the result.
   a Python `Exception ignored in:` block) where this command prints botocore's
   `Unable to locate credentials`. Uploads and downloads use the CRT engine on
   both tools.
+- **Ctrl-C's closing line under the CRT engine.** When Ctrl-C lands while
+  transfers are still being submitted under `preferred_transfer_client = crt`,
+  both tools print the same `upload failed: ... AWS_ERROR_S3_CANCELED: Request
+  successfully cancelled` line per in-flight transfer and exit 1, but the
+  closing line differs: this command ends with its usual `cancelled: ctrl-c
+  received`, while `aws` ends with a `fatal error:` line carrying no message —
+  its result recorder renders the `KeyboardInterrupt`, whose text is empty, as
+  an error result, padded with the blanks that erase the progress line. The
+  empty line is a rendering accident, so this command keeps its uniform Ctrl-C
+  ending instead of copying it.
 - **Invalid bucket names report one line.** For a name S3 cannot accept, `aws`
   prints botocore's full report, ending in the regex the name must match; here
   the report stops after `Invalid bucket name "<name>"`. The exit code is the

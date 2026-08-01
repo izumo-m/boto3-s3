@@ -462,7 +462,9 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   ([`opresult.md`](./opresult.md)); and a submission-window Ctrl-C ends with
   the CLI's `cancelled: ctrl-c received` line where aws ends with an empty
   `fatal error:` line (its recorder renders the `KeyboardInterrupt`, whose
-  `str()` is empty, as an error result) - the per-item lines and rc 1 match.
+  `str()` is empty, as an error result) - the per-item lines and rc 1 match,
+  and the closing line stays ours deliberately (decided 2026-08-01; recorded
+  in docs/cli/aws-differences.md section 2).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
   `create_s3_crt_client`'s signature rather than a version, so the keys start
