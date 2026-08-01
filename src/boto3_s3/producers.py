@@ -294,7 +294,8 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1, like aws-cli). The recursive listing
+    with [Errno 21] Is a directory, rc 1; aws fails it too, with wording that
+    differs on purpose - docs/cli/aws-differences.md section 2). The recursive listing
     stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
     scan (``scan_pages``' contract); the single source, having no scan filter, is
     filtered here.

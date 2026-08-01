@@ -1074,10 +1074,12 @@ class Transferrer:
     def _submit_upload(self, item: TransferItem) -> Any | None:
         """Map one upload and attach close, move-delete, completion, and tracking hooks."""
         # A directory source is handed through to fail like aws-cli ([Errno 21]
-        # Is a directory, rc 1); botocore's default checksum wrapper would
-        # otherwise open it and mask the read failure as an opaque rewind error,
-        # so detect it and surface the OS error directly. A stream (src_fileobj)
-        # is never a directory.
+        # Is a directory, rc 1; aws words the failed line differently, its CRT
+        # lane's untranslated "Unknown Error Code" included - a recorded
+        # deliberate difference, docs/cli/aws-differences.md section 2);
+        # botocore's default checksum wrapper would otherwise open it and mask
+        # the read failure as an opaque rewind error, so detect it and surface
+        # the OS error directly. A stream (src_fileobj) is never a directory.
         if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
             self._record_failure(
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)

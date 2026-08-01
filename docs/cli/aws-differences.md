@@ -21,11 +21,12 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Seven of section 2's entries
+does change from one `aws` release to the next. Eight of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
 engine, the line that closes a Ctrl-C caught mid-submission under the CRT
-engine, the one-line invalid-bucket-name report, the `--version` line, and two
+engine, the failure line of a directory copied without `--recursive`, the
+one-line invalid-bucket-name report, the `--version` line, and two
 argument-parsing corners. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
@@ -110,6 +111,18 @@ are visible, or make no difference to the result.
   an error result, padded with the blanks that erase the progress line. The
   empty line is a rendering accident, so this command keeps its uniform Ctrl-C
   ending instead of copying it.
+- **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
+  source is a directory always fails — exit code 1 on both tools, the source
+  left in place — and only the failed line's wording differs. `aws` threads
+  the source through in its trailing-separator form: its line names the
+  source `d/` and, on the classic engine, ends with `[Errno 21] Is a
+  directory: '/path/to/d/'`, while under the CRT engine it ends with
+  `Unknown Error Code: Unknown Error Code` — the native error its renderer
+  cannot translate. Here the directory is detected before submission, so the
+  line names the source `./d` and ends with `[Errno 21] Is a directory:
+  '/path/to/d'` on either engine. The `Unknown Error Code` ending is a
+  rendering accident, so this command keeps the errno report instead of
+  copying it.
 - **Invalid bucket names report one line.** For a name S3 cannot accept, `aws`
   prints botocore's full report, ending in the regex the name must match; here
   the report stops after `Invalid bucket name "<name>"`. The exit code is the
