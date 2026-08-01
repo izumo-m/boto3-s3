@@ -656,7 +656,12 @@ def _resolves_no_credentials(cred_wrapper: Any) -> bool:
     Only that exception answers "resolves none": any other credential-provider
     failure (``CredentialRetrievalError`` and friends, from a wrapper built
     around a real provider) propagates, as it does out of `_compare_identity`.
-    Unreachable from the CLI, whose process holds a single client.
+    Reached only under the ``allow_absent_credentials`` opt-in - the CLI's
+    posture - and only for a client that itself resolved no credentials, so
+    the propagating variant would need the singleton's wrapper to hold a real
+    provider while this client resolves none; the CLI's clients share one
+    session (`build_session`), so the two sides resolve alike and that split
+    does not arise there.
     """
     from botocore.exceptions import NoCredentialsError
 

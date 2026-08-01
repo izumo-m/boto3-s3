@@ -70,12 +70,20 @@ _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
 )
 
 # Back-compat (floor boto3 1.28): the ``DEFAULTS`` table the class below
-# overrides arrived with boto3's CRT support (~1.33). The floor's ctor carries
-# concrete defaults instead, so there the value has to be forwarded explicitly
-# - which is safe exactly there, because that boto3 has no CRT lane whose
-# validation would read a forwarded value as an explicitly-set classic-only
-# option (on a modern boto3 it would, which is why the table is the only way).
-# Drop this shim together with the one above once the floor passes 1.33.
+# overrides arrived with the ``UNSET_DEFAULT`` sentinel machinery (~1.42, the
+# boto3 that lets ``[s3]`` tuning reach the CRT manager - compatibility.md) -
+# well after the ctor grew ``preferred_transfer_client`` (the shim above).
+# Every DEFAULTS-less boto3 carries concrete ctor defaults instead, so there
+# the value has to be forwarded explicitly. That is safe across the whole
+# band, the CRT-capable releases without the table (~1.33 - ~1.41; verified
+# on 1.34.162) included, because the explicit-'crt' validation that would
+# read a forwarded value as an explicitly-set classic-only option is itself
+# gated on the sentinel (`create_crt_transfer_manager` submits a config to it
+# only when the config carries ``UNSET_DEFAULT``). On a modern boto3 that
+# validation runs, which is why the table is the only way there. Drop this
+# shim only once the floor passes the table's arrival (~1.42): dropping it at
+# the shim above's boundary would put the base 100 back on every DEFAULTS-less
+# boto3.
 _BASE_HAS_DEFAULTS = hasattr(Boto3TransferConfig, "DEFAULTS")
 
 
@@ -120,8 +128,8 @@ class TransferConfig(Boto3TransferConfig):
     ) -> None:
         """Forward classic values and retain library settings across SDK versions."""
         # Forward each base parameter only when set, letting the base ctor supply
-        # its own default. On the floor boto3 (1.28 - ~1.40) the base signature
-        # carries concrete defaults; forwarding None would overwrite them and
+        # its own default. On a DEFAULTS-less boto3 (1.28 - ~1.41) the base
+        # signature carries concrete defaults; forwarding None would overwrite them and
         # reach s3transfer as None - a TypeError on the first size comparison, and
         # use_threads=None silently disables threading. On a modern boto3 an
         # omitted arg resolves to the same UNSET_DEFAULT sentinel a forwarded None
