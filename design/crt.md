@@ -206,8 +206,8 @@ A port of aws-cli `TransferManagerFactory._compute_transfer_client_type`.
 |---|---|
 | `paths_type == 's3s3'` | `classic` (unconditional; CRT has no copy) |
 | `preferred == 'classic'` | `classic` |
-| `preferred == 'crt'` and awscrt present and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
-| `preferred == 'crt'` and awscrt **absent** | `ConfigurationError` (rc 253, section 6) |
+| `preferred == 'crt'` and awscrt present (>= 0.19.18) and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
+| `preferred == 'crt'` and awscrt **absent or too old** | `ConfigurationError` (rc 253, section 6) |
 | `preferred == 'crt'` and s3transfer **< 0.8.0** (the supported floor predates it) | `ConfigurationError` (rc 253, the same clean degradation) |
 | `preferred == 'auto'` and `is_optimized_for_system()` and the lock is acquirable | `crt` (an s3transfer without the CRT surface silently resolves `classic`) |
 | otherwise (`auto` with non-optimized / lock contention) | `classic` |
@@ -220,7 +220,8 @@ also follows `preferred`).
 ### Building the `TransferConfig` (`build_transfer_config`)
 
 It passes **only the keys explicitly set** in `[s3]` to the `TransferConfig` ctor,
-plus the always-passed, already-resolved `preferred_transfer_client`
+plus the always-passed, already-resolved `preferred_transfer_client` - and,
+under CRT, one derived pin described below
 (an unset tuning key stays at boto3's `UNSET_DEFAULT` sentinel = "part_size
 only when `multipart_chunksize` is explicit" holds).
 
@@ -239,15 +240,25 @@ keys).
 - **Resolved to crt**: only the keys the CRT client actually reads
   (`multipart_chunksize` / `target_bandwidth` / `should_stream` /
   `disk_throughput` / `direct_io` = those that aws-cli `_create_crt_client`
-  references). The classic-only keys (`io_chunksize` / `max_bandwidth` /
+  references), plus one derived pin: an explicit `multipart_chunksize` is also
+  passed as the ctor's `multipart_threshold`. aws sends no per-request
+  threshold on the CRT lane and aws-c-s3 falls back to the client part size,
+  so an explicit chunksize *is* aws's effective threshold - while the
+  installed s3transfer stamps the config's **resolved** threshold onto every
+  CRT put, which unpinned would stamp the 8 MiB default and multipart a file
+  aws single-puts. With no explicit chunksize the stamped default equals
+  aws-c-s3's default part size (the same effective cutoff), so no pin is
+  needed; the `[s3]` `multipart_threshold` key itself stays ignored either
+  way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
   attributes (queue size, in-memory chunk cap) are
   **not passed**. This is to
   match aws-cli ignoring these on the CRT path, and to prevent the case where
   placing `io_chunksize` / `max_bandwidth` on a crt-preferred config gets rejected
   by boto3's `_validate_crt_transfer_config` and fails the run - the library
-  translates the rejection to a `ValidationError`, one `fatal error:` line,
-  rc 1 - where aws is rc 0 (avoiding a charter violation; e2e:
+  translates the rejection to a `ValidationError`, which the engine
+  materialization ahead of the run (below) surfaces at rc 252 - where aws is
+  rc 0 (avoiding a charter violation; e2e:
   `test_crt_ignores_classic_only_config`).
 
 cp / mv / sync **and rm** call `transferargs.resolve_transfer_config(ctx, s3,

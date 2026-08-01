@@ -136,8 +136,9 @@ All of this matches `aws s3`, including the orderings above.
 
 Two cases where the codes are deliberately not identical:
 
-- **Features needing `awscrt`** exit 253 when the `crt` extra is not installed.
-  `aws` v2 bundles awscrt, so this situation cannot arise there.
+- **The CRT transfer engine without the `crt` extra** exits 253; a CRT-only
+  `--checksum-algorithm` without it fails per item at exit code 1 instead.
+  `aws` v2 bundles awscrt, so neither situation can arise there.
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
 

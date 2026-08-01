@@ -44,8 +44,12 @@ botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 `SHA256` and `SHA512` are pure Python and never need it.
 
 Missing awscrt fails only the features that need it, and nothing else changes.
-The `boto3-s3` command reports 253 for those; `aws` v2 bundles awscrt, so the
-situation cannot arise there (see [`exit-codes.md`](./cli/exit-codes.md)).
+How it fails differs by feature: `preferred_transfer_client = crt` is refused
+before the run starts (exit code 253), while an explicit CRT-only
+`--checksum-algorithm` fails inside the run as a per-item
+`upload failed: ... Missing Dependency:` line (exit code 1). `aws` v2 bundles
+awscrt, so neither situation can arise there (see
+[`exit-codes.md`](./cli/exit-codes.md)).
 
 ## 3. Three `[s3]` keys that never take effect
 

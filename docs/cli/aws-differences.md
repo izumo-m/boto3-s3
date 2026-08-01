@@ -30,9 +30,13 @@ argument-parsing corners. The interactive prompt
 the ordering of concurrent output is not reproducible on either tool (below).
 
 Because the text is aws's, so are its envelopes: parameter-validation errors
-use `An error occurred (ParamValidation): <message>`, and so do the two
-exit-code 253 reports this command can produce — unresolved credentials and an
-unresolved region (see [`exit-codes.md`](./exit-codes.md)). Those two also keep
+use `An error occurred (ParamValidation): <message>`, and so do the
+exit-code 253 reports this command shares with `aws` — unresolved credentials,
+an unresolved region, and an unusable `cli_timestamp_format` (`An error
+occurred (Configuration): ...`); the 253 an uninstalled dependency produces is
+this command's own and has no envelope
+(see [`exit-codes.md`](./exit-codes.md)). The credentials and region reports
+also keep
 aws's hint verbatim, which is why the credentials error tells you to run
 `aws login`: this command has no login subcommand of its own, and both tools
 read the same credentials and config files, so configuring credentials with
