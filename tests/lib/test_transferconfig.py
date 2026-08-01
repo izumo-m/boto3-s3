@@ -45,12 +45,20 @@ class TestSdkFloorCompat:
             "multipart_threshold",
             "multipart_chunksize",
             "num_download_attempts",
-            "max_io_queue",
             "io_chunksize",
             "use_threads",
             "max_bandwidth",
         ):
             assert omitted not in captured, f"{omitted} must be omitted, not forwarded as None"
+        # The moved download IO queue depth is the one exception: on a modern
+        # boto3 it rides the overridden DEFAULTS table and stays omitted; the
+        # floor has no table (the base ctor's own 100 would win), so there the
+        # ctor forwards the concrete library default in its place - a real
+        # value on both paths, never None.
+        if hasattr(Boto3TransferConfig, "DEFAULTS"):
+            assert "max_io_queue" not in captured
+        else:
+            assert captured.get("max_io_queue") == 1000
 
 
 class TestReExport:
