@@ -39,6 +39,8 @@ from boto3_s3.transfer import (
 from boto3_s3.transferconfig import TransferConfig as LibraryTransferConfig
 from boto3_s3.types import (
     AnnotationCopyMode,
+    CancelMode,
+    CancelToken,
     CopyPropsMode,
     FileInfo,
     OpOutcome,
@@ -1068,6 +1070,28 @@ class TestCrtCancelClassification:
             transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
             self._submit_one(transferrer, tmp_path)
             transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+    def test_token_cancel_caught_mid_submission_stays_cancelled(self, tmp_path: Path) -> None:
+        # An immediate token cancel surfacing in the submission loop reaches
+        # __exit__ as the CancelledError that folds the manager
+        # (s3._raise_if_cancelled). That cancel is still the token's own
+        # order, so the in-flight item revokes CANCELLED exactly like the
+        # drain-time escalation above - not FAILED like a fatal's cancel.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(CancelledError):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise CancelledError("cp was cancelled", operation="cp")
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)

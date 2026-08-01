@@ -788,16 +788,17 @@ class Transferrer:
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
         self._shutdown_done = threading.Event()
-        # True once this run's cancel token escalated to cancelling accepted
-        # transfers (`_cancel_futures`: an immediate cancel, the drain-time
-        # watcher). Read by the done callbacks to tell a token-ordered
-        # revocation (CANCELLED - the one cancel aws-cli has no counterpart
-        # for) from every other CRT cancellation - the fatal / interrupt
-        # shutdown's, or one nobody ordered (a swallowed interrupt's trace) -
-        # classified FAILED like aws-cli's (`_is_cancellation`). Monotonic
-        # False->True, always set before the cancel it describes is issued,
-        # so the callback that observes a cancel outcome observes the flag
-        # too.
+        # True once this run's cancel token ordered accepted transfers
+        # cancelled - set by `__exit__` folding the manager under the token's
+        # own `CancelledError`, and by `_cancel_futures` when the drain-time
+        # watcher escalates. Read by the done callbacks to tell a
+        # token-ordered revocation (CANCELLED - the one cancel aws-cli has no
+        # counterpart for) from every other CRT cancellation - the fatal /
+        # interrupt shutdown's, or one nobody ordered (a swallowed
+        # interrupt's trace) - classified FAILED like aws-cli's
+        # (`_is_cancellation`). Monotonic False->True, always set before the
+        # cancel it describes is issued, so the callback that observes a
+        # cancel outcome observes the flag too.
         self._cancel_initiated = False
         self._succeeded = 0
         self._failed = 0
@@ -874,6 +875,18 @@ class Transferrer:
             watcher.start()
         try:
             if cancel:
+                # A CancelledError with this run's token cancelled is the
+                # token's own order surfacing through the submission loop
+                # (s3._raise_if_cancelled), so the manager cancel it forces is
+                # token-ordered: mark it before it is issued, and the revoked
+                # items classify CANCELLED like the drain-time escalation's.
+                # A fatal or interrupt leaves the flag down - FAILED.
+                if (
+                    isinstance(exc, CancelledError)
+                    and self._cancel_token is not None
+                    and self._cancel_token.cancelled
+                ):
+                    self._cancel_initiated = True
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
