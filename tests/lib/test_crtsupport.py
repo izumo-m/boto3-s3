@@ -506,8 +506,14 @@ class TestCreateCrtTransferManager:
 
     @pytest.mark.parametrize(
         ("botocore_verify", "expected"),
-        [(True, None), (False, False), ("/etc/ca.pem", "/etc/ca.pem")],
-        ids=["default", "disabled", "ca-bundle"],
+        [
+            (True, None),
+            (False, False),
+            ("/etc/ca.pem", "/etc/ca.pem"),
+            ("", False),
+            ("   ", "   "),
+        ],
+        ids=["default", "disabled", "ca-bundle", "empty-ca-bundle", "whitespace-ca-bundle"],
     )
     def test_verify_mapping(self, stubs: CrtStubs, botocore_verify: Any, expected: Any) -> None:
         client = FakeClient(verify=botocore_verify)

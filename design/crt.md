@@ -477,6 +477,24 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
   past 0.16.
+- **Empty / whitespace-only `verify`**: pip s3transfer >= 0.19.2 rejects an
+  empty or whitespace-only `verify` string outright with `InvalidConfigError`,
+  where aws's bundled fork reads the empty string as falsy and turns TLS
+  verification off, letting the transfer proceed - measured 2026-08-02, a dead
+  endpoint and `--ca-bundle ""`: aws 2.36.1 runs on to
+  `AWS_IO_SOCKET_CONNECTION_REFUSED: socket connection refused` at rc 1, and
+  so does this library once `_derive_verify` normalizes the empty string to
+  `False`, uniformly across pip s3transfer versions (the classic lane needs no
+  such normalization - botocore gives the empty string the same falsy read on
+  both sides). A whitespace-only value stays through and still fails, since
+  aws attempts it as a CA-bundle path too, but the shape now depends on the
+  installed s3transfer: on 0.19.0 this library's `[Errno 2] No such file or
+  directory: '   '` at rc 255 matches aws's own `[Errno 2] No such file or
+  directory: '   '` at rc 255 exactly; on 0.19.2 the upfront check fires first
+  and this library's `Invalid CA bundle: ...` at rc 255 diverges from aws's
+  `[Errno 2] No such file or directory: '   '` at rc 255 - an engine-rooted
+  divergence under `overview.md` section 3's third exception (measured
+  2026-08-02).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).
