@@ -270,7 +270,9 @@ def should_use_crt(preferred: str) -> bool:
 
 def _prefers_crt(config: Any | None) -> bool:
     """Whether *config* names the CRT engine explicitly (``'auto'`` does not)."""
-    preferred = getattr(config, "preferred_transfer_client", None) or "auto"
+    preferred = getattr(config, "preferred_transfer_client", None)
+    if preferred is None:
+        preferred = "auto"
     return str(preferred).lower() == "crt"
 
 
@@ -278,12 +280,17 @@ def selects_crt(config: Any | None) -> bool:
     """Whether *config* selects the CRT engine, with boto3's rule and defaults.
 
     No config - or one carrying no ``preferred_transfer_client`` - is boto3's
-    ``'auto'``. ``'classic'`` short-circuits *before* `should_use_crt`, so an
-    explicitly classic run never raises the missing-awscrt error an explicit
-    ``'crt'`` does. Shared by the transfer engine and `materialize_crt_engine`
-    so the two cannot answer differently.
+    ``'auto'``. Only ``None`` maps to ``'auto'``: any other value, an empty
+    string included, is compared as-is, so an unrecognized preference selects
+    classic exactly as boto3's ``_should_use_crt`` (which matches it against
+    no branch) decides it. ``'classic'`` short-circuits *before*
+    `should_use_crt`, so an explicitly classic run never raises the
+    missing-awscrt error an explicit ``'crt'`` does. Shared by the transfer
+    engine and `materialize_crt_engine` so the two cannot answer differently.
     """
-    preferred = getattr(config, "preferred_transfer_client", None) or "auto"
+    preferred = getattr(config, "preferred_transfer_client", None)
+    if preferred is None:
+        preferred = "auto"
     if str(preferred).lower() == "classic":
         return False
     return should_use_crt(str(preferred))

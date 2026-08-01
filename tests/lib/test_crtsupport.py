@@ -209,6 +209,25 @@ class TestShouldUseCrt:
         assert crtsupport.has_crt_s3transfer() is False
 
 
+class TestSelectsCrt:
+    def test_no_config_is_boto3s_auto(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        set_optimized(monkeypatch, True)
+        assert crtsupport.selects_crt(None) is True
+
+    def test_an_empty_preference_is_classic_like_boto3(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3's _should_use_crt matches "" against no branch and lands on
+        # classic; only None (an absent attribute, or no config at all) means
+        # 'auto'. A falsy coalesce would flip the engine - and skip the
+        # explicit-'crt' config validation with it.
+        set_optimized(monkeypatch, True)
+        config = TransferConfig()
+        config.preferred_transfer_client = ""
+        assert crtsupport.selects_crt(config) is False
+        assert crtsupport._prefers_crt(config) is False  # pyright: ignore[reportPrivateUsage]
+
+
 class TestCreateCrtTransferManager:
     def test_creates_manager_with_derived_wiring(self, stubs: CrtStubs) -> None:
         client = FakeClient(endpoint="http://127.0.0.1:9000")
