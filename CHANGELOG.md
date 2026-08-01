@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - `TransferConfig`'s download IO queue now defaults to the depth `aws s3` runs at, so passing a default-constructed config no longer shrinks it tenfold.
-- A CRT-engine run cut short by Ctrl-C now raises `BatchError` with the cancelled items counted as failures, instead of returning as if it had succeeded.
+- A CRT-engine run cut short — by Ctrl-C or by a fatal error elsewhere in the run — now counts the cancelled items as failures the way `aws s3` does (a Ctrl-C that previously returned as if the run had succeeded now raises `BatchError`); only a `CancelToken` cancel still reports them cancelled.
 - Added a third `aws s3` CRT posture to `S3(...)`: `crt_allow_lockless` lets an explicit `crt` preference build the CRT engine under cross-process lock contention the way `aws s3` does; the default keeps boto3's classic fallback.
 
 ## [0.9.0] - 2026-08-01

@@ -225,15 +225,16 @@ def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
     re-raising a translated cancellation) - both always classify as revoked.
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
     matched by the error's ``name`` without importing awscrt - but only when
-    this run started the cancel (``cancel_initiated``: the fatal / immediate-
-    cancel shutdown). A CRT cancellation nobody here asked for is the trace of
-    a swallowed interrupt: pip s3transfer's CRT coordinator converts a
-    drain-time ``KeyboardInterrupt`` into ``cancel()`` and the interrupt never
-    resurfaces (its ``_shutdown`` discards it), so the cancelled item itself
-    is the only evidence the run was cut short. Classifying it as a failure
-    is aws-cli's own rule - its ``DoneResultSubscriber`` treats every
-    non-``CancelledError`` as a per-item failure - and is what keeps an
-    interrupted CRT run from reporting success (design/crt.md section 6).
+    this run's cancel token ordered the cancel (``cancel_initiated``), the
+    one revocation aws-cli has no counterpart for. Every other CRT
+    cancellation classifies as a failure, aws-cli's own rule (measured live:
+    its ``DoneResultSubscriber`` treats every non-``CancelledError`` as a
+    per-item failure, so a fatal or Ctrl-C folding its CRT manager prints a
+    failed line per in-flight transfer). The same rule keeps an interrupted
+    CRT run from reporting success when pip s3transfer's CRT coordinator
+    converts a drain-time ``KeyboardInterrupt`` into ``cancel()`` and
+    discards the interrupt - the item classified FAILED is then the only
+    evidence the run was cut short (design/crt.md section 6).
     """
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         return True
@@ -787,14 +788,16 @@ class Transferrer:
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
         self._shutdown_done = threading.Event()
-        # True once this run itself started cancelling accepted transfers (the
-        # fatal/immediate-cancel shutdown, the token watcher). Read by the
-        # done callbacks to tell a revocation this run ordered (CANCELLED)
-        # from a CRT cancellation nobody ordered - the trace of an interrupt
-        # the CRT manager swallowed, classified FAILED (`_is_cancellation`).
-        # Monotonic False->True, always set before the cancel it describes is
-        # issued, so the callback that observes a cancel outcome observes the
-        # flag too.
+        # True once this run's cancel token escalated to cancelling accepted
+        # transfers (`_cancel_futures`: an immediate cancel, the drain-time
+        # watcher). Read by the done callbacks to tell a token-ordered
+        # revocation (CANCELLED - the one cancel aws-cli has no counterpart
+        # for) from every other CRT cancellation - the fatal / interrupt
+        # shutdown's, or one nobody ordered (a swallowed interrupt's trace) -
+        # classified FAILED like aws-cli's (`_is_cancellation`). Monotonic
+        # False->True, always set before the cancel it describes is issued,
+        # so the callback that observes a cancel outcome observes the flag
+        # too.
         self._cancel_initiated = False
         self._succeeded = 0
         self._failed = 0
@@ -839,18 +842,19 @@ class Transferrer:
         message as the exception *class*. ``__exit__`` exists on both engines;
         the classic one cancels with aws's exception shape
         (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
-        classic ``CANCELLED`` record names the fatal that revoked it, while
-        the CRT manager cancels without the message and its ``CANCELLED``
-        records carry awscrt's cancellation wording instead (classified via
-        ``AWS_ERROR_S3_CANCELED`` under the ``_cancel_initiated`` flag this
-        cancel path sets). On the clean drain no cancel is ordered, so a CRT
-        cancellation arriving there - pip s3transfer's CRT manager converting
+        classic ``CANCELLED`` record names the fatal that revoked it. The CRT
+        manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
+        classifies as a per-item *failure* - aws-cli's measured behavior: a
+        fatal or Ctrl-C folding its CRT manager prints a failed line per
+        in-flight transfer and counts them failed; only a cancel ordered by
+        this run's cancel token, which aws-cli has no counterpart for,
+        classifies ``CANCELLED`` (`_is_cancellation`). A CRT cancellation
+        arriving on the clean drain - pip s3transfer's CRT manager converting
         a drain-time ``KeyboardInterrupt`` into ``cancel()`` and discarding
-        the interrupt - is recorded as a per-item failure instead, aws-cli's
-        own classification, and the run raises `BatchError` in place of the
-        swallowed ``KeyboardInterrupt`` (design/crt.md section 6). The classic
-        manager re-raises a drain-time interrupt itself, so that lane never
-        needs the distinction.
+        the interrupt - is the same per-item failure, and the run raises
+        `BatchError` in place of the swallowed ``KeyboardInterrupt``
+        (design/crt.md section 6). The classic manager re-raises a drain-time
+        interrupt itself, so that lane never needs the distinction.
         """
         if self._manager is None:
             return
@@ -870,7 +874,6 @@ class Transferrer:
             watcher.start()
         try:
             if cancel:
-                self._cancel_initiated = True
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
@@ -1501,15 +1504,17 @@ class Transferrer:
         # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
         if _is_cancellation(exc, cancel_initiated=self._cancel_initiated):
-            # An accepted item revoked by a shutdown this run ordered (a fatal
-            # elsewhere, an immediate cancel, classic Ctrl-C): CANCELLED, not
-            # FAILED - nothing is wrong with the item itself, and the run's
-            # outcome is the exception the operation raises. Deliberately
-            # richer than aws-cli, which drops cancelled items from output and
-            # counts; first_error stays reserved for real failures
-            # (BatchError's diagnostic sample). A CRT cancellation this run
-            # did *not* order falls through to the failure branch below - the
-            # swallowed-interrupt trace `_is_cancellation` describes.
+            # An accepted item revoked as a cancellation: classic s3transfer's
+            # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
+            # CRT cancel this run's token ordered. CANCELLED, not FAILED -
+            # nothing is wrong with the item itself, and the run's outcome is
+            # the exception the operation raises. Deliberately richer than
+            # aws-cli, which drops cancelled items from output and counts;
+            # first_error stays reserved for real failures (BatchError's
+            # diagnostic sample). Every other CRT cancel - the fatal /
+            # interrupt shutdown's, or one nobody ordered (a swallowed
+            # interrupt's trace) - falls through to the failure branch below,
+            # aws-cli's own classification (`_is_cancellation`).
             error = CancelledError(
                 str(exc) or "canceled",
                 operation=self._operation,

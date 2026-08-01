@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Two CRT-engine corners now match aws: Ctrl-C during a CRT transfer exits 1 with aws's per-item cancellation lines instead of exiting 0 silently, and an explicit `preferred_transfer_client = crt` fails construction-time errors even when another process holds the CRT slot instead of silently running the classic engine.
+- Two CRT-engine corners now match aws: Ctrl-C or a fatal error during a CRT transfer prints aws's per-item cancellation lines and exits 1 instead of dropping them (a mid-transfer Ctrl-C previously exited 0 silently), and an explicit `preferred_transfer_client = crt` fails construction-time errors even when another process holds the CRT slot instead of silently running the classic engine.
 
 ## [0.7.0] - 2026-08-01
 

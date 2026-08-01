@@ -1000,7 +1000,11 @@ class _CrtDrainManager:
 
 
 class TestCrtCancelClassification:
-    """Who ordered a CRT cancellation decides its outcome (design/crt.md section 6).
+    """A CRT cancellation is a per-item failure unless this run's cancel token
+    ordered it (design/crt.md section 6) - aws-cli's measured classification:
+    a fatal or Ctrl-C folding its CRT manager prints a failed line per
+    in-flight transfer, and only the token, which aws-cli has no counterpart
+    for, revokes as CANCELLED.
 
     Driven with a stand-in manager because the real CRT stack needs awscrt's
     event loop; the stand-in reproduces exactly the seam under test - futures
@@ -1035,11 +1039,12 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (1, 0)
 
-    def test_initiated_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
+    def test_fatal_ordered_cancellations_are_failures(self, tmp_path: Path) -> None:
         # The fatal path orders the cancel (Transferrer.__exit__ under the
-        # exception), so the same awscrt outcome is an ordered revocation:
-        # CANCELLED, silent, outside the failure counts - the on_result
-        # contract (design/opresult.md).
+        # exception), and aws-cli still counts each folded in-flight transfer
+        # as a per-item failure (measured: a mid-listing fatal under the CRT
+        # engine prints "download failed: ... AWS_ERROR_S3_CANCELED" per item
+        # before the fatal error line).
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
@@ -1048,6 +1053,21 @@ class TestCrtCancelClassification:
                 transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 raise RuntimeError("fatal elsewhere")
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_token_ordered_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
+        # The cancel-token escalation (`_cancel_futures`, as the drain-time
+        # watcher runs it) is the one CRT cancel aws-cli has no counterpart
+        # for: an ordered revocation, CANCELLED, outside the failure counts -
+        # the on_result contract (design/opresult.md).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+            self._submit_one(transferrer, tmp_path)
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
@@ -1056,8 +1076,10 @@ class TestCrtCancelClassification:
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
     (aws's manager-context behavior, measured live: a mid-listing fatal
-    leaves every queued transfer unrun), and each revoked item reports one
-    CANCELLED record naming the fatal (design/opresult.md)."""
+    leaves every queued transfer unrun), and on the classic lane each revoked
+    item reports one CANCELLED record naming the fatal (design/opresult.md;
+    the CRT lane's fatal cancels classify FAILED instead -
+    TestCrtCancelClassification)."""
 
     def test_fatal_mid_enumeration_cancels_queued_transfers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
