@@ -69,6 +69,15 @@ class TestBuildClient:
         s3 = clientfactory.build_s3(_parse([]))
         assert s3._crt_allow_absent_credentials is True  # pyright: ignore[reportPrivateUsage]
 
+    def test_build_s3_takes_aws_clis_posture_on_lock_contention(self) -> None:
+        # aws-cli's factory acquires the cross-process CRT lock best-effort
+        # and, under an explicit 'crt' preference, builds the CRT client
+        # regardless - so construction-time failures surface under contention
+        # too, where the library default would silently run classic and, on a
+        # dryrun, report success (design/crt.md section 6).
+        s3 = clientfactory.build_s3(_parse([]))
+        assert s3._crt_allow_lockless is True  # pyright: ignore[reportPrivateUsage]
+
     @pytest.mark.parametrize(
         ("argv", "env", "expected"),
         [

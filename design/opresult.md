@@ -98,8 +98,8 @@ the same item's real outcome). Aggregate counts always agree with the records: t
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
 
-A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode,
-Ctrl-C) resolves the accepted transfer items like this:
+A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode, a
+classic-engine Ctrl-C) resolves the accepted transfer items like this:
 
 - accepted but not yet running - or abandoned mid-flight - reports
   `CANCELLED`, with `error` a `CancelledError` naming the cause;
@@ -108,6 +108,16 @@ Ctrl-C) resolves the accepted transfer items like this:
   landed, and s3transfer lets the completion win over the cancel mark;
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
+
+"Cancellation" here means one the run itself ordered. The one revocation that
+is not: pip s3transfer's CRT manager converts a Ctrl-C landing in its transfer
+drain into `cancel()` and discards the interrupt, so the cancelled items are
+the only evidence the run was cut short. Those items report `FAILED` (the
+error carrying awscrt's cancellation wording), count into `BatchError`, and
+the run raises that `BatchError` in place of the swallowed interrupt -
+aws-cli's own classification of every non-`CancelledError` outcome
+(design/crt.md section 6). The classic engine re-raises a drain-time
+interrupt, so this arises on the CRT engine alone.
 
 A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
 items run to completion and report their real outcomes, so no `CANCELLED`

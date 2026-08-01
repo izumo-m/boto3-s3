@@ -268,6 +268,12 @@ def should_use_crt(preferred: str) -> bool:
     return False
 
 
+def _prefers_crt(config: Any | None) -> bool:
+    """Whether *config* names the CRT engine explicitly (``'auto'`` does not)."""
+    preferred = getattr(config, "preferred_transfer_client", None) or "auto"
+    return str(preferred).lower() == "crt"
+
+
 def selects_crt(config: Any | None) -> bool:
     """Whether *config* selects the CRT engine, with boto3's rule and defaults.
 
@@ -290,6 +296,7 @@ def create_crt_transfer_manager(
     endpoint: str | None = None,
     session: Session | None = None,
     allow_absent_credentials: bool = False,
+    allow_lockless: bool = False,
     region: CrtRegion = CLIENT_REGION,
 ) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
@@ -307,6 +314,16 @@ def create_crt_transfer_manager(
     other pin, still falls back to classic. Default ``False`` = boto3's rule;
     ``boto3-s3-cli`` sets it because the CLI layer owes aws-cli parity
     (design/crt.md section 4).
+
+    ``allow_lockless`` opts out of the lock half of the fallback, for an
+    **explicit** ``'crt'`` preference only: aws-cli's factory acquires the
+    cross-process lock best-effort and builds the CRT client regardless, so
+    a construction-time failure (a bad CA bundle, an unresolved region)
+    surfaces under contention exactly as it does without it, where boto3 -
+    and the default here - silently selects classic and hides it. An
+    ``'auto'`` preference keeps the lock requirement under this opt-in too:
+    that is aws-cli's own ``auto``, which resolves classic when another
+    process holds the lock (design/crt.md section 6).
 
     ``endpoint`` is the caller's explicit endpoint (the CLI threads its
     ``--endpoint-url`` here, matching aws-cli, which passes it to the CRT
@@ -336,7 +353,7 @@ def create_crt_transfer_manager(
         from boto3_s3.transferconfig import TransferConfig
 
         config = TransferConfig()
-    crt_s3_client = _get_crt_s3_client(client, config, endpoint, session, region)
+    crt_s3_client = _get_crt_s3_client(client, config, endpoint, session, region, allow_lockless)
     if not _is_compatible_request(
         client,
         crt_s3_client,
@@ -386,6 +403,7 @@ def materialize_crt_engine(
     endpoint: str | None = None,
     session: Session | None = None,
     allow_absent_credentials: bool = False,
+    allow_lockless: bool = False,
     region: CrtRegion = CLIENT_REGION,
 ) -> None:
     """Build the engine *config* selects now, for a caller that will not transfer.
@@ -410,6 +428,7 @@ def materialize_crt_engine(
         endpoint=endpoint,
         session=session,
         allow_absent_credentials=allow_absent_credentials,
+        allow_lockless=allow_lockless,
         region=region,
     )
 
@@ -436,11 +455,14 @@ def _get_crt_s3_client(
     endpoint: str | None,
     session: Session | None,
     region: CrtRegion,
+    allow_lockless: bool,
 ) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(client, config, endpoint, session, region)
+            serializer, crt_s3_client = _initialize(
+                client, config, endpoint, session, region, allow_lockless
+            )
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
     return _crt_s3_client
@@ -486,6 +508,7 @@ def _initialize(
     endpoint: str | None,
     session: Session | None,
     region_source: CrtRegion,
+    allow_lockless: bool,
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
@@ -497,8 +520,12 @@ def _initialize(
     # Annotated Any: s3transfer types the return as the lock object, but the
     # documented contract is "None when another process holds it".
     lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
-    if lock is None:
+    if lock is None and not (allow_lockless and _prefers_crt(config)):
         # Another process of this application holds the CRT client; classic.
+        # Under the `allow_lockless` opt-in an *explicit* 'crt' preference
+        # builds on regardless (aws-cli's factory ignores its own acquisition
+        # result), so construction-time failures surface under contention too;
+        # 'auto' keeps the lock requirement, aws-cli's own auto resolution.
         return None, None
 
     region = _resolve_region(client, region_source)

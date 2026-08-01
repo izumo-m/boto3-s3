@@ -1326,8 +1326,10 @@ the library. The overall design and the library side (boto3-faithful) are in
   inside its credentials delegate; the library, boto3-faithfully, would fall
   back to classic and report `Unable to locate credentials` instead.
   `clientfactory.build_s3` opts into aws's behavior with
-  `S3(crt_allow_absent_credentials=True)` - the one place the CLI overrides
-  the library's boto3 default here (crt.md section 4).
+  `S3(crt_allow_absent_credentials=True)` (crt.md section 4). The lock
+  posture is declared the same way: `S3(crt_allow_lockless=True)` makes an
+  explicit `crt` preference build the CRT client even when another process
+  holds the cross-process slot, aws's factory shape (crt.md section 4).
 - **Annotation staging**: `build_transfer_options` always sets the library-only
   `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
   multipart source annotation before creating the destination, matching

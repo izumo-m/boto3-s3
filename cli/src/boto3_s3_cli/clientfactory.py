@@ -188,6 +188,13 @@ def build_s3(args: argparse.Namespace) -> S3:
     # rather than falling back to classic. The library defaults to boto3's
     # opposite rule; the aws-faithful entry is this layer's (design/crt.md
     # section 4).
+    # crt_allow_lockless=True: aws-cli's factory acquires the cross-process
+    # CRT lock best-effort and, under an explicit 'crt' preference, builds the
+    # CRT client regardless - so its construction-time failures (a bad CA
+    # bundle, an unresolved region) surface under contention too, where the
+    # library default silently selects classic and would report success. An
+    # 'auto' preference respects the lock on both tools (design/crt.md
+    # section 6).
     # crt_region: aws-cli resolves the CRT region from its own region chain
     # (the same `_resolve_region` every client here is built with), which
     # yields None when nothing is configured - where botocore would hand the
@@ -199,6 +206,7 @@ def build_s3(args: argparse.Namespace) -> S3:
         endpoint_url=args.endpoint_url,
         wait_on_interrupt=False,
         crt_allow_absent_credentials=True,
+        crt_allow_lockless=True,
         crt_region=region,
     )
 

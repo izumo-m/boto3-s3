@@ -216,19 +216,28 @@ def _is_precondition_failed(exc: BaseException) -> bool:
         return False
 
 
-def _is_cancellation(exc: BaseException) -> bool:
+def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
     """A future outcome meaning "revoked", not "failed".
 
     Classic s3transfer settles cancelled futures with its own
-    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass); the
-    CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead, so
-    that is matched by the error's ``name`` without importing awscrt. The
-    library's own `CancelledError` is included for symmetry (a subscriber
-    re-raising a translated cancellation).
+    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass), and
+    the library's own `CancelledError` is included for symmetry (a subscriber
+    re-raising a translated cancellation) - both always classify as revoked.
+    The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
+    matched by the error's ``name`` without importing awscrt - but only when
+    this run started the cancel (``cancel_initiated``: the fatal / immediate-
+    cancel shutdown). A CRT cancellation nobody here asked for is the trace of
+    a swallowed interrupt: pip s3transfer's CRT coordinator converts a
+    drain-time ``KeyboardInterrupt`` into ``cancel()`` and the interrupt never
+    resurfaces (its ``_shutdown`` discards it), so the cancelled item itself
+    is the only evidence the run was cut short. Classifying it as a failure
+    is aws-cli's own rule - its ``DoneResultSubscriber`` treats every
+    non-``CancelledError`` as a per-item failure - and is what keeps an
+    interrupted CRT run from reporting success (design/crt.md section 6).
     """
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         return True
-    return getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
+    return cancel_initiated and getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
 
 
 def _allow_if_none_match() -> None:
@@ -669,6 +678,7 @@ class Transferrer:
         capture_response: bool = False,
         crt_endpoint: str | None = None,
         crt_allow_absent_credentials: bool = False,
+        crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         session: Session | None = None,
     ) -> None:
@@ -758,6 +768,10 @@ class Transferrer:
         # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
         # boto3's classic fallback, which every library caller keeps.
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        # aws-cli's posture on cross-process lock contention under an explicit
+        # 'crt' preference: build the CRT client without the lock. False =
+        # boto3's classic fallback (crtsupport.create_crt_transfer_manager).
+        self._crt_allow_lockless = crt_allow_lockless
         # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
         # off the client, boto3's source); a declared None is what reaches
         # awscrt's own region assertion, as aws-cli's region chain does.
@@ -773,6 +787,15 @@ class Transferrer:
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
         self._shutdown_done = threading.Event()
+        # True once this run itself started cancelling accepted transfers (the
+        # fatal/immediate-cancel shutdown, the token watcher). Read by the
+        # done callbacks to tell a revocation this run ordered (CANCELLED)
+        # from a CRT cancellation nobody ordered - the trace of an interrupt
+        # the CRT manager swallowed, classified FAILED (`_is_cancellation`).
+        # Monotonic False->True, always set before the cancel it describes is
+        # issued, so the callback that observes a cancel outcome observes the
+        # flag too.
+        self._cancel_initiated = False
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
@@ -818,8 +841,16 @@ class Transferrer:
         (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
         classic ``CANCELLED`` record names the fatal that revoked it, while
         the CRT manager cancels without the message and its ``CANCELLED``
-        records carry awscrt's cancellation wording instead (still classified
-        via ``AWS_ERROR_S3_CANCELED``).
+        records carry awscrt's cancellation wording instead (classified via
+        ``AWS_ERROR_S3_CANCELED`` under the ``_cancel_initiated`` flag this
+        cancel path sets). On the clean drain no cancel is ordered, so a CRT
+        cancellation arriving there - pip s3transfer's CRT manager converting
+        a drain-time ``KeyboardInterrupt`` into ``cancel()`` and discarding
+        the interrupt - is recorded as a per-item failure instead, aws-cli's
+        own classification, and the run raises `BatchError` in place of the
+        swallowed ``KeyboardInterrupt`` (design/crt.md section 6). The classic
+        manager re-raises a drain-time interrupt itself, so that lane never
+        needs the distinction.
         """
         if self._manager is None:
             return
@@ -839,6 +870,7 @@ class Transferrer:
             watcher.start()
         try:
             if cancel:
+                self._cancel_initiated = True
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
@@ -880,6 +912,7 @@ class Transferrer:
             self._futures.discard(future)
 
     def _cancel_futures(self) -> None:
+        self._cancel_initiated = True
         with self._futures_lock:
             futures = tuple(self._futures)
         for future in futures:
@@ -1313,6 +1346,7 @@ class Transferrer:
                 endpoint=endpoint,
                 session=self._session,
                 allow_absent_credentials=self._crt_allow_absent_credentials,
+                allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
             )
         except InvalidCrtTransferConfigError as exc:
@@ -1466,14 +1500,16 @@ class Transferrer:
         # Failed / skipped / cancelled items surface no captured response, but
         # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
-        if _is_cancellation(exc):
-            # An accepted item revoked by the engine shutdown (a fatal
-            # elsewhere, an immediate cancel, Ctrl-C): CANCELLED, not FAILED -
-            # nothing is wrong with the item itself, and the run's outcome is
-            # the exception the operation raises. Deliberately richer than
-            # aws-cli, which drops cancelled items from output and counts;
-            # first_error stays reserved for real failures (BatchError's
-            # diagnostic sample).
+        if _is_cancellation(exc, cancel_initiated=self._cancel_initiated):
+            # An accepted item revoked by a shutdown this run ordered (a fatal
+            # elsewhere, an immediate cancel, classic Ctrl-C): CANCELLED, not
+            # FAILED - nothing is wrong with the item itself, and the run's
+            # outcome is the exception the operation raises. Deliberately
+            # richer than aws-cli, which drops cancelled items from output and
+            # counts; first_error stays reserved for real failures
+            # (BatchError's diagnostic sample). A CRT cancellation this run
+            # did *not* order falls through to the failure branch below - the
+            # swallowed-interrupt trace `_is_cancellation` describes.
             error = CancelledError(
                 str(exc) or "canceled",
                 operation=self._operation,

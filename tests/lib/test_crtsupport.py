@@ -317,6 +317,35 @@ class TestCreateCrtTransferManager:
         monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: object())
         assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
 
+    def test_lockless_opt_in_builds_under_an_explicit_crt_preference(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's factory shape: an explicit 'crt' acquires the lock
+        # best-effort and builds regardless, so its construction-time failures
+        # surface under contention too (design/crt.md section 6).
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        manager = crtsupport.create_crt_transfer_manager(
+            FakeClient(),  # pyright: ignore[reportArgumentType]
+            TransferConfig(preferred_transfer_client="crt"),
+            allow_lockless=True,
+        )
+        assert manager is not None
+        assert len(stubs.create_kwargs) == 1
+
+    def test_lockless_opt_in_keeps_auto_respecting_the_lock(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's own auto resolution answers classic when another process holds
+        # the lock; the opt-in is scoped to an explicit 'crt' preference.
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        manager = crtsupport.create_crt_transfer_manager(
+            FakeClient(),  # pyright: ignore[reportArgumentType]
+            TransferConfig(preferred_transfer_client="auto"),
+            allow_lockless=True,
+        )
+        assert manager is None
+        assert stubs.create_kwargs == []
+
     def test_singleton_is_reused_for_a_compatible_client(self, stubs: CrtStubs) -> None:
         first = crtsupport.create_crt_transfer_manager(FakeClient(), None)  # pyright: ignore[reportArgumentType]
         second = crtsupport.create_crt_transfer_manager(FakeClient(), None)  # pyright: ignore[reportArgumentType]

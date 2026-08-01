@@ -539,6 +539,7 @@ class TestMaterializeCrtEngine:
             session=session,
             endpoint_url=endpoint,
             crt_allow_absent_credentials=True,
+            crt_allow_lockless=True,
             crt_region=None,
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
@@ -549,6 +550,7 @@ class TestMaterializeCrtEngine:
                 "endpoint": endpoint,
                 "session": session,
                 "allow_absent_credentials": True,
+                "allow_lockless": True,
                 "region": None,
             }
         ]

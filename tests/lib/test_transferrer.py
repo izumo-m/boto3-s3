@@ -939,6 +939,120 @@ class TestNonTransferOutcomes:
         assert all(p.bytes_total == 1000 for p in progress)
 
 
+class _CrtCancelError(Exception):
+    """awscrt's cancellation outcome: matched by ``name``, awscrt never imported."""
+
+    name = "AWS_ERROR_S3_CANCELED"
+
+
+class _FakeCrtMeta:
+    size = None
+    etag = None
+
+    def __init__(self) -> None:
+        self.user_context: dict[str, Any] = {}
+
+
+class _FakeCrtFuture:
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.meta = _FakeCrtMeta()
+
+    def done(self) -> bool:
+        return True
+
+    def result(self) -> None:
+        raise self._error
+
+    def cancel(self) -> None:
+        pass
+
+
+class _CrtDrainManager:
+    """The CRT manager's drain surface: every accepted transfer settles with
+    awscrt's cancellation outcome and no interrupt ever escapes - the shape
+    pip s3transfer's ``CRTTransferManager`` presents when a Ctrl-C lands in
+    its drain (its coordinator converts the interrupt into ``cancel()`` and
+    its ``_shutdown`` discards the replacement error too)."""
+
+    def __init__(self) -> None:
+        self._accepted: list[tuple[_FakeCrtFuture, list[Any]]] = []
+
+    def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+        future = _FakeCrtFuture(
+            _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+        )
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
+
+    def _drain(self) -> None:
+        for future, subscribers in self._accepted:
+            for subscriber in subscribers:
+                on_done = getattr(subscriber, "on_done", None)
+                if on_done is not None:
+                    on_done(future)
+
+    def shutdown(self) -> None:
+        self._drain()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._drain()
+
+
+class TestCrtCancelClassification:
+    """Who ordered a CRT cancellation decides its outcome (design/crt.md section 6).
+
+    Driven with a stand-in manager because the real CRT stack needs awscrt's
+    event loop; the stand-in reproduces exactly the seam under test - futures
+    settling with the ``AWS_ERROR_S3_CANCELED`` outcome during the drain.
+    """
+
+    def _submit_one(self, transferrer: Transferrer, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        transferrer.submit(
+            TransferItem(
+                compare_key="a.bin",
+                size=1,
+                src_path=str(src),
+                dest_bucket="b",
+                dest_key="a.bin",
+            )
+        )
+
+    def test_uninitiated_cancellations_are_failures(self, tmp_path: Path) -> None:
+        # Nobody here ordered a cancel, yet the drain settled the item
+        # cancelled: the trace of an interrupt the CRT manager swallowed.
+        # aws-cli classifies exactly this as a per-item failure (its
+        # DoneResultSubscriber, rc 1); a silent CANCELLED would report the
+        # interrupted run as success.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+            self._submit_one(transferrer, tmp_path)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_initiated_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
+        # The fatal path orders the cancel (Transferrer.__exit__ under the
+        # exception), so the same awscrt outcome is an ordered revocation:
+        # CANCELLED, silent, outside the failure counts - the on_result
+        # contract (design/opresult.md).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(RuntimeError, match="fatal elsewhere"):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                raise RuntimeError("fatal elsewhere")
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
     (aws's manager-context behavior, measured live: a mid-listing fatal
@@ -1656,6 +1770,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append((client, config, endpoint, session))
@@ -1681,6 +1796,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
@@ -1719,6 +1835,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(endpoint)
@@ -1747,6 +1864,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(session)
@@ -1781,6 +1899,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             seen.append(allow_absent_credentials)
@@ -1810,6 +1929,7 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run

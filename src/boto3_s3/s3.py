@@ -698,9 +698,13 @@ class S3:
     Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
     prefetch worker instead of waiting out an in-flight listing page pull
     (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
-    interrupt itself is always re-raised, never converted or swallowed; and
-    the posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit`` and
-    every other exception always get the full reclamation (``sys.exit()``
+    interrupt itself is re-raised, never converted or swallowed - with one
+    engine-imposed exception: pip s3transfer's CRT manager discards an
+    interrupt that lands in its transfer drain, so a CRT-engine run cut short
+    there raises `BatchError` with the cancelled items counted as failures
+    instead (design/crt.md section 6); the classic engine re-raises even
+    there. The posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit``
+    and every other exception always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.wait_on_interrupt``.
 
@@ -713,7 +717,17 @@ class S3:
     from inside it instead. Only the CLI distribution, which owes ``aws s3``
     output parity, sets it (design/crt.md section 4).
 
-    ``crt_region`` is the third, and names where the CRT engine's region comes
+    ``crt_allow_lockless`` is the third, for cross-process lock contention
+    under an **explicit** ``'crt'`` preference. ``False`` (the default) is
+    boto3's rule: another process of this application holding the CRT slot
+    silently selects the classic engine. ``True`` is aws-cli's: its factory
+    acquires the lock best-effort and builds the CRT client regardless, so a
+    construction-time failure surfaces under contention exactly as it does
+    without it. An ``'auto'`` preference respects the lock either way -
+    aws-cli's own ``auto`` resolution. Only the CLI distribution sets it
+    (design/crt.md section 6).
+
+    ``crt_region`` is the fourth, and names where the CRT engine's region comes
     from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
     own ``meta.region_name``; an explicit value is the application's already
     resolved region and rides verbatim. The distinction only shows when nothing
@@ -734,6 +748,7 @@ class S3:
         transfer_config: TransferConfig | None = None,
         wait_on_interrupt: bool = True,
         crt_allow_absent_credentials: bool = False,
+        crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
     ) -> None:
         self._session = session
@@ -742,6 +757,7 @@ class S3:
         self._transfer_config = transfer_config
         self._wait_on_interrupt = wait_on_interrupt
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        self._crt_allow_lockless = crt_allow_lockless
         self._crt_region: crtsupport.CrtRegion = crt_region
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
@@ -826,6 +842,7 @@ class S3:
                 endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
                 session=self._session,
                 allow_absent_credentials=self._crt_allow_absent_credentials,
+                allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
             )
         except InvalidCrtTransferConfigError as exc:
@@ -1189,6 +1206,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
             session=self._session,
         )
@@ -1408,6 +1426,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
             session=self._session,
         )
@@ -1756,6 +1775,7 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
             session=self._session,
         )

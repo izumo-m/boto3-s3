@@ -362,6 +362,22 @@ one call site where aws's behavior is known and measured -
 rendering: an empty detail prints `boto3-s3: [ERROR]:` with **no** trailing
 space, aws's `format_error_message` branch.
 
+### Building without the cross-process lock
+
+aws-cli's factory acquires the cross-process CRT lock best-effort: under an
+explicit `crt` preference it builds the CRT client whether or not the
+acquisition succeeded, so every construction-time failure (a bad `--ca-bundle`,
+the region assertion above) surfaces under contention exactly as it does
+without it. boto3 instead answers a held lock with the silent classic
+fallback - which would also swallow those failures and, on a dryrun, report
+success where aws exits 255 (measured 2026-08-01). Same split as the two
+postures above: the library keeps boto3's rule and the CLI opts out through
+`S3(crt_allow_lockless=True)` (`clientfactory.build_s3`), threaded to
+`create_crt_transfer_manager(allow_lockless=...)`. The opt-in is scoped to an
+explicit `'crt'` preference - `auto` resolves classic under contention on aws
+too - and to the lock alone: every identity pin of the compatibility check is
+unchanged.
+
 ## 5. Charter treatment
 
 The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
@@ -417,10 +433,33 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
     boto3 does (faithful). This is a deliberate exception to the backend-exception
     translation at the library boundary (exceptions.md section 1) - to reproduce boto3's
     behavior.
-- **Explicit crt x lock contention**: aws forces CRT; our library does boto3's
-  faithful silent classic fallback. The output and rc are identical for both
-  engines (proven), so no observable charter is broken - only throughput is
-  affected.
+- **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
+  and the library default - silently falls back to classic. When the
+  construction succeeds the two are indistinguishable in output and rc
+  (proven; only throughput differs), but a construction-time failure surfaces
+  only on aws's path - the fallback would run classic and, on a dryrun, exit 0
+  where aws exits 255 (measured 2026-08-01, a held lock plus a bad
+  `--ca-bundle`). The CLI therefore opts into aws's posture with
+  `S3(crt_allow_lockless=True)` (section 4, "Building without the
+  cross-process lock"); library callers keep boto3's fallback by default.
+- **Ctrl-C on the CRT lane**: pip s3transfer's CRT manager discards a
+  drain-time `KeyboardInterrupt` - its coordinator converts the interrupt into
+  `cancel()`, the cancellation error replaces it, and its shutdown drops that
+  too - where the classic manager re-raises it. aws is built to survive that
+  loss: its per-item subscribers classify every non-`CancelledError` outcome
+  as a failure, so an interrupted CRT run prints `upload failed: ...
+  AWS_ERROR_S3_CANCELED: Request successfully cancelled` per in-flight item at
+  rc 1 (measured 2026-08-01; aws's own classic lane prints `cancelled: ctrl-c
+  received` instead - the two aws lanes differ). This library takes the same
+  rule at the same place: a CRT cancellation the run did not itself order
+  (`Transferrer._cancel_initiated`) is classified `FAILED`, so the run raises
+  `BatchError`, the CLI streams aws's per-item lines, and the rc is 1 - where
+  the items were previously silent `CANCELLED` and an interrupted run reported
+  success (rc 0). A cancellation the run *did* order (a fatal elsewhere, an
+  immediate cancel) stays `CANCELLED`, and the classic lane is untouched. The
+  residual for a library caller: on that one window the operation raises
+  `BatchError`, not the swallowed `KeyboardInterrupt`
+  ([`opresult.md`](./opresult.md)).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
   `create_s3_crt_client`'s signature rather than a version, so the keys start
