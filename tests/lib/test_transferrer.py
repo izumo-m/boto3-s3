@@ -650,6 +650,38 @@ class TestCopy:
         }
         assert transferrer.succeeded == 1
 
+    def test_annotation_write_drops_the_copy_checksum_algorithm(self) -> None:
+        # --checksum-algorithm rides the copy calls, but aws writes
+        # annotations from its own subscriber and maps only RequestPayer onto
+        # PutObjectAnnotation - upstream's native path would forward the
+        # copy's ChecksumAlgorithm there (_align_annotation_put_args removes
+        # it from the table; this pins the wire).
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
+            {"AnnotationPayload": io.BytesIO(b"payload")},
+        ]
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL, checksum_algorithm="CRC32"),
+        )
+        assert calls[0].operation == "CreateMultipartUpload"
+        assert calls[0].params["ChecksumAlgorithm"] == "CRC32"
+        annotation_put = calls[-1]
+        assert annotation_put.operation == "PutObjectAnnotation"
+        assert "ChecksumAlgorithm" not in annotation_put.params
+
     def test_all_multipart_deferred_lists_every_annotation_page(self) -> None:
         # s3transfer's own post-complete read calls list_object_annotations
         # once and never follows NextContinuationToken; the deferred-mode
@@ -1163,6 +1195,60 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
+    def test_interrupt_folded_cancellations_are_failures(self, tmp_path: Path) -> None:
+        # A Ctrl-C forcing the fold classifies its cancels FAILED like a
+        # fatal (aws-measured); the interrupt itself propagates.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                raise KeyboardInterrupt
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_interrupt_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
+        # The flag rises only under the token's *own* CancelledError: an
+        # interrupt that forces the fold - even with the token already
+        # cancelled - keeps the aws-measured FAILED classification. Which
+        # cancel "the token ordered" is decided by the exception that forced
+        # the fold, not by the token's state alone.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise KeyboardInterrupt
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_fatal_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
+        # The fatal variant of the same tiebreak: the token was cancelled, but
+        # the fatal forced the fold, so its cancels stay per-item failures.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(RuntimeError, match="fatal elsewhere"):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise RuntimeError("fatal elsewhere")
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
 
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
@@ -1172,8 +1258,38 @@ class TestFatalCancellation:
     the CRT lane's fatal cancels classify FAILED instead -
     TestCrtCancelClassification)."""
 
+    @pytest.mark.parametrize(
+        ("raise_exc", "raises", "match", "revoked_text"),
+        [
+            pytest.param(
+                lambda: NotFoundError("listing died mid-enumeration"),
+                NotFoundError,
+                "listing died",
+                "listing died mid-enumeration",
+                id="fatal",
+            ),
+            pytest.param(
+                # An interrupt escaping the submission loop folds the manager
+                # the same way: the classic manager revokes the queued work
+                # with CancelledError (str(KI) is empty, so s3transfer's repr
+                # fallback names it) and the interrupt propagates - CANCELLED
+                # records, unlike the CRT lane's FAILED for the same window.
+                KeyboardInterrupt,
+                KeyboardInterrupt,
+                None,
+                "KeyboardInterrupt()",
+                id="interrupt",
+            ),
+        ],
+    )
     def test_fatal_mid_enumeration_cancels_queued_transfers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        raise_exc: Any,
+        raises: type[BaseException],
+        match: str | None,
+        revoked_text: str,
     ) -> None:
         from s3transfer.manager import TransferCoordinatorController
 
@@ -1228,7 +1344,7 @@ class TestFatalCancellation:
             transfer_config=TransferConfig(max_concurrency=1),
             on_result=results.append,
         )
-        with pytest.raises(NotFoundError, match="listing died"):
+        with pytest.raises(raises, match=match):
             with transferrer:
                 for item in items:
                     transferrer.submit(item)
@@ -1237,7 +1353,7 @@ class TestFatalCancellation:
                 # without this the fatal can also beat the worker and revoke
                 # all three (a legal but different outcome).
                 assert first_started.wait(5.0)
-                raise NotFoundError("listing died mid-enumeration")
+                raise raise_exc()
 
         # Only the already-running first transfer reached the API; the queued
         # two were revoked before ever becoming requests (aws's transfer set:
@@ -1253,7 +1369,7 @@ class TestFatalCancellation:
             result = by_key[key]
             assert result.outcome is OpOutcome.CANCELLED
             assert isinstance(result.error, CancelledError)
-            assert "listing died mid-enumeration" in str(result.error)
+            assert revoked_text in str(result.error)
         assert (transferrer.succeeded, transferrer.failed, transferrer.cancelled) == (1, 0, 2)
         # first_error stays reserved for real failures (BatchError's sample).
         assert transferrer.first_error is None

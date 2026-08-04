@@ -752,6 +752,28 @@ class TestVerifyResolution:
         argv = ["--no-verify-ssl", "--ca-bundle", str(bundle)]
         assert _client_verify(clientfactory.build_client(_parse(argv))) is False
 
+    def test_empty_ca_bundle_flag_disables_verification(self) -> None:
+        # `--ca-bundle=` is present-empty, not unset: it stops the chain
+        # (measured: aws adopts it the same way, and botocore reads the empty
+        # string as verification-off on both tools) instead of falling through
+        # to the env or the certifi default. A truthy-`or` rewrite of the
+        # chain - the b935265 / 51e7831 empty-string family - resolves the
+        # default CA here instead.
+        assert _client_verify(clientfactory.build_client(_parse(["--ca-bundle", ""]))) == ""
+
+    def test_empty_aws_ca_bundle_env_stops_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "req.pem"))
+        assert _client_verify(clientfactory.build_client(_parse([]))) == ""
+
+    def test_empty_requests_ca_bundle_env_stops_the_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
+        assert _client_verify(clientfactory.build_client(_parse([]))) == ""
+
     def test_ca_bundle_flag_beats_the_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

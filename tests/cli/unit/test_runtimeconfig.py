@@ -172,6 +172,26 @@ class TestErrorWording:
             build_config_with(multipart_threshold="10XB")
         assert str(exc_info.value) == "Invalid size value: 10xb"
 
+    def test_empty_choice_value_is_rejected_not_defaulted(self) -> None:
+        # A `preferred_transfer_client =` line is present-empty, not unset: it
+        # must reach the choices validation (aws's wording names the "")
+        # rather than fall back to auto - which would silently flip the
+        # engine on an optimized host (the b935265 / 51e7831 empty-string
+        # family). Measured identical on aws (rc 255).
+        with pytest.raises(InvalidConfigError) as exc_info:
+            build_config_with(preferred_transfer_client="")
+        assert str(exc_info.value) == (
+            'Invalid value: "" for configuration option: '
+            '"preferred_transfer_client". Supported values are: auto, classic, crt'
+        )
+
+    def test_empty_integer_value_is_rejected_not_defaulted(self) -> None:
+        with pytest.raises(InvalidConfigError) as exc_info:
+            build_config_with(max_concurrent_requests="")
+        assert (
+            str(exc_info.value) == "Value for max_concurrent_requests must be a positive integer: "
+        )
+
 
 class TestLoadScopedS3Config:
     def _config(self, profile: str | None = None):
@@ -208,6 +228,20 @@ class TestLoadScopedS3Config:
         scoped = runtimeconfig.load_scoped_s3_config(self._config("alt"))
 
         assert scoped == {"preferred_transfer_client": "classic"}
+
+    def test_empty_values_stay_present_in_the_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A `key =` line is present-empty: it must survive into the scope so
+        # the validation rejects it like aws (rc 255), not vanish into the
+        # defaults through a truthy guard.
+        self._write(
+            tmp_path,
+            monkeypatch,
+            "[default]\ns3 =\n  preferred_transfer_client =\n  max_concurrent_requests =\n",
+        )
+        scoped = runtimeconfig.load_scoped_s3_config(self._config())
+        assert scoped == {"preferred_transfer_client": "", "max_concurrent_requests": ""}
 
     def test_missing_section_is_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

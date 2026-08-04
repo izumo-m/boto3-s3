@@ -253,6 +253,16 @@ class TestBuildTransferConfig:
         config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
         assert config.get_deep_attr("multipart_threshold") is config.UNSET_DEFAULT
 
+    def test_classic_keeps_an_explicit_threshold_alongside_a_chunksize(self) -> None:
+        # The threshold pin is CRT-only: under the classic engine both keys
+        # are aws's own [s3] knobs and ride verbatim (aws-cli's translation
+        # map), so an explicit multipart_threshold must survive an explicit
+        # chunksize instead of being overwritten by the pin.
+        scoped = {"multipart_chunksize": "64MB", "multipart_threshold": "10MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "classic")
+        assert config.multipart_threshold == 10 * _MIB
+        assert config.multipart_chunksize == 64 * _MIB
+
     def test_classic_keeps_io_chunksize_and_max_bandwidth(self) -> None:
         # The same keys are honored verbatim under the classic engine.
         scoped = {"io_chunksize": "1MB", "max_bandwidth": "10MB/s"}
