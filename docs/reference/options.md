@@ -246,7 +246,9 @@ default that leaves boto3's own value (100): it caps the read parts buffered
 for the disk writer, so boto3's figure would give a slow disk a tenth of
 `aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
 `boto3.s3.transfer.TransferConfig` keeps it, as it keeps all of boto3's
-defaults. `use_threads=False` selects a non-threaded executor for the
+defaults. (Not under an explicit `preferred_transfer_client="crt"`: an
+explicitly-set `max_io_queue` is a classic-only option there and fails
+boto3's own CRT validation; the default needs no override on that lane.) `use_threads=False` selects a non-threaded executor for the
 classic engine, as in boto3.
 
 The library never reads the `[s3]` section of `~/.aws/config` — tuning comes

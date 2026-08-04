@@ -197,8 +197,9 @@ def test_crt_ignores_classic_only_config(
     aws-cli's CRT client never reads ``io_chunksize`` / ``max_bandwidth``, so a
     CRT transfer with them set in ``[s3]`` completes (rc 0). Our CLI must not
     forward them onto the crt-preferred ``TransferConfig`` either - doing so
-    trips boto3's ``_validate_crt_transfer_config`` and would exit rc 1 with an
-    uncaught traceback. Differential: both CLIs must agree on rc 0.
+    trips boto3's ``_validate_crt_transfer_config`` at the pre-run materialize
+    slot and would exit rc 252 (a ``ValidationError``, no traceback).
+    Differential: both CLIs must agree on rc 0.
     """
     config = tmp_path_factory.mktemp("crt-classic-keys") / "config"
     config.write_text(

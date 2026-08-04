@@ -115,7 +115,12 @@ On the CRT engine, `CANCELLED` is reserved for the cancel this run's
 Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
 `FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
 measured classification: a fatal or Ctrl-C folding its CRT manager counts
-every in-flight item failed (design/crt.md section 6). That covers the
+every in-flight item failed (design/crt.md section 6). The tiebreak when both
+hold is the exception that forced the fold, not the token's state: a fatal or
+interrupt folding the manager keeps its cancels `FAILED` even if this run's
+token was already cancelled - only the token's own `CancelledError` surfacing
+through the submission loop, or its drain-time escalation issuing the cancel,
+marks the revocation ordered. That covers the
 revocation nobody ordered, too: pip s3transfer's CRT manager converts a
 Ctrl-C landing in its transfer drain into `cancel()` and discards the
 interrupt, so the items classified `FAILED` are the only evidence the run was

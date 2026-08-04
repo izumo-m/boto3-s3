@@ -26,7 +26,7 @@ class TestSdkFloorCompat:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Regression: forwarding None for an omitted base param overwrites the
-        # base ctor's concrete default on the SDK floor (boto3 1.28 - ~1.40), so
+        # base ctor's concrete default on a DEFAULTS-less boto3 (1.28 - ~1.41), so
         # None reaches s3transfer (a TypeError on the first size comparison, and
         # use_threads=None silently disables threading). Unset base params must
         # be omitted so the base ctor supplies its own default.

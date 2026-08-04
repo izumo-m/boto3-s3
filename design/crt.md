@@ -462,8 +462,11 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   takes the same rule at the same place: every CRT cancellation classifies
   `FAILED` unless this run's `CancelToken` ordered it
   (`Transferrer._cancel_initiated` - the one revocation aws has no
-  counterpart for, kept `CANCELLED`), so the CLI streams aws's per-item lines
-  and the classic lane is untouched. Two residuals: a library caller on the
+  counterpart for, kept `CANCELLED`; "ordered" means the token's own
+  `CancelledError` forced the fold or its escalation issued the cancel, so a
+  fatal or interrupt folding the manager stays `FAILED` even with the token
+  already cancelled - design/opresult.md), so the CLI streams aws's per-item
+  lines and the classic lane is untouched. Two residuals: a library caller on the
   swallowed-interrupt window gets `BatchError`, not the `KeyboardInterrupt`
   ([`opresult.md`](./opresult.md)); and a submission-window Ctrl-C ends with
   the CLI's `cancelled: ctrl-c received` line where aws ends with an empty

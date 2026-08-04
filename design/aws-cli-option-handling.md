@@ -311,7 +311,7 @@ explicit decision a new normalization rule takes. All but the last are
 user-reachable and are therefore carried in
 [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well.
 
-The first three are the output pipeline's (`progress.py`; the rendering thread
+The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
 
 - **Bounded printer queue.** aws-cli feeds its printer thread through an
@@ -339,11 +339,14 @@ itself mirrors aws-cli's `ResultProcessor`):
   from the rendering thread; taken together with the repaint floor above, the
   cadence is this pipeline's rather than aws's.
 - **Deletions stay out of the meter's byte totals.** aws queues a
-  `sync --delete` deletion like a transfer, so its size joins the expected
-  bytes and its file joins the remaining count from the start. The library's
-  delete lane reports only terminals, so a deletion joins both totals at its
-  own completion: same final counts, but the meter's denominator grows as the
-  run proceeds instead of being known up front.
+  `sync --delete` deletion like a transfer, so an S3-side deletion's size
+  joins the expected bytes from the start — and only the expected: no bytes
+  are ever counted transferred for it, so aws's byte meter ends short of its
+  denominator (a local-side deletion queues with size 0 and moves neither).
+  The library's delete lane reports only terminals, so here a deletion joins
+  the file count at its own completion and its size joins neither byte
+  total: the byte meter reads done over expected for the real transfers
+  alone, and the two meters disagree mid-run and at the end.
 
 The rest sit outside the pipeline:
 
@@ -361,6 +364,18 @@ The rest sit outside the pipeline:
   the program identifying itself, but the shape of the line differs beyond a
   token rewrite, so it is recorded here rather than folded into the
   program-identity mapping.
+- **Ctrl-C's closing line.** `aws` produces its `cancelled: ctrl-c received`
+  closing line only from a cancelled classic transfer future; every other
+  interrupted shape closes with an empty `fatal error:` line (a rendering
+  accident), or with no closing line at all when the CRT manager swallows a
+  drain-time interrupt. This command keeps one uniform
+  `cancelled: ctrl-c received` ending wherever the interrupt reaches its
+  handler ([`crt.md`](./crt.md) section 6).
+- **The non-recursive directory-source failure line** keeps the up-front
+  `[Errno 21]` report (`./d`) where aws threads the trailing-separator form
+  through its engines — under CRT an untranslated `Unknown Error Code` —
+  because mirroring that rendering would cost the clear errno report
+  (decided 2026-08-01).
 - **The invalid-bucket-name report is truncated** to botocore's leading
   `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
   after it (`usage.py`; the tail is botocore-version-fragile). The exit code

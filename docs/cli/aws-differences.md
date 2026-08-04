@@ -24,10 +24,10 @@ is exactly what makes parsing fragile: the wording is aws's to change, and it
 does change from one `aws` release to the next. Eight of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
-engine, the line that closes a Ctrl-C caught mid-submission under the CRT
-engine, the failure line of a directory copied without `--recursive`, the
-one-line invalid-bucket-name report, the `--version` line, and two
-argument-parsing corners. The interactive prompt
+engine, the closing line of a Ctrl-C `aws` cannot attribute to a cancelled
+classic transfer, the failure line of a directory copied without
+`--recursive`, the one-line invalid-bucket-name report, the `--version` line,
+and two argument-parsing corners. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -106,17 +106,20 @@ are visible, or make no difference to the result.
   a Python `Exception ignored in:` block) where this command prints botocore's
   `Unable to locate credentials`. Uploads and downloads use the CRT engine on
   both tools.
-- **Ctrl-C's closing line when nothing is in flight.** Both tools exit 1 on a
-  Ctrl-C caught mid-run, and while transfers are actually in flight both close
-  with `cancelled: ctrl-c received`. When none are — the interrupt landed
-  before the first transfer was submitted, or during a `--dryrun`, or after the
-  last one finished, or under `preferred_transfer_client = crt` while
-  submission was still under way — `aws` closes instead with a `fatal error:`
-  line carrying no message: it only produces its Ctrl-C line from a cancelled
-  transfer, so with none to cancel its recorder renders the
+- **Ctrl-C's closing line.** Both tools exit 1 on a Ctrl-C caught mid-run,
+  and on the classic engine with transfers actually in flight both close
+  with `cancelled: ctrl-c received`. `aws` produces that line only from a
+  cancelled *classic* transfer future, so everywhere else it has one — the
+  interrupt landed before the first transfer was submitted, or during a
+  `--dryrun`, or after the last one finished, or mid-submission under
+  `preferred_transfer_client = crt` — `aws` closes instead with a
+  `fatal error:` line carrying no message: its recorder renders the
   `KeyboardInterrupt`, whose text is empty, as an error result padded with the
   blanks that erase the progress line. The empty line is a rendering accident,
-  so this command keeps its uniform Ctrl-C ending instead of copying it.
+  so this command keeps its uniform Ctrl-C ending instead of copying it. (An
+  interrupt landing in the CRT engine's transfer drain is a different shape
+  with no divergence at all: the CRT manager swallows it on both tools, which
+  print their per-item failure lines and no closing line.)
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory always fails — exit code 1 on both tools, the source
   left in place — and only the failed line's wording differs. `aws` threads
