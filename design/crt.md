@@ -250,8 +250,15 @@ keys).
   5 MiB from doing the same in the other direction (a 1 MiB chunksize leaves
   aws single-putting up to 5 MiB). With no explicit chunksize the stamped
   default equals aws-c-s3's default part size (the same effective cutoff), so
-  no pin is needed; the `[s3]` `multipart_threshold` key itself stays ignored
-  either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
+  no pin is needed. One nuance behind that equality: aws passes
+  `part_size=None` and lets aws-c-s3 resolve its *dynamic* default, whose
+  fallback constant is the same 8 MiB - measured 2026-08-04 (MinIO, explicit
+  `crt`, no chunksize): both tools single-put an exactly-8-MiB file and
+  multipart 9 MiB, so the cutoffs coincide here and aws-c-s3's comparison is
+  strictly-greater. A host whose dynamic default resolved differently would
+  part the two cutoffs; that residual is the bundled-vs-pip engine family
+  (charter exception 3), recorded rather than pinned. The `[s3]`
+  `multipart_threshold` key itself stays ignored either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
   attributes (queue size, in-memory chunk cap) are
   **not passed**. This is to
