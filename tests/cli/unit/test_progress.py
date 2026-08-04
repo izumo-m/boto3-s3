@@ -210,6 +210,45 @@ class TestCarriageReturnProtocol:
         assert line.startswith("upload: s3://b/a")
         assert len(line.rstrip("\n")) == len(long_statement)
 
+    def test_unknown_size_grows_the_expected_total_with_the_bytes(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no known total, aws grows the expected total with the bytes as
+        # they arrive (_update_ongoing_transfer_size_if_unknown), keeping the
+        # meter in byte form with done == expected. Unreachable from the CLI
+        # today (its only sizeless route is streaming, which paints nothing),
+        # but the library's on_progress contract allows bytes_total=None.
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, None))  # queued, size unknown
+            printer.on_progress(_progress("a", 10240, None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 10.0 KiB/10.0 KiB (10.0 KiB/s) with 1 file(s) remaining" in out
+
+    def test_size_known_mid_transfer_tops_up_the_expected_total(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws tops the expected total up by total - progressed once a size
+        # arrives mid-transfer, so the per-delta additions are not counted
+        # twice and the denominator lands on the true sum.
+        clock = iter([0.0, 1.0, 2.0, 4.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 8192))  # queued, known 8 KiB
+            printer.on_progress(_progress("b", 0, None))  # queued, size unknown
+            printer.on_progress(_progress("a", 8192, 8192))  # t=1.0
+            printer.on_progress(_progress("b", 2048, None))  # t=2.0: expected grows
+            printer.on_progress(_progress("b", 3072, 6144))  # t=4.0: total revealed
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="b", src="s3://b/b", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 8.0 KiB/8.0 KiB (8.0 KiB/s) with 2 file(s) remaining" in out
+        assert "Completed 10.0 KiB/10.0 KiB (5.0 KiB/s) with 2 file(s) remaining" in out
+        # 8192 + 6144 = 14336: the top-up lands the denominator on the sum.
+        assert "Completed 11.0 KiB/14.0 KiB (2.8 KiB/s) with 2 file(s) remaining" in out
+
     def test_speed_is_not_computed_from_a_zero_elapsed_clock(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -248,13 +248,30 @@ class TransferPrinter:
                 # does not deflate the displayed rate.
                 self._start = time.monotonic()
             is_new = progress.compare_key not in self._inflight
+            previous_done, previous_total = self._inflight.get(progress.compare_key, (0, None))
             if is_new:
                 self._expected_files += 1
-                if progress.bytes_total is not None:
+            delta = progress.bytes_done - previous_done
+            if progress.bytes_total is not None:
+                if is_new:
                     self._expected_bytes += progress.bytes_total
-            previous = self._inflight.get(progress.compare_key, (0, None))[0]
-            self._inflight[progress.compare_key] = (progress.bytes_done, progress.bytes_total)
-            self._done_bytes += progress.bytes_done - previous
+                elif previous_total is None:
+                    # The size became known mid-transfer: top the expected
+                    # total up by the part the unknown-size additions below
+                    # have not covered (aws's
+                    # _update_ongoing_transfer_size_if_unknown).
+                    self._expected_bytes += progress.bytes_total - previous_done
+            else:
+                # Size unknown: the denominator tracks the bytes as they
+                # arrive - aws's rule, so the meter stays in byte form and
+                # never shows done ahead of expected.
+                self._expected_bytes += delta
+            # A known total sticks even if a later notification omits it:
+            # reverting to unknown would resume the per-delta additions on an
+            # expected total already topped up to the full size.
+            total = progress.bytes_total if progress.bytes_total is not None else previous_total
+            self._inflight[progress.compare_key] = (progress.bytes_done, total)
+            self._done_bytes += delta
             if not self._show_progress:
                 return
             if is_new and progress.bytes_done == 0:
