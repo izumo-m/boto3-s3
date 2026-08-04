@@ -1176,6 +1176,23 @@ class Transferrer:
     def _submit_copy(self, item: TransferItem) -> Any:
         """Map one S3 copy, including copy-props and optional source deletion."""
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
+        if (
+            extra_args.get("MetadataDirective") == "COPY"
+            and item.size is not None
+            and item.size >= self._multipart_threshold
+        ):
+            # A multipart-bound explicit COPY flips to REPLACE in the request
+            # parameters only. Every supported s3transfer blocklists
+            # MetadataDirective from CreateMultipartUpload, so no wire request
+            # changes; the flip is what keeps upstream 0.19's
+            # PRESERVED_METADATA_FIELDS strip from dropping the caller's own
+            # properties (ContentType and friends) where aws-cli's fork -
+            # tableless - passes them through. The single-part CopyObject keeps
+            # the real COPY. The multipart prediction is upstream's own
+            # comparison (size >= threshold, like the annotation gate); a
+            # caller-less size (a custom scan) skips the flip and leaves the
+            # decision - and upstream's own preservation - to its probe.
+            extra_args["MetadataDirective"] = "REPLACE"
         subscribers = self._common_subscribers(item)
         source_client: Any = self._source_client
         if not self._options.get("metadata_directive"):
@@ -1362,7 +1379,6 @@ class Transferrer:
         # The copy tables are inert for CRT (it has no copy path) but keeping
         # one alignment site means the classic fallback never sees them unpatched.
         _allow_inline_mpu_tagging()
-        _allow_mpu_metadata_passthrough()
         _align_annotation_put_args()
         # The run's client is the route-selected one (an S3Storage may carry its
         # own), so the S3-level endpoint pin only applies to the client it built.
@@ -1392,7 +1408,6 @@ class Transferrer:
         """Build the classic s3transfer manager, honoring threaded execution config."""
         _allow_if_none_match()
         _allow_inline_mpu_tagging()
-        _allow_mpu_metadata_passthrough()
         _align_annotation_put_args()
         config: Any = self._transfer_config
         if config is None:
@@ -2340,28 +2355,6 @@ def _allow_inline_mpu_tagging() -> None:
         pass
 
 
-def _allow_mpu_metadata_passthrough() -> None:
-    """Stop s3transfer from stripping explicit properties off a multipart copy.
-
-    aws-cli's bundled s3transfer hands CreateMultipartUpload everything the
-    caller put in ``extra_args`` minus its blacklist. Upstream 0.19 added
-    ``PRESERVED_METADATA_FIELDS``: unless ``MetadataDirective`` is REPLACE it
-    drops those seven properties and substitutes the ones it read from its own
-    HeadObject probe. The copy-props chain always sets REPLACE so it is
-    unaffected, but an explicit ``--metadata-directive COPY`` disables the whole
-    chain (section 4 of design/transfer.md), and there the seven properties the
-    caller asked for - ``--content-type`` and friends - are silently dropped
-    while aws sends them. The probe never runs here either (a copy always
-    provides size and etag up front), so upstream's substitute is always empty:
-    the table can only take properties away. Emptying it in place restores the
-    bundled fork's pass-through exactly, and is idempotent - a list that is
-    already empty, or an older s3transfer without the attribute, is left alone.
-    """
-    preserved = getattr(CopySubmissionTask, "PRESERVED_METADATA_FIELDS", None)
-    if preserved:
-        preserved.clear()
-
-
 def _align_annotation_put_args() -> None:
     """Drop ``ChecksumAlgorithm`` from s3transfer's PutObjectAnnotation args.
 
@@ -2374,6 +2367,14 @@ def _align_annotation_put_args() -> None:
     reason as `_allow_inline_mpu_tagging`: the table is process-shared.
     (``ExpectedBucketOwner``, the other extra, has no ``aws s3`` option behind
     it and never reaches the copy's ``extra_args``.)
+
+    Being process-shared also bounds what these patches may do: they stay
+    inert for a plain s3transfer caller in the same process unless it passes
+    the affected argument itself (here, ``ChecksumAlgorithm`` on an annotated
+    copy). A patch that would flip such a caller's *default* behavior is out -
+    which is why upstream's ``PRESERVED_METADATA_FIELDS`` is left untouched
+    and the explicit-COPY multipart case is handled per request instead
+    (`Transferrer._submit_copy`'s directive flip).
     """
     put_args: list[str] | None = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
     if put_args is None:

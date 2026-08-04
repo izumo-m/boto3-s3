@@ -263,8 +263,9 @@ chain:
   never touches `AnnotationDirective` on that path either).
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
-  guarded spots, and realigns three of upstream's tables at manager build -
-  the same idempotent-mutation pattern as the IfNoneMatch patch):
+  guarded spots, realigns two of upstream's tables at manager build - the
+  same idempotent-mutation pattern as the IfNoneMatch patch - and flips one
+  request parameter per copy):
   upstream 0.19 grew its own multipart copy-props handling -
   it strips the seven injected properties from CreateMultipartUpload unless
   `MetadataDirective` is REPLACE, and blacklists inline `Tagging` from the
@@ -278,15 +279,25 @@ chain:
   atomic, and failing at create (source kept) where tagging is denied. The
   `_mpu_inline_tagging_supported` probe guards the alignment: a future
   upstream that reshapes the table degrades to the post-copy PutObjectTagging
-  fallback instead of silently dropping the header. The other two realignments
-  cover paths the chain does not own:
-  **`PRESERVED_METADATA_FIELDS` is emptied** (`_allow_mpu_metadata_passthrough`)
-  so an explicit `--metadata-directive COPY` - which disables the whole chain,
-  and with it the REPLACE that would have satisfied upstream's guard - still
-  puts the caller's `--content-type` and friends on CreateMultipartUpload as
-  aws-cli's fork does. Upstream fills that table only from a HeadObject probe a
-  copy here never triggers (size and etag are always provided), so it can only
-  take properties away.
+  fallback instead of silently dropping the header. Two more spots cover paths
+  the chain does not own:
+  **a multipart-bound explicit COPY directive is flipped to REPLACE in the
+  request parameters** (`Transferrer._submit_copy`): an explicit
+  `--metadata-directive COPY` disables the whole chain, and with it the
+  REPLACE that would have satisfied upstream's guard, so upstream would strip
+  the caller's `--content-type` and friends from CreateMultipartUpload where
+  aws-cli's fork - tableless - passes them through. Every supported s3transfer
+  blocklists `MetadataDirective` from the create call, so the flip changes no
+  wire request, and the single-part CopyObject keeps the real COPY. Upstream's
+  `PRESERVED_METADATA_FIELDS` table itself is deliberately not emptied: the
+  table patches are process-shared, and emptying this one would flip a plain
+  s3transfer caller's *default* multipart-copy behavior in the same process,
+  where the two surviving patches stay inert until a caller passes the
+  affected argument. The multipart decision is predicted with upstream's own
+  comparison (`size >= multipart_threshold`, the annotation gate's pattern); a
+  copy whose size was never provided skips the flip - upstream then sizes it
+  with its HeadObject probe and applies its own preservation, a path aws-cli
+  cannot produce (it always provides the size).
   **`ChecksumAlgorithm` is removed from `PUT_OBJECT_ANNOTATION_ARGS`**
   (`_align_annotation_put_args`): `all`'s annotation writes ride upstream's
   native path, which would forward the copy's checksum algorithm onto every

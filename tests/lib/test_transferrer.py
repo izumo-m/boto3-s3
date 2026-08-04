@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
+from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
@@ -450,7 +451,9 @@ class TestCopy:
         # CreateMultipartUpload - it would otherwise strip the caller's own
         # --content-type / --metadata and substitute the (never fetched) head
         # response's. aws-cli's bundled s3transfer has no such table and passes
-        # them straight through; _allow_mpu_metadata_passthrough realigns it.
+        # them straight through; _submit_copy flips the multipart-bound
+        # directive to REPLACE (blocklisted from the create call, so no wire
+        # request changes) to match.
         calls, source_calls, _, _ = _run(
             TransferType.COPY,
             [self._item(size=9 * _MIB)],
@@ -476,6 +479,37 @@ class TestCopy:
         # The directive itself stays off the create call (both tables blacklist it).
         assert "MetadataDirective" not in create.params
         assert source_calls == []
+
+    def test_explicit_copy_directive_stays_on_a_single_part_copy(self) -> None:
+        # Below the threshold the directive is a real CopyObject parameter -
+        # S3 itself copies or replaces the metadata - so the multipart flip
+        # must not touch it: aws sends COPY verbatim.
+        calls, source_calls, _, _ = _run(
+            TransferType.COPY,
+            [self._item()],
+            [{}],
+            source_responses=[],
+            options=TransferOptions(metadata_directive="COPY", content_type="text/plain"),
+        )
+        assert ops(calls) == ["CopyObject"]
+        assert calls[0].params["MetadataDirective"] == "COPY"
+        assert calls[0].params["ContentType"] == "text/plain"
+        assert source_calls == []
+
+    def test_upstream_copy_tables_keep_their_defaults_for_third_parties(self) -> None:
+        # The alignment patches are process-shared, so they are bounded to
+        # changes that stay inert for a plain s3transfer caller in the same
+        # process: the annotation table only loses an argument aws never maps,
+        # and the preserved-metadata table - whose emptying would flip such a
+        # caller's default multipart-copy behavior - stays upstream's own (the
+        # explicit-COPY case is handled per request by _submit_copy instead).
+        _run(TransferType.COPY, [self._item()], [{}], source_responses=[])
+        preserved = getattr(CopySubmissionTask, "PRESERVED_METADATA_FIELDS", None)
+        if preserved is not None:  # absent on the s3transfer floor
+            assert "ContentType" in preserved
+        put_args = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
+        if put_args is not None:
+            assert "ChecksumAlgorithm" not in put_args
 
     def test_multipart_metadata_injected_from_cached_head(self) -> None:
         head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
