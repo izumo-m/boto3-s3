@@ -241,15 +241,17 @@ keys).
   (`multipart_chunksize` / `target_bandwidth` / `should_stream` /
   `disk_throughput` / `direct_io` = those that aws-cli `_create_crt_client`
   references), plus one derived pin: an explicit `multipart_chunksize` is also
-  passed as the ctor's `multipart_threshold`. aws sends no per-request
-  threshold on the CRT lane and aws-c-s3 falls back to the client part size,
-  so an explicit chunksize *is* aws's effective threshold - while the
-  installed s3transfer stamps the config's **resolved** threshold onto every
-  CRT put, which unpinned would stamp the 8 MiB default and multipart a file
-  aws single-puts. With no explicit chunksize the stamped default equals
-  aws-c-s3's default part size (the same effective cutoff), so no pin is
-  needed; the `[s3]` `multipart_threshold` key itself stays ignored either
-  way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
+  passed as the ctor's `multipart_threshold`, raised to S3's 5 MiB minimum part
+  size. aws sends no per-request threshold on the CRT lane and aws-c-s3 falls
+  back to `max(part size, 5 MiB)`, so that value *is* aws's effective threshold
+  - while the installed s3transfer stamps the config's **resolved** threshold
+  onto every CRT put, which unpinned would stamp the 8 MiB default and
+  multipart a file aws single-puts. The floor is what keeps a chunksize below
+  5 MiB from doing the same in the other direction (a 1 MiB chunksize leaves
+  aws single-putting up to 5 MiB). With no explicit chunksize the stamped
+  default equals aws-c-s3's default part size (the same effective cutoff), so
+  no pin is needed; the `[s3]` `multipart_threshold` key itself stays ignored
+  either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
   attributes (queue size, in-memory chunk cap) are
   **not passed**. This is to

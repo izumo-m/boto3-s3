@@ -53,6 +53,12 @@ _TRANSFER_CONFIG_CTOR_KEYS = {
 # aws-cli's TransferManagerFactory pins this on every classic manager.
 _MAX_IN_MEMORY_CHUNKS = 6
 
+# S3's minimum upload part size, which is also the floor aws-c-s3 applies when
+# no per-request multipart threshold arrives: it defaults the threshold to
+# ``max(part size, 5 MiB)``. aws-cli sends no threshold, so this is the cutoff
+# an explicit ``[s3] multipart_chunksize`` below 5 MiB still leaves aws running.
+_CRT_MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024
+
 # The ``[s3]`` keys the CRT engine actually consumes (aws-cli factory
 # ``_create_crt_client``: the part size, the throughput target and the file-I/O
 # options). Every other key is classic-only - aws-cli silently ignores it under
@@ -350,16 +356,19 @@ def build_transfer_config(
         kwargs[ctor_key] = runtime_config[rc_key]
     if crt and "multipart_chunksize" in scoped:
         # aws-cli sends no per-request threshold on the CRT lane, and aws-c-s3
-        # falls back to the client part size when none arrives - so an explicit
-        # ``multipart_chunksize`` IS aws's effective threshold (the ``[s3]``
-        # ``multipart_threshold`` key is ignored there, like aws). The
-        # installed s3transfer always stamps the config's *resolved* threshold
-        # onto every CRT put, so leaving it unset would stamp the 8 MiB boto3
-        # default and multipart a file aws single-puts; pinning it to the part
-        # size restores aws's request sequence. With no explicit chunksize the
-        # stamped 8 MiB default equals aws-c-s3's default part size - the same
-        # effective cutoff - so no pin is needed.
-        kwargs["multipart_threshold"] = runtime_config["multipart_chunksize"]
+        # falls back to ``max(part size, 5 MiB)`` when none arrives - so an
+        # explicit ``multipart_chunksize`` under that floor still leaves aws
+        # single-putting up to 5 MiB (the ``[s3]`` ``multipart_threshold`` key
+        # is ignored there, like aws). The installed s3transfer always stamps
+        # the config's *resolved* threshold onto every CRT put, so leaving it
+        # unset would stamp the 8 MiB boto3 default and multipart a file aws
+        # single-puts; pinning it to aws-c-s3's own fallback restores aws's
+        # request sequence. With no explicit chunksize the stamped 8 MiB
+        # default equals aws-c-s3's default part size - the same effective
+        # cutoff - so no pin is needed.
+        kwargs["multipart_threshold"] = max(
+            runtime_config["multipart_chunksize"], _CRT_MIN_UPLOAD_PART_SIZE
+        )
     config = TransferConfig(**kwargs)
     if not crt:
         # Classic-only tuning aws-cli applies solely to its classic

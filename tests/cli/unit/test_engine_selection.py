@@ -233,6 +233,18 @@ class TestBuildTransferConfig:
         assert config.multipart_chunksize == 64 * _MIB
         crtsupport._validate_crt_transfer_config(config)
 
+    def test_crt_threshold_pin_never_drops_below_the_5_mib_part_floor(self) -> None:
+        # aws-c-s3's fallback is max(part size, 5 MiB), not the part size, so a
+        # chunksize under S3's minimum part size leaves aws single-putting up
+        # to 5 MiB. Pinning the raw chunksize would multipart a 3 MiB file aws
+        # sends as one PutObject; the part size itself still carries the
+        # configured value (aws passes it to the client verbatim).
+        scoped = {"multipart_chunksize": "1MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
+        assert config.multipart_threshold == 5 * _MIB
+        assert config.multipart_chunksize == _MIB
+        crtsupport._validate_crt_transfer_config(config)
+
     def test_crt_without_an_explicit_chunksize_leaves_the_threshold_unset(self) -> None:
         # No pin without an explicit chunksize: the stamped 8 MiB resolved
         # default equals aws-c-s3's default part size - the same effective
