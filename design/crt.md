@@ -378,7 +378,11 @@ postures above: the library keeps boto3's rule and the CLI opts out through
 `create_crt_transfer_manager(allow_lockless=...)`. The opt-in is scoped to an
 explicit `'crt'` preference - `auto` resolves classic under contention on aws
 too - and to the lock alone: every identity pin of the compatibility check is
-unchanged.
+unchanged. The scoping survives construction: a singleton built under the
+opt-in holds no lock, so a later lock-respecting request (an `auto`, or a
+default-posture explicit `'crt'`) re-attempts the acquisition and rides the
+singleton only once the lock is held - classic under live contention - rather
+than inheriting the opt-in through the process singleton.
 
 ## 5. Charter treatment
 

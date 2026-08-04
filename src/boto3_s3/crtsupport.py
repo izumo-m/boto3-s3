@@ -145,6 +145,8 @@ class _CrtS3Client:
         s3_config: Any,
     ) -> None:
         self.crt_client = crt_client
+        # None = built under the lockless opt-in; `_get_crt_s3_client`
+        # upgrades it in place once a lock-respecting request re-acquires.
         self.process_lock = process_lock
         self.region = region
         self.endpoint_url = endpoint_url
@@ -472,6 +474,20 @@ def _get_crt_s3_client(
             )
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
+        elif _crt_s3_client.process_lock is None and not (allow_lockless and _prefers_crt(config)):
+            # A singleton built under the lockless opt-in holds no lock, and
+            # the opt-in is scoped to explicit-'crt' requests (design/crt.md
+            # section 6) - a lock-respecting request keeps aws's own lock
+            # semantics by re-attempting the acquisition: s3transfer stores
+            # the lock process-globally, so a success upgrades this singleton
+            # for every later request, while live contention resolves this
+            # run classic instead of riding the opt-in through the singleton.
+            from s3transfer.crt import acquire_crt_s3_process_lock
+
+            lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
+            if lock is None:
+                return None
+            _crt_s3_client.process_lock = lock
     return _crt_s3_client
 
 

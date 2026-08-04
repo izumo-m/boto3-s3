@@ -365,6 +365,71 @@ class TestCreateCrtTransferManager:
         assert manager is None
         assert stubs.create_kwargs == []
 
+    def test_lockless_singleton_is_not_ridden_by_a_lock_respecting_request(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A singleton built under the explicit-'crt' opt-in holds no lock; a
+        # later 'auto' (or default-posture) request keeps aws's lock semantics
+        # - classic while another process holds it - instead of inheriting the
+        # opt-in through the process singleton (design/crt.md section 6).
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(),  # pyright: ignore[reportArgumentType]
+                TransferConfig(preferred_transfer_client="crt"),
+                allow_lockless=True,
+            )
+            is not None
+        )
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(),  # pyright: ignore[reportArgumentType]
+                TransferConfig(preferred_transfer_client="auto"),
+                allow_lockless=True,
+            )
+            is None
+        )
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1  # no second CRT client was built
+
+    def test_lockless_singleton_upgrades_once_the_lock_frees(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Once the contending process releases the lock, a lock-respecting
+        # request re-acquires it and the singleton serves every later request
+        # (aws's auto runs CRT whenever the lock is obtainable).
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(),  # pyright: ignore[reportArgumentType]
+                TransferConfig(preferred_transfer_client="crt"),
+                allow_lockless=True,
+            )
+            is not None
+        )
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: object())
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        # The lock is stamped onto the singleton: fresh contention no longer
+        # downgrades this process (it holds the lock now).
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1
+
+    def test_explicit_crt_lockless_keeps_riding_its_own_singleton(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
+        for _ in range(2):
+            assert (
+                crtsupport.create_crt_transfer_manager(
+                    FakeClient(),  # pyright: ignore[reportArgumentType]
+                    TransferConfig(preferred_transfer_client="crt"),
+                    allow_lockless=True,
+                )
+                is not None
+            )
+        assert len(stubs.create_kwargs) == 1
+
     def test_singleton_is_reused_for_a_compatible_client(self, stubs: CrtStubs) -> None:
         first = crtsupport.create_crt_transfer_manager(FakeClient(), None)  # pyright: ignore[reportArgumentType]
         second = crtsupport.create_crt_transfer_manager(FakeClient(), None)  # pyright: ignore[reportArgumentType]
