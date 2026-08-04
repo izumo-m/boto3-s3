@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `TransferConfig`'s download IO queue now defaults to the depth `aws s3` runs at, so passing a default-constructed config no longer shrinks it tenfold.
 - A CRT-engine run cut short — by Ctrl-C or by a fatal error elsewhere in the run — now counts the cancelled items as failures the way `aws s3` does (a Ctrl-C that previously returned as if the run had succeeded now raises `BatchError`); only a `CancelToken` cancel still reports them cancelled.
-- Added a third `aws s3` CRT posture to `S3(...)`: `crt_allow_lockless` lets an explicit `crt` preference build the CRT engine under cross-process lock contention the way `aws s3` does; the default keeps boto3's classic fallback.
+- Added a third `aws s3` CRT posture to `S3(...)`: `crt_allow_lockless` lets an explicit `crt` preference build the CRT engine under cross-process lock contention the way `aws s3` does; the default keeps boto3's classic fallback, and an `auto` run never inherits the opt-in through the process singleton.
+- Building a transfer engine no longer rewrites the multipart-copy defaults of plain s3transfer callers sharing the process.
 - More aws-cli parity in how the transfer engine is driven: a multipart copy under an explicit `metadata_directive="COPY"` keeps the properties you passed instead of silently dropping them, an annotation copy no longer sends a checksum header `aws s3` omits, a bad option is now reported ahead of an unusable source, and the case-conflict gate holds a key until its download has fully torn down.
 
 ## [0.9.0] - 2026-08-01
