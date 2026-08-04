@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Two CRT-engine corners now match aws: Ctrl-C or a fatal error during a CRT transfer prints aws's per-item cancellation lines and exits 1 instead of dropping them (a mid-transfer Ctrl-C previously exited 0 silently), and an explicit `preferred_transfer_client = crt` fails construction-time errors even when another process holds the CRT slot instead of silently running the classic engine.
+- A `multipart_chunksize` under 5 MB no longer multiparts uploads `aws` sends as a single request under the CRT engine.
+- Progress-line spacing and the displayed transfer speed now match aws where a transfer fails or a case-conflict advisory prints.
 
 ## [0.7.0] - 2026-08-01
 

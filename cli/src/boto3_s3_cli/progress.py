@@ -14,9 +14,11 @@ lines:
   ``warning: <body>`` - the bodies arrive aws-cli-worded from the library.
 - progress (stdout): ``Completed 1.2 MiB/9.0 MiB (3.4 MiB/s) with 1 file(s)
   remaining`` rewritten in place via aws-cli's carriage-return protocol:
-  each statement is left-justified to the previous statement's length (so a
-  shorter line blots the longer one out) and ends with ``\\r``; a result line
-  ends with ``\\n`` and resets the padding. aws applies no isatty gate and
+  each statement is left-justified to the longest one painted since the last
+  result line (so a shorter line blots the longer one out) and ends with
+  ``\\r``; a result line ends with ``\\n`` and resets the padding. The left
+  number carries a failed transfer's untransferred remainder, which the speed
+  deliberately does not. aws applies no isatty gate and
   neither does this printer - piped output carries the same ``\\r`` segments
   (the golden normalization strips them). aws's ``~total (calculating...)``
   markers for a still-running enumeration are not reproduced (the library
@@ -46,8 +48,9 @@ transfer instead (documented in design/aws-cli-option-handling.md section 6).
 
 Suppression matrix (rm's ``_DeletePrinter`` precedent): ``--quiet``
 builds no output at all - failures included, with one aws-matching
-exception: the case-conflict NOTICE advisories still print (aws writes
-them straight to stderr, bypassing its printers; design/cli.md) - while the
+exception: the case-conflict NOTICE advisories still print, and print raw -
+no meter padding, and the meter's width survives them (aws writes them
+straight to stderr, bypassing its printers; design/cli.md) - while the
 ``warned`` counter
 still feeds the exit code (rc 2; a failure's rc 1 comes from the library's
 ``BatchError``, so ``failed`` is observational only, kept exact all the
@@ -114,6 +117,7 @@ class _ProgressSnapshot:
     (so the painted numbers are exactly the state that passed the throttle)."""
 
     done_bytes: int
+    failed_bytes: int
     expected_bytes: int
     finished_files: int
     remaining: int
@@ -165,6 +169,11 @@ class TransferPrinter:
         self._skipped_files = 0
         self._expected_bytes = 0
         self._done_bytes = 0
+        # Kept apart from _done_bytes: aws adds a failed transfer's
+        # untransferred remainder to the displayed left-hand total but never to
+        # the speed's numerator (results.py keeps bytes_failed_to_transfer out
+        # of bytes_transferred, which alone divides the elapsed time).
+        self._failed_bytes = 0
         # key -> (bytes_done, bytes_total); bytes_total lets a FAILED result
         # backfill the untransferred remainder into the meter (aws parity).
         self._inflight: dict[str, tuple[int, int | None]] = {}
@@ -252,6 +261,7 @@ class TransferPrinter:
             self._last_progress_at = now
             snapshot = _ProgressSnapshot(
                 done_bytes=self._done_bytes,
+                failed_bytes=self._failed_bytes,
                 expected_bytes=self._expected_bytes,
                 finished_files=self._finished_files,
                 remaining=self._expected_files - self._finished_files - self._skipped_files,
@@ -288,10 +298,12 @@ class TransferPrinter:
                         # aws adds a failed file's untransferred remainder to the
                         # meter (results.py bytes_failed_to_transfer) so the byte
                         # progress still reaches the expected total; a cancelled
-                        # item closes its meter share the same way.
+                        # item closes its meter share the same way. Held in its
+                        # own counter because aws shows it but does not let it
+                        # inflate the transfer speed.
                         done_bytes, total_bytes = inflight
                         if total_bytes is not None:
-                            self._done_bytes += total_bytes - done_bytes
+                            self._failed_bytes += total_bytes - done_bytes
                 elif (
                     result.outcome is OpOutcome.SKIPPED
                     and self._inflight.pop(result.compare_key, None) is not None
@@ -358,7 +370,11 @@ class TransferPrinter:
     def _render_result(self, record: _ResultRecord) -> None:
         """Render one terminal result with aws-cli's stream and wording rules."""
         if record.outcome is OpOutcome.NOTICE:
-            self._write_line(sys.stderr, record.error)
+            # Written raw, not through _write_line: aws uni_prints the
+            # case-conflict advisories straight to stderr, so they neither get
+            # padded to the meter's width nor reset it (the next result line is
+            # still padded against the meter still on screen).
+            self._uni_write(sys.stderr, record.error + "\n")
             return
         if record.dest is None:
             # A one-endpoint record (sync's deletions): aws prints
@@ -380,9 +396,12 @@ class TransferPrinter:
         if snapshot.expected_bytes > 0:
             start = self._start if self._start is not None else snapshot.now
             elapsed = max(snapshot.now - start, 1e-9)
+            # Speed over transferred bytes only; the displayed left-hand total
+            # additionally carries the failed remainder (aws's split).
             speed = human_readable_size(snapshot.done_bytes / elapsed)
+            completed = human_readable_size(snapshot.done_bytes + snapshot.failed_bytes)
             statement = (
-                f"Completed {human_readable_size(snapshot.done_bytes)}/"
+                f"Completed {completed}/"
                 f"{human_readable_size(snapshot.expected_bytes)} ({speed}/s) "
                 f"with {snapshot.remaining} file(s) remaining"
             )
@@ -395,7 +414,11 @@ class TransferPrinter:
             self._uni_write(sys.stdout, statement + "\n")
         else:
             padded = statement.ljust(self._progress_length)
-            self._progress_length = len(statement)
+            # The *padded* width, as aws records it (len(statement) - 1 of a
+            # statement it has already padded and given its trailing \r). It
+            # only grows until a result line resets it, so a statement that
+            # shrinks keeps blotting out the longest one printed before it.
+            self._progress_length = len(padded)
             self._uni_write(sys.stdout, padded + "\r")
 
     def _write_line(self, stream: TextIO, text: str) -> None:
