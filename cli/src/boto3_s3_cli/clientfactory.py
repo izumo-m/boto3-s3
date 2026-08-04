@@ -543,6 +543,20 @@ def build_client(
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
+        # aws's first reader of the profile's raw `s3` section is a plain
+        # `scoped_config.get('s3', {}).get('use_dualstack_endpoint')` inside
+        # client creation (botocore's dualstack probe). A degenerate `s3 =`
+        # line (no nested keys) rides botocore's section provider as the
+        # string "" - the provider's truthy guard discards every other
+        # non-dict - and this client passes Config(s3=...) (the regional pin
+        # above), so botocore's merge (`s3_configuration.copy()`) would
+        # otherwise touch that string first and report `.copy` where aws
+        # reports `.get`. Performing aws's read up front keeps the report
+        # byte-identical - a real AttributeError from the same operation, rc
+        # 255 on both tools - and is a no-op read on a well-formed section.
+        # It sits before the retry-defaults read: aws reports the broken
+        # section ahead of a broken retry_mode (measured, the combined case).
+        botocore_session.get_scoped_config().get("s3", {}).get("use_dualstack_endpoint")
         overrides["retries"] = _retry_defaults(botocore_session)
         config = Config(**overrides)
         return session.client(

@@ -724,6 +724,40 @@ def _botocore_default_bundle() -> Any:
     return get_cert_path(True)
 
 
+class TestMalformedS3Section:
+    """A profile `s3` value that is not a section reaches aws's exact report.
+
+    `s3 =` with no nested keys survives botocore's section provider as the
+    string "" (the provider's truthy guard discards every other non-dict);
+    a truthy scalar like `s3 = foo` is discarded there but still sits in the
+    raw scoped config both tools read. Either way the first touch must be
+    aws's raw `.get` (build_client's pre-read), not the Config(s3=...)
+    merge's `.copy`, so the crash line matches aws byte-for-byte (rc 255).
+    """
+
+    def _write_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> None:
+        config_file = tmp_path / "config"
+        config_file.write_text(content)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+
+    def test_empty_s3_section_fails_with_aws_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_config(tmp_path, monkeypatch, "[default]\ns3 =\n")
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
+    def test_truthy_junk_s3_section_keeps_the_same_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both tools already crashed at a `.get` for this shape (the provider
+        # discards the value, the raw read still returns the string); the
+        # pre-read only moves the same failure earlier.
+        self._write_config(tmp_path, monkeypatch, "[default]\ns3 = foo\n")
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
+
 class TestVerifyResolution:
     """The TLS trust source, resolved explicitly for every CLI-built client.
 
