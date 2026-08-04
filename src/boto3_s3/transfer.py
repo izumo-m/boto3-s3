@@ -1073,6 +1073,11 @@ class Transferrer:
 
     def _submit_upload(self, item: TransferItem) -> Any | None:
         """Map one upload and attach close, move-delete, completion, and tracking hooks."""
+        # Mapped first, like aws-cli's _do_submit: the mapper is what rejects a
+        # malformed --grants, and aws raises that before it looks at the source
+        # at all, so a directory source paired with a bad option must still fail
+        # on the option.
+        extra_args = requestparams.map_put_object_params(self._options, self._operation)
         # A directory source is handed through to fail like aws-cli ([Errno 21]
         # Is a directory, rc 1; aws words the failed line differently, its CRT
         # lane's untranslated "Unknown Error Code" included - a recorded
@@ -1085,7 +1090,6 @@ class Transferrer:
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
             )
             return None
-        extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
             if not name and item.src_info is not None:
@@ -1125,8 +1129,6 @@ class Transferrer:
             subscribers.append(_DirectoryCreator())
         if item.dest_fileobj is not None:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
-        if item.case_conflict_cleanup is not None:
-            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         # Before the mv source delete, like aws-cli registering
         # ProvideLastModifiedTimeSubscriber ahead of DeleteSourceObjectSubscriber:
         # a failed delete then still leaves the downloaded file carrying the
@@ -1144,6 +1146,13 @@ class Transferrer:
             ):
                 subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
+        if item.case_conflict_cleanup is not None:
+            # After the source delete, aws-cli's slot for
+            # CaseConflictCleanupSubscriber: on_done subscribers run in
+            # registration order, so releasing the key earlier would shrink the
+            # window in which a same-name-different-case twin still counts as
+            # in flight - by an os.utime on cp, by a whole DeleteObject on mv.
+            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         subscribers.append(self._completion(item))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
@@ -1350,7 +1359,11 @@ class Transferrer:
         if not crtsupport.selects_crt(self._transfer_config):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
-        _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
+        # The copy tables are inert for CRT (it has no copy path) but keeping
+        # one alignment site means the classic fallback never sees them unpatched.
+        _allow_inline_mpu_tagging()
+        _allow_mpu_metadata_passthrough()
+        _align_annotation_put_args()
         # The run's client is the route-selected one (an S3Storage may carry its
         # own), so the S3-level endpoint pin only applies to the client it built.
         endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
@@ -1379,6 +1392,8 @@ class Transferrer:
         """Build the classic s3transfer manager, honoring threaded execution config."""
         _allow_if_none_match()
         _allow_inline_mpu_tagging()
+        _allow_mpu_metadata_passthrough()
+        _align_annotation_put_args()
         config: Any = self._transfer_config
         if config is None:
             # The library's own defaults, not s3transfer's bare ones: an omitted
@@ -2321,6 +2336,50 @@ def _allow_inline_mpu_tagging() -> None:
     """
     try:
         CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST.remove("Tagging")
+    except ValueError:
+        pass
+
+
+def _allow_mpu_metadata_passthrough() -> None:
+    """Stop s3transfer from stripping explicit properties off a multipart copy.
+
+    aws-cli's bundled s3transfer hands CreateMultipartUpload everything the
+    caller put in ``extra_args`` minus its blacklist. Upstream 0.19 added
+    ``PRESERVED_METADATA_FIELDS``: unless ``MetadataDirective`` is REPLACE it
+    drops those seven properties and substitutes the ones it read from its own
+    HeadObject probe. The copy-props chain always sets REPLACE so it is
+    unaffected, but an explicit ``--metadata-directive COPY`` disables the whole
+    chain (section 4 of design/transfer.md), and there the seven properties the
+    caller asked for - ``--content-type`` and friends - are silently dropped
+    while aws sends them. The probe never runs here either (a copy always
+    provides size and etag up front), so upstream's substitute is always empty:
+    the table can only take properties away. Emptying it in place restores the
+    bundled fork's pass-through exactly, and is idempotent - a list that is
+    already empty, or an older s3transfer without the attribute, is left alone.
+    """
+    preserved = getattr(CopySubmissionTask, "PRESERVED_METADATA_FIELDS", None)
+    if preserved:
+        preserved.clear()
+
+
+def _align_annotation_put_args() -> None:
+    """Drop ``ChecksumAlgorithm`` from s3transfer's PutObjectAnnotation args.
+
+    ``copy_props=ALL`` rides upstream's native annotation write path (section 4
+    of design/transfer.md), which forwards ``PUT_OBJECT_ANNOTATION_ARGS`` from
+    the copy's ``extra_args``. aws-cli writes annotations from its own
+    subscriber and maps only ``RequestPayer`` there, so a run that also passes
+    ``--checksum-algorithm`` would put an extra checksum header on every
+    PutObjectAnnotation that aws does not send. Removed EAFP-style for the same
+    reason as `_allow_inline_mpu_tagging`: the table is process-shared.
+    (``ExpectedBucketOwner``, the other extra, has no ``aws s3`` option behind
+    it and never reaches the copy's ``extra_args``.)
+    """
+    put_args: list[str] | None = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
+    if put_args is None:
+        return
+    try:
+        put_args.remove("ChecksumAlgorithm")
     except ValueError:
         pass
 

@@ -155,10 +155,14 @@ add nothing the `getattr` protocol uses.
 
 Items 1-2 are value/callback-conditional (they register only when they have
 something to provide or forward), items 3-7 route-conditional (download / copy
-/ mv only), and the open route / case-conflict gate add unnumbered subscribers
-of their own (`_CloseFileobj`, `_CaseConflictCleanup`) in the same order; the
-always-present pair is 8-9 (the numbering is the slot order, not a single
-chain that every transfer runs end to end).
+/ mv only), and two gates add unnumbered subscribers of their own at aws-cli's
+slots: the open route's `_CloseFileobj` right after item 3 (before the mv
+deletion pair, so a failed flush keeps the source) and the case-conflict gate's
+`_CaseConflictCleanup` right after item 7 (aws-cli registers
+`CaseConflictCleanupSubscriber` after the DeleteSource family, so a key stays
+"in flight" for the whole of its download's teardown). The always-present pair
+is 8-9 (the numbering is the slot order, not a single chain that every transfer
+runs end to end).
 
 `on_result` / `on_progress` fire **from s3transfer's worker threads** for
 submitted transfers (with `use_threads=False`, on the calling thread), and the
@@ -259,20 +263,35 @@ chain:
   never touches `AnnotationDirective` on that path either).
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
-  guarded spots): upstream 0.19 grew its own multipart copy-props handling -
+  guarded spots, and realigns three of upstream's tables at manager build -
+  the same idempotent-mutation pattern as the IfNoneMatch patch):
+  upstream 0.19 grew its own multipart copy-props handling -
   it strips the seven injected properties from CreateMultipartUpload unless
   `MetadataDirective` is REPLACE, and blacklists inline `Tagging` from the
   create call. The port therefore always sets `MetadataDirective=REPLACE` when
   injecting (every supported s3transfer drops the directive from the create
   call via the same blacklist, so the wire request is unchanged on older
   versions), and **removes `Tagging` from upstream's create blacklist at
-  manager build** (`_allow_inline_mpu_tagging`, the same idempotent-mutation
-  pattern as the IfNoneMatch patch): aws-cli's bundled table never blacklisted
+  manager build** (`_allow_inline_mpu_tagging`): aws-cli's bundled table never
+  blacklisted
   the plain header, so the small-tag set rides CreateMultipartUpload there -
   atomic, and failing at create (source kept) where tagging is denied. The
   `_mpu_inline_tagging_supported` probe guards the alignment: a future
   upstream that reshapes the table degrades to the post-copy PutObjectTagging
-  fallback instead of silently dropping the header. s3transfer 0.19's own
+  fallback instead of silently dropping the header. The other two realignments
+  cover paths the chain does not own:
+  **`PRESERVED_METADATA_FIELDS` is emptied** (`_allow_mpu_metadata_passthrough`)
+  so an explicit `--metadata-directive COPY` - which disables the whole chain,
+  and with it the REPLACE that would have satisfied upstream's guard - still
+  puts the caller's `--content-type` and friends on CreateMultipartUpload as
+  aws-cli's fork does. Upstream fills that table only from a HeadObject probe a
+  copy here never triggers (size and etag are always provided), so it can only
+  take properties away.
+  **`ChecksumAlgorithm` is removed from `PUT_OBJECT_ANNOTATION_ARGS`**
+  (`_align_annotation_put_args`): `all`'s annotation writes ride upstream's
+  native path, which would forward the copy's checksum algorithm onto every
+  PutObjectAnnotation, while aws-cli maps only `RequestPayer` there.
+  s3transfer 0.19's own
   `TaggingDirective`-driven tag copy is deliberately not used: it has no
   destination rollback when the tagging write fails. Its post-complete
   tag/annotation hooks stay inert here (outside `all`'s deliberate

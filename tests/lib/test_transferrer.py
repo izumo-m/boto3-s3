@@ -444,6 +444,39 @@ class TestCopy:
         ]
         assert source_calls == []
 
+    def test_explicit_metadata_directive_copy_keeps_the_caller_properties(self) -> None:
+        # With the chain disabled nothing sets MetadataDirective=REPLACE, which
+        # is upstream 0.19's condition for keeping the seven preserved fields on
+        # CreateMultipartUpload - it would otherwise strip the caller's own
+        # --content-type / --metadata and substitute the (never fetched) head
+        # response's. aws-cli's bundled s3transfer has no such table and passes
+        # them straight through; _allow_mpu_metadata_passthrough realigns it.
+        calls, source_calls, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(
+                metadata_directive="COPY",
+                content_type="text/plain",
+                cache_control="max-age=1",
+                metadata={"k": "v"},
+            ),
+        )
+        create = calls[0]
+        assert create.operation == "CreateMultipartUpload"
+        assert create.params["ContentType"] == "text/plain"
+        assert create.params["CacheControl"] == "max-age=1"
+        assert create.params["Metadata"] == {"k": "v"}
+        # The directive itself stays off the create call (both tables blacklist it).
+        assert "MetadataDirective" not in create.params
+        assert source_calls == []
+
     def test_multipart_metadata_injected_from_cached_head(self) -> None:
         head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
         calls, source_calls, _, _ = _run(
@@ -1317,6 +1350,26 @@ class TestMove:
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
+
+    def test_case_conflict_key_is_released_after_the_source_delete(self, tmp_path: Path) -> None:
+        # aws-cli registers CaseConflictCleanupSubscriber after the DeleteSource
+        # family, so an admitted key counts as in flight for the whole of its
+        # download's teardown - the mtime stamp and, on mv, the DeleteObject.
+        # Releasing it earlier would let a name differing only by case slip past
+        # the gate while the first download is still tearing down.
+        # Driven without _run so the recorded call list is readable *while* the
+        # cleanup fires, which is what pins the ordering.
+        client, calls = make_recording_client([self._get_object_response(), {}])
+        seen_at_release: list[list[str]] = []
+        item = self._download_item(tmp_path)
+        item.case_conflict_cleanup = lambda: seen_at_release.append(ops(calls))
+        transferrer = Transferrer(TransferType.DOWNLOAD, client, is_move=True)
+        with transferrer:
+            transferrer.submit(item)
+        assert ops(calls) == ["GetObject", "DeleteObject"]
+        # The source delete had already been issued when the key was released.
+        assert seen_at_release == [["GetObject", "DeleteObject"]]
+        assert transferrer.succeeded == 1
 
     def test_copy_move_deletes_on_the_source_client(self) -> None:
         item = TransferItem(

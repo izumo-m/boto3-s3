@@ -274,6 +274,26 @@ class TestUploadRoute:
         assert "Is a directory" in str(results[0].error)
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
 
+    def test_directory_source_still_fails_on_a_bad_option_first(self, tmp_path: Path) -> None:
+        # aws-cli's _do_submit maps the request params before it ever looks at
+        # the source, so a malformed --grants beats the directory: the run dies
+        # on the option (a fatal, not a per-item failure) exactly as aws does.
+        src = tmp_path / "adir"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                grants=["bogus"],
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert str(excinfo.value) == "grants should be of the form permission=principal"
+        assert calls == []
+        assert results == []
+
     def test_local_to_local_is_rejected(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
