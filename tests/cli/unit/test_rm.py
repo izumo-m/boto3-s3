@@ -186,6 +186,10 @@ class TestExitCodeShape:
         # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
         # received` line (measured mid-rm on the pinned 2.36.1), never the
         # dispatcher backstop's 130, which stays for the pre-pipeline spans.
+        # The rc is the match; the line is uniform here by design, where aws
+        # words it `fatal error: ` when - as in this interrupt on the first
+        # listing page - it has nothing in flight to cancel
+        # (docs/cli/aws-differences.md).
         class _InterruptPaginatorClient:
             def get_paginator(self, _name: Any) -> Any:
                 class _Paginator:

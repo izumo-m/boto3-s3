@@ -32,7 +32,9 @@ failures were already printed as `... failed:` lines while the run proceeded;
 a failure that stops the whole run prints one `fatal error:` line.
 
 Ctrl-C during a running transfer or delete is also 1, with a
-`cancelled: ctrl-c received` line.
+`cancelled: ctrl-c received` line — the one line `aws` words differently when
+no transfer is in flight to cancel
+([`aws-differences.md`](./aws-differences.md) section 2).
 
 `ls` uses 1 for its own "nothing to show" case: a key or prefix that matched no
 entries.

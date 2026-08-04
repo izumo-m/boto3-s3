@@ -619,7 +619,10 @@ class TestStreaming:
         # A Ctrl-C inside the pipeline span is aws's cancelled run - rc 1
         # with one `cancelled: ctrl-c received` line (measured mid-sync on
         # the pinned 2.36.1), never the dispatcher backstop's 130, which
-        # stays for the pre-pipeline spans (test_exit_codes).
+        # stays for the pre-pipeline spans (test_exit_codes). The rc is the
+        # match; the line is uniform here by design, where aws words it
+        # `fatal error: ` when - as in this pre-first-submit interrupt - it has
+        # no cancelled transfer to report (docs/cli/aws-differences.md).
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def interrupt(*_args: object, **_kwargs: object) -> object:

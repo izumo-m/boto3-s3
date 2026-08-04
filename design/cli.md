@@ -880,7 +880,11 @@ lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
 `cancelled: ctrl-c received` line + 1 (aws's result machinery swallows a
 mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.1;
 rm's own pipeline catch converts identically, and the dispatcher's 130
-backstop keeps the pre-pipeline spans), any other library exception ->
+backstop keeps the pre-pipeline spans). aws only reaches that line through a
+*cancelled transfer future*, so where none is in flight - before the first
+submit, during a dryrun, after the last completion - it closes with an empty
+`fatal error:` instead; the uniform line here is the recorded deviation
+(aws-differences.md section 2), not a claim of a match. Any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
 `--expected-size`, an absent stdin, and case-conflict `error` are also here;

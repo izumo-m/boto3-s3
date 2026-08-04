@@ -74,11 +74,16 @@ are visible, or make no difference to the result.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
-- **Progress display.** `aws` repaints on every transferred chunk; here
-  repaints are floored at 0.1 s, or `--progress-frequency` when that is larger.
-  The numbers painted are exact either way — only the cadence differs. `aws`
-  also paints a `~total (calculating...)` marker while it is still enumerating
-  what to transfer; here the total is painted plain.
+- **Progress display.** `aws` repaints on every transferred chunk and again
+  after every line it prints; here repaints are floored at 0.1 s (or
+  `--progress-frequency` when that is larger) and come only from byte
+  progress, so a run that never moves a byte — every transfer failing early,
+  or a `sync --delete` that only deletes — shows a meter on `aws` and none
+  here. `aws` also paints a `~total (calculating...)` marker while it is still
+  enumerating what to transfer; here the total is painted plain. And `aws`
+  counts a `sync --delete` deletion into the meter's totals when it queues it,
+  where here it joins them as it completes. The numbers painted are exact
+  either way, and the final counts agree.
 - **Help pages and `--debug` traces.** Help pages are laid out by this
   command's own parser, not by aws's documentation renderer; the options, their
   values and their meanings are the same, the typography is not. `--debug`
@@ -101,16 +106,17 @@ are visible, or make no difference to the result.
   a Python `Exception ignored in:` block) where this command prints botocore's
   `Unable to locate credentials`. Uploads and downloads use the CRT engine on
   both tools.
-- **Ctrl-C's closing line under the CRT engine.** When Ctrl-C lands while
-  transfers are still being submitted under `preferred_transfer_client = crt`,
-  both tools print the same `upload failed: ... AWS_ERROR_S3_CANCELED: Request
-  successfully cancelled` line per in-flight transfer and exit 1, but the
-  closing line differs: this command ends with its usual `cancelled: ctrl-c
-  received`, while `aws` ends with a `fatal error:` line carrying no message —
-  its result recorder renders the `KeyboardInterrupt`, whose text is empty, as
-  an error result, padded with the blanks that erase the progress line. The
-  empty line is a rendering accident, so this command keeps its uniform Ctrl-C
-  ending instead of copying it.
+- **Ctrl-C's closing line when nothing is in flight.** Both tools exit 1 on a
+  Ctrl-C caught mid-run, and while transfers are actually in flight both close
+  with `cancelled: ctrl-c received`. When none are — the interrupt landed
+  before the first transfer was submitted, or during a `--dryrun`, or after the
+  last one finished, or under `preferred_transfer_client = crt` while
+  submission was still under way — `aws` closes instead with a `fatal error:`
+  line carrying no message: it only produces its Ctrl-C line from a cancelled
+  transfer, so with none to cancel its recorder renders the
+  `KeyboardInterrupt`, whose text is empty, as an error result padded with the
+  blanks that erase the progress line. The empty line is a rendering accident,
+  so this command keeps its uniform Ctrl-C ending instead of copying it.
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory always fails — exit code 1 on both tools, the source
   left in place — and only the failed line's wording differs. `aws` threads

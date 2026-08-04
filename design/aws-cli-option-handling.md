@@ -330,6 +330,20 @@ itself mirrors aws-cli's `ResultProcessor`):
   progress line while its enumeration is still running. The library has no
   enumeration-finished signal to drive it, so the total is painted plain
   ([`cli.md`](./cli.md) section 5.7).
+- **Progress is painted only from byte progress.** aws repaints the meter
+  after every result line it prints as well (`_redisplay_progress`), so a run
+  that never reports a byte - every transfer failing before its first chunk,
+  or a `sync --delete` that only deletes - still shows a meter there and none
+  here. The printer thread renders snapshots taken on the worker side at
+  progress time, so painting on a result would mean reading the live counters
+  from the rendering thread; taken together with the repaint floor above, the
+  cadence is this pipeline's rather than aws's.
+- **Deletions stay out of the meter's byte totals.** aws queues a
+  `sync --delete` deletion like a transfer, so its size joins the expected
+  bytes and its file joins the remaining count from the start. The library's
+  delete lane reports only terminals, so a deletion joins both totals at its
+  own completion: same final counts, but the meter's denominator grows as the
+  run proceeds instead of being known up front.
 
 The rest sit outside the pipeline:
 
