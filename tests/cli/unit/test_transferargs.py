@@ -13,11 +13,13 @@ flag before transfer). Plus ``identify_type`` (aws-cli's
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
 
 from boto3_s3.exceptions import InvalidValueError, ValidationError
+from boto3_s3.types import CaseConflictMode
 from boto3_s3_cli.commands import transferargs
 from tests.utils.fakemodel import model_only_client
 
@@ -293,3 +295,24 @@ class TestMetadataParamfile:
             transferargs.resolve_text_paramfile(f"file://{p}", "--content-type", operation="cp")
             == "caf\xe9"
         )
+
+
+class TestExpressCaseConflictWarning:
+    def test_warning_rides_uni_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The standing S3 Express warning has no trailing newline (aws's
+        # measured byte shape), so it must ride the uni_print port - write plus
+        # flush. A raw stderr.write sits in a block-buffered redirect until
+        # process exit, inverting aws's output order.
+        writes: list[tuple[object, str]] = []
+        monkeypatch.setattr(
+            transferargs, "uni_write", lambda stream, text: writes.append((stream, text))
+        )
+        args = argparse.Namespace(case_conflict="warn", recursive=True)
+        mode = transferargs.resolve_case_conflict(
+            args, "s3://b--use1-az4--x-s3/p/", "s3local", operation="cp"
+        )
+        assert mode is CaseConflictMode.IGNORE
+        [(stream, text)] = writes
+        assert stream is sys.stderr
+        assert text.startswith("warning: Recursive copies/moves")
+        assert not text.endswith("\n")

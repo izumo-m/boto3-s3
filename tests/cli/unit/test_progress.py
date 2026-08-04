@@ -210,6 +210,47 @@ class TestCarriageReturnProtocol:
         assert line.startswith("upload: s3://b/a")
         assert len(line.rstrip("\n")) == len(long_statement)
 
+    def test_speed_is_not_computed_from_a_zero_elapsed_clock(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws recomputes the rate only on a strictly-later timestamp
+        # (ResultRecorder guards `result.timestamp > self.start_time`), so a
+        # coarse clock's first paint shows the initial 0 Bytes/s. Dividing by
+        # a clamped epsilon instead would paint a nonsense multi-GiB/s figure
+        # (reachable on Windows' ~15.6 ms monotonic granularity).
+        clock = iter([0.0, 0.0, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 4096))  # queued: anchors 0.0
+            printer.on_progress(_progress("a", 1024, 4096))  # t=0.0: same reading
+            printer.on_progress(_progress("a", 2048, 4096))  # t=2.0: 1.0 KiB/s
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        first, second, _ = capsys.readouterr().out.split("\r")
+        assert "(0 Bytes/s)" in first
+        assert "(1.0 KiB/s)" in second
+
+    def test_dryrun_lines_keep_the_meter_width(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's _print_dry_run pads to the meter's width but does not reset it
+        # (only success / failure / warning printers do), so every dryrun line
+        # in a row blots the meter out. Latent today - a dryrun run paints no
+        # meter - but pinned at the printer so the widths cannot drift.
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 4096))  # queued
+            printer.on_progress(_progress("a", 2048, 4096))
+            printer.on_result(_result(OpOutcome.DRYRUN, key="b", src="s3://b/b", dest=None))
+            printer.on_result(_result(OpOutcome.DRYRUN, key="c", src="s3://b/c", dest=None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        meter, rest = capsys.readouterr().out.split("\r", 1)
+        first, second, result_line = rest.split("\n")[:3]
+        assert first.startswith("(dryrun)") and len(first) == len(meter)
+        assert second.startswith("(dryrun)") and len(second) == len(meter)
+        # The result line still blots the meter width out (and resets it).
+        assert len(result_line) == len(meter)
+
     def test_notice_prints_raw_and_leaves_the_meter_width(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

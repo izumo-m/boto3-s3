@@ -164,6 +164,12 @@ class TransferPrinter:
         # progress bookkeeping (worker side, under the lock)
         self._start: float | None = None
         self._last_progress_at = float("-inf")
+        # The painted rate, recomputed only from a strictly-later clock
+        # reading (aws's ResultRecorder guards `timestamp > start_time`), so
+        # a snapshot sharing the start's reading - a coarse clock's first
+        # paint - shows the previous rate (0 at first) instead of a division
+        # by epsilon.
+        self._speed = 0.0
         self._expected_files = 0
         self._finished_files = 0
         self._skipped_files = 0
@@ -385,7 +391,11 @@ class TransferPrinter:
         if record.outcome is OpOutcome.SUCCEEDED:
             self._write_line(sys.stdout, f"{record.verb}: {location}")
         elif record.outcome is OpOutcome.DRYRUN:
-            self._write_line(sys.stdout, f"(dryrun) {record.verb}: {location}")
+            # aws's _print_dry_run pads to the meter's width without resetting
+            # it (only success / failure / warning printers reset), so every
+            # dryrun line in a row blots the meter out. Latent today - a
+            # dryrun run paints no meter - but kept aligned at the printer.
+            self._write_line(sys.stdout, f"(dryrun) {record.verb}: {location}", reset=False)
         elif record.outcome is OpOutcome.FAILED:
             self._write_line(sys.stderr, f"{record.verb} failed: {location} {record.error}")
         elif record.outcome is OpOutcome.WARNED:
@@ -395,10 +405,12 @@ class TransferPrinter:
         """Render one byte-based or file-based progress snapshot."""
         if snapshot.expected_bytes > 0:
             start = self._start if self._start is not None else snapshot.now
-            elapsed = max(snapshot.now - start, 1e-9)
-            # Speed over transferred bytes only; the displayed left-hand total
-            # additionally carries the failed remainder (aws's split).
-            speed = human_readable_size(snapshot.done_bytes / elapsed)
+            if snapshot.now > start:
+                # Speed over transferred bytes only; the displayed left-hand
+                # total additionally carries the failed remainder (aws's
+                # split).
+                self._speed = snapshot.done_bytes / (snapshot.now - start)
+            speed = human_readable_size(self._speed)
             completed = human_readable_size(snapshot.done_bytes + snapshot.failed_bytes)
             statement = (
                 f"Completed {completed}/"
@@ -421,9 +433,10 @@ class TransferPrinter:
             self._progress_length = len(padded)
             self._uni_write(sys.stdout, padded + "\r")
 
-    def _write_line(self, stream: TextIO, text: str) -> None:
+    def _write_line(self, stream: TextIO, text: str, *, reset: bool = True) -> None:
         padded = text.ljust(self._progress_length)
-        self._progress_length = 0
+        if reset:
+            self._progress_length = 0
         self._uni_write(stream, padded + "\n")
 
     def _clear_residual_progress(self) -> None:

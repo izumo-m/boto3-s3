@@ -46,6 +46,7 @@ from boto3_s3_cli.commands.base import (
     expand_option_paramfile,
     parse_integer_option,
 )
+from boto3_s3_cli.output import uni_write
 from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
@@ -606,15 +607,19 @@ def resolve_case_conflict(
             operation=operation,
         )
     # aws emits this via ``uni_print`` with no trailing newline (measured: the
-    # message ends at ``...html.`` and the next stderr output concatenates).
-    sys.stderr.write(
+    # message ends at ``...html.`` and the next stderr output concatenates);
+    # uni_write is that port - same bytes plus the flush that keeps the
+    # newline-less warning from sitting in a block-buffered stderr (a
+    # redirected run) until process exit, behind output aws prints after it.
+    uni_write(
+        sys.stderr,
         "warning: Recursive copies/moves from an S3 Express directory "
         "bucket to a case-insensitive local filesystem may result in "
         "undefined behavior if there are S3 object key names that differ "
         "only by case. To disable this warning, set the `--case-conflict` "
         "parameter to `ignore`. For more information, see "
         "https://docs.aws.amazon.com/cli/latest/topic/"
-        "s3-case-insensitivity.html."
+        "s3-case-insensitivity.html.",
     )
     return CaseConflictMode.IGNORE
 
