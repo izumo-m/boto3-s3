@@ -39,6 +39,7 @@ jobs:
     # OIDC token request, build, publish - is skipped elsewhere.
     if: github.repository == 'izumo-m/boto3-s3'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # The environment name must match the one registered as the trusted
     # publisher on (Test)PyPI. Tag pushes always target the production index.
     environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.repository) || 'pypi' }}
@@ -138,7 +139,7 @@ jobs:
 
       - name: Verify source tree
         run: |
-          uv sync --all-packages --frozen
+          uv sync --all-packages --locked
           uv run ruff format --check
           uv run ruff check
           uv run basedpyright
