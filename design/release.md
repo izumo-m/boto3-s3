@@ -117,3 +117,27 @@ say) would surface there only by burning a version tag. Verify up front:
 Watch the run in the Actions tab. Before building, the release workflow syncs
 the locked workspace and reruns formatting, lint, type checking, and the default
 test suite; a version, dependency, or source-quality failure uploads nothing.
+
+## Dependabot pull requests
+
+GitHub checks `uv.lock` against its advisory database and, when a locked
+version gains a known vulnerability, opens a pull request bumping that one
+package. Such PRs always target `main`: GitHub raises security PRs against
+the default branch, which is also the branch the repository's alert state is
+evaluated on. Work happening on `develop` is no reason to reroute them —
+treat the PR like a hotfix:
+
+1. Confirm CI is green on the PR.
+2. Merge it into `main`; this is what flips the alert to fixed. Applying the
+   bump on `develop` instead leaves the alert open until the next release,
+   because alert state tracks `main` only.
+3. Immediately merge `main` back into `develop` so both branches stay on one
+   history (unlike release step 5 this is a true merge, since `develop` is
+   usually ahead).
+
+Two notes for perspective: `uv.lock` serves development and CI only — the
+published packages declare version ranges, so a lock-only advisory does not
+by itself affect users of the released artifacts. And keep the local uv at
+the version the workflows pin — uv generations format the lock slightly
+differently, so a regeneration from a mismatched uv rewrites unrelated lock
+lines alongside the actual bump.
