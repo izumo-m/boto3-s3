@@ -152,8 +152,20 @@ fileb://...` loads the bytes and then crashes indexing them inside aws's own
 shorthand parser (`'in <string>' requires string as left operand, not int`).
 `boto3-s3-cli` reproduces that crash verbatim: a missing file is still the
 paramfile's rc 252, but an *existing* one is aws's rc 255, not a clean usage
-error. (A `fileb://` value inside the `key@=...` shorthand form, by contrast,
-is rejected at parse like aws's schema validation - rc 252.)
+error.
+
+The `key@=...` shorthand form splits the same two outcomes differently, because
+the load happens one level down. aws wraps a paramfile failure into the
+`Error parsing parameter '<name>'` form only in the `load-cli-arg` handler it
+registers for *named* arguments; its shorthand parser calls the loader itself,
+so a reference it cannot load - missing, or binary through the text `file://` -
+skips that wrapping and reaches the general handler as **rc 255 with the bare
+`Unable to load paramfile ...` line**, naming no option. A reference that
+*does* load is then schema-checked like any map value, so a `fileb://` one is
+rejected for being bytes (rc 252, botocore's `Parameter validation failed:`
+wording rather than the parser's). `boto3-s3-cli` keeps that split by scoping
+its wrapper the same way (`paramfile.named_argument`, entered by the option and
+positional resolution and skipped by `shorthand.py`).
 
 A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
 expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally

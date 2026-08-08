@@ -16,7 +16,9 @@ corner cases the naive ``split(",")``/``partition("=")`` got wrong:
 
 Error wording is shaped on aws's parser message (``Error parsing parameter
 '<name>'``) closely enough for the stderr token contract; every parse failure
-maps to aws's usage rc (252) via ``ValidationError``.
+maps to aws's usage rc (252) via ``ValidationError``. A failure to *load* an
+``@=`` paramfile is not a parse failure: it leaves this module unwrapped and
+exits 255 (`paramfile.named_argument`).
 """
 
 from __future__ import annotations
@@ -67,13 +69,15 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     value (only reachable via the ``@=`` operator's ``fileb://`` load) is
     rejected here too: aws schema-validates the shorthand result at parse
     time - a map value must be a string - so ``a@=fileb://...`` is its
-    pre-pipeline ParamValidation (rc 252, measured), never a transfer.
+    pre-pipeline ParamValidation (rc 252, measured), never a transfer. A
+    paramfile the ``@=`` operator cannot *load*, by contrast, is not this
+    function's error at all - see `_Parser._keyval`.
     """
     text = value.strip()
     if text.startswith("{"):
         return _parse_json_map(value, name=name, operation=operation)
     try:
-        parsed = _Parser(value, name=name, operation=operation).parse()
+        parsed = _Parser(value, operation=operation).parse()
     except _ShorthandParseError as exc:
         raise ValidationError(
             f"Error parsing parameter '{name}': {exc}", operation=operation
@@ -81,9 +85,13 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     result: dict[str, str] = {}
     for key, val in parsed.items():
         if isinstance(val, bytes):
+            # botocore's schema report, not the parser's: aws validates the
+            # parsed map against the option's shape afterwards, so this one
+            # carries no "Error parsing parameter" prefix (measured).
             raise ValidationError(
-                f"Error parsing parameter '{name}': Invalid type for parameter {key}, "
-                f"value: {val!r}, valid types: <class 'str'>",
+                "Parameter validation failed:\n"
+                f"Invalid type for parameter {key}, value: {val!r}, "
+                "type: <class 'bytes'>, valid types: <class 'str'>",
                 operation=operation,
             )
         result[key] = val
@@ -121,10 +129,9 @@ class _Parser:
     order, so a caller can keep the user's pair order.
     """
 
-    def __init__(self, value: str, *, name: str, operation: str) -> None:
+    def __init__(self, value: str, *, operation: str) -> None:
         self._value = value
         self._index = 0
-        self._name = name
         self._operation = operation
 
     def parse(self) -> dict[str, str | bytes]:
@@ -165,7 +172,12 @@ class _Parser:
         self._expect("=", consume_whitespace=True)
         value = self._scalar_value()
         if resolve_paramfiles:
-            loaded = paramfile.get_paramfile(value, name=self._name, operation=self._operation)
+            # Outside `paramfile.named_argument` on purpose: aws's shorthand
+            # parser calls `get_paramfile` itself, so a load failure here is not
+            # the option's parse error but a bare `ResourceLoadingError` reaching
+            # its general handler - rc 255 without the ParamValidation envelope
+            # (measured: `--metadata k@=file:///no/x`).
+            loaded = paramfile.get_paramfile(value, operation=self._operation)
             if loaded is not None:
                 return key, loaded
         return key, value

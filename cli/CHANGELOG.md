@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `multipart_chunksize` under 5 MB no longer multiparts uploads `aws` sends as a single request under the CRT engine.
 - More aws parity in the transfer engine: `--metadata-directive COPY` keeps your properties on a multipart copy, annotation copies drop a checksum header `aws` omits, and a bad option is reported ahead of an unusable source.
 - Progress-line spacing and the displayed transfer speed now match aws where a transfer fails, a coarse clock reads no elapsed time yet, or a case-conflict advisory prints — and the standing S3 Express warning flushes immediately, like aws's.
+- A `--metadata k@=file://...` reference that cannot be loaded now reports and exits like aws (255, not 252).
 
 ## [0.7.0] - 2026-08-01
 

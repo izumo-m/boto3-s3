@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from boto3_s3 import ValidationError
+from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli.shorthand import parse_map_option
 
 
@@ -145,16 +145,37 @@ class TestAtEqualsParamfile:
     def test_fileb_prefix_is_rejected_as_a_non_string_value(self, tmp_path: Path) -> None:
         # aws schema-validates the shorthand result at parse time: a map value
         # must be a string, so a fileb:// bytes load is its pre-pipeline
-        # ParamValidation (rc 252, measured) - never a transfer.
+        # ParamValidation (rc 252, measured) - never a transfer. The report is
+        # botocore's schema wording, with no "Error parsing parameter" prefix.
         ref = tmp_path / "val.bin"
         ref.write_bytes(b"\x00\x01")
-        with pytest.raises(ValidationError, match="Invalid type for parameter a"):
-            _parse(f"a@=fileb://{ref}")
-
-    def test_missing_paramfile_is_a_usage_error(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError) as excinfo:
+            _parse(f"a@=fileb://{ref}")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: b'\\x00\\x01', "
+            "type: <class 'bytes'>, valid types: <class 'str'>"
+        )
+
+    def test_missing_paramfile_is_the_general_error(self, tmp_path: Path) -> None:
+        # aws's shorthand parser calls get_paramfile directly, outside the
+        # load-cli-arg handler that names the option, so the failure reaches its
+        # general handler: rc 255 with the bare message, not the parser's 252
+        # (measured: `--metadata k@=file:///no/x`).
+        with pytest.raises(InvalidValueError) as excinfo:
             _parse(f"a@=file://{tmp_path}/no-such-file")
-        assert "Unable to load paramfile" in str(excinfo.value)
+        assert str(excinfo.value).startswith("Unable to load paramfile file://")
+
+    def test_undecodable_paramfile_is_the_general_error(self, tmp_path: Path) -> None:
+        ref = tmp_path / "val.bin"
+        ref.write_bytes(b"\xff\xfe\x00bin")
+        with pytest.raises(InvalidValueError) as excinfo:
+            _parse(f"a@=file://{ref}")
+        assert str(excinfo.value) == (
+            f"Unable to load paramfile ({ref}), text contents could not be decoded.  "
+            "If this is a binary file, please use the fileb:// prefix instead of the "
+            "file:// prefix."
+        )
 
     def test_at_without_equals_is_a_parse_error(self) -> None:
         # "a@b=c": the '@' is consumed as the operator probe, then the '='

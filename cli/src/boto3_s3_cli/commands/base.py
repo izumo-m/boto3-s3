@@ -187,7 +187,8 @@ def _expand_string_paramfile(
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
-    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    with paramfile.named_argument(name, operation=operation):
+        loaded = paramfile.get_paramfile(value, operation=operation)
     if loaded is None:
         return
     if isinstance(loaded, bytes):
@@ -227,7 +228,8 @@ def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation
     value = getattr(args, option, None)
     if isinstance(value, str):
         name = f"--{option.replace('_', '-')}"
-        loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            loaded = paramfile.get_paramfile(value, operation=operation)
         if loaded is not None:
             setattr(args, option, loaded)
 
@@ -247,7 +249,8 @@ def expand_positional_paramfile(
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
-    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    with paramfile.named_argument(name, operation=operation):
+        loaded = paramfile.get_paramfile(value, operation=operation)
     if loaded is None:
         return
     if isinstance(loaded, bytes) and operation in {"mb", "rb", "presign"}:

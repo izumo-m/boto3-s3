@@ -1613,6 +1613,20 @@ class TestParseToValidationOrder:
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@=fileb://{blob}"])
         assert rc == 252
 
+    def test_metadata_shorthand_paramfile_load_failure_is_255(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The counterpart of the whole-value case below: inside the shorthand,
+        # aws calls get_paramfile itself, so a load failure reaches its general
+        # handler bare - rc 255 with no ParamValidation envelope and no option
+        # name, for either prefix. Measured on the pinned aws-cli.
+        for ref in ("file:///no/x", "fileb:///no/x"):
+            assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@={ref}"]) == 255
+            assert capsys.readouterr().err == (
+                f"boto3-s3: [ERROR]: Unable to load paramfile {ref}: "
+                "[Errno 2] No such file or directory: '/no/x'\n"
+            )
+
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
         # A whole-value --metadata fileb:// load failure is the paramfile 252.
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "fileb:///no/x"])

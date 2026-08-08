@@ -1,8 +1,9 @@
-"""Unit tests for boto3_s3_cli.paramfile's text-encoding resolution.
+"""Unit tests for boto3_s3_cli.paramfile: text encoding, and the error shape.
 
-Pins the aws-cli ``compat.getpreferredencoding`` port: ``AWS_CLI_FILE_ENCODING``
-wins, a ``C`` / ``POSIX`` ``LC_CTYPE`` reads as UTF-8 (verified against the
-pinned aws-cli under ``LC_ALL=C``), anything else falls to the locale default.
+The encoding half pins the aws-cli ``compat.getpreferredencoding`` port:
+``AWS_CLI_FILE_ENCODING`` wins, a ``C`` / ``POSIX`` ``LC_CTYPE`` reads as UTF-8
+(verified against the pinned aws-cli under ``LC_ALL=C``), anything else falls to
+the locale default. The error half pins which exit code a load failure carries.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from boto3_s3 import ValidationError
 from boto3_s3_cli import paramfile
 
 
@@ -50,5 +52,36 @@ class TestTextEncoding:
         ref.write_text("こんにちは", encoding="utf-8")
         monkeypatch.delenv("AWS_CLI_FILE_ENCODING", raising=False)
         monkeypatch.setattr(paramfile.locale, "setlocale", lambda category: "C")
-        loaded = paramfile.read_text_paramfile(f"file://{ref}", name="--metadata", operation="cp")
+        loaded = paramfile.read_text_paramfile(f"file://{ref}", operation="cp")
         assert loaded == "こんにちは"
+
+
+class TestErrorShape:
+    """Which exception a load failure becomes - aws's two paths.
+
+    aws raises ``ResourceLoadingError`` inside ``get_paramfile`` and catches it
+    only in the ``load-cli-arg`` handler it registers for *named* arguments, so
+    the same missing file is a bare rc-255 report or the named argument's rc-252
+    parse error depending on the caller (both measured on the pinned aws-cli via
+    ``--metadata k@=file:///no/x`` and ``--metadata file:///no/x``).
+    """
+
+    def test_unwrapped_load_failure_is_the_general_error(self, tmp_path: Path) -> None:
+        with pytest.raises(paramfile.ParamfileLoadError) as excinfo:
+            paramfile.get_paramfile(f"file://{tmp_path}/no-such-file", operation="cp")
+        assert str(excinfo.value).startswith("Unable to load paramfile file://")
+
+    def test_named_argument_wraps_it_as_the_parse_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            with paramfile.named_argument("--metadata", operation="cp"):
+                paramfile.get_paramfile(f"file://{tmp_path}/no-such-file", operation="cp")
+        assert not isinstance(excinfo.value, paramfile.ParamfileLoadError)
+        assert str(excinfo.value).startswith(
+            "Error parsing parameter '--metadata': Unable to load paramfile file://"
+        )
+
+    def test_named_argument_passes_success_through(self, tmp_path: Path) -> None:
+        ref = tmp_path / "val.txt"
+        ref.write_text("ok")
+        with paramfile.named_argument("--metadata", operation="cp"):
+            assert paramfile.get_paramfile(f"file://{ref}", operation="cp") == "ok"

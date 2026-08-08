@@ -368,7 +368,8 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     if isinstance(grants, list):
         items = cast("list[object]", grants)
         if len(items) == 1 and isinstance(items[0], str):
-            loaded = paramfile.get_paramfile(items[0], name="--grants", operation=operation)
+            with paramfile.named_argument("--grants", operation=operation):
+                loaded = paramfile.get_paramfile(items[0], operation=operation)
             if loaded is not None:
                 args.grants = loaded
 
@@ -402,7 +403,8 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
     if args.metadata is None:
         return
     if args.metadata.startswith("fileb://"):
-        paramfile.read_binary_paramfile(args.metadata, name="--metadata", operation=operation)
+        with paramfile.named_argument("--metadata", operation=operation):
+            paramfile.read_binary_paramfile(args.metadata, operation=operation)
         raise InvalidValueError(
             "'in <string>' requires string as left operand, not int", operation=operation
         )
@@ -686,9 +688,11 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     the load 252.
     """
     if value.startswith("file://"):
-        return paramfile.read_text_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            return paramfile.read_text_paramfile(value, operation=operation)
     if value.startswith("fileb://"):
-        loaded = paramfile.read_binary_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            loaded = paramfile.read_binary_paramfile(value, operation=operation)
         raise ValidationError(
             "Parameter validation failed:\n"
             f"Invalid type for parameter input, value: {loaded!r}, "
@@ -708,7 +712,8 @@ def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
     key is *not* a usage error.
     """
     if value.startswith("fileb://"):
-        return paramfile.read_binary_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            return paramfile.read_binary_paramfile(value, operation=operation)
     return resolve_text_paramfile(value, name, operation=operation)
 
 

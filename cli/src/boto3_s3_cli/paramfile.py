@@ -9,18 +9,58 @@ options, ``--metadata``'s pre-parse, the SSE-C blobs), the shorthand
 parser's ``@=`` operator (``shorthand.py``), and the plain-option expansions
 (``commands/base.py``'s ``expand_option_paramfile`` and its integer wrapper
 ``expand_integer_paramfile``: ls / rm ``--page-size``,
-presign ``--expires-in``). Every file *read* failure is a
-``ValidationError`` with aws's wording (rc 252); a bad
-``AWS_CLI_FILE_ENCODING`` instead raises ``LookupError`` into the general
-handler (255), as in aws.
+presign ``--expires-in``). A bad ``AWS_CLI_FILE_ENCODING`` raises
+``LookupError`` into the general handler (255), as in aws.
+
+A read failure is a `ParamfileLoadError` carrying aws's bare wording, and
+which exit code it becomes depends on the caller - aws's own split.
+aws registers a ``load-cli-arg`` handler (``URIArgumentHandler``) that catches
+its ``ResourceLoadingError`` and re-raises it as the named argument's
+``ParamError`` (rc 252), so every *named* argument's load reports that way; its
+shorthand parser instead calls ``get_paramfile`` directly, letting the failure
+reach the general handler bare (rc 255). `named_argument` is that handler
+boundary: callers resolving a named argument enter it, and the shorthand's
+``@=`` operator (``shorthand.py``) deliberately does not.
 """
 
 from __future__ import annotations
 
+import contextlib
 import locale
 import os
+from typing import TYPE_CHECKING
 
-from boto3_s3 import ValidationError
+from boto3_s3 import InvalidValueError, ValidationError
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+
+class ParamfileLoadError(InvalidValueError):
+    """A paramfile reference that could not be loaded (aws's ``ResourceLoadingError``).
+
+    The message is aws's bare wording, with no argument name in it. Left
+    unhandled it is the general handler's rc 255; `named_argument` converts it
+    into the rc-252 ``Error parsing parameter '<name>'`` form.
+    """
+
+
+@contextlib.contextmanager
+def named_argument(name: str, *, operation: str) -> Generator[None, None, None]:
+    """Report a paramfile failure inside as *name*'s parse error (aws rc 252).
+
+    The port of aws's ``URIArgumentHandler`` boundary: it wraps the load of
+    every argument that has a CLI name to report - the options, the positionals,
+    and the whole-value form of a map option. Values loaded from *inside* a
+    parsed value (the shorthand ``@=`` operator) have no such name and are
+    resolved outside this scope.
+    """
+    try:
+        yield
+    except ParamfileLoadError as exc:
+        raise ValidationError(
+            f"Error parsing parameter '{name}': {exc}", operation=operation
+        ) from exc
 
 
 def _text_encoding() -> str:
@@ -43,7 +83,7 @@ def _text_encoding() -> str:
     return locale.getpreferredencoding()
 
 
-def read_text_paramfile(original: str, *, name: str, operation: str) -> str:
+def read_text_paramfile(original: str, *, operation: str) -> str:
     """Load a ``file://`` reference as text (aws paramfile ``mode='r'``).
 
     Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``
@@ -58,20 +98,19 @@ def read_text_paramfile(original: str, *, name: str, operation: str) -> str:
     except UnicodeDecodeError as exc:
         # aws wording (paramfile.get_file): the decode-error message names the
         # EXPANDED path in parentheses; the OSError one names the full original.
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile ({path}), "
+        raise ParamfileLoadError(
+            f"Unable to load paramfile ({path}), "
             "text contents could not be decoded.  If this is a binary file, please use "
             "the fileb:// prefix instead of the file:// prefix.",
             operation=operation,
         ) from exc
     except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
+        raise ParamfileLoadError(
+            f"Unable to load paramfile {original}: {exc}", operation=operation
         ) from exc
 
 
-def read_binary_paramfile(original: str, *, name: str, operation: str) -> bytes:
+def read_binary_paramfile(original: str, *, operation: str) -> bytes:
     """Load a ``fileb://`` reference as raw bytes (aws paramfile ``mode='rb'``).
 
     Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``.
@@ -81,13 +120,12 @@ def read_binary_paramfile(original: str, *, name: str, operation: str) -> bytes:
         with open(path, "rb") as handle:
             return handle.read()
     except OSError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Unable to load paramfile {original}: {exc}",
-            operation=operation,
+        raise ParamfileLoadError(
+            f"Unable to load paramfile {original}: {exc}", operation=operation
         ) from exc
 
 
-def get_paramfile(value: str, *, name: str, operation: str) -> str | bytes | None:
+def get_paramfile(value: str, *, operation: str) -> str | bytes | None:
     """aws's ``get_paramfile``: load a prefixed reference, or ``None`` verbatim.
 
     ``file://`` loads text, ``fileb://`` raw bytes; a value with neither
@@ -95,10 +133,16 @@ def get_paramfile(value: str, *, name: str, operation: str) -> str | bytes | Non
     "file-optional-values" of the shorthand ``@=`` grammar).
     """
     if value.startswith("file://"):
-        return read_text_paramfile(value, name=name, operation=operation)
+        return read_text_paramfile(value, operation=operation)
     if value.startswith("fileb://"):
-        return read_binary_paramfile(value, name=name, operation=operation)
+        return read_binary_paramfile(value, operation=operation)
     return None
 
 
-__all__ = ["get_paramfile", "read_binary_paramfile", "read_text_paramfile"]
+__all__ = [
+    "ParamfileLoadError",
+    "get_paramfile",
+    "named_argument",
+    "read_binary_paramfile",
+    "read_text_paramfile",
+]
