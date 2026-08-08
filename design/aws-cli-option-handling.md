@@ -392,6 +392,17 @@ The rest sit outside the pipeline:
   `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
   after it (`usage.py`; the tail is botocore-version-fragile). The exit code
   is unaffected - mb / rb 1, website 252.
+- **A message botocore itself writes is the installed botocore's wording**,
+  where aws prints its bundled fork's. This is not class 2: the same aws
+  version installed from PyPI still carries the fork, so the difference is ours
+  to record. It reaches the console on exactly one input on this surface - a
+  `max_attempts` below the minimum, which aws ends `greater than or equal to
+  one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
+  2026-08-08). Rewriting an SDK sentence to match would be a fragile string
+  patch on a report neither tool authors, so the difference is taken. The
+  invalid-bucket-name entry above is the same family, and the rest of the
+  fork's wording differences sit on aws's SSO / login paths, which this command
+  does not have.
 - **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
   and renders `None`; `human_readable_size` keeps counting in EiB instead
   (`output.py`). Unreachable in practice - a total below 1 EiB never gets

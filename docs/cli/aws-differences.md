@@ -157,6 +157,13 @@ are visible, or make no difference to the result.
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
   in `--debug` traces; anything keying on the aws-cli User-Agent (bucket
   policies, access-log analytics) will classify these requests differently.
+- **Messages botocore itself writes can be worded differently.** Where a report
+  comes from the SDK rather than from either tool, the sentence is the
+  installed botocore's, not the one in aws's bundled copy — the two are
+  separate codebases. The invalid-bucket-name report above is one instance; the
+  other reachable one is a rejected `max_attempts`, which `aws` ends "greater
+  than or equal to one." and this command ends "greater than or equal to 1.".
+  The exit code is the same either way.
 - **`AWS_DEFAULTS_MODE` is honored.** The installed botocore implements
   defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
   Setting it changes retry/timeout defaults here where `aws` would not, and an
