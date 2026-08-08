@@ -38,6 +38,11 @@ jobs:
             python: "3.14"
           - os: macos-latest
             python: "3.10"
+          # Windows runs both ends: 3.10 is the support floor and what the
+          # documented local Windows setup provisions (design/testing.md
+          # section 8), so it is the version contributors actually hit there.
+          - os: windows-latest
+            python: "3.10"
           - os: windows-latest
             python: "3.14"
     runs-on: ${{ matrix.os }}
