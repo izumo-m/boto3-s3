@@ -166,9 +166,14 @@ class TestAtEqualsParamfile:
             _parse(f"a@=file://{tmp_path}/no-such-file")
         assert str(excinfo.value).startswith("Unable to load paramfile file://")
 
-    def test_undecodable_paramfile_is_the_general_error(self, tmp_path: Path) -> None:
+    def test_undecodable_paramfile_is_the_general_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         ref = tmp_path / "val.bin"
         ref.write_bytes(b"\xff\xfe\x00bin")
+        # Pin the decode to UTF-8 (aws's compat_open knob): the locale default
+        # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
+        monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
         with pytest.raises(InvalidValueError) as excinfo:
             _parse(f"a@=file://{ref}")
         assert str(excinfo.value) == (
