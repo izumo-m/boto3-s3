@@ -533,6 +533,17 @@ an elevated shell) because several `tests/lib` scenarios create symlinks.
 Tests staged on chmod-revoked access skip themselves on Windows (the
 `skip_if_chmod_is_inert` mark in `tests/utils/host.py`).
 
+**Pin any expectation that rides the locale's default codec.** Windows hosts
+disagree on it - the CI runner reads cp1252, a Japanese host cp932 (both
+measured) - so a test that expects a `file://` paramfile to decode, or to fail
+decoding, must set `AWS_CLI_FILE_ENCODING` (aws's `compat_open` knob) rather
+than lean on the host. Left to the host, such a test passes on one Windows and
+fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
+same knob is how a test picks a codec deliberately. Subprocess runs are already
+pinned - the harness passes `PYTHONUTF8=1`, which fixes the child's stdio and
+its default codec at UTF-8 (the pinned `aws.exe` honors it too, so both sides of
+a parity pair move together).
+
 **Goldens on Windows.** The cp/mv/sync goldens resolve to their
 `<name>.windows.json` variants (section 3, "Platform variants"); regenerating
 them needs this Windows setup plus the e2e stack below. Work from a fresh
