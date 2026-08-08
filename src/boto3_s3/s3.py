@@ -2186,6 +2186,10 @@ class S3:
         signers a directory bucket (``v4-s3express``) or an MRAP ARN
         (``s3v4a``) resolve to, and an unsigned client, are left as botocore
         chose them.
+
+        The URL also names the client's **own** region, again matching
+        ``aws s3 presign`` and again against botocore's default - see
+        `_regional_presign`.
         """
         if method not in ("get_object", "put_object"):
             raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
@@ -2193,7 +2197,7 @@ class S3:
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
         with s3_errors(operation="presign", bucket=storage.bucket, key=storage.key):
-            with _sigv4_presign(client, operation):
+            with _sigv4_presign(client, operation), _regional_presign(client):
                 return client.generate_presigned_url(
                     method,
                     Params={"Bucket": storage.bucket, "Key": storage.key},
@@ -2274,6 +2278,52 @@ def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
         yield
     finally:
         events.unregister(event, _choose)
+
+
+@contextmanager
+def _regional_presign(client: Any) -> Generator[None, None, None]:
+    """Keep a presign on the client's own region for the duration of one call.
+
+    botocore marks presign requests with a ``use_global_endpoint`` context flag
+    and then resolves the endpoint with the region builtin replaced by
+    ``aws-global``, so a eu-west-1 client presigns
+    ``bucket.s3.amazonaws.com`` while every real request it sends goes to
+    ``bucket.s3.eu-west-1.amazonaws.com``. The URL still carries the true
+    region in its credential scope, so the host and the signature disagree.
+    aws-cli's bundled botocore has no such flag and always presigns the
+    resolved regional host; this restores that by clearing the flag before
+    botocore's own endpoint-builtins handler reads it (registered *first* on
+    ``before-endpoint-resolution.s3``, unregistered in a ``finally``).
+
+    Everything botocore already exempts from the flag is untouched, because
+    clearing it only reaches the cases where it was set: a non-``aws``
+    partition, dualstack, an explicit ``addressing_style``, and a us-east-1
+    client with the regional pin the CLI applies never set it in the first
+    place, and botocore's handler ignores it for an ARN bucket, a directory
+    bucket, and a DNS-incompatible name that forces path style. A custom
+    ``endpoint_url`` overrides the resolved host either way. The net change is
+    exactly the plain non-us-east-1 case (all measured against the pinned
+    aws-cli).
+
+    ``use_global_endpoint`` is a botocore-internal context key; if a botocore
+    version renames or drops it this override simply no-ops (the ``pop`` finds
+    nothing), and a client without botocore's event seam is left alone, like
+    `_sigv4_presign`.
+    """
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is None or not hasattr(events, "register_first"):
+        yield
+        return
+
+    def _drop_global_endpoint(context: dict[str, Any], **_kwargs: Any) -> None:
+        context.pop("use_global_endpoint", None)
+
+    event = "before-endpoint-resolution.s3"
+    events.register_first(event, _drop_global_endpoint)
+    try:
+        yield
+    finally:
+        events.unregister(event, _drop_global_endpoint)
 
 
 # -- module-level convenience -------------------------------------------------

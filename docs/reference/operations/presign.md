@@ -106,6 +106,26 @@ botocore made it:
 No new client is built and the client's own configuration is not modified: the
 client signs exactly as it did before once the call returns.
 
+### The host in the URL
+
+The URL names the endpoint the client itself would send a request to. This too
+differs from calling `generate_presigned_url` directly: stock botocore resolves
+a *presigned* URL's endpoint as if the client's region were `aws-global`, so a
+`eu-west-1` client's URL points at `bucket.s3.amazonaws.com` while every real
+request that client sends goes to `bucket.s3.eu-west-1.amazonaws.com` — and the
+URL's own credential scope still names `eu-west-1`, so its host and its
+signature disagree. `presign` keeps the resolved regional host, matching
+`aws s3 presign`.
+
+As with the signing above, the correction reaches only the case botocore
+applies the substitution to. These already resolved regionally and are
+unchanged: a `us-east-1` client whose configuration sets
+`s3={"us_east_1_regional_endpoint": "regional"}` (what the `boto3-s3` command
+builds), a dualstack or accelerate endpoint, an explicit
+`s3={"addressing_style": ...}`, an access point ARN, a directory bucket, and a
+bucket name too long or DNS-incompatible for virtual hosting, which addresses
+path-style. An explicit `endpoint_url` overrides the host either way.
+
 ### Raises
 
 The category contracts are specified in
