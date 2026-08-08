@@ -316,3 +316,50 @@ class TestExpressCaseConflictWarning:
         assert stream is sys.stderr
         assert text.startswith("warning: Recursive copies/moves")
         assert not text.endswith("\n")
+
+
+class TestBuildPrinter:
+    """Every display flag reaches the printer it configures.
+
+    The four flags share one construction site, so a wiring slip here silences
+    or reshapes output for a whole command family while the printer's own tests
+    stay green. ``--progress-multiline`` is the reason this class exists: its
+    rendering is covered in ``test_progress.py``, but nothing pinned the flag
+    that selects it.
+    """
+
+    @staticmethod
+    def _args(**overrides: object) -> argparse.Namespace:
+        defaults = {
+            "quiet": False,
+            "only_show_errors": False,
+            "progress": True,
+            "progress_multiline": False,
+        }
+        return argparse.Namespace(**{**defaults, **overrides})
+
+    def test_defaults(self) -> None:
+        printer = transferargs.build_printer(self._args(), 0)
+        assert (printer._quiet, printer._only_show_errors) == (False, False)
+        assert printer._show_progress
+        assert not printer._multiline
+
+    def test_progress_multiline_selects_the_multiline_renderer(self) -> None:
+        printer = transferargs.build_printer(self._args(progress_multiline=True), 0)
+        assert printer._multiline
+
+    def test_no_progress_and_quiet_reach_the_printer(self) -> None:
+        assert not transferargs.build_printer(self._args(progress=False), 0)._show_progress
+        assert transferargs.build_printer(self._args(quiet=True), 0)._quiet
+
+    def test_only_show_errors_ors_in_the_stream_rule(self) -> None:
+        # cp's streaming download forces the errors-only printer even without
+        # the flag, because the object bytes own stdout.
+        assert transferargs.build_printer(self._args(), 0, only_show_errors=True)._only_show_errors
+        assert transferargs.build_printer(self._args(only_show_errors=True), 0)._only_show_errors
+
+    def test_progress_frequency_floors_at_the_repaint_minimum(self) -> None:
+        # --progress-frequency 0 (aws's default) is raised to the repaint
+        # floor; a larger value wins (aws-cli-option-handling.md section 6).
+        assert transferargs.build_printer(self._args(), 0)._frequency == pytest.approx(0.1)
+        assert transferargs.build_printer(self._args(), 5)._frequency == pytest.approx(5.0)
