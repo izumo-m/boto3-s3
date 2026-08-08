@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Progress-line spacing and the displayed transfer speed now match aws where a transfer fails, a coarse clock reads no elapsed time yet, or a case-conflict advisory prints — and the standing S3 Express warning flushes immediately, like aws's.
 - A `--metadata k@=file://...` reference that cannot be loaded now reports and exits like aws (255, not 252).
 - `presign` URLs outside `us-east-1` now name the regional S3 host like `aws`, not the legacy global one.
+- S3 Outposts access-point targets now sign with SigV4a like `aws` (with the `crt` extra), instead of a plain SigV4 the endpoint rejects.
 
 ## [0.7.0] - 2026-08-01
 

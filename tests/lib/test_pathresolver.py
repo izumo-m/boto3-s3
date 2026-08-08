@@ -19,6 +19,7 @@ from boto3_s3.pathresolver import (
     S3PathResolver,
     has_underlying_s3_path,
     is_mrap_path,
+    is_outpost_path,
     is_s3express_path,
 )
 from tests.utils.fakes3 import client_error
@@ -86,9 +87,10 @@ class TestHasUnderlyingS3Path:
 
 class TestIsMrapPath:
     def test_only_the_mrap_arn_shape_matches(self) -> None:
-        # The SigV4a stand-down (the CLI's clientfactory) keys on exactly the
-        # MRAP shape: plain and Outposts access points sign symmetric SigV4
-        # like a bucket, so they must not lift the pin.
+        # One of the two SigV4a shapes the CLI's clientfactory stands its pin
+        # down for; `is_outpost_path` below is the other. A plain,
+        # region-qualified access point signs symmetric SigV4 like a bucket and
+        # must not lift the pin.
         assert is_mrap_path(f"s3://{_MRAP_ARN}/k.txt")
         assert is_mrap_path(f"s3://{_MRAP_ARN}")
         assert not is_mrap_path(f"s3://{_AP_ARN}/k.txt")
@@ -101,6 +103,26 @@ class TestIsMrapPath:
         # and the stream sentinel must fall out quietly.
         assert not is_mrap_path("./local/file.txt")
         assert not is_mrap_path("-")
+
+
+class TestIsOutpostPath:
+    def test_only_the_outpost_arn_shape_matches(self) -> None:
+        # The second SigV4a stand-down shape: an Outposts access point resolves
+        # to asymmetric SigV4a, measured against aws 2.36.1 (its presign signs
+        # AWS4-ECDSA-P256-SHA256). The Outposts *alias* suffix has no ARN and
+        # does not resolve that way, so it stays out.
+        assert is_outpost_path(f"s3://{_OUTPOST_ARN}/k.txt")
+        assert is_outpost_path(f"s3://{_OUTPOST_ARN}")
+        assert is_outpost_path(f"s3://{_OUTPOST_ARN.replace('accesspoint/', 'accesspoint:')}/k")
+        assert is_outpost_path(f"s3://{_OUTPOST_ARN.replace('arn:aws:', 'arn:aws-us-gov:')}/k")
+        assert not is_outpost_path(f"s3://{_AP_ARN}/k.txt")
+        assert not is_outpost_path(f"s3://{_MRAP_ARN}/k.txt")
+        assert not is_outpost_path("s3://my-alias--op-s3/k.txt")
+        assert not is_outpost_path("s3://plain-bucket/k.txt")
+
+    def test_non_s3_strings_never_match(self) -> None:
+        assert not is_outpost_path("./local/file.txt")
+        assert not is_outpost_path("-")
 
 
 class TestIsS3ExpressPath:

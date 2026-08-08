@@ -414,10 +414,11 @@ def _coerce_cli_timeout(value: str) -> int | None:
 def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     """Whether a positional S3 path needs botocore's endpoint auth-scheme resolution.
 
-    True for an MRAP ARN bucket (must sign asymmetric SigV4a) and for an
-    S3 Express directory bucket (must sign ``sigv4-s3express`` with
-    `CreateSession` credentials) - the two shapes an explicit
-    `signature_version` would mis-sign, so the s3v4 pin stands down for them.
+    True for the two ARN shapes that must sign asymmetric SigV4a (an MRAP
+    bucket and an S3 Outposts access point) and for an S3 Express directory
+    bucket (must sign ``sigv4-s3express`` with `CreateSession` credentials) -
+    the shapes an explicit `signature_version` would mis-sign, so the s3v4 pin
+    stands down for them.
     Reads the parsed positionals off the namespace - `paths` (a string, or the
     transfer family's two-item list) and presign's `path`. The single-path
     commands' positionals arrive paramfile-expanded by client-build time; the
@@ -437,7 +438,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     where aws (resolving the auth scheme off the final Bucket, not the input
     notation) signs ``sigv4-s3express``.
     """
-    from boto3_s3.pathresolver import is_mrap_path, is_s3express_path
+    from boto3_s3.pathresolver import is_mrap_path, is_outpost_path, is_s3express_path
 
     values: list[object] = []
     paths: object = getattr(args, "paths", None)
@@ -450,7 +451,8 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
         presign_path = f"s3://{presign_path}"
     values.append(presign_path)
     return any(
-        isinstance(value, str) and (is_mrap_path(value) or is_s3express_path(value))
+        isinstance(value, str)
+        and (is_mrap_path(value) or is_outpost_path(value) or is_s3express_path(value))
         for value in values
     )
 

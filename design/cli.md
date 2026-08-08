@@ -265,7 +265,7 @@ the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
-`pathresolver`'s pin stand-down probes `is_mrap_path` /
+`pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
 `is_s3express_path`). What the in-repo CLI needs, an external
 compatible-tool author needs too (overview.md's mission), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
@@ -354,16 +354,24 @@ These implement the policy in
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
      regions that accept SigV2 (us-east-1), but SigV2 does not exist in aws v2's
      botocore. `Config(signature_version="s3v4")` is set for every command whose
-     positionals name no MRAP ARN and no S3 Express directory bucket
-     (`--no-sign-request` overrides it with UNSIGNED). For those two targets
+     positionals name no MRAP ARN, no S3 Outposts access-point ARN and no
+     S3 Express directory bucket
+     (`--no-sign-request` overrides it with UNSIGNED). For those three targets
      the pin stands down: an explicit `signature_version` suppresses botocore's
-     auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP
+     auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP and
+     for an Outposts access point
      (item 4) and `sigv4-s3express` (with `CreateSession` credentials) for a
      directory bucket - a pinned `s3v4` matches either scheme name up to the
-     first dash and would silently sign a plain SigV4 request instead.
+     first dash and would silently sign a plain SigV4 request instead. A plain,
+     region-qualified access-point ARN is *not* in the set: it signs symmetric
+     SigV4 like a bucket (every shape measured against the pinned aws-cli).
   3. **us-east-1 regional endpoint** - aws v2 resolves us-east-1 as regional
      (`s3.us-east-1.amazonaws.com`). `s3={"us_east_1_regional_endpoint":
-     "regional"}` is set permanently.
+     "regional"}` is set permanently. It is not the whole story for a
+     presigned URL, whose endpoint stock botocore resolves as if the region
+     were `aws-global` regardless of this setting; the library's `presign`
+     clears the flag that does it, so a URL from either layer names the
+     client's own regional host like aws (docs/reference/operations/presign.md).
   4. **a pure-Python pin for symmetric SigV4 signing** - when awscrt is
      importable (it can be pulled in via the opt-in `crt` extra - transfer.md section 9 -
      or via a co-installed package), stock botocore swaps `v4` / `v4-query` /

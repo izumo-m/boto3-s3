@@ -73,6 +73,20 @@ def is_mrap_path(path: str) -> bool:
     return _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket) is not None
 
 
+def is_outpost_path(path: str) -> bool:
+    """Whether *path*'s bucket part is an S3 Outposts access-point ARN.
+
+    Pure string inspection like `is_mrap_path`, and the same reason: botocore
+    resolves asymmetric SigV4a for an Outposts access point (its region set is
+    `*`, and the credential scope drops the region), which an explicit
+    symmetric `signature_version` would suppress. Both ARN separators
+    (``accesspoint/name`` and ``accesspoint:name``) and every partition match,
+    since the shared aws-cli regex covers them.
+    """
+    bucket, _key = _split_bucket_key(path)
+    return _S3_OUTPOST_ACCESSPOINT_ARN_TO_ACCOUNT_REGEX.match(bucket) is not None
+
+
 def is_s3express_path(path: str) -> bool:
     """Whether an ``s3://`` path names an S3 Express directory bucket
     (aws-cli's ``is_s3express_bucket``: the ``--x-s3`` suffix).
@@ -203,4 +217,10 @@ class S3PathResolver:
         return s3_errors(operation="mv")
 
 
-__all__ = ["S3PathResolver", "has_underlying_s3_path", "is_mrap_path", "is_s3express_path"]
+__all__ = [
+    "S3PathResolver",
+    "has_underlying_s3_path",
+    "is_mrap_path",
+    "is_outpost_path",
+    "is_s3express_path",
+]

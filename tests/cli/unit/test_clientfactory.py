@@ -382,6 +382,39 @@ class TestBuildClient:
         assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
         assert "X-Amz-Region-Set=" in url
 
+    @pytest.mark.parametrize(
+        ("region", "arn"),
+        [
+            (
+                "us-west-2",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01/accesspoint/apx",
+            ),
+            (
+                "us-west-2",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01/accesspoint:apx",
+            ),
+            (
+                "us-gov-west-1",
+                "arn:aws-us-gov:s3-outposts:us-gov-west-1:123456789012:outpost/op-01/accesspoint/apx",
+            ),
+        ],
+    )
+    def test_outpost_target_lifts_the_pin_to_sigv4a(self, region: str, arn: str) -> None:
+        # An S3 Outposts access point resolves to SigV4a like an MRAP, which
+        # the pin would suppress - measured against aws 2.36.1, whose presign
+        # for each of these signs AWS4-ECDSA-P256-SHA256 with a region-less
+        # `.../s3-outposts/aws4_request` scope. Both ARN separators and a
+        # non-`aws` partition are covered because the shared aws-cli regex is.
+        args = _parse(["--region", region])
+        args.path = f"s3://{arn}/key"
+        client = clientfactory.build_client(args)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": arn, "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in url
+        assert "X-Amz-Region-Set=" in url
+        assert f"%2F{region}%2F" not in url  # SigV4a scope carries no region
+
     def test_transfer_positional_list_lifts_the_pin_too(self) -> None:
         # The transfer family carries a two-item `paths` list; an MRAP ARN on
         # either side lifts the pin for the command's client.

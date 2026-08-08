@@ -401,8 +401,12 @@ Nothing is validated: a string that is not an S3 path simply reports `False`,
 unless its first segment happens to end in one of the two alias suffixes.
 
 The same module, `boto3_s3.pathresolver`, also carries the string probes
-`is_mrap_path` and `is_s3express_path`, which are not re-exported from the
-package root.
+`is_mrap_path`, `is_outpost_path` and `is_s3express_path`, which are not
+re-exported from the package root. They name the target shapes whose signing
+scheme botocore has to resolve for itself — asymmetric SigV4a for the first
+two, `sigv4-s3express` for the third — so a caller that pins a symmetric
+`signature_version` on its client (as the `boto3-s3` command does) can stand
+that pin down for them.
 
 ## S3Deleter
 
