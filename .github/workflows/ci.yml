@@ -30,6 +30,11 @@ jobs:
   test:
     strategy:
       fail-fast: false
+      # Every supported OS at both ends of the Python range: 3.10 is the floor
+      # (and what .python-version provisions locally, so it is the version
+      # contributors actually develop against), 3.14 the newest. The full grid
+      # costs no wall-clock - the jobs run concurrently and Windows is the
+      # slowest - and leaves no crossing whose safety has to be argued.
       matrix:
         include:
           - os: ubuntu-latest
@@ -38,9 +43,8 @@ jobs:
             python: "3.14"
           - os: macos-latest
             python: "3.10"
-          # Windows runs both ends: 3.10 is the support floor and what the
-          # documented local Windows setup provisions (design/testing.md
-          # section 8), so it is the version contributors actually hit there.
+          - os: macos-latest
+            python: "3.14"
           - os: windows-latest
             python: "3.10"
           - os: windows-latest

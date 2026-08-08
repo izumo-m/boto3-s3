@@ -19,8 +19,8 @@ Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
 except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
 quality gates and package builds on Linux, then runs this default suite on
-Linux, macOS and Windows at the Python 3.10 floor, plus Python 3.14 on Linux
-and Windows.
+Linux, macOS and Windows at both ends of the supported Python range (the 3.10
+floor and 3.14).
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
 runs the library and CLI compatibility-seam tests whose expected request
 models are stable at that SDK generation. It needs no Docker because e2e self-skips without
