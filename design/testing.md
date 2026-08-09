@@ -20,7 +20,9 @@ Directory = provenance (awscli port vs own), subdirectory = mechanism
 except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
 quality gates and package builds on Linux, then runs this default suite on
 Linux, macOS and Windows at both ends of the supported Python range (the 3.10
-floor and 3.14).
+floor and 3.14). A test silent for five minutes dumps every thread's stack
+(pytest's `faulthandler_timeout`), so a hang pins its location in the job log
+instead of ending as a silent timeout kill.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
 runs the library and CLI compatibility-seam tests whose expected request
 models are stable at that SDK generation. It needs no Docker because e2e self-skips without

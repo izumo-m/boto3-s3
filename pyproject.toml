@@ -92,3 +92,8 @@ known-first-party = ["boto3_s3", "boto3_s3_cli", "tests", "benchmarks"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+# A test silent for 5 minutes dumps every thread's stack and keeps running: a
+# hang then pins its location in the CI log instead of a silent job kill. Far
+# above any legitimate test (the slowest bounded waits are ~180s subprocess
+# timeouts).
+faulthandler_timeout = 300
