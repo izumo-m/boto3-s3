@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed a rare hang: a cancellation upgraded to immediate while `sync` was already settling pooled filter decisions now cancels them instead of waiting forever.
 - `presign` URLs now name the client's own regional endpoint like `aws s3 presign`; outside `us-east-1` they named the legacy global host while carrying the real region in their credential scope.
 - Added `pathresolver.is_outpost_path`, the S3 Outposts counterpart of `is_mrap_path` for callers that pin a signature version.
 - `TransferConfig`'s download IO queue now defaults to the depth `aws s3` runs at, so passing a default-constructed config no longer shrinks it tenfold.

@@ -315,9 +315,20 @@ def _run_sync_pairs(
     done: Queue[tuple[Callable[[], None], Future[bool]]] = Queue()
 
     def settle_pending(*, cancel: bool) -> None:
-        """Optionally cancel queued decisions, then await every accepted one."""
+        """Optionally cancel queued decisions, then await every accepted one.
+
+        Re-observes the token each pass: an upgrade to `IMMEDIATE` arriving
+        while a graceful settle is already waiting must still cancel the
+        queued decisions (`CancelToken`'s escalation contract) - a decision
+        that can only complete through `cancel()`, such as one queued on an
+        executor that will never run it, would otherwise pin this loop
+        forever. `cancel` never downgrades, matching the token's monotonicity.
+        """
         remaining = pending
         while remaining:
+            cancel = cancel or (
+                cancel_token is not None and cancel_token.mode is CancelMode.IMMEDIATE
+            )
             if cancel:
                 for future in remaining:
                     future.cancel()
