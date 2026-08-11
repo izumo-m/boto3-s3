@@ -1866,15 +1866,17 @@ class S3:
                 # workers) before the stack unwinds into Transferrer.__exit__'s
                 # capture deregistration - the teardown mirror of prepare()'s
                 # register-before-enumeration ordering. Under the process-fatal
-                # posture a Ctrl-C unwind skips it: closing would throw
-                # GeneratorExit into the producers, whose prefetch teardown
-                # always joins, and the unwind must not wait on an in-flight
-                # page pull (`S3` docstring, `reusable_after_interrupt`).
-                if self._reusable_after_interrupt or not (
-                    exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
-                ):
-                    dest_entries.close()
-                    src_entries.close()
+                # posture a Ctrl-C unwind skips it and marks the unwind
+                # instead, like `_run_transfer`'s guard: the unwind must not
+                # wait on an in-flight page pull (`S3` docstring,
+                # `reusable_after_interrupt`), and the mark makes the deferred
+                # finalization of both producers abandon rather than join.
+                if exc_type is not None and issubclass(exc_type, KeyboardInterrupt):
+                    if not self._reusable_after_interrupt:
+                        concurrency.mark_interrupt_unwinding()
+                        return
+                dest_entries.close()
+                src_entries.close()
 
             stack.push(_close_scans)
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""

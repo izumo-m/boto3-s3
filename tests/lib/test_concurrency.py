@@ -232,16 +232,17 @@ def test_the_marker_leaves_a_default_posture_teardown_joining() -> None:
 class _BlockingScanStorage(S3Storage):
     """An S3Storage whose second page pull blocks until released."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(self, *args: object, block: float = 10.0, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         self.release = threading.Event()
+        self.block = block
 
     def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
         yield [
             S3FileInfo(key="prefix/a", size=1, compare_key="a"),
             S3FileInfo(key="prefix/b", size=1, compare_key="b"),
         ]
-        self.release.wait(10)  # the slow in-flight pull
+        self.release.wait(self.block)  # the slow in-flight pull
         yield [S3FileInfo(key="prefix/c", size=1, compare_key="c")]
 
 
@@ -326,3 +327,84 @@ def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
             assert _worker_alive()
     finally:
         _drain_worker(storage.release)
+
+
+def test_sync_teardown_abandons_after_the_interrupt_is_marked() -> None:
+    # sync closes its two side scans through its own `_close_scans` guard,
+    # not `_run_transfer`'s - a separate copy of the mark-then-skip decision
+    # that a review found lagging on the pre-mark behaviour (the deferred
+    # finalization joined the pull the posture forbids waiting on).
+    import tempfile
+
+    from boto3_s3 import S3
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    counter = {"n": 0}
+    start = time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory() as dest:
+            with pytest.raises(KeyboardInterrupt):
+                S3(reusable_after_interrupt=False).sync(
+                    storage,
+                    dest,
+                    dryrun=True,
+                    on_result=lambda result: _interrupt_on_second(counter),
+                )
+            gc_import = __import__("gc")
+            gc_import.collect()
+            assert time.monotonic() - start < 5
+            assert _worker_alive()
+    finally:
+        _drain_worker(storage.release)
+
+
+def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -> None:
+    # The non-dryrun rm consumes its scan through the S3Deleter loop - a
+    # separate `_scan_teardown` site from the dryrun loop the other rm test
+    # drives; a mutation reverting it to a bare for-temporary survived the
+    # suite until this test.
+    from boto3_s3 import S3
+    from boto3_s3.deleter import S3Deleter
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    original = S3Deleter.submit
+
+    def submit(self: S3Deleter, info: object) -> None:
+        raise KeyboardInterrupt
+
+    S3Deleter.submit = submit  # pyright: ignore[reportAttributeAccessIssue]
+    start = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            S3(reusable_after_interrupt=False).rm(storage, recursive=True)
+        assert time.monotonic() - start < 5
+        assert _worker_alive()
+    finally:
+        S3Deleter.submit = original  # pyright: ignore[reportAttributeAccessIssue]
+        _drain_worker(storage.release)
+
+
+@pytest.mark.parametrize("exc_type", [SystemExit, ValueError])
+def test_ls_joins_on_exits_other_than_the_interrupt(exc_type: type[BaseException]) -> None:
+    # The posture scopes to KeyboardInterrupt alone at the operation level
+    # too: `_scan_teardown` must not mark a SystemExit or an ordinary
+    # exception, whose unwind keeps the full reclamation (worker joined)
+    # even under `reusable_after_interrupt=False`. The pull is short so the
+    # correct join stays fast; a mutation that widens the except abandons
+    # instead, leaving the worker alive at the assertion.
+    from boto3_s3 import S3
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/", block=1.0)
+    counter = {"n": 0}
+
+    def on_entry(_info: object) -> None:
+        counter["n"] += 1
+        if counter["n"] == 2:
+            raise exc_type()
+
+    try:
+        with pytest.raises(exc_type):
+            S3(reusable_after_interrupt=False).ls(storage, on_entry=on_entry)
+        assert not _worker_alive()
+    finally:
+        storage.release.set()
