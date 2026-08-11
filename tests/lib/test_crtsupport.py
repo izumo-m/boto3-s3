@@ -389,6 +389,17 @@ class TestCreateCrtTransferManager:
             )
             is None
         )
+        # The opt-in is per-request: an explicit-'crt' request *without* it is
+        # lock-respecting too, so live contention resolves it classic rather
+        # than riding the lockless singleton (the half of the guard the
+        # library's default posture hangs on).
+        assert (
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(),  # pyright: ignore[reportArgumentType]
+                TransferConfig(preferred_transfer_client="crt"),
+            )
+            is None
+        )
         assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is None  # pyright: ignore[reportArgumentType]
         assert len(stubs.create_kwargs) == 1  # no second CRT client was built
 
