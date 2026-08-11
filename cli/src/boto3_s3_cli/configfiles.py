@@ -50,6 +50,11 @@ ConfigValue: TypeAlias = "str | dict[str, str]"
 TIMESTAMP_FORMAT_KEY = "cli_timestamp_format"
 _TIMESTAMP_FORMATS = ("wire", "iso8601")
 
+# aws's binary-format setting and the two keys its customization's handler
+# table declares; anything else is the rc-255 report `cli` renders.
+BINARY_FORMAT_KEY = "cli_binary_format"
+_BINARY_FORMATS = ("base64", "raw-in-base64-out")
+
 
 class _UnparseableError(Exception):
     """Internal marker for what botocore turns into ``ConfigParseError``."""
@@ -107,6 +112,27 @@ class ConfigScan(NamedTuple):
         """
         value = self.scoped(profile).get(TIMESTAMP_FORMAT_KEY)
         if value is None or value in _TIMESTAMP_FORMATS:
+            return None
+        return value
+
+    def invalid_binary_format(self, profile: str | None) -> ConfigValue | None:
+        """``profile``'s rejected ``cli_binary_format`` value, or ``None``.
+
+        aws resolves the setting in its ``session-initialized`` binary-format
+        customization, registered after the timestamp one - so a bad
+        ``cli_timestamp_format`` wins (measured). An explicit
+        ``--cli-binary-format`` never reaches the config (argparse restricts
+        it to the valid choices first), and the config value indexes the
+        customization's handler table directly, so anything but the two table
+        keys surfaces as the bare ``KeyError`` - the ``repr`` of the value -
+        through aws's general rc-255 handler (measured over four values,
+        ``Base64`` included: the match is case-sensitive). An undeclared
+        profile stands down to the ``base64`` default (``ProfileNotFound``
+        caught, like the timestamp handler); an absent key is that default
+        too.
+        """
+        value = self.scoped(profile).get(BINARY_FORMAT_KEY)
+        if value is None or value in _BINARY_FORMATS:
             return None
         return value
 

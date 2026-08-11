@@ -7,6 +7,7 @@ import contextlib
 import importlib
 import io
 import logging
+import os
 import re
 import sys
 from collections.abc import Generator
@@ -933,6 +934,26 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # --profile "" leaves the env chain in force, like `resolve_profile`.
     if head.profile:
         _enhanced_envelope = _config_scan.declares(head.profile)
+    # aws validates AWS_CLI_OUTPUT_ENCODING right here: after handling the
+    # top-level args and before `session-initialized` (clidriver.main calls
+    # compat.validate_preferred_output_encoding between the two), so an
+    # unknown codec beats both config gates below, the help token, an invalid
+    # subcommand and every leaf error, while the three resolutions above, an
+    # unparseable config file and a parse-time --version still win (all
+    # measured). Only the validation is ported: aws applies the codec when
+    # building the text writers of its error-handler and formatted-output
+    # paths, none of which the s3 surface reaches (measured: a valid codec
+    # changes no bytes on any s3 command).
+    output_encoding = os.environ.get("AWS_CLI_OUTPUT_ENCODING")
+    if output_encoding is not None:
+        try:
+            "".encode(output_encoding)
+        except LookupError:
+            _write_error(
+                f"Unknown codec `{output_encoding}` specified for AWS_CLI_OUTPUT_ENCODING.",
+                rc=_GENERAL_ERROR_RC,
+            )
+            return _GENERAL_ERROR_RC
     # aws emits `session-initialized` right after binding --profile, and the
     # first handler on it validates `cli_timestamp_format` against the now-bound
     # profile's scoped config. So an unknown value settles the run here: after
@@ -950,6 +971,28 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             code="Configuration",
         )
         return _CONFIGURATION_ERROR_RC
+    # aws's next `session-initialized` handler resolves `cli_binary_format`
+    # (its binary-format customization), so a bad value in the bound profile
+    # settles the run here - after the timestamp gate above (measured: with
+    # both broken, the timestamp report wins) and ahead of the help token and
+    # every command layer. An explicit --cli-binary-format never consults the
+    # config (argparse restricted it to the valid choices already), and the
+    # bad value renders as aws's bare KeyError - its repr through the general
+    # rc-255 handler, no envelope.
+    if head.cli_binary_format is None:
+        invalid_binary = _config_scan.invalid_binary_format(clientfactory.resolve_profile(head))
+        if invalid_binary is not None:
+            # An indented block parses to a map, which aws's table lookup
+            # rejects as an unhashable key - its official build's (Python
+            # 3.14) TypeError text, pinned across hosts like the argparse
+            # corners; a string renders as the KeyError's repr.
+            message = (
+                "cannot use 'dict' as a dict key (unhashable type: 'dict')"
+                if isinstance(invalid_binary, dict)
+                else f"{invalid_binary!r}"
+            )
+            _write_error(message, rc=_GENERAL_ERROR_RC)
+            return _GENERAL_ERROR_RC
     if tokens == ["help"]:
         _build_stage1_parser().print_help()
         return 0
