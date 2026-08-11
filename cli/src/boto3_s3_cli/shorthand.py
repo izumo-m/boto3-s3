@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import string
+from typing import cast
 
 from boto3_s3 import ValidationError
 from boto3_s3_cli import paramfile
@@ -70,6 +71,8 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     rejected here too: aws schema-validates the shorthand result at parse
     time - a map value must be a string - so ``a@=fileb://...`` is its
     pre-pipeline ParamValidation (rc 252, measured), never a transfer. A
+    JSON object's non-string values draw the same schema report, one line
+    per offending key (measured). A
     paramfile the ``@=`` operator cannot *load*, by contrast, is not this
     function's error at all - see `_Parser._keyval`.
     """
@@ -106,15 +109,54 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
             f"Error parsing parameter '{name}': Invalid JSON: {exc}\nJSON received: {value}",
             operation=operation,
         ) from exc
-    if not isinstance(data, dict) or not all(
-        isinstance(key, str) and isinstance(item, str)
-        for key, item in data.items()  # pyright: ignore[reportUnknownVariableType]
-    ):
+    if not isinstance(data, dict):
+        # Unreachable behind the `{`-led gate (a JSON document starting with
+        # `{` can only parse to an object); kept for the type narrowing.
         raise ValidationError(
             f"Error parsing parameter '{name}': expected a JSON object of strings",
             operation=operation,
         )
-    return data  # pyright: ignore[reportUnknownVariableType]
+    entries = cast("dict[str, object]", data)  # JSON object keys are strings
+    invalid = {key: item for key, item in entries.items() if not isinstance(item, str)}
+    if invalid:
+        # botocore's schema report, like the bytes rejection in
+        # `parse_map_option`: aws parses the JSON and then fails its schema
+        # validation with one line per offending key, in document order
+        # (measured).
+        reports = "\n".join(
+            f"Invalid type for parameter {key}, value: {_json_value_repr(item)}, "
+            f"type: {_json_type_repr(item)}, valid types: <class 'str'>"
+            for key, item in invalid.items()
+        )
+        raise ValidationError("Parameter validation failed:\n" + reports, operation=operation)
+    return cast("dict[str, str]", entries)
+
+
+def _json_value_repr(value: object) -> str:
+    """Render a JSON-decoded value the way aws's schema report prints it.
+
+    aws parses the JSON with ``object_pairs_hook=OrderedDict``, so an object
+    value prints in ``OrderedDict`` form. Formatting that by hand - rather
+    than parsing into ``OrderedDict`` and calling ``repr`` - keeps the text
+    identical across host interpreters: ``OrderedDict.__repr__`` changed
+    form in Python 3.12, and aws's official build ships the new one.
+    """
+    if isinstance(value, dict):
+        mapping = cast("dict[object, object]", value)
+        if not mapping:
+            return "OrderedDict()"
+        items = ", ".join(f"{key!r}: {_json_value_repr(item)}" for key, item in mapping.items())
+        return "OrderedDict({" + items + "})"
+    if isinstance(value, list):
+        elements = cast("list[object]", value)
+        return "[" + ", ".join(_json_value_repr(item) for item in elements) + "]"
+    return repr(value)
+
+
+def _json_type_repr(value: object) -> str:
+    if isinstance(value, dict):
+        return "<class 'collections.OrderedDict'>"
+    return str(type(value))
 
 
 class _Parser:

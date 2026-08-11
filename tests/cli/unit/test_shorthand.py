@@ -219,10 +219,46 @@ class TestParseMapOptionErrors:
             _parse('{"a": }')
         assert "Error parsing parameter '--metadata'" in str(excinfo.value)
 
-    def test_json_non_string_values_rejected(self) -> None:
+    def test_json_non_string_values_get_the_schema_report(self) -> None:
+        # aws parses the JSON and then fails botocore's schema validation -
+        # no "Error parsing parameter" prefix, one line per offending key
+        # (measured against the pinned aws-cli).
         with pytest.raises(ValidationError) as excinfo:
             _parse('{"a": 1}')
-        assert "Error parsing parameter '--metadata'" in str(excinfo.value)
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: 1, type: <class 'int'>, "
+            "valid types: <class 'str'>"
+        )
+
+    def test_json_schema_report_names_every_offending_key(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{"a": 1, "b": "ok", "c": true}')
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: 1, type: <class 'int'>, "
+            "valid types: <class 'str'>\n"
+            "Invalid type for parameter c, value: True, type: <class 'bool'>, "
+            "valid types: <class 'str'>"
+        )
+
+    def test_json_nested_values_render_in_ordereddict_form(self) -> None:
+        # aws parses with object_pairs_hook=OrderedDict and its official
+        # build (Python 3.14) prints the 3.12+ OrderedDict repr; the hand
+        # formatter reproduces that text on every supported interpreter
+        # (measured byte-equal against the pinned aws-cli, empty map and
+        # deep nesting included).
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{"a": {"b": {"c": 1}}, "d": [1, "x", {"e": 2}], "f": {}}')
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: OrderedDict({'b': OrderedDict({'c': 1})}), "
+            "type: <class 'collections.OrderedDict'>, valid types: <class 'str'>\n"
+            "Invalid type for parameter d, value: [1, 'x', OrderedDict({'e': 2})], "
+            "type: <class 'list'>, valid types: <class 'str'>\n"
+            "Invalid type for parameter f, value: OrderedDict(), "
+            "type: <class 'collections.OrderedDict'>, valid types: <class 'str'>"
+        )
 
 
 class TestSyntaxErrorWordingParity:
