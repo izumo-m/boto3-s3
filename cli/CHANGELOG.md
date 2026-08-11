@@ -8,8 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two CRT-engine corners now match aws: Ctrl-C or a fatal error during a CRT transfer prints aws's per-item cancellation lines and exits 1 instead of dropping them (a mid-transfer Ctrl-C previously exited 0 silently), and an explicit `preferred_transfer_client = crt` fails construction-time errors even when another process holds the CRT slot instead of silently running the classic engine.
 - A `multipart_chunksize` under 5 MB no longer multiparts uploads `aws` sends as a single request under the CRT engine.
 - More aws parity in the transfer engine: `--metadata-directive COPY` keeps your properties on a multipart copy, annotation copies drop a checksum header `aws` omits, and a bad option is reported ahead of an unusable source.
-- Progress-line spacing and the displayed transfer speed now match aws where a transfer fails, a coarse clock reads no elapsed time yet, or a case-conflict advisory prints — and the standing S3 Express warning flushes immediately, like aws's.
-- A `--metadata k@=file://...` reference that cannot be loaded now reports and exits like aws (255, not 252).
+- Progress-line spacing and the displayed transfer speed now match aws where a transfer fails, a coarse clock reads no elapsed time yet, a notification omits an already-known size, or a case-conflict advisory prints — and the standing S3 Express warning flushes immediately, like aws's.
+- A `--metadata k@=file://...` reference that cannot be loaded now reports and exits like aws (255, not 252), and the reports for an empty `fileb://` payload (`--metadata`, `website`) and for JSON metadata carrying non-string values now match aws's wording too.
+- `AWS_CLI_OUTPUT_ENCODING` and the `cli_binary_format` config variable are now validated like aws: an unknown value stops the run at exit code 255.
+- Ctrl-C during a slow listing page pull now exits immediately like aws, whichever moment it lands in; previously some windows waited the in-flight request out first.
 - `presign` URLs outside `us-east-1` now name the regional S3 host like `aws`, not the legacy global one.
 - S3 Outposts access-point targets now sign with SigV4a like `aws` (with the `crt` extra), instead of a plain SigV4 the endpoint rejects.
 
