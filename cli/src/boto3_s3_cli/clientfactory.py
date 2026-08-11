@@ -500,17 +500,18 @@ def build_client(
     # accept it (a default us-east-1 client) and resolves us-east-1
     # to the legacy global endpoint where aws v2 uses the regional one. Pin
     # both so every command - visibly, presign's URLs - matches aws v2.
-    # The pin stands down when the command targets an MRAP ARN or an S3
-    # Express directory bucket: an explicit signature_version suppresses
-    # botocore's auth-scheme resolution, and those endpoints must resolve to
-    # asymmetric SigV4a / ``sigv4-s3express`` (with `CreateSession`
-    # credentials) respectively - a pinned s3v4 matches both scheme names up
-    # to the first dash and silently signs a plain SigV4 request instead.
-    # aws v2's bundled botocore pins only the symmetric families
-    # (_pin_python_sigv4_signers) and leaves both resolutions alive. With
-    # awscrt absent, an MRAP target surfaces botocore's own
-    # MissingDependencyException (-> ConfigurationError, 253) instead of a
-    # silently mis-signed SigV4 request.
+    # The pin stands down when the command targets an MRAP ARN, an S3
+    # Outposts access point, or an S3 Express directory bucket: an explicit
+    # signature_version suppresses botocore's auth-scheme resolution, and
+    # those endpoints must resolve to asymmetric SigV4a (the two ARN shapes)
+    # / ``sigv4-s3express`` (with `CreateSession` credentials) - a pinned
+    # s3v4 matches all those scheme names up to the first dash and silently
+    # signs a plain SigV4 request instead. aws v2's bundled botocore pins
+    # only the symmetric families (_pin_python_sigv4_signers) and leaves the
+    # resolutions alive. With awscrt absent, a SigV4a target (MRAP or
+    # Outposts) surfaces botocore's own MissingDependencyException
+    # (-> ConfigurationError, 253) instead of a silently mis-signed SigV4
+    # request.
     overrides: dict[str, Any] = {
         "s3": {"us_east_1_regional_endpoint": "regional"},
     }

@@ -1443,8 +1443,8 @@ class LocalStorage(Storage):
         to confine - ``..`` should navigate the parent rather than be rejected.
         The one genuinely untrusted path - a *remote* S3 key steering a recursive
         download's local target - is guarded separately, where the key arrives
-        from the bucket (``s3.py``'s ``_warn_parent_reference`` port, warn-and-skip
-        for ``aws s3`` parity).
+        from the bucket (``producers.py``'s ``_warn_parent_reference`` port,
+        warn-and-skip for ``aws s3`` parity).
         """
         # Anchor on the construction-time absolutized path like scan /
         # get_fileinfo, so a later chdir cannot move where a relative

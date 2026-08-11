@@ -318,9 +318,10 @@ class OpOutcome(enum.Enum):
     ``SKIPPED`` is an informational, non-warning skip and does not affect the
     exit code: a ``cp`` / ``mv`` that ``no_overwrite`` stopped from replacing
     an existing destination, or a glacier-blocked source passed over under
-    ``ignore_glacier_warnings``. ``sync`` emits none - a pair it finds up to
-    date produces no record at all, and its ``no_overwrite`` drops the whole
-    update lane instead of skipping pairs one by one.
+    ``ignore_glacier_warnings``. ``sync`` emits one only from that glacier
+    gate - a pair it finds up to date produces no record at all, and its
+    ``no_overwrite`` drops the whole update lane instead of skipping pairs
+    one by one.
     ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only

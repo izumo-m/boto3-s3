@@ -21,13 +21,14 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Eight of section 2's entries
+does change from one `aws` release to the next. Nine of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
 engine, the closing line of a Ctrl-C `aws` cannot attribute to a cancelled
 classic transfer, the failure line of a directory copied without
 `--recursive`, the one-line invalid-bucket-name report, the `--version` line,
-and two argument-parsing corners. The interactive prompt
+two argument-parsing corners, and the messages the installed botocore itself
+writes. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -131,7 +132,11 @@ are visible, or make no difference to the result.
   line names the source `./d` and ends with `[Errno 21] Is a directory:
   '/path/to/d'` on either engine. The `Unknown Error Code` ending is a
   rendering accident, so this command keeps the errno report instead of
-  copying it.
+  copying it. Under `--dryrun` both tools instead exit 0 and preview the
+  doomed upload, and the same threading difference shows in the previewed
+  line: `aws` prints `(dryrun) upload: d/ to s3://bkt/` — the
+  trailing-separator form, with the destination key folded away — where this
+  command prints `(dryrun) upload: ./d to s3://bkt/d`.
 - **Invalid bucket names report one line.** For a name S3 cannot accept, `aws`
   prints botocore's full report, ending in the regex the name must match; here
   the report stops after `Invalid bucket name "<name>"`. The exit code is the
@@ -168,6 +173,10 @@ are visible, or make no difference to the result.
   defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
   Setting it changes retry/timeout defaults here where `aws` would not, and an
   invalid value is an error here (`aws` runs as if it were unset).
+- **`sts_regional_endpoints` is validated.** The installed botocore still
+  validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
+  bundled botocore dropped it. An invalid value is an error here (exit
+  code 255) where `aws` runs as if it were unset.
 - **Which CA certificates are trusted.** Both tools verify every TLS connection
   against an explicit CA file — never the operating system's trust store — but
   not the same file: `aws` uses the `cacert.pem` bundled in its own

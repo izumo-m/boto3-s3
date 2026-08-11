@@ -13,7 +13,8 @@ Following the library's connection model, the resolver takes its
 region/verify/profile wiring of your choice - aws builds the s3control
 client in the path's region and the sts client without one); the pure
 string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
-``is_s3express_path`` - are callable without any client. aws-cli's
+``is_outpost_path`` / ``is_s3express_path`` - are callable without any
+client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
 This module stays SDK-free at import time (design/imports.md): the first path
