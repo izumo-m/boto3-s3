@@ -249,6 +249,26 @@ class TestCarriageReturnProtocol:
         # 8192 + 6144 = 14336: the top-up lands the denominator on the sum.
         assert "Completed 11.0 KiB/14.0 KiB (2.8 KiB/s) with 2 file(s) remaining" in out
 
+    def test_omitted_total_after_a_known_size_adds_nothing(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws gates the unknown-size additions on the *stored* size
+        # (_update_ongoing_transfer_size_if_unknown runs only while it is
+        # None), so a notification that omits an already-known total must not
+        # grow the expected total again.
+        clock = iter([0.0, 1.0, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 8192))  # queued, known 8 KiB
+            printer.on_progress(_progress("a", 4096, None))  # total omitted
+            printer.on_progress(_progress("a", 8192, None))  # and again
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 4.0 KiB/8.0 KiB" in out
+        assert "Completed 8.0 KiB/8.0 KiB" in out
+        assert "/12.0 KiB" not in out
+        assert "/16.0 KiB" not in out
+
     def test_speed_is_not_computed_from_a_zero_elapsed_clock(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:

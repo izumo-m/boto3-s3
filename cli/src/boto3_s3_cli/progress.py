@@ -261,14 +261,15 @@ class TransferPrinter:
                     # have not covered (aws's
                     # _update_ongoing_transfer_size_if_unknown).
                     self._expected_bytes += progress.bytes_total - previous_done
-            else:
+            elif previous_total is None:
                 # Size unknown: the denominator tracks the bytes as they
                 # arrive - aws's rule, so the meter stays in byte form and
                 # never shows done ahead of expected.
                 self._expected_bytes += delta
-            # A known total sticks even if a later notification omits it:
-            # reverting to unknown would resume the per-delta additions on an
-            # expected total already topped up to the full size.
+            # A known total sticks even if a later notification omits it: the
+            # stored slot below keeps the size, and the elif above keeps the
+            # per-delta additions off an expected total already topped up to
+            # the full size (aws gates on the *stored* size the same way).
             total = progress.bytes_total if progress.bytes_total is not None else previous_total
             self._inflight[progress.compare_key] = (progress.bytes_done, total)
             self._done_bytes += delta
