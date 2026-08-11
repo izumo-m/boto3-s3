@@ -395,16 +395,21 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
     shorthand machinery (measured: ``--metadata file:///no/x --page-size
     abc`` is the coercion's 255, while a direct option's bad paramfile wins
     with 252). A ``file://`` whole-value reference loads the map text (252 on
-    a missing file); a ``fileb://`` one loads bytes and then aws crashes
-    indexing them in its shorthand parser (measured: rc 255 with this exact
-    message, the ``int`` from a bytes index reaching ``in`` a string), so a
-    missing file is still the load 252 but an existing one is the 255.
+    a missing file); a ``fileb://`` one loads bytes and then aws crashes in
+    its shorthand parser (measured: rc 255 either way - a non-empty payload
+    indexes to an ``int`` that reaches ``in`` a string, an empty one fails a
+    step earlier with the bytes-vs-str ``TypeError``), so a missing file is
+    still the load 252 but an existing one is the 255.
     """
     if args.metadata is None:
         return
     if args.metadata.startswith("fileb://"):
         with paramfile.named_argument("--metadata", operation=operation):
-            paramfile.read_binary_paramfile(args.metadata, operation=operation)
+            payload = paramfile.read_binary_paramfile(args.metadata, operation=operation)
+        if not payload:
+            raise InvalidValueError(
+                "a bytes-like object is required, not 'str'", operation=operation
+            )
         raise InvalidValueError(
             "'in <string>' requires string as left operand, not int", operation=operation
         )

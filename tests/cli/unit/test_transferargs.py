@@ -241,6 +241,16 @@ class TestMetadataParamfile:
             transferargs.resolve_metadata_option(args, operation="cp")
         assert str(excinfo.value) == "'in <string>' requires string as left operand, not int"
 
+    def test_whole_value_fileb_empty_payload_is_the_bytes_type_error(self, tmp_path: Path) -> None:
+        # An empty payload fails one step earlier in aws's parser: the
+        # bytes-vs-str TypeError, not the int-index one (measured).
+        p = tmp_path / "m.bin"
+        p.write_bytes(b"")
+        args = argparse.Namespace(metadata=f"fileb://{p}")
+        with pytest.raises(InvalidValueError) as excinfo:
+            transferargs.resolve_metadata_option(args, operation="cp")
+        assert str(excinfo.value) == "a bytes-like object is required, not 'str'"
+
     def test_whole_value_fileb_missing_is_the_load_252(self) -> None:
         args = argparse.Namespace(metadata="fileb:///nonexistent/boto3_s3_md")
         with pytest.raises(ValidationError, match="Unable to load paramfile"):

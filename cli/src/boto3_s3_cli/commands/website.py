@@ -69,7 +69,10 @@ class WebsiteCommand(Command):
             # Intentional aws-cli bug parity: WebsiteCommand declares a
             # one-element positional list, the URI handler unwraps it to bytes,
             # and the command indexes those bytes as though the list remained.
-            # The resulting int has no startswith(), so aws exits 255.
+            # An empty payload dies at that index itself; any other indexes to
+            # an int with no startswith(), so aws exits 255 either way.
+            if not args.paths:
+                raise IndexError("index out of range")
             raise AttributeError("'int' object has no attribute 'startswith'")
         path: str = args.paths
         if paths_expanded:
