@@ -1166,7 +1166,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=None,
             operation="mv",
-            wait_on_interrupt=True,
+            reusable_after_interrupt=True,
         )
         assert gate is not None
         first = TransferItem(
@@ -1276,7 +1276,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=item_filter,
             operation="cp",
-            wait_on_interrupt=True,
+            reusable_after_interrupt=True,
         )
         return gate, transferrer
 

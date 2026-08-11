@@ -136,7 +136,7 @@ listings, and for bucket listings wherever `ListBuckets` paginates — and
 target `S3Storage` and seeded into the listings it produces, so pass a
 configured `S3Storage` to tune them (see [`../storage.md`](../storage.md)). The
 Ctrl-C posture of an object listing's page worker comes from
-`S3(wait_on_interrupt=...)` (see [`../s3.md`](../s3.md)).
+`S3(reusable_after_interrupt=...)` (see [`../s3.md`](../s3.md)).
 
 ### Ordering
 

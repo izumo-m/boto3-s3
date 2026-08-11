@@ -749,7 +749,7 @@ def resolve_locations(
         # build_s3_storage applies the strict aws-cli validation (rc 252
         # ahead of the pipeline) with the measured bucket-less carve-out. The
         # CLI's process-fatal Ctrl-C posture is not a storage concern:
-        # build_s3 declares it once (S3's wait_on_interrupt).
+        # build_s3 declares it once (S3's reusable_after_interrupt).
         return build_s3_storage(arg, client=client_for, page_size=page_size)
 
     def _local(path: str) -> LocalStorage:

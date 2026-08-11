@@ -92,7 +92,7 @@ def _drain_worker(release: threading.Event) -> None:
 
 def test_interrupt_still_joins_by_default() -> None:
     # A KeyboardInterrupt unwind keeps the no-surviving-worker contract unless
-    # the app opted out with wait_on_interrupt=False. The producer far exceeds
+    # the app opted out with reusable_after_interrupt=False. The producer far exceeds
     # the queue, so the worker is genuinely blocked mid-run - it cannot have
     # finished naturally, and only the context exit's join reclaims it.
     pages = ([i] for i in range(100_000))
@@ -104,7 +104,7 @@ def test_interrupt_still_joins_by_default() -> None:
 
 
 def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
-    # wait_on_interrupt=False: a KeyboardInterrupt unwind must not wait for a
+    # reusable_after_interrupt=False: a KeyboardInterrupt unwind must not wait for a
     # page pull in flight (a network fetch can block for a full timeout); the
     # daemon worker is abandoned to die with the process.
     pull_started = threading.Event()
@@ -118,7 +118,7 @@ def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
 
     try:
         with pytest.raises(KeyboardInterrupt):
-            with prefetch(pages(), queue_size=1, wait_on_interrupt=False) as it:
+            with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
                 assert next(it) == 1
                 assert pull_started.wait(5)
                 raise KeyboardInterrupt
@@ -129,29 +129,29 @@ def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
         _drain_worker(release)
 
 
-def test_early_break_still_joins_with_wait_on_interrupt_false() -> None:
+def test_early_break_still_joins_with_reusable_after_interrupt_false() -> None:
     # The opt-out is interrupt-scoped: GeneratorExit / normal exits keep the
-    # full teardown even when wait_on_interrupt is False.
+    # full teardown even when reusable_after_interrupt is False.
     pages = ([i] for i in range(100_000))
-    with prefetch(pages, queue_size=2, wait_on_interrupt=False) as it:
+    with prefetch(pages, queue_size=2, reusable_after_interrupt=False) as it:
         assert next(it) == 0
     assert not _worker_alive()
 
 
-def test_systemexit_still_joins_with_wait_on_interrupt_false() -> None:
+def test_systemexit_still_joins_with_reusable_after_interrupt_false() -> None:
     # The opt-out scopes to KeyboardInterrupt alone. sys.exit() requests an
     # orderly termination, so a SystemExit unwind reclaims the worker like any
-    # ordinary exception even when wait_on_interrupt is False.
+    # ordinary exception even when reusable_after_interrupt is False.
     pages = ([i] for i in range(100_000))
     with pytest.raises(SystemExit):
-        with prefetch(pages, queue_size=2, wait_on_interrupt=False) as it:
+        with prefetch(pages, queue_size=2, reusable_after_interrupt=False) as it:
             assert next(it) == 0
             raise SystemExit(3)
     assert not _worker_alive()
 
 
 def test_storage_scan_forwards_the_interrupt_policy() -> None:
-    # Storage.scan wires ScanOptions.wait_on_interrupt into prefetch: with
+    # Storage.scan wires ScanOptions.reusable_after_interrupt into prefetch: with
     # False, a KeyboardInterrupt unwind of the scan returns without waiting
     # for the in-flight page pull.
     from typing import BinaryIO, Literal
@@ -182,7 +182,7 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
             return "blocking-stub"
 
     try:
-        scan = _Blocking().scan(ScanOptions(wait_on_interrupt=False))
+        scan = _Blocking().scan(ScanOptions(reusable_after_interrupt=False))
         assert next(scan).key == "a"
         assert pull_started.wait(5)
         with pytest.raises(KeyboardInterrupt):
@@ -208,7 +208,7 @@ def test_marked_interrupt_abandons_a_generator_exit_teardown() -> None:
         yield [2]
 
     try:
-        with prefetch(pages(), queue_size=1, wait_on_interrupt=False) as it:
+        with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
             assert next(it) == 1
             assert pull_started.wait(5)
             concurrency.mark_interrupt_unwinding()
@@ -263,7 +263,7 @@ def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            S3(wait_on_interrupt=False).ls(
+            S3(reusable_after_interrupt=False).ls(
                 storage, on_entry=lambda info: _interrupt_on_second(counter)
             )
         assert time.monotonic() - start < 5
@@ -283,7 +283,7 @@ def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            S3(wait_on_interrupt=False).rm(
+            S3(reusable_after_interrupt=False).rm(
                 storage,
                 recursive=True,
                 dryrun=True,
@@ -312,7 +312,7 @@ def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
     try:
         with tempfile.TemporaryDirectory() as dest:
             with pytest.raises(KeyboardInterrupt):
-                S3(wait_on_interrupt=False).cp(
+                S3(reusable_after_interrupt=False).cp(
                     storage,
                     dest,
                     recursive=True,

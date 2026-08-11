@@ -185,14 +185,14 @@ def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> Non
 
 
 @contextmanager
-def _scan_teardown(entries: object, *, wait_on_interrupt: bool) -> Generator[None]:
+def _scan_teardown(entries: object, *, reusable_after_interrupt: bool) -> Generator[None]:
     """Close a consumed scan on exit, honoring the process-fatal posture.
 
     ``ls`` / ``rm`` consume a scan outside `prefetch`'s own pull, so a
     ``KeyboardInterrupt`` landing in their loop bodies (``on_entry``, a
     deleter submission wait) never unwinds through the prefetch context -
     the scan's teardown arrives as a plain ``GeneratorExit``, which always
-    joins the page worker. Under ``wait_on_interrupt=False`` that join is
+    joins the page worker. Under ``reusable_after_interrupt=False`` that join is
     exactly what the posture forbids, so the interrupt is marked
     (`concurrency.mark_interrupt_unwinding`) *before* the close runs and the
     teardown abandons the worker instead.
@@ -206,7 +206,7 @@ def _scan_teardown(entries: object, *, wait_on_interrupt: bool) -> Generator[Non
     try:
         yield
     except KeyboardInterrupt:
-        if not wait_on_interrupt:
+        if not reusable_after_interrupt:
             concurrency.mark_interrupt_unwinding()
         raise
     finally:
@@ -729,7 +729,7 @@ class S3:
     ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
 
-    ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
+    ``reusable_after_interrupt`` declares the application's Ctrl-C posture, once, for
     every operation this instance starts a scan for - ``ls``, ``rm``, the
     ``cp`` / ``mv`` transfers and ``sync``. The operations with no enumeration
     to reclaim (``mb`` / ``rb`` / ``presign`` / ``website``, and the streaming
@@ -748,7 +748,7 @@ class S3:
     there. The posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit``
     and every other exception always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
-    ``ScanOptions.wait_on_interrupt``.
+    ``ScanOptions.reusable_after_interrupt``.
 
     ``crt_allow_absent_credentials`` is the second such posture declaration,
     for the CRT transfer engine. ``False`` (the default) is boto3's rule: a
@@ -788,7 +788,7 @@ class S3:
         endpoint_url: str | None = None,
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
-        wait_on_interrupt: bool = True,
+        reusable_after_interrupt: bool = True,
         crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
@@ -797,7 +797,7 @@ class S3:
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
-        self._wait_on_interrupt = wait_on_interrupt
+        self._reusable_after_interrupt = reusable_after_interrupt
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
         self._crt_allow_lockless = crt_allow_lockless
         self._crt_region: crtsupport.CrtRegion = crt_region
@@ -812,9 +812,9 @@ class S3:
         return self._session
 
     @property
-    def wait_on_interrupt(self) -> bool:
+    def reusable_after_interrupt(self) -> bool:
         """The Ctrl-C posture declared at construction (see the class docstring)."""
-        return self._wait_on_interrupt
+        return self._reusable_after_interrupt
 
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
@@ -986,11 +986,11 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 ),
                 cancel_token=cancel_token,
             )
-        with _scan_teardown(items, wait_on_interrupt=self._wait_on_interrupt):
+        with _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
@@ -1258,7 +1258,7 @@ class S3:
             transferrer=transferrer,
             item_filter=item_filter,
             operation=operation,
-            wait_on_interrupt=self._wait_on_interrupt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
         with transferrer:
             if not dryrun:
@@ -1274,7 +1274,7 @@ class S3:
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             elif plan.paths_type == "s3open":
                 assert src_s3 is not None
@@ -1286,7 +1286,7 @@ class S3:
                     options=options,
                     operation=operation,
                     dryrun=dryrun,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             elif src_s3 is None:
                 items = producers.upload_items(
@@ -1294,7 +1294,7 @@ class S3:
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     item_filter=item_filter,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             else:
                 items = producers.s3_source_items(
@@ -1307,7 +1307,7 @@ class S3:
                     options=options,
                     case_gate=case_gate,
                     operation=operation,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             # Check cancellation *before* pulling the next item, not after:
             # pulling only while the run is live keeps a cancelled run from
@@ -1330,7 +1330,7 @@ class S3:
                         transferrer.submit(item)
             except KeyboardInterrupt:
                 interrupted = True
-                if not self._wait_on_interrupt:
+                if not self._reusable_after_interrupt:
                     # The interrupt may have landed outside the scan's own
                     # pull (a submission wait, a result callback), so the
                     # producer's eventual teardown - the interpreter
@@ -1347,9 +1347,9 @@ class S3:
                 # emits on the client during the deregistration. Under the
                 # process-fatal posture a Ctrl-C unwind skips it: the unwind
                 # must not wait on an in-flight page pull (`S3` docstring,
-                # `wait_on_interrupt`), and the mark above makes the deferred
+                # `reusable_after_interrupt`), and the mark above makes the deferred
                 # finalization abandon rather than join.
-                if self._wait_on_interrupt or not interrupted:
+                if self._reusable_after_interrupt or not interrupted:
                     items.close()
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
@@ -1846,7 +1846,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
-                wait_on_interrupt=self._wait_on_interrupt,
+                reusable_after_interrupt=self._reusable_after_interrupt,
             )
             dest_entries = producers.sync_entries(
                 dest_storage,
@@ -1854,7 +1854,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
-                wait_on_interrupt=self._wait_on_interrupt,
+                reusable_after_interrupt=self._reusable_after_interrupt,
             )
 
             def _close_scans(
@@ -1869,8 +1869,8 @@ class S3:
                 # posture a Ctrl-C unwind skips it: closing would throw
                 # GeneratorExit into the producers, whose prefetch teardown
                 # always joins, and the unwind must not wait on an in-flight
-                # page pull (`S3` docstring, `wait_on_interrupt`).
-                if self._wait_on_interrupt or not (
+                # page pull (`S3` docstring, `reusable_after_interrupt`).
+                if self._reusable_after_interrupt or not (
                     exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
                 ):
                     dest_entries.close()
@@ -2026,14 +2026,14 @@ class S3:
             request_payer=request_payer,
             prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),
-            wait_on_interrupt=self._wait_on_interrupt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
 
         if dryrun:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, wait_on_interrupt=self._wait_on_interrupt):
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
                 for info in entries:
                     _raise_if_cancelled(cancel_token, "rm")
                     _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
@@ -2052,7 +2052,7 @@ class S3:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, wait_on_interrupt=self._wait_on_interrupt):
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
                 for info in entries:
                     _raise_if_cancelled(cancel_token, "rm")
                     deleter.submit(info)

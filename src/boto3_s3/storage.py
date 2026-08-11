@@ -212,7 +212,7 @@ class Storage(abc.ABC):
         storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
         paths build from this and overlay only the run-level knobs
         (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix`` /
-        ``request_payer``, plus the application's ``wait_on_interrupt``
+        ``request_payer``, plus the application's ``reusable_after_interrupt``
         posture), which
         is what lets an app configure the walk through the storage rather than per
         call.
@@ -270,7 +270,7 @@ class Storage(abc.ABC):
             pages,
             queue_size=self._scan_prefetch_pages,
             cancel_token=cancel_token,
-            wait_on_interrupt=opts.wait_on_interrupt,
+            reusable_after_interrupt=opts.reusable_after_interrupt,
         ) as items:
             yield from items
 

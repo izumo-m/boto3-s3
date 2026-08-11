@@ -787,7 +787,7 @@ side - because the library reads how a source is walked / listed from the storag
 itself (`default_scan_options`), not from a per-operation argument. `ls` / `rm`
 likewise build `S3Storage(uri, page_size=…)`. The CLI's Ctrl-C posture is
 declared once instead: `build_s3` constructs the command's `S3` with
-`wait_on_interrupt=False` (Ctrl-C is process-fatal in the CLI, so a scan's
+`reusable_after_interrupt=False` (Ctrl-C is process-fatal in the CLI, so a scan's
 exit must not wait for an in-flight listing page pull, matching aws's
 immediate death - the library default keeps waiting), and the operations
 thread it into every scan they start ([`storage.md`](./storage.md) section 2).

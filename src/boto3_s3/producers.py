@@ -54,7 +54,7 @@ def walk_source_scan_options(
     sort: bool = False,
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
 
@@ -64,8 +64,8 @@ def walk_source_scan_options(
     custom backend's own knobs, all configured on the constructor) - with only
     the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``) and the application's
-    Ctrl-C posture (``wait_on_interrupt``, declared once on
-    ``S3(wait_on_interrupt=...)``). So a ``LocalStorage`` subclass,
+    Ctrl-C posture (``reusable_after_interrupt``, declared once on
+    ``S3(reusable_after_interrupt=...)``). So a ``LocalStorage`` subclass,
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
@@ -85,7 +85,7 @@ def walk_source_scan_options(
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
-        wait_on_interrupt=wait_on_interrupt,
+        reusable_after_interrupt=reusable_after_interrupt,
     )
     return options
 
@@ -286,7 +286,7 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
 
@@ -310,7 +310,7 @@ def upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     else:
@@ -368,7 +368,7 @@ def s3_source_items(
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
     operation: str,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize download/copy items from an S3 source, gates applied."""
     src_bucket = src_storage.bucket
@@ -378,7 +378,7 @@ def s3_source_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
     elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
@@ -395,7 +395,7 @@ def s3_source_items(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
         infos = (
             info
@@ -543,7 +543,7 @@ def scan_s3_source(
     key_prefix: str,
     item_filter: FileFilter | None,
     options: TransferOptions,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Iterator[FileInfo]:
     """A recursive object listing anchored at the '/'-normalized ``key_prefix``.
 
@@ -555,7 +555,7 @@ def scan_s3_source(
     config and a custom ``S3Storage`` subclass survive), with the run-level
     knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
     ``key_prefix``, ``request_payer`` from the transfer options, and the
-    application's Ctrl-C posture (``wait_on_interrupt``).
+    application's Ctrl-C posture (``reusable_after_interrupt``).
     """
 
     def scan_filter(info: FileInfo) -> bool:
@@ -573,7 +573,7 @@ def scan_s3_source(
         prefix=key_prefix,
         filter=scan_filter,
         request_payer=options.get("request_payer"),
-        wait_on_interrupt=wait_on_interrupt,
+        reusable_after_interrupt=reusable_after_interrupt,
     )
     return storage.scan(scan_options)
 
@@ -723,7 +723,7 @@ def open_upload_items(
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
@@ -753,7 +753,7 @@ def open_upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     else:
@@ -914,7 +914,7 @@ def open_download_items(
     options: TransferOptions,
     operation: str,
     dryrun: bool,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
@@ -935,7 +935,7 @@ def open_download_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
     elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket custom`): mirror the
@@ -952,7 +952,7 @@ def open_download_items(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
         infos = (
             info
@@ -1057,7 +1057,7 @@ def cp_case_gate(
     transferrer: Transferrer,
     item_filter: FileFilter | None,
     operation: str,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -1091,7 +1091,7 @@ def cp_case_gate(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     }
@@ -1129,7 +1129,7 @@ def sync_entries(
     item_filter: FileFilter | None,
     transferrer: Transferrer,
     options: TransferOptions,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
@@ -1152,7 +1152,7 @@ def sync_entries(
             key_prefix=key_prefix,
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         ):
             yield _compare_key(info), info
         return
@@ -1163,7 +1163,7 @@ def sync_entries(
             sort=True,  # the merge-join needs both sides byte-ordered
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
     ):
         yield _compare_key(info), info

@@ -334,7 +334,7 @@ contradict section 1, where the CLI resolves the engine and the library builds
 it. Carrying the flag on `TransferConfig` would reach the same code with no
 plumbing, but that class is transfer *tuning*, and a compatibility-posture
 boolean does not belong in it. `S3` already declares one such posture
-(`wait_on_interrupt`), so it is where the second one goes.
+(`reusable_after_interrupt`), so it is where the second one goes.
 
 Only uploads reach this surface - a local source or a stdin stream alike, both
 measured byte-for-byte. A download or a sync fails earlier, at the botocore

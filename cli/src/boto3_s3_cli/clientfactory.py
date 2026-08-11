@@ -174,7 +174,7 @@ def build_s3(args: argparse.Namespace) -> S3:
         def client(self) -> S3Client:
             return build_client(args, session=session, region=region)
 
-    # wait_on_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
+    # reusable_after_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
     # (aws dies immediately); the library default keeps waiting.
     # endpoint_url: build_client already applies it to every client this S3
@@ -204,7 +204,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     return CliS3(
         session=session,
         endpoint_url=args.endpoint_url,
-        wait_on_interrupt=False,
+        reusable_after_interrupt=False,
         crt_allow_absent_credentials=True,
         crt_allow_lockless=True,
         crt_region=region,

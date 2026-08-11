@@ -351,7 +351,7 @@ class TestScanInterruptPolicy:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
-        # wait_on_interrupt=False once, and ls threads it into its listing
+        # reusable_after_interrupt=False once, and ls threads it into its listing
         # scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
@@ -360,7 +360,7 @@ class TestScanInterruptPolicy:
         class _Recording(boto3_s3.S3Storage):
             def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
                 assert options is not None
-                scan_waits.append(options.wait_on_interrupt)
+                scan_waits.append(options.reusable_after_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the command module's binding: ls.py imports S3Storage at top.

@@ -14,7 +14,7 @@ S3().cp("local.txt", "s3://bucket/key")
 
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
-   transfer_config=None, wait_on_interrupt=True,
+   transfer_config=None, reusable_after_interrupt=True,
    crt_allow_absent_credentials=False, crt_allow_lockless=False,
    crt_region=CLIENT_REGION)
 ```
@@ -27,7 +27,7 @@ S3(session=None, *, endpoint_url=None, config=None,
   S3-compatible endpoint or a `botocore.config.Config`.
 - **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`.
   Any call can override it.
-- **`wait_on_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
+- **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
   has been reclaimed, so the next operation still works. `False` treats Ctrl-C
   as fatal to the process and lets the unwind abandon an in-flight listing page.

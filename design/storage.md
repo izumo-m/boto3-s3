@@ -135,7 +135,7 @@ A few more members come with working defaults a custom backend normally keeps:
   `frozen=True, kw_only=True` dataclass and give **every added field a
   default**: the high-level operations overlay only the run-level knobs — the
   operation-inherent ones plus the application's Ctrl-C posture
-  (`wait_on_interrupt`, from `S3(wait_on_interrupt=…)`) — via
+  (`reusable_after_interrupt`, from `S3(reusable_after_interrupt=…)`) — via
   `dataclasses.replace(storage.default_scan_options(), …)`, and the
   base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
@@ -150,7 +150,7 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`ScanOptions.wait_on_interrupt`** (not a `Storage` member) — the Ctrl-C
+- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the Ctrl-C
   exit policy of `scan()`'s background page worker. `True` (the default): the
   scan's teardown always waits for a page pull already in flight, so no worker
   survives the operation — required for an app that may catch
@@ -158,7 +158,7 @@ A few more members come with working defaults a custom backend normally keeps:
   abandons the daemon worker instead of waiting (an in-flight network pull can
   otherwise hold the exit for a full timeout) — only for an app that treats
   Ctrl-C as process-fatal. The application declares the posture once, on
-  `S3(wait_on_interrupt=…)`; every scan an operation starts receives it
+  `S3(reusable_after_interrupt=…)`; every scan an operation starts receives it
   through this field, and only a direct `Storage.scan` caller sets it here
   itself. The CLI's `S3` declares `False`, matching aws's immediate death on
   Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an

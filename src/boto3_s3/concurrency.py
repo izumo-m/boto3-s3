@@ -14,7 +14,7 @@ Cleanup is cooperative -- the worker checks a stop flag between puts. The
 owner must exit the `prefetch` context when it stops consuming; context exit
 drops buffered pages and waits for a page pull already in progress before
 returning, so no worker survives the operation. The single opt-out is
-``wait_on_interrupt=False`` for apps that treat a Ctrl-C as process-fatal
+``reusable_after_interrupt=False`` for apps that treat a Ctrl-C as process-fatal
 (see `prefetch`).
 """
 
@@ -41,7 +41,7 @@ _END: object = object()
 _STOP_POLL_SECONDS = 0.1
 
 # Monotonic process-fatal marker. An operation running under
-# `wait_on_interrupt=False` sets it (`mark_interrupt_unwinding`) the moment a
+# `reusable_after_interrupt=False` sets it (`mark_interrupt_unwinding`) the moment a
 # `KeyboardInterrupt` starts unwinding it, and every posture-False prefetch
 # teardown from then on abandons its worker instead of joining. Never cleared:
 # the posture's contract is that the interrupt terminates the process, and an
@@ -53,7 +53,7 @@ def mark_interrupt_unwinding() -> None:
     """Declare that a process-fatal ``KeyboardInterrupt`` unwind has begun.
 
     Called by the high-level operations when a ``KeyboardInterrupt`` reaches
-    them under ``wait_on_interrupt=False``. The point of a separate marker: a
+    them under ``reusable_after_interrupt=False``. The point of a separate marker: a
     `prefetch` context only *sees* the interrupt when it lands inside the
     consumer's pull. When it lands anywhere else - a result callback, a
     submission wait - the scan generator is merely closed (``GeneratorExit``),
@@ -73,7 +73,7 @@ def prefetch(
     *,
     queue_size: int = 4,
     cancel_token: CancelToken | None = None,
-    wait_on_interrupt: bool = True,
+    reusable_after_interrupt: bool = True,
 ) -> Generator[Iterator[T]]:
     """Run ``pages`` on a worker thread; yield a flattened iterator.
 
@@ -89,7 +89,7 @@ def prefetch(
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
 
-    ``wait_on_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
+    ``reusable_after_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
     ``False`` and the context is unwinding on a ``KeyboardInterrupt`` - seen
     directly when the interrupt lands in the consumer's pull, or via
     `mark_interrupt_unwinding` when it lands elsewhere and the teardown
@@ -184,10 +184,10 @@ def prefetch(
         # finish rather than returning with a live worker. Botocore's request
         # timeouts bound a stuck S3 fetch; local/custom backends must likewise
         # make their page producer eventually return. The one exception is a
-        # terminal interrupt under wait_on_interrupt=False (see docstring) -
+        # terminal interrupt under reusable_after_interrupt=False (see docstring) -
         # whether it unwound through this context or was marked by the
         # operation it landed in.
-        if wait_on_interrupt or not (interrupted or _interrupt_unwinding):
+        if reusable_after_interrupt or not (interrupted or _interrupt_unwinding):
             worker.join()
 
 

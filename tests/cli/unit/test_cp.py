@@ -862,7 +862,7 @@ class TestSourceScanWiring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
-        # wait_on_interrupt=False once, and the operation threads it into the
+        # reusable_after_interrupt=False once, and the operation threads it into the
         # ScanOptions of every scan it starts (here the upload's source walk);
         # the library default keeps waiting.
         import boto3_s3
@@ -872,7 +872,7 @@ class TestSourceScanWiring:
         class _RecLocal(boto3_s3.LocalStorage):
             def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
                 assert options is not None
-                scan_waits.append(options.wait_on_interrupt)
+                scan_waits.append(options.reusable_after_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the binding module: transferargs imports LocalStorage at top.
