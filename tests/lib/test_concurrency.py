@@ -13,7 +13,10 @@ from collections.abc import Iterator
 
 import pytest
 
+from boto3_s3 import concurrency
 from boto3_s3.concurrency import prefetch
+from boto3_s3.s3storage import S3Storage
+from boto3_s3.types import S3FileInfo, ScanOptions
 
 _WORKER_NAME = "boto3-s3-prefetch"
 
@@ -154,7 +157,7 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
     from typing import BinaryIO, Literal
 
     from boto3_s3 import Storage
-    from boto3_s3.types import FileInfo, ScanOptions
+    from boto3_s3.types import FileInfo
 
     pull_started = threading.Event()
     release = threading.Event()
@@ -187,3 +190,139 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
         assert _worker_alive()  # abandoned mid-pull, not joined
     finally:
         _drain_worker(release)
+
+
+def test_marked_interrupt_abandons_a_generator_exit_teardown() -> None:
+    # The interrupt does not always unwind through the prefetch context: when
+    # it lands in the consumer's loop body (ls's on_entry, rm's submission
+    # wait) the scan is merely closed - a GeneratorExit. The operation marks
+    # the unwind (`mark_interrupt_unwinding`) and a posture-False teardown
+    # then abandons the in-flight pull instead of joining it.
+    pull_started = threading.Event()
+    release = threading.Event()
+
+    def pages() -> Iterator[list[int]]:
+        yield [1]
+        pull_started.set()
+        release.wait(10)  # the slow in-flight pull
+        yield [2]
+
+    try:
+        with prefetch(pages(), queue_size=1, wait_on_interrupt=False) as it:
+            assert next(it) == 1
+            assert pull_started.wait(5)
+            concurrency.mark_interrupt_unwinding()
+        # The exit was a plain (non-interrupt) teardown, but the marker made
+        # it abandon: the worker is still inside the 10s pull.
+        assert _worker_alive()
+    finally:
+        _drain_worker(release)
+
+
+def test_the_marker_leaves_a_default_posture_teardown_joining() -> None:
+    # The marker relaxes posture-False contexts alone: full reclamation stays
+    # the default posture's contract even mid-fatal-unwind.
+    pages = ([i] for i in range(100_000))
+    concurrency.mark_interrupt_unwinding()
+    with prefetch(pages, queue_size=2) as it:
+        assert next(it) == 0
+    assert not _worker_alive()
+
+
+class _BlockingScanStorage(S3Storage):
+    """An S3Storage whose second page pull blocks until released."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        self.release = threading.Event()
+
+    def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
+        yield [
+            S3FileInfo(key="prefix/a", size=1, compare_key="a"),
+            S3FileInfo(key="prefix/b", size=1, compare_key="b"),
+        ]
+        self.release.wait(10)  # the slow in-flight pull
+        yield [S3FileInfo(key="prefix/c", size=1, compare_key="c")]
+
+
+def _interrupt_on_second(counter: dict[str, int]) -> None:
+    counter["n"] += 1
+    if counter["n"] == 2:
+        raise KeyboardInterrupt
+
+
+def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
+    # The consumer-side windows: an interrupt raised from `on_entry` never
+    # unwinds through the prefetch context, so before the operations marked
+    # the unwind, ls's close joined the 10s pull and held the interrupt back
+    # for its full length (measured pre-fix).
+    from boto3_s3 import S3
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    counter = {"n": 0}
+    start = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            S3(wait_on_interrupt=False).ls(
+                storage, on_entry=lambda info: _interrupt_on_second(counter)
+            )
+        assert time.monotonic() - start < 5
+        assert _worker_alive()
+    finally:
+        _drain_worker(storage.release)
+
+
+def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
+    # Same window on rm's loop - which additionally iterated its scan as a
+    # bare temporary, so the unwind finalized (and joined) it even before an
+    # `except` could have marked anything (measured pre-fix).
+    from boto3_s3 import S3
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    counter = {"n": 0}
+    start = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            S3(wait_on_interrupt=False).rm(
+                storage,
+                recursive=True,
+                dryrun=True,
+                on_result=lambda result: _interrupt_on_second(counter),
+            )
+        assert time.monotonic() - start < 5
+        assert _worker_alive()
+    finally:
+        _drain_worker(storage.release)
+
+
+def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
+    # cp/mv/sync already delivered the interrupt promptly (their guard skips
+    # the close), but releasing the traceback finalized the producer and its
+    # teardown joined the pull inside the caller's own interrupt handler
+    # (measured pre-fix). With the unwind marked, the deferred finalization
+    # abandons the worker too.
+    import gc
+    import tempfile
+
+    from boto3_s3 import S3
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    counter = {"n": 0}
+    start = time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory() as dest:
+            with pytest.raises(KeyboardInterrupt):
+                S3(wait_on_interrupt=False).cp(
+                    storage,
+                    dest,
+                    recursive=True,
+                    dryrun=True,
+                    on_result=lambda result: _interrupt_on_second(counter),
+                )
+            # The pytest.raises exit dropped the exception state; collect so
+            # the assertion below cannot depend on refcount timing.
+            gc.collect()
+            assert time.monotonic() - start < 5
+            assert _worker_alive()
+    finally:
+        _drain_worker(storage.release)

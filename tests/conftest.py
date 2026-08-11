@@ -117,6 +117,20 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
 
 
 @pytest.fixture(autouse=True)
+def _reset_interrupt_unwinding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the process-fatal interrupt marker between tests.
+
+    ``concurrency.mark_interrupt_unwinding`` is monotonic on purpose - the
+    posture's contract is that the process is about to die - but the test
+    process survives its simulated Ctrl-Cs, and a marker leaked from one test
+    would make every later posture-False scan teardown abandon its worker.
+    """
+    from boto3_s3 import concurrency
+
+    monkeypatch.setattr(concurrency, "_interrupt_unwinding", False)
+
+
+@pytest.fixture(autouse=True)
 def _fail_on_recorder_exhaustion() -> Iterator[None]:
     """Fail any test whose recording client was called past its script.
 

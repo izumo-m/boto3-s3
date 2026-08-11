@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import crtsupport, producers, transferplan
+from boto3_s3 import concurrency, crtsupport, producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -182,6 +182,37 @@ def _emit_result(
 def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> None:
     if cancel_token is not None and cancel_token.cancelled:
         raise CancelledError(f"{operation} was cancelled", operation=operation)
+
+
+@contextmanager
+def _scan_teardown(entries: object, *, wait_on_interrupt: bool) -> Generator[None]:
+    """Close a consumed scan on exit, honoring the process-fatal posture.
+
+    ``ls`` / ``rm`` consume a scan outside `prefetch`'s own pull, so a
+    ``KeyboardInterrupt`` landing in their loop bodies (``on_entry``, a
+    deleter submission wait) never unwinds through the prefetch context -
+    the scan's teardown arrives as a plain ``GeneratorExit``, which always
+    joins the page worker. Under ``wait_on_interrupt=False`` that join is
+    exactly what the posture forbids, so the interrupt is marked
+    (`concurrency.mark_interrupt_unwinding`) *before* the close runs and the
+    teardown abandons the worker instead.
+
+    The caller must iterate a scan it bound to a local, never a bare
+    ``for info in storage.scan(...)`` temporary: an exception unwinding the
+    frame finalizes an unreferenced temporary while it clears the loop's
+    stack - before any handler runs - so the worker would be joined ahead of
+    the mark.
+    """
+    try:
+        yield
+    except KeyboardInterrupt:
+        if not wait_on_interrupt:
+            concurrency.mark_interrupt_unwinding()
+        raise
+    finally:
+        close = getattr(entries, "close", None)
+        if close is not None:
+            close()
 
 
 def _is_folder_marker(info: FileInfo) -> bool:
@@ -959,17 +990,13 @@ class S3:
                 ),
                 cancel_token=cancel_token,
             )
-        try:
+        with _scan_teardown(items, wait_on_interrupt=self._wait_on_interrupt):
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
                 on_entry(info)
                 if cancel_token is not None and cancel_token.cancelled:
                     break
-        finally:
-            close = getattr(items, "close", None)
-            if close is not None:
-                close()
         _raise_if_cancelled(cancel_token, "ls")
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
@@ -1303,6 +1330,14 @@ class S3:
                         transferrer.submit(item)
             except KeyboardInterrupt:
                 interrupted = True
+                if not self._wait_on_interrupt:
+                    # The interrupt may have landed outside the scan's own
+                    # pull (a submission wait, a result callback), so the
+                    # producer's eventual teardown - the interpreter
+                    # finalizes it once this frame's traceback is released -
+                    # arrives as a GeneratorExit. Marked, that teardown
+                    # abandons the page worker instead of joining it.
+                    concurrency.mark_interrupt_unwinding()
                 raise
             finally:
                 # Close the producer (joining its scan prefetch worker) before
@@ -1310,10 +1345,10 @@ class S3:
                 # handlers - the teardown mirror of prepare()'s
                 # register-before-enumeration ordering, so no listing traffic
                 # emits on the client during the deregistration. Under the
-                # process-fatal posture a Ctrl-C unwind skips it: closing
-                # would throw GeneratorExit into the producer, whose prefetch
-                # teardown always joins, and the unwind must not wait on an
-                # in-flight page pull (`S3` docstring, `wait_on_interrupt`).
+                # process-fatal posture a Ctrl-C unwind skips it: the unwind
+                # must not wait on an in-flight page pull (`S3` docstring,
+                # `wait_on_interrupt`), and the mark above makes the deferred
+                # finalization abandon rather than join.
                 if self._wait_on_interrupt or not interrupted:
                     items.close()
         _raise_if_cancelled(cancel_token, operation)
@@ -1997,10 +2032,12 @@ class S3:
         if dryrun:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
-            for info in storage.scan(options, cancel_token=cancel_token):
-                _raise_if_cancelled(cancel_token, "rm")
-                _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
-                _raise_if_cancelled(cancel_token, "rm")
+            entries = storage.scan(options, cancel_token=cancel_token)
+            with _scan_teardown(entries, wait_on_interrupt=self._wait_on_interrupt):
+                for info in entries:
+                    _raise_if_cancelled(cancel_token, "rm")
+                    _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
+                    _raise_if_cancelled(cancel_token, "rm")
             _raise_if_cancelled(cancel_token, "rm")
             return
 
@@ -2014,9 +2051,11 @@ class S3:
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
-            for info in storage.scan(options, cancel_token=cancel_token):
-                _raise_if_cancelled(cancel_token, "rm")
-                deleter.submit(info)
+            entries = storage.scan(options, cancel_token=cancel_token)
+            with _scan_teardown(entries, wait_on_interrupt=self._wait_on_interrupt):
+                for info in entries:
+                    _raise_if_cancelled(cancel_token, "rm")
+                    deleter.submit(info)
             _raise_if_cancelled(cancel_token, "rm")
         _raise_if_cancelled(cancel_token, "rm")
         if deleter.failed:

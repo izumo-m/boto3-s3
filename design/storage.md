@@ -163,7 +163,13 @@ A few more members come with working defaults a custom backend normally keeps:
   itself. The CLI's `S3` declares `False`, matching aws's immediate death on
   Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
   early break, `SystemExit` (`sys.exit()` requests an orderly termination),
-  an ordinary exception — always waits (`concurrency.prefetch`).
+  an ordinary exception — always waits (`concurrency.prefetch`). The interrupt
+  does not always unwind *through* the prefetch context (it can land in a
+  result callback or a submission wait, leaving the scan's teardown a plain
+  close), so the operations mark the unwind
+  (`concurrency.mark_interrupt_unwinding`, monotonic — the process is fatal by
+  declaration) and every posture-`False` teardown from then on abandons its
+  worker too.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
