@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - More aws parity in the transfer engine: `--metadata-directive COPY` keeps your properties on a multipart copy, annotation copies drop a checksum header `aws` omits, and a bad option is reported ahead of an unusable source.
 - Progress-line spacing and the displayed transfer speed now match aws where a transfer fails, a coarse clock reads no elapsed time yet, a notification omits an already-known size, or a case-conflict advisory prints — and the standing S3 Express warning flushes immediately, like aws's.
 - A `--metadata k@=file://...` reference that cannot be loaded now reports and exits like aws (255, not 252), and the reports for an empty `fileb://` payload (`--metadata`, `website`) and for JSON metadata carrying non-string values now match aws's wording too.
-- `AWS_CLI_OUTPUT_ENCODING` and the `cli_binary_format` config variable are now validated like aws: an unknown value stops the run at exit code 255.
+- `AWS_CLI_OUTPUT_ENCODING` and the `cli_binary_format` config variable are now validated like aws: an unknown value stops the run at exit code 255. A valid codec is now also applied to error reports the way aws applies it, down to the exit code 255 when the codec cannot encode the report.
 - Ctrl-C during a slow listing page pull now exits immediately like aws, whichever moment it lands in; previously some windows waited the in-flight request out first.
 - `presign` URLs outside `us-east-1` now name the regional S3 host like `aws`, not the legacy global one.
-- S3 Outposts access-point targets now sign with SigV4a like `aws` (with the `crt` extra), instead of a plain SigV4 the endpoint rejects.
+- S3 Outposts access-point targets — every ARN spelling and full-length `--op-s3` aliases — and MRAP targets of any alias spelling now sign with SigV4a like `aws` (with the `crt` extra), instead of a plain SigV4 the endpoint rejects.
+- `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` no longer disable credentials passed in environment variables (aws binds only `--profile` that tightly), and a leftover `api_versions` config entry is ignored like aws instead of failing every command.
+- S3's wrong-region and SigV4-migration errors now carry aws's extra guidance lines.
+- `--metadata` now accepts aws's whole shorthand grammar (csv lists, nested hashes, explicit lists) and reports every rejection with aws's wording.
+- More config-surface parity: an indented `cli_auto_prompt` block, an `[s3]` section carrying a `self` key, and a non-text `AWS_CLI_FILE_ENCODING` codec now fail the way aws fails.
+- A single-file copy to the bare `s3:///` root names its destination key like aws, and a `HeadObject` 404 report keeps botocore's retry note.
 
 ## [0.7.0] - 2026-08-01
 
