@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, and a download stamps whole seconds on the local file like aws.
+- `guess_mime_type` now guesses from the MIME table of the official aws-cli build on every host interpreter, so the stored `Content-Type` no longer depends on the Python version.
+- A stream destination no longer checks stdout up front or flushes it on completion (aws's writer shape): a missing or failing stdout is a per-item transfer failure.
+- Added `S3ScanOptions.include_common_prefixes`; `ls` uses it to keep prefix entries in recursive listings the way aws displays them.
 - Fixed a rare hang: a cancellation upgraded to immediate while `sync` was already settling pooled filter decisions now cancels them instead of waiting forever.
 - `wait_on_interrupt` was renamed `reusable_after_interrupt`: the flag declares whether operations stay callable after a caught Ctrl-C, which the old name did not convey. Declaring `False` now also abandons an in-flight listing page pull whichever window the interrupt lands in; previously an interrupt outside the pull itself waited the pull out.
 - `presign` URLs now name the client's own regional endpoint like `aws s3 presign`; outside `us-east-1` they named the legacy global host while carrying the real region in their credential scope.
