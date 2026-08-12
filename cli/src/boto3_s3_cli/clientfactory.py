@@ -119,6 +119,10 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     the whole CLI down. An empty mapping as the session instance variable heads
     the config chain, so no env var or config file can put one back. The
     library's own ``S3()`` keeps reading it, staying boto3-faithful.
+
+    Finally the temporary-credential providers get their on-disk cache, the
+    last thing aws does to a session before running a command
+    (`_inject_credential_cache`).
     """
     import botocore.session
 
@@ -129,7 +133,74 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     if args.profile:
         session.set_config_variable("profile", args.profile)
     session.set_config_variable("api_versions", {})
+    _inject_credential_cache(session)
     return session
+
+
+def _credential_cache_dir() -> str:
+    """The directory aws caches assumed-role / SSO credentials in.
+
+    Literally aws's own ``~/.aws/cli/cache`` (its ``CACHE_DIR``), so the two
+    tools share one cache: credentials fetched under either are reused by the
+    other for as long as they are valid. aws freezes the expansion at import
+    time; expanding per call is the same answer for a process whose ``HOME``
+    does not move, and it keeps the directory testable.
+    """
+    return os.path.expanduser(os.path.join("~", ".aws", "cli", "cache"))
+
+
+def _inject_credential_cache(session: BotocoreSession) -> None:
+    """Persist assumed-role / web-identity / SSO credentials across runs, as aws does.
+
+    botocore caches the temporary credentials these three providers fetch in a
+    plain dict, which dies with the process: every invocation would re-call
+    ``AssumeRole``, and an ``mfa_serial`` profile would prompt for a code
+    every time - fatal (rc 255 on the ``getpass`` EOF) in any non-interactive
+    run. aws's two ``session-initialized`` handlers replace that dict with a
+    ``JSONFileCache`` over `_credential_cache_dir`; do the same to every session
+    this module opens, which is aws's timing too (its event fires after the
+    driver has bound ``--profile``, so the provider chain this reaches is built
+    for the run's own profile).
+
+    A ``ProfileNotFound`` from building the chain is swallowed exactly as aws
+    swallows it: the profile is reported by the caller's own config read
+    instead, keeping that error's wording and position. The ``sso`` provider is
+    fetched separately, under aws's wider ``UnknownCredentialError`` guard for
+    a botocore whose chain has no such provider.
+    """
+    # botocore.credentials re-exports this very class; `utils` is where it is
+    # defined, and the only spelling botocore-stubs declares.
+    from botocore.exceptions import ProfileNotFound, UnknownCredentialError
+    from botocore.utils import JSONFileCache
+
+    cache_dir = _credential_cache_dir()
+    try:
+        chain = session.get_component("credential_provider")
+        chain.get_provider("assume-role").cache = JSONFileCache(cache_dir)
+        chain.get_provider("assume-role-with-web-identity").cache = JSONFileCache(cache_dir)
+    except ProfileNotFound:
+        return
+    try:
+        chain.get_provider("sso").cache = JSONFileCache(cache_dir)
+    except (ProfileNotFound, UnknownCredentialError):
+        return
+
+
+def _has_url_scheme(value: str) -> bool:
+    """Does *value* carry a URL scheme by the rule the shipped aws build applies?
+
+    ``urlsplit`` requires an ASCII letter to lead the scheme only from Python
+    3.11 on; 3.10 and 3.9 accept any run of scheme characters, so
+    ``192.168.0.9:9000`` - a MinIO / Ceph address typed without ``http://`` -
+    parses there with ``192.168.0.9`` *as the scheme* and slips past a plain
+    truthiness test, reaching botocore for a different message and rc. Testing
+    the parsed scheme's first character adds exactly 3.11's condition (the
+    scheme it returns is lower-cased and drawn from ASCII scheme characters, so
+    one ``isalpha`` covers it), pinning every supported version to what the
+    official aws distribution does - the same pin the argparse corners use
+    (``design/cli.md`` section 2).
+    """
+    return urlparse(value).scheme[:1].isalpha()
 
 
 def validate_endpoint_url(args: argparse.Namespace) -> None:
@@ -143,7 +214,7 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
     where botocore would otherwise raise a bare ``ValueError``.
     """
     endpoint_url: str | None = args.endpoint_url
-    if endpoint_url is not None and not urlparse(endpoint_url).scheme:
+    if endpoint_url is not None and not _has_url_scheme(endpoint_url):
         raise ValidationError(
             f'Bad value for --endpoint-url "{endpoint_url}": scheme is '
             "missing.  Must be of the form http://<hostname>/ or https://<hostname>/"
@@ -654,12 +725,22 @@ def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
     mode) where aws v2 rejects it. An unconvertible ``max_attempts`` raises
     ``ValueError`` like the bundled botocore's int cast (aws's general
     handler, rc 255 - main()'s backstop maps it the same).
+
+    The attempts are resolved *first* because that is the order aws resolves
+    them in (its bundled ``_compute_retry_config`` calls
+    ``_compute_retry_max_attempts`` ahead of ``_compute_retry_mode``, and the
+    int conversion is the config store's read-time type), so with both values
+    broken the int cast is what fails - measured on the pinned aws-cli.
     """
     scoped = botocore_session.get_scoped_config()
     # Present-wins reads, like the profile/region env chains: aws treats a
     # present-but-empty AWS_RETRY_MODE / AWS_MAX_ATTEMPTS as a fatal value
-    # (rc 255), never as "unset" - the empty string fails the mode validation
-    # below (attempts via the int cast).
+    # (rc 255), never as "unset" - the empty string fails the int cast below
+    # (mode via the value validation).
+    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
+    if attempts_raw is None:
+        attempts_raw = scoped.get("max_attempts")
+    attempts = 3 if attempts_raw is None else int(attempts_raw)
     mode = os.environ.get("AWS_RETRY_MODE")
     if mode is None:
         mode = scoped.get("retry_mode", "standard")
@@ -667,8 +748,4 @@ def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
         raise InvalidConfigError(
             f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
         )
-    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
-    if attempts_raw is None:
-        attempts_raw = scoped.get("max_attempts")
-    attempts = 3 if attempts_raw is None else int(attempts_raw)
     return {"mode": mode, "total_max_attempts": attempts}

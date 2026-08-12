@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import NoRegionError
+from botocore.utils import JSONFileCache
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -203,6 +204,35 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
         client = clientfactory.build_client(_parse([]))
         assert client.meta.config.retries == {"mode": "adaptive", "total_max_attempts": 7}
+
+    def test_broken_max_attempts_is_reported_ahead_of_a_broken_retry_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws resolves the attempts first - its bundled `_compute_retry_config`
+        # calls `_compute_retry_max_attempts` before `_compute_retry_mode`, and
+        # the int conversion is the config store's read-time type - so with both
+        # values broken the int cast is what fails (measured on the pinned
+        # aws-cli: `aws: [ERROR]: invalid literal for int() with base 10:
+        # 'abc'`, rc 255). Validating the mode first would report the mode.
+        monkeypatch.setenv("AWS_RETRY_MODE", "bogus")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "abc")
+        with pytest.raises(ValueError) as excinfo:
+            clientfactory.build_client(_parse([]))
+        assert str(excinfo.value) == "invalid literal for int() with base 10: 'abc'"
+
+    def test_broken_config_max_attempts_also_wins_over_the_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same order through the profile, where both values are read off the
+        # scoped config rather than the environment.
+        config_file = tmp_path / "config"
+        config_file.write_text("[default]\nretry_mode = bogus\nmax_attempts = abc\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        for var in ("AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+            monkeypatch.delenv(var, raising=False)
+        with pytest.raises(ValueError) as excinfo:
+            clientfactory.build_client(_parse([]))
+        assert str(excinfo.value) == "invalid literal for int() with base 10: 'abc'"
 
     def test_scalar_s3_section_fails_at_client_build_like_aws(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -628,6 +658,41 @@ class TestBuildClient:
             )
         assert 'Bad value for --endpoint-url "example.com": scheme is missing' in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "value", ["192.168.0.9:9000", "127.0.0.1:9000/prefix", "+http://127.0.0.1:9000"]
+    )
+    def test_a_scheme_needs_an_ascii_letter_in_front_like_the_python_aws_ships(
+        self, value: str
+    ) -> None:
+        # `--endpoint-url 192.168.0.9:9000` is what a user types with http://
+        # forgotten in front of a MinIO / Ceph address. Only from Python 3.11 on
+        # does urlsplit require an ASCII letter to lead a scheme, so on the
+        # supported floor `192.168.0.9` (and `+http`) parses AS the scheme; a
+        # plain truthiness test then passes the value to botocore for a
+        # different message and rc, where aws - frozen on 3.14 - rejects it at
+        # parse time. Measured on the pinned aws-cli: rc 252 and the wording
+        # below, for every command surface.
+        with pytest.raises(ValidationError) as excinfo:
+            clientfactory.build_client(_parse(["--region", "us-east-1", "--endpoint-url", value]))
+        assert exit_code_for(excinfo.value) == 252
+        assert str(excinfo.value) == (
+            f'Bad value for --endpoint-url "{value}": scheme is missing.  '
+            "Must be of the form http://<hostname>/ or https://<hostname>/"
+        )
+
+    @pytest.mark.parametrize(
+        "value", [" http://127.0.0.1:9000", "HTTP://127.0.0.1:9000", "h://127.0.0.1:9000"]
+    )
+    def test_an_unusual_but_present_scheme_still_passes(self, value: str) -> None:
+        # The other direction of the same gate, which a first-character test on
+        # the raw value would get wrong: urlsplit strips leading whitespace
+        # before it looks for the scheme and lower-cases what it finds, so all
+        # three of these carry one and aws accepts them (measured: the leading
+        # space and the upper case connect to 127.0.0.1:9000, the one-letter
+        # scheme reaches botocore's own `Custom endpoint ... was not a valid
+        # URI` - never the 252 above).
+        clientfactory.validate_endpoint_url(_parse(["--endpoint-url", value]))
+
     def test_zero_timeout_means_no_timeout(self) -> None:
         # aws maps a 0 timeout to None ("no timeout"); botocore rejects a
         # literal 0 with ValueError, which would otherwise crash client creation.
@@ -866,6 +931,98 @@ class TestProfileSessionBinding:
         assert len(opened) == 4
         assert [session.instance_variables().get("profile") for session in opened] == [None] * 4
         assert [session.get_config_variable("profile") for session in opened] == ["named"] * 4
+
+
+class TestCredentialCache:
+    """Assumed-role / web-identity / SSO credentials are cached on disk, as aws does.
+
+    botocore's own cache is a per-process dict, so every invocation would
+    re-call ``AssumeRole`` and an ``mfa_serial`` profile would prompt for a
+    code every time - fatal in a non-interactive run. aws replaces it with a
+    ``JSONFileCache`` over ``~/.aws/cli/cache``: measured against the pinned
+    aws-cli, two consecutive ``ls`` runs under a ``role_arn`` profile make one
+    ``AssumeRole`` call and leave a ``<sha1>.json`` there, and the same file
+    name is what our botocore computes, so the two tools reuse each other's
+    entries.
+    """
+
+    _PROVIDERS = ("assume-role", "assume-role-with-web-identity", "sso")
+
+    @pytest.fixture(autouse=True)
+    def _home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = us-east-1\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Windows expanduser
+        # An entry planted where aws's own runs put theirs: reading it back
+        # through a provider's cache pins the directory (aws writes
+        # `$HOME/.aws/cli/cache/<sha1>.json`, measured) without reaching into
+        # the cache object.
+        self._cache_dir(tmp_path).mkdir(parents=True)
+        (self._cache_dir(tmp_path) / "planted-key.json").write_text(
+            '{"AccessKeyId": "ASIAPLANTED"}'
+        )
+
+    def _cache_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "home" / ".aws" / "cli" / "cache"
+
+    def _caches(self, session: Any) -> list[Any]:
+        chain = session.get_component("credential_provider")
+        return [chain.get_provider(name).cache for name in self._PROVIDERS]
+
+    def test_the_temporary_credential_providers_cache_to_aws_s_directory(
+        self, tmp_path: Path
+    ) -> None:
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        caches = self._caches(session)
+        assert [type(cache) for cache in caches] == [JSONFileCache] * 3
+        for cache in caches:
+            assert "planted-key" in cache
+            assert cache["planted-key"] == {"AccessKeyId": "ASIAPLANTED"}
+
+    def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
+        # The write half: whatever a provider caches becomes a file under the
+        # shared directory, so the next invocation (and aws) can read it.
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        self._caches(session)[0]["written-key"] = {"AccessKeyId": "ASIAWRITTEN"}
+        assert (self._cache_dir(tmp_path) / "written-key.json").read_text() == (
+            '{"AccessKeyId": "ASIAWRITTEN"}'
+        )
+
+    def test_every_entry_point_gets_the_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws emits `session-initialized` once per run, so no session may be
+        # left with botocore's in-memory dict: the sessions the startup gate
+        # and the non-S3 client builder open assume the same role.
+        opened: list[Any] = []
+        real_opener = clientfactory._open_botocore_session  # pyright: ignore[reportPrivateUsage]
+
+        def recording(args: argparse.Namespace) -> Any:
+            session = real_opener(args)
+            opened.append(session)
+            return session
+
+        monkeypatch.setattr(clientfactory, "_open_botocore_session", recording)
+        clientfactory.validate_profile(_parse([]))
+        clientfactory.build_client(_parse([]))
+        clientfactory.build_service_client("sts", _parse([]))
+        clientfactory.build_session(_parse([]))
+        assert len(opened) == 4
+        for session in opened:
+            for cache in self._caches(session):
+                assert isinstance(cache, JSONFileCache)
+                assert cache["planted-key"] == {"AccessKeyId": "ASIAPLANTED"}
+
+    def test_an_unknown_profile_is_still_reported_the_same_way(self) -> None:
+        # Injecting the cache builds the provider chain while the session is
+        # opened, which is where an unknown profile now raises: pin that the
+        # startup gate still reports it with aws's wording and rc (measured
+        # against the pinned aws-cli: rc 255, `The config profile
+        # (nosuchprofile) could not be found`).
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.validate_profile(_parse(["--profile", "nosuchprofile"]))
+        assert exit_code_for(excinfo.value) == 255
+        assert str(excinfo.value) == "The config profile (nosuchprofile) could not be found"
 
 
 class TestApiVersionsIsIgnored:

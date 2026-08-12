@@ -385,8 +385,9 @@ class TransferPrinter:
                 # A dead stream (BrokenPipeError on a closed pipe, a full
                 # non-blocking pty, ...): stop rendering but keep draining so
                 # no worker ever blocks on the queue. The rc inputs live on
-                # the worker side and are unaffected; cli.main's own
-                # BrokenPipeError handling covers the process-level contract.
+                # the worker side and are unaffected; cli._dispatch's general
+                # backstop covers the process-level contract (report + 255) for
+                # a write failure that does escape a command.
                 # An unencodable key is not a dead stream: _uni_write handles
                 # UnicodeEncodeError inline, so it never reaches here.
                 self._output_dead = True

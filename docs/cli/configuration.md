@@ -39,7 +39,7 @@ On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
 
 The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
-`file://` paramfile is read with (section 5); `AWS_CLI_OUTPUT_ENCODING` is the
+`file://` paramfile is read with (section 7); `AWS_CLI_OUTPUT_ENCODING` is the
 one an error report is written with, and reaches nothing else — result lines
 and warnings keep the stream's own codec, as they do under `aws`. A codec
 Python does not know is a configuration error, exit code 255, on either
@@ -125,7 +125,48 @@ The value is read from the selected profile only — a `[profile x]` setting
 applies under `--profile x` or `AWS_PROFILE=x`, not otherwise — and the shared
 credentials file is read for it too, winning over `~/.aws/config`.
 
-## 5. Reading a value from a file
+## 5. Aliases: `~/.aws/cli/alias`
+
+The `[command s3]` section of `~/.aws/cli/alias` — the same file, at the same
+fixed path, that `aws` reads (`AWS_CONFIG_FILE` does not move it) — declares
+extra subcommands:
+
+```ini
+[command s3]
+lsr = ls --recursive
+recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
+```
+
+`boto3-s3 lsr s3://bucket` then runs `ls --recursive s3://bucket`, and
+`boto3-s3 recent s3://bucket` runs the shell command with `s3://bucket`
+appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
+applies; `[toplevel]`, whose entries name services, has no counterpart here and
+is ignored.
+
+- A value that starts with `!` is a **shell command line**. The invocation's
+  remaining arguments are appended (quoted, so a space inside one is safe) and
+  the command's exit status becomes this command's.
+- Any other value is **CLI arguments**. They are split with shell quoting rules
+  and placed ahead of what was typed, then parsed again — so an alias may
+  expand to another alias, and a global option in the value (say `--region`)
+  applies to the run, overriding one typed on the command line. `--debug` and
+  `--profile` are refused there, as they are under `aws`.
+- An alias named after a built-in subcommand **replaces** it and proxies to it,
+  dropping the first word of the expansion: `ls = ls --recursive` makes every
+  `ls` recursive.
+
+A file that is not valid INI aborts the run with exit code 255 before anything
+else, `--version` and `help` included — again matching `aws`.
+
+## 6. Cached temporary credentials
+
+Credentials fetched for an `assume_role` / web-identity / SSO profile are cached
+in `~/.aws/cli/cache`, aws's own directory and file format, so consecutive
+commands do not repeat the `AssumeRole` call and an `mfa_serial` profile asks
+for a code once rather than on every invocation. The cache is shared with
+`aws`: either command reuses what the other fetched.
+
+## 7. Reading a value from a file
 
 Any option or path that takes a single string can be given as `file://path`
 (read as text) or `fileb://path` (read as bytes), resolved before the command
