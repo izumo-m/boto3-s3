@@ -196,6 +196,108 @@ class TestScanRecursive:
         assert results[0].compare_key == "keep/a.txt"
 
 
+class TestScanRecursiveCommonPrefixes:
+    """``S3ScanOptions.include_common_prefixes``: the listing view of a recursive scan.
+
+    A recursive listing sends no ``Delimiter``, so a conforming service returns
+    no ``CommonPrefixes`` at all; a service that returns them anyway is what
+    ``aws s3 ls --recursive`` still prints as ``PRE`` lines. The oracle for what
+    a page then yields, and in which order, is the pinned aws-cli listing such a
+    page (2026-08-12 stamps, ``PRE`` right-justified to column 30):
+
+        $ aws s3 ls s3://bkt/deep/ --recursive
+                                   PRE one/
+                                   PRE sub/
+                                   PRE /
+        2026-08-12 00:00:00          1 deep/a.txt
+        2026-08-12 00:00:00          2 deep/two/sub/b.txt
+
+    for a page carrying the prefixes ``deep/one/``, ``deep/two/sub/``, ``deep//``
+    and those two objects - every prefix of the page ahead of the page's
+    objects, in the response's own order, whatever their depth. A transfer must
+    not see those entries (they would enter its item stream and break ``sync``'s
+    ``compare_key`` byte order), so the default drops them.
+    """
+
+    def test_default_recursive_scan_drops_them(self) -> None:
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [r.key for r in results] == ["prefix/a.txt"]
+        assert "Delimiter" not in client.calls[0]
+
+    def test_storage_config_never_seeds_the_listing_view(self) -> None:
+        # The knob is operation-set (ls), not storage config: every scan a
+        # transfer builds from default_scan_options keeps the transfer view.
+        storage, _ = _storage([])
+        assert storage.default_scan_options().include_common_prefixes is False
+
+    def test_flag_emits_each_page_directories_ahead_of_its_objects(self) -> None:
+        pages = [
+            {"Contents": [_obj("prefix/a.txt")], "CommonPrefixes": [{"Prefix": "prefix/zdir/"}]},
+            {
+                "CommonPrefixes": [{"Prefix": "prefix/adir/"}, {"Prefix": "prefix/two/sub/"}],
+                "Contents": [_obj("prefix/z.txt")],
+            },
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True, include_common_prefixes=True)))
+        assert [(r.kind, r.key) for r in results] == [
+            (FileKind.DIRECTORY, "prefix/zdir/"),
+            (FileKind.FILE, "prefix/a.txt"),
+            (FileKind.DIRECTORY, "prefix/adir/"),
+            (FileKind.DIRECTORY, "prefix/two/sub/"),
+            (FileKind.FILE, "prefix/z.txt"),
+        ]
+        # Still a recursive listing: the flag widens what a page yields, it does
+        # not ask the service for prefixes.
+        assert "Delimiter" not in client.calls[0]
+
+    def test_widened_directory_entries_carry_the_scan_stamps(self) -> None:
+        pages = [{"CommonPrefixes": [{"Prefix": "prefix/two/sub/"}]}]
+        storage, _ = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True, include_common_prefixes=True)))
+        assert results == [
+            S3FileInfo(
+                key="prefix/two/sub/",
+                kind=FileKind.DIRECTORY,
+                compare_key="two/sub/",
+                storage=storage,
+            )
+        ]
+
+    def test_filter_prunes_a_widened_entry(self) -> None:
+        # The caller that widens the enumeration owns the filtering, as on
+        # LocalScanOptions.enumerate_all_entries.
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, _ = _storage(pages)
+        options = S3ScanOptions(
+            recursive=True,
+            include_common_prefixes=True,
+            filter=lambda info: info.kind is not FileKind.DIRECTORY,
+        )
+        assert [r.key for r in storage.scan(options)] == ["prefix/a.txt"]
+
+    @pytest.mark.parametrize("include", [False, True])
+    def test_non_recursive_listing_emits_them_either_way(self, include: bool) -> None:
+        # The Delimiter a non-recursive listing sends is what asks for the
+        # prefixes, so that path ignores the flag entirely.
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(include_common_prefixes=include)))
+        assert [(r.kind, r.key) for r in results] == [
+            (FileKind.DIRECTORY, "prefix/sub/"),
+            (FileKind.FILE, "prefix/a.txt"),
+        ]
+        assert client.calls[0]["Delimiter"] == "/"
+
+
 class TestScanOptionForwarding:
     def test_page_size_and_request_payer_forwarded(self) -> None:
         storage, client = _storage([])

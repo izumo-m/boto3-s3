@@ -101,8 +101,13 @@ reading the S3-only fields.
 `recursive` selects the shape of an object listing. The default `False` lists
 one level: `Delimiter='/'` is sent, so each sub-"directory" arrives as a single
 `DIRECTORY`-kind entry instead of its contents. `True` sends no delimiter, so
-every key under the prefix arrives as a `FILE` entry and no `DIRECTORY` entries
-are produced. It is ignored at the service root, where nothing is nested.
+every key under the prefix arrives as a `FILE` entry, and a service that follows
+the API returns no common prefixes to such a listing — but any it does return
+still arrives as a `DIRECTORY` entry, which is what `aws s3 ls --recursive`
+prints as a `PRE` line rather than dropping. `ls` is the only operation that
+keeps them; a transfer's source listing drops them
+([`../storage.md`](../storage.md)). `recursive` is ignored at the service root,
+where nothing is nested.
 
 `request_payer` is passed through as the `ListObjectsV2` `RequestPayer` value
 and is not validated by the library — the service decides. `None` sends the
@@ -151,7 +156,9 @@ order the listing produces them, so what a caller may rely on is that order:
 - A non-recursive object listing keeps the delimiter listing's native shape:
   each page's common prefixes are delivered ahead of that page's objects, which
   is `aws s3 ls`'s order. Across a multi-page listing the delivered stream is
-  therefore grouped per page rather than globally ascending by key.
+  therefore grouped per page rather than globally ascending by key. A recursive
+  listing takes the same per-page shape if a service returns common prefixes to
+  it — which is why the ascending guarantee above is one about objects.
 - The bucket listing is delivered in the order `ListBuckets` returns; `ls`
   makes no ordering promise there.
 - An `S3Storage` subclass that overrides `scan_pages` decides the order of an

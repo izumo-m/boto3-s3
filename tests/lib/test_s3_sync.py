@@ -823,6 +823,30 @@ class TestSyncDownload:
         assert calls == []
 
 
+class TestSyncS3SourceCommonPrefixes:
+    """A listing page's ``CommonPrefixes`` never enter sync's item stream.
+
+    ``ls`` opts into them (``S3ScanOptions.include_common_prefixes``, so that a
+    recursive listing prints the ``PRE`` lines aws prints); a transfer must not,
+    on both counts sync is strict about - a directory record is not a
+    transferable item, and a page yields its prefixes *ahead* of its objects,
+    which would break the merge-join's requirement that each side arrive in
+    ``compare_key`` byte order.
+    """
+
+    def test_a_prefix_carrying_page_syncs_only_the_object(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        page = listing(("d/a.txt", 7))
+        # A service that answers a Delimiter-less listing with prefixes anyway;
+        # 'zdir/' sorts after 'a.txt', so a leaked entry breaks the byte order.
+        page["CommonPrefixes"] = [{"Prefix": "d/zdir/"}]
+        client, calls = make_recording_client([page, get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert calls[1].params["Key"] == "d/a.txt"
+        assert sorted(path.name for path in out.iterdir()) == ["a.txt"]
+
+
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([listing(("s/new.txt", 2))])

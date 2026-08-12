@@ -176,6 +176,49 @@ class TestLsRouting:
             S3().ls("s3:///key", on_entry=lambda _info: None)
 
 
+class TestLsCommonPrefixes:
+    """``ls`` is the one operation that keeps a recursive listing's common prefixes.
+
+    A recursive listing sends no ``Delimiter``, so a conforming service returns
+    none; ``aws s3 ls --recursive`` nevertheless prints whatever it is handed.
+    The oracle is the pinned aws-cli against a service whose page carries the
+    prefix ``mixed/zdir/`` and the object ``mixed/a.txt``:
+
+        $ aws s3 ls s3://bkt/mixed/ --recursive
+                                   PRE zdir/
+        2026-08-12 00:00:00          1 mixed/a.txt
+
+    - one entry per prefix, ahead of the page's objects. A page holding prefixes
+    and no object counts as a match for the same reason (aws exits 0, not the 1
+    it reserves for a first page with neither).
+    """
+
+    def test_recursive_listing_delivers_prefixes_ahead_of_objects(self) -> None:
+        client = _FakeS3Client(
+            [
+                {
+                    "Contents": [{"Key": "mixed/a.txt", "Size": 1, "LastModified": _MTIME}],
+                    "CommonPrefixes": [{"Prefix": "mixed/zdir/"}],
+                }
+            ]
+        )
+        infos: list[Any] = []
+        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
+        assert [(info.kind, info.key) for info in infos] == [
+            (FileKind.DIRECTORY, "mixed/zdir/"),
+            (FileKind.FILE, "mixed/a.txt"),
+        ]
+        # Keeping them costs the listing nothing on the wire: still no Delimiter.
+        assert "Delimiter" not in client.calls[0]
+
+    def test_prefix_only_recursive_page_still_delivers_an_entry(self) -> None:
+        # What the CLI's "nothing matched" exit code 1 hangs on.
+        client = _FakeS3Client([{"CommonPrefixes": [{"Prefix": "mixed/only/"}]}])
+        infos: list[Any] = []
+        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
+        assert [(info.kind, info.key) for info in infos] == [(FileKind.DIRECTORY, "mixed/only/")]
+
+
 class TestUnknownTransferOption:
     """cp / mv / sync reject a typo'd ``**options`` key eagerly (pre-pipeline).
 

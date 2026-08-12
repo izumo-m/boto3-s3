@@ -966,6 +966,14 @@ class S3:
         raises ``ValidationError``. The target is validated eagerly. Entries are
         delivered in listing order to `on_entry` on the calling thread.
 
+        An object listing delivers one ``DIRECTORY``-kind entry per common
+        prefix, ahead of the objects of the page that carried it - ``recursive``
+        or not (`S3ScanOptions.include_common_prefixes`, which only ``ls``
+        sets). A recursive listing sends no ``Delimiter``, so a conforming
+        service returns no prefixes to keep; one that returns them anyway is
+        listed the way ``aws s3 ls`` prints such a page, rather than silently
+        dropping entries the service reported.
+
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
         page request already in progress, reclaims the prefetch worker (the
@@ -986,6 +994,9 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
+                    # The listing view: keep the common prefixes a recursive
+                    # listing is handed, which a transfer scan drops.
+                    include_common_prefixes=True,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 ),
                 cancel_token=cancel_token,

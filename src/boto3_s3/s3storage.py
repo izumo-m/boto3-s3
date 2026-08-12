@@ -255,14 +255,21 @@ def s3_errors(
 
 
 def _page_to_infos(
-    page: ListObjectsV2OutputTypeDef, *, recursive: bool, prefix: str, storage: S3Storage
+    page: ListObjectsV2OutputTypeDef,
+    *,
+    include_common_prefixes: bool,
+    prefix: str,
+    storage: S3Storage,
 ) -> list[S3FileInfo]:
     """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
 
     Runs on the prefetch worker thread under ``Storage.scan`` (a direct
-    ``scan_pages`` consumer drives it on its own thread). Non-recursive listings emit one
-    ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
-    objects); every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
+    ``scan_pages`` consumer drives it on its own thread). With
+    ``include_common_prefixes`` the page emits one ``DIRECTORY``-kind entry per
+    ``CommonPrefixes`` entry (before the page's objects); the caller derives that
+    from the listing shape - a non-recursive listing always includes them, a
+    recursive one only when ``S3ScanOptions.include_common_prefixes`` asks.
+    Every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
     the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
     ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
     ``Prefix``, so every object key and common-prefix starts with it, and the
@@ -273,7 +280,7 @@ def _page_to_infos(
     ``info.storage``.
     """
     infos: list[S3FileInfo] = []
-    if not recursive:
+    if include_common_prefixes:
         for common in page.get("CommonPrefixes", []):
             dir_prefix = common.get("Prefix")
             if dir_prefix is not None:
@@ -724,6 +731,13 @@ class S3Storage(Storage):
         ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
         passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
         ``S3FileInfo`` per sub-"directory" (before the page's objects).
+        ``options.include_common_prefixes`` additionally emits the directory
+        entries of a *recursive* listing - whatever ``CommonPrefixes`` the
+        service returns to a listing that sent no ``Delimiter`` (a conforming
+        one returns none). ``S3.ls`` sets it, since ``aws s3 ls`` prints a
+        page's common prefixes recursive or not; a transfer leaves it off,
+        because those entries would enter the transfer stream and cost it the
+        byte order below.
         ``FileInfo.key`` is the full S3 key (or the prefix for directories) -
         for a recursive listing, in ListObjectsV2's UTF-8 lexicographic byte
         order across pages, so that stream is directly merge-joinable (the
@@ -762,8 +776,15 @@ class S3Storage(Storage):
         (a transfer's normalized prefix) - both the ``Prefix`` and the
         ``compare_key`` relativization use it - so this instance lists under it
         without being rebuilt.
+
+        Whether a page's ``CommonPrefixes`` become ``DIRECTORY`` entries is
+        decided once here: a non-recursive listing sent the ``Delimiter`` that
+        asks for them, and a recursive listing emits whatever the service
+        returns only when ``options.include_common_prefixes`` asks for it
+        (``S3.ls``, mirroring what ``aws s3 ls`` prints).
         """
         prefix = options.prefix if options.prefix is not None else self._key
+        include_common_prefixes = not options.recursive or options.include_common_prefixes
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": prefix,
@@ -784,7 +805,12 @@ class S3Storage(Storage):
         with s3_errors(operation=None, bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(page, recursive=options.recursive, prefix=prefix, storage=self)
+                yield _page_to_infos(
+                    page,
+                    include_common_prefixes=include_common_prefixes,
+                    prefix=prefix,
+                    storage=self,
+                )
 
     def list_buckets(
         self,

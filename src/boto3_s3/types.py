@@ -241,12 +241,28 @@ class S3ScanOptions(ScanOptions):
     the plan appends a trailing ``/``), so the *passed* storage instance is
     scanned rather than rebuilt from a URI - a custom ``S3Storage`` subclass (and
     its ``scan_pages`` override) survives. ``None`` uses the storage's key.
+
+    ``include_common_prefixes`` widens a *recursive* listing to also emit one
+    ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry the response carries
+    (ahead of that page's objects, the order the response lists them in). It has
+    no effect on a non-recursive listing, which always emits them - the
+    ``Delimiter`` it sends is what asks the service for them. ``False``
+    (default) is the transfer view: a recursive listing sends no ``Delimiter``,
+    so a conforming service returns no prefixes, and a service that returns
+    them anyway must not feed directory records to a transfer stream (``sync``
+    merge-joins on ``compare_key`` byte order, which a page's leading prefix
+    entry would break). ``True`` is the listing view, which ``S3.ls`` sets
+    because ``aws s3 ls`` prints every page's common prefixes as ``PRE`` lines
+    whether or not the listing is recursive. Like
+    ``LocalScanOptions.enumerate_all_entries``, the widened enumeration leaves
+    filtering to the caller that enabled it.
     """
 
     page_size: int | None = None
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
+    include_common_prefixes: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
