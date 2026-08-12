@@ -610,14 +610,18 @@ class S3Storage(Storage):
         scheme-less ``bucket/key`` root falls straight out of the join, and so
         does the keyless-bucket normalization (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``) - only the bare service root ``s3://`` stays empty (a
-        ``dir_op`` still appends its trailing ``/``, so that root formats as
-        ``"/"``).
+        root ``bucket/``).
+        Only the bare service root has no join to fall out of, and there the
+        two spellings differ the way aws's scheme strip leaves them: ``s3://``
+        formats to ``""`` (no source name), ``s3:///`` to ``"/"`` (the source
+        name is taken). The raw URI decides, since ``bucket`` and ``key`` are
+        both empty either way - and the test is on the scheme-less rest,
+        because ``"s3://"`` itself ends in a slash.
         A ``dir_op`` root is ``/``-terminated and takes the source's name;
         otherwise only an explicit trailing ``/`` does.
         """
         if not self._bucket and not self._key:
-            path = ""  # the bare service root, not the "/"-rooted join
+            path = "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
         else:
             path = f"{self._bucket}/{self._key}"
         if dir_op:
