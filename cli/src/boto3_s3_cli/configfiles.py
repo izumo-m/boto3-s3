@@ -142,7 +142,9 @@ def env_profile() -> str | None:
 
     Present-wins over ``PROFILE_ENV_VARS`` (the single home of aws's
     ``AWS_PROFILE`` > ``AWS_DEFAULT_PROFILE`` order), an empty value included -
-    the same rule ``clientfactory.resolve_profile`` opens its session with.
+    the rule ``clientfactory.resolve_profile`` falls back to, and the one
+    botocore itself applies to the session variable
+    ``clientfactory._open_botocore_session`` redeclares with the same names.
     """
     for name in PROFILE_ENV_VARS:
         if name in os.environ:
