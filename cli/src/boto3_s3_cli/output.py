@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from dateutil.tz import tzlocal
+
 from boto3_s3 import FileKind
 
 if TYPE_CHECKING:
@@ -41,7 +43,7 @@ def uni_write(stream: TextIO, text: str) -> None:
     stream.flush()
 
 
-_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+_DATE_WIDTH = 19
 _SIZE_WIDTH = 10
 _PRE_WIDTH = 30
 _HUMANIZE_SUFFIXES = ("KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
@@ -74,7 +76,27 @@ def _size_str(size: int, *, human_readable: bool) -> str:
 
 
 def _date_str(mtime: datetime | None) -> str:
-    return mtime.astimezone().strftime(_DATE_FORMAT) if mtime is not None else " " * 19
+    """Render one listing timestamp like aws-cli's ``_make_last_mod_str``.
+
+    Two details are aws-cli's own and not free choices. The zone is dateutil's
+    ``tzlocal``, which carries only the offsets in effect *now* (a snapshot of
+    ``time.timezone`` / ``time.altzone``, with the DST flag looked up per
+    instant): in a zone whose rules changed, an object older than the change
+    renders with today's offset, where a plain ``astimezone()`` would apply the
+    historical rule and print a different hour. And the stamp is assembled from
+    its fields - the year unpadded, the rest zero-filled - then left-justified
+    into 19 columns, so a year below 1000 keeps the size column in place instead
+    of pulling it left (``strftime``'s ``%Y`` padding is platform-dependent,
+    which is the other reason not to use it here).
+    """
+    if mtime is None:
+        return " " * _DATE_WIDTH
+    local = mtime.astimezone(tzlocal())
+    stamp = (
+        f"{local.year}-{local.month:02d}-{local.day:02d} "
+        f"{local.hour:02d}:{local.minute:02d}:{local.second:02d}"
+    )
+    return stamp.ljust(_DATE_WIDTH, " ")
 
 
 def format_entry(info: FileInfo, *, recursive: bool, human_readable: bool) -> str:
