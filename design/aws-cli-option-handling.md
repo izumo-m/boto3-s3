@@ -167,6 +167,16 @@ wording rather than the parser's). `boto3-s3-cli` keeps that split by scoping
 its wrapper the same way (`paramfile.named_argument`, entered by the option and
 positional resolution and skipped by `shorthand.py`).
 
+**How far the operator reaches** follows from where aws arms it: per key/value
+pair, not per scalar. So it covers every element of a csv or explicit list -
+`a@=[file://f,plain]` loads the first and passes the second through, and the
+list is then the schema's error - while a hash literal re-arms it for each
+inner key, which *disarms* the outer one: in `a@={b=file://f}` the inner value
+stays the unresolved text. Both shapes end at the same schema report, since a
+map of strings holds neither a list nor a nested map, but which references
+were loaded on the way there is observable in it - and in whether a missing
+file turns the run into the bare rc 255 above.
+
 A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
 expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally
 reproduces. aws loads the bytes into the positional and lets each command
@@ -390,8 +400,12 @@ The rest sit outside the pipeline:
   (decided 2026-08-01).
 - **The invalid-bucket-name report is truncated** to botocore's leading
   `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
-  after it (`usage.py`; the tail is botocore-version-fragile). The exit code
-  is unaffected - mb / rb 1, website 252.
+  after it (`usage.py`; the tail is botocore-version-fragile). It reaches only
+  the reports this command synthesizes rather than lets botocore raise - the
+  bucket-less URIs mb / rb / rm refuse up front, and the key-carrying website
+  URIs - because a name that reaches botocore's own check carries botocore's
+  own text on both tools, tail included (measured 2026-08-12). The exit code
+  is unaffected - mb / rb / rm 1, website 252.
 - **A message botocore itself writes is the installed botocore's wording**,
   where aws prints its bundled fork's. This is not class 2: the same aws
   version installed from PyPI still carries the fork, so the difference is ours

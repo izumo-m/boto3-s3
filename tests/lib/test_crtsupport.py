@@ -256,6 +256,24 @@ class TestCreateCrtTransferManager:
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client
         assert manager_kwargs["config"] is config
 
+    def test_an_environment_endpoint_still_decides_use_ssl(
+        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A real client, because the point is where the endpoint came from:
+        # aws-cli reads its own `--endpoint-url` argument for this decision and
+        # so keeps TLS on for an environment-supplied plain-HTTP endpoint,
+        # while deriving from `meta.endpoint_url` covers both sources
+        # (design/crt.md section 3, docs/cli/aws-differences.md section 2).
+        import boto3
+
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        assert crtsupport.create_crt_transfer_manager(client, None) is not None
+        [(_, client_kwargs)] = stubs.serializer_args
+        assert client_kwargs["endpoint_url"] == "http://127.0.0.1:9000"
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["use_ssl"] is False
+
     def test_aws_default_endpoint_stays_none(self, stubs: CrtStubs) -> None:
         client = FakeClient(endpoint=AWS_ENDPOINT)
         assert crtsupport.create_crt_transfer_manager(client, None) is not None  # pyright: ignore[reportArgumentType]

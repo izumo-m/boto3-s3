@@ -149,9 +149,27 @@ class TestWebsiteExitCodeShape:
         assert client.calls == []
 
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The empty name survives the fold intact and rides on to botocore, so
+        # the report is botocore's whole one - the truncation below never
+        # applies here (measured; docs/cli/aws-differences.md section 2).
         rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
+        err = capsys.readouterr().err
         assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
+        assert 'Invalid bucket name ""' in err
+        assert "Bucket name must match the regex" in err
+
+    def test_a_name_botocore_rejects_keeps_the_whole_report(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The same for a slash-free bad name: only the key-carrying URIs
+        # refused up front get the one-line form.
+        rc = cli.main(
+            ["website", "s3://in!valid", "--index-document", "i.html"], ctx=_real_client_ctx()
+        )
+        err = capsys.readouterr().err
+        assert rc == 252
+        assert 'Invalid bucket name "in!valid"' in err
+        assert "Bucket name must match the regex" in err
 
     def test_bucketless_key_folds_into_the_bucket_name(
         self, capsys: pytest.CaptureFixture[str]

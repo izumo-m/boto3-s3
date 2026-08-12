@@ -241,6 +241,10 @@ class TestExitCodeShape:
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3:///key ")
         assert "Invalid bucket name" in result.stderr
+        # botocore raised it, so the report is botocore's whole one - the
+        # one-line truncation belongs to the synthesized reports below
+        # (docs/cli/aws-differences.md section 2).
+        assert "Bucket name must match the regex" in result.stderr
 
     def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:
         # The dryrun never reaches the submit-time validation: aws prints the
@@ -260,8 +264,11 @@ class TestExitCodeShape:
         ):
             result = run_cli_in_process(argv, ctx=built_client_ctx())
             assert result.rc == 1, argv
-            assert result.stderr.startswith("fatal error: Parameter validation failed")
-            assert "Invalid bucket name" in result.stderr
+            # Synthesized, so it stops before botocore's regex tail - the one
+            # truncation this surface has (docs/cli/aws-differences.md).
+            assert result.stderr == (
+                'fatal error: Parameter validation failed:\nInvalid bucket name ""\n'
+            )
 
 
 class TestFilterWiring:

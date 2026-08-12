@@ -35,8 +35,16 @@ through botocore exactly as they do for `aws` — `AWS_ACCESS_KEY_ID`,
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
-`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING` and
-`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
+`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`,
+`AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
+
+The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
+`file://` paramfile is read with (section 5); `AWS_CLI_OUTPUT_ENCODING` is the
+one an error report is written with, and reaches nothing else — result lines
+and warnings keep the stream's own codec, as they do under `aws`. A codec
+Python does not know is a configuration error, exit code 255, on either
+variable. With `AWS_CLI_OUTPUT_ENCODING` unset, `PYTHONUTF8=1` selects UTF-8
+for that same report — aws's own compatibility fallback, matched here.
 
 Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally

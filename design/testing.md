@@ -544,8 +544,12 @@ than lean on the host. Left to the host, such a test passes on one Windows and
 fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
 same knob is how a test picks a codec deliberately. Subprocess runs are already
 pinned - the harness passes `PYTHONUTF8=1`, which fixes the child's stdio and
-its default codec at UTF-8 (the pinned `aws.exe` honors it too, so both sides of
-a parity pair move together).
+its default codec at UTF-8. It does not pin the `aws` side: the official
+distribution is a frozen interpreter in isolated mode and ignores the `PYTHON*`
+family entirely (measured on the pinned Linux binary - `PYTHONIOENCODING` set
+to `latin-1` leaves its output UTF-8). Both sides of a parity pair still land
+on the same codec, because that build writes UTF-8 of its own accord; the
+variable buys the child's determinism, not aws's.
 
 **Goldens on Windows.** The cp/mv/sync goldens resolve to their
 `<name>.windows.json` variants (section 3, "Platform variants"); regenerating
@@ -643,6 +647,19 @@ the pinned aws's measured bytes. Four rules.
   and goes; aws's middle line is our `boto3-s3 help` and its third is our
   `boto3-s3 <subcommand> help`, both under the hierarchy rule above
   ([`cli.md`](./cli.md) section 2).
+
+One consequence of the first rule, not a fifth rule: when a message quotes a
+character offset or a byte count measured over a line that itself carries the
+program token, the figure moves with the token's width - `boto3-s3` is five
+characters longer than `aws`, so it reads five higher here. The measured
+instance is the codec error a report `AWS_CLI_OUTPUT_ENCODING` cannot
+represent produces ([`cli.md`](./cli.md) section 6): under
+`AWS_CLI_OUTPUT_ENCODING=ascii`, `ls --café` ends `'ascii' codec can't encode
+character '\xe9' in position 36` on aws and `... position 41` here, rc 255 on
+both. The offset is counted over the whole report line, prefix included, so
+the shift *is* the program-token rewrite showing through: class 1, not a
+divergence. A figure counted over text that carries no program token is
+comparable as it stands.
 
 The list is **closed**. A comparison never invents a rule to absorb a
 difference it has just found; a new rule takes an explicit design decision and
