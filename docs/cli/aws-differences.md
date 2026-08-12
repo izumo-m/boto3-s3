@@ -1,8 +1,8 @@
 # Differences from `aws s3`
 
 Read this before you switch a script over. Most `aws s3` invocations behave
-identically; the handful that do not are listed below, and one of them is
-silent.
+identically; the handful that do not are listed below, and two of them are
+silent — one on each side.
 
 For what each option does, run `boto3-s3 <subcommand> help`; every option is an
 `aws s3` option and is described there. For exit codes see
@@ -14,10 +14,15 @@ variables and `[s3]` tuning keys the command reads see
 
 Under the same arguments and configuration you get **the same resulting S3
 state, the same returned values, the same error conditions, and the same exit
-code**, bar the two entries in section 2 that say outright that the run comes
-out differently — a plain-HTTP endpoint taken from the environment under the
-CRT engine, and the `PYTHON*` environment variables. A mismatch anywhere else
-is a bug worth reporting.
+code**, bar the entries in section 2 that say outright that the run comes out
+differently. Those are a corrupted ranged download, a transfer whose connection
+dies below the HTTP layer, a download body cut mid-stream, a plain-HTTP
+endpoint taken from the environment under the CRT engine, the `PYTHON*`
+environment variables, and three failures the interpreter decides rather than
+either tool: a stdout that cannot take a streamed object, an error report that
+cannot be written at all, and a standard stream that cannot be set up at all —
+that last one settling before either tool's first line of code runs. A mismatch
+anywhere else is a bug worth reporting.
 
 **Do not parse the console output.** Not because the wording differs: result
 lines, error text and warnings are aws's own, with this command's name
@@ -66,10 +71,11 @@ both tools.
 
 ## 2. Behavior differences
 
-Only the first can leave you with something wrong without saying so. The rest
-are visible, or make no difference to the result — except the two that say
-outright that the run comes out differently, the CRT engine's plain-HTTP
-endpoint and the `PYTHON*` family.
+The first two can leave you with something wrong without saying so, one on each
+side: a corrupted ranged download is a silent success here, and a transfer
+whose connection dies is a silent success on `aws`. The rest are visible, or
+make no difference to the result — except the ones that say outright that the
+run comes out differently, listed in section 1.
 
 - **Corrupted ranged downloads are not detected by the classic engine.** For a
   single-object download at or above the multipart threshold, `aws` verifies the
@@ -79,6 +85,41 @@ endpoint and the `PYTHON*` family.
   `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
   Downloads below the threshold are verified on both tools, so only large
   single-object downloads are affected.
+- **`aws` loses a per-item failure that happened below the HTTP layer.** When
+  the last attempt botocore makes for one item dies without a response — the
+  connection closed, or the read timed out — `aws` records nothing at all: no
+  `... failed:` line, the item counted neither transferred nor failed, and
+  **exit code 0 although nothing was transferred**. Its per-item completion
+  handler asks whether the exception is S3's conditional-write rejection by
+  reading the response off it, which that family of botocore errors leaves
+  empty; the `AttributeError` that follows is swallowed inside `s3transfer` and
+  the failure never reaches the result queue (`aws --debug` prints it). Every
+  route is affected — `cp`, `mv`, `sync` and `rm`, uploads, downloads, S3-to-S3
+  copies and deletes, single-part and multipart — and in a recursive run only
+  the affected item vanishes while the rest print normally. Here the same
+  question is asked in a way that survives the missing response, so the item
+  fails like any other: one `upload failed:` / `download failed:` /
+  `copy failed:` / `move failed:` / `delete failed:` line and exit code 1. The
+  number of attempts, and what is left behind (no partial download, an `mv`
+  source kept, a multipart upload aborted), are the same on both tools. This is
+  deliberately not mirrored: mirroring it would mean exiting 0 and printing
+  nothing after a transfer that did not happen. It belongs to the same family
+  as the rendering accidents below — the empty `fatal error:` line of a Ctrl-C,
+  the CRT engine's `Unknown Error Code` — and is the only one of them you
+  cannot see.
+- **A download body cut mid-stream is retried here and not by `aws`.** The
+  retryable set differs between the `s3transfer` installed from PyPI and the
+  fork `aws` bundles: the installed botocore turns a connection broken in the
+  middle of a response body into an error the installed `s3transfer` re-fetches
+  the range for, while the bundled pair does not. So one transient break leaves
+  this command at exit code 0 with the complete file, where `aws` exits 1 with
+  the underlying `Connection broken: IncompleteRead(...)` on its
+  `download failed:` line and nothing at the destination. A break that persists
+  fails both — exit code 1, no file — but this command spends five attempts per
+  range and ends with `Max Retries Exceeded`, where `aws` gives up on the first
+  break and prints that same underlying error. This lives in the installed
+  `botocore` / `s3transfer` rather than in either tool's own code — the same
+  split as the default checksum algorithm below — so no option here changes it.
 - **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
   integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
   neither changes the result or the exit code. An explicit
@@ -203,7 +244,12 @@ endpoint and the `PYTHON*` family.
   installed botocore's, not the one in aws's bundled copy — the two are
   separate codebases. The one reachable instance is a rejected `max_attempts`,
   which `aws` ends "greater than or equal to one." and this command ends
-  "greater than or equal to 1."; the exit code is the same either way. The
+  "greater than or equal to 1."; the exit code is the same either way. Give an
+  out-of-range `max_attempts` (`0`, `-1`) and an invalid `retry_mode` in the
+  same run and the two even report different halves of the problem — `aws` the
+  range, this command the mode — because each validates them in a different
+  order; either one alone is reported identically. The order is left as it is,
+  since the range message can never match byte for byte anyway. The
   invalid-bucket-name report above belongs to the same SDK-owned family: the
   two copies word it identically today, and it is because that wording is
   theirs to change that the reports this command writes itself stop before the
@@ -216,6 +262,31 @@ endpoint and the `PYTHON*` family.
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit
   code 255) where `aws` runs as if it were unset.
+- **Where a failing stdout stops a stream download.** `cp s3://bkt/k -` hands
+  the object's bytes to the process's stdout and never flushes them, exactly as
+  `aws` does, so a stdout that cannot take them fails in one of two places:
+  inside the transfer, as a `download failed:` line and exit code 1, or at
+  interpreter shutdown when the buffered bytes are finally flushed, which ends
+  the *process* at 120 with no failure line at all. Which one you get depends on
+  whether the object outgrows the interpreter's own stdout buffer, and that size
+  belongs to the interpreter rather than to either tool: `aws`'s frozen 3.14
+  buffers about 128 KiB against a `/dev/full` stdout, where a host CPython 3.10
+  gives it 4096 bytes. Objects between those two sizes therefore report the
+  failure and exit 1 here while `aws` reports nothing and exits 120; smaller and
+  larger ones agree, and so does every size once the two buffers are the same
+  (measured). A closed pipe and a stdout opened read-only fail in those same two
+  places, by the same rule.
+- **When the error report itself cannot be written.** Both tools deliberately
+  leave the report *about* a failed report unguarded. That is what replaces a
+  run's own exit code with 255 on both when the report carries a character the
+  output codec cannot encode (`AWS_CLI_OUTPUT_ENCODING`, whose codec is
+  described in [`configuration.md`](./configuration.md)) — there the second
+  report still gets written. With stdout and stderr both broken, though —
+  `ls s3://bkt/ 2>&1 |` a reader that closes at once — there is nothing left to
+  catch it: `aws` lets the failure escape and its interpreter exits **1**,
+  while here the process ends at **120** on the shutdown flush that fails on
+  the same stream. Neither tool has managed to write anything you can read, so
+  only the code differs.
 - **The `PYTHON*` environment variables reach this command and not `aws`.**
   The official `aws` distribution is a frozen interpreter running in isolated
   mode, so the interpreter ignores that whole family; this command runs on
@@ -234,7 +305,12 @@ endpoint and the `PYTHON*` family.
   exiting 255 with `Failed to set sys.argv: decoding error`. Leave the family
   unset and the two agree: under a plain C, ISO-8859-1 or ASCII locale, config
   reading, `file://` decoding, and the scanning and display of file names all
-  match.
+  match. One last packaging split needs no environment at all: give the process
+  a standard stream it cannot set up — `cp - s3://bkt/k < /some/directory` —
+  and `aws`'s bootloader fails to start its embedded interpreter and exits 255,
+  while here CPython dies in `init_sys_streams` and exits 1 with a
+  `Fatal Python error:` block. No code from either tool has run at that point,
+  and nothing is created either way.
 - **Which CA certificates are trusted.** Both tools verify every TLS connection
   against an explicit CA file — never the operating system's trust store — but
   not the same file: `aws` uses the `cacert.pem` bundled in its own

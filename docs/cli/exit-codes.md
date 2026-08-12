@@ -19,9 +19,11 @@ script that already branches on `aws s3`'s codes keeps working unchanged.
 ### 0 — success
 
 `help` and `--version` exit 0 as well. Piping into a reader that closes early
-(`ls | head`) is a special case: the command itself succeeds, but the process
-usually ends with 120, once Python fails to flush to the closed pipe. `aws` does
-the same, so do not branch on it.
+(`ls | head`) is not one of them: the broken pipe is reported like any other
+write failure — `boto3-s3: [ERROR]: [Errno 32] Broken pipe`, exit code 255 —
+and the process then usually ends at 120 anyway, once Python fails to flush to
+the closed pipe at shutdown. `aws` does exactly the same, report included, so
+do not branch on it.
 
 ### 1 — the operation failed after it started
 
@@ -143,6 +145,12 @@ Two cases where the codes are deliberately not identical:
   `aws` v2 bundles awscrt, so neither situation can arise there.
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
+
+A few failure paths settle on different codes too — a transfer whose connection
+dies below the HTTP layer, a download body cut mid-stream, a stdout or an error
+report that cannot be written, and a standard stream that cannot be set up at
+all. Section 2 of [`aws-differences.md`](./aws-differences.md) has each of them,
+with why it is not worth mirroring.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.
