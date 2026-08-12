@@ -13,7 +13,7 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from difflib import get_close_matches
-from typing import NoReturn, cast
+from typing import NoReturn, TextIO, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -147,6 +147,11 @@ _UNKNOWN_TIMESTAMP_FORMAT = (
     'Unknown cli_timestamp_format value: {}, valid values are "wire" or "iso8601"'
 )
 
+# aws's codec override for the streams it reports errors on, and the
+# interpreter variable it still honors as a fallback (its compat.py).
+_OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
+_PYTHONUTF8_ENV_VAR = "PYTHONUTF8"
+
 
 def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     """aws's envelope code and message for an unresolvable credentials / region.
@@ -181,6 +186,42 @@ def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     if isinstance(cause, NoRegionError):
         return "NoRegion", f'{cause} You can also configure your region by running "aws configure".'
     return None
+
+
+def _set_preferred_output_encoding(stream: TextIO) -> None:
+    """Re-encode a report stream the way aws's error writers do.
+
+    aws builds a text writer for every error report it makes, and building one
+    re-encodes the stream it wraps (`compat.set_preferred_output_encoding`):
+    to `AWS_CLI_OUTPUT_ENCODING` when that names a codec, else to UTF-8 when
+    `PYTHONUTF8` is `1` - the fallback aws keeps for users of the interpreter
+    variable its frozen build stopped honoring. Reconfiguring an encoding
+    without an error handler resets the handler to `strict`, so a report the
+    codec cannot represent raises instead of being escaped; `main` reports
+    that raise the way aws's entry-point chain does.
+
+    aws builds both writers for every report and its handlers then write to
+    one: stderr for every report there is, stdout for the bare newline a
+    Ctrl-C prints. Each call site here re-encodes the stream it is about to
+    write, which is the same thing for everything observable - nothing else on
+    this surface writes after a report. Nothing outside a report re-encodes at
+    all: a successful run's result, progress and warning lines keep the
+    interpreter's own streams, aws included (measured on both tools).
+
+    An unknown codec is ignored rather than raised: `_dispatch`'s gate has
+    already rejected one, and aws swallows it here too so the report *about*
+    the codec can still be written. A stream with nothing to reconfigure (a
+    capture buffer) is left alone.
+    """
+    encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
+    if encoding is None:
+        if os.environ.get(_PYTHONUTF8_ENV_VAR) != "1":
+            return
+        encoding = "UTF-8"
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        with contextlib.suppress(LookupError):
+            reconfigure(encoding=encoding)
 
 
 def _write_error(message: object, *, rc: int | None = None, code: str | None = None) -> None:
@@ -222,6 +263,7 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
             report = _unresolved_config_report(message)
             if report is not None:
                 code, detail = report
+    _set_preferred_output_encoding(sys.stderr)
     # The degradation is the renderer's, so it costs any code its envelope
     # while leaving the message the handler built - aws's fallback writes the
     # extracted `Message`, hints included. Only the rc-252 family can be
@@ -231,11 +273,34 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     # `Configuration` gate reads the same undeclared profile and stands down
     # for the same reason.
     if code is not None and _enhanced_envelope:
-        detail = f"An error occurred ({code}): {detail}"
-    if not detail:
-        sys.stderr.write("boto3-s3: [ERROR]:\n")
-        return
-    sys.stderr.write(f"boto3-s3: [ERROR]: {detail.strip()}\n")
+        try:
+            _write_report(f"An error occurred ({code}): {detail}")
+            return
+        except Exception:
+            # The other way into the degraded form: aws's renderer wraps the
+            # whole enveloped write in a `try`, so a codec that cannot
+            # represent the report drops it there and the bare message is
+            # written instead - unenveloped, and only then allowed to fail
+            # (measured: the position the codec error names is the bare
+            # message's, and rc 252 becomes aws's 255 through that second
+            # failure).
+            pass
+    _write_report(detail)
+
+
+def _write_report(detail: str) -> None:
+    """aws's `errorformat.write_error`: the prefix, the message, the newline.
+
+    Three writes there, two here - aws leads with a blank line this CLI does
+    not print (a class-1 rule of the parity normalization, design/testing.md
+    section 9). Keeping the newline a write of its own still matters: under a
+    stateful codec (`utf_8_sig`, `punycode`) the chunk boundaries are what the
+    encoder acts on, and a report that fails to encode must leave the stream
+    exactly as aws leaves it.
+    """
+    prefix = "boto3-s3: [ERROR]:"
+    sys.stderr.write(prefix if not detail else f"{prefix} {detail.strip()}")
+    sys.stderr.write("\n")
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
@@ -720,8 +785,23 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return _main(argv, ctx)
     except KeyboardInterrupt:
         with contextlib.suppress(Exception):
+            # aws's `InterruptExceptionHandler` writes this newline through
+            # the stdout writer its chain built, so the codec applies to it -
+            # the one report on this surface that is not stderr's.
+            _set_preferred_output_encoding(sys.stdout)
             sys.stdout.write("\n")
         return 130
+    except UnicodeError as exc:
+        # aws's entry-point handler chain (its `AWSCLIEntryPoint.main`), whose
+        # one reachable case here is a report `AWS_CLI_OUTPUT_ENCODING` cannot
+        # represent: the codec is strict, so the write raises out of the
+        # handler that was making the report and the general handler reports
+        # *that* at rc 255 - which is what turns a 252 into a 255 when the
+        # message carries a character the codec lacks (measured). The second
+        # report is deliberately unguarded: when the codec cannot write it
+        # either, aws lets the error escape its entry point as well.
+        _write_error(exc, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
@@ -763,7 +843,17 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
             rc=_PARAM_VALIDATION_ERROR_RC,
         )
         return _PARAM_VALIDATION_ERROR_RC
-    mode = resolve.resolve_auto_prompt_mode(raw)
+    try:
+        mode = resolve.resolve_auto_prompt_mode(raw, _config_scan)
+    except AttributeError as exc:
+        # The resolution runs aws's own `config.lower()` over whatever the
+        # setting holds, so an indented block - a map after botocore's parse -
+        # raises there and aws's entry-point chain reports it at rc 255,
+        # ahead of the command it was about to run (measured). Reported here
+        # rather than left to `main`'s backstop, which only claims the codec
+        # failures of the report streams.
+        _write_error(exc, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
     if mode == "on":
         return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
@@ -909,6 +999,10 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             sys.stdout.write(pre_stdout.getvalue())
             return 0
         if not suppress_usage_errors:
+            # Replayed onto the real stream, so the codec `_write_error`
+            # applies to a live report has to be applied here too - the
+            # capture buffer it was written into could not take it.
+            _set_preferred_output_encoding(sys.stderr)
             sys.stderr.write(pre_stderr.getvalue())
         return _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
@@ -940,17 +1034,17 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # unknown codec beats both config gates below, the help token, an invalid
     # subcommand and every leaf error, while the three resolutions above, an
     # unparseable config file and a parse-time --version still win (all
-    # measured). Only the validation is ported: aws applies the codec when
-    # building the text writers of its error-handler and formatted-output
-    # paths, none of which the s3 surface reaches (measured: a valid codec
-    # changes no bytes on any s3 command).
-    output_encoding = os.environ.get("AWS_CLI_OUTPUT_ENCODING")
+    # measured). The validation is separate from the application on purpose,
+    # aws's own split: `_set_preferred_output_encoding` swallows an unknown
+    # codec so a report can still be written, and this gate is what makes one
+    # impossible to reach with the codec still unknown.
+    output_encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
     if output_encoding is not None:
         try:
             "".encode(output_encoding)
         except LookupError:
             _write_error(
-                f"Unknown codec `{output_encoding}` specified for AWS_CLI_OUTPUT_ENCODING.",
+                f"Unknown codec `{output_encoding}` specified for {_OUTPUT_ENCODING_ENV_VAR}.",
                 rc=_GENERAL_ERROR_RC,
             )
             return _GENERAL_ERROR_RC

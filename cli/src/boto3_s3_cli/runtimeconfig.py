@@ -263,9 +263,22 @@ def load_scoped_s3_config(config: AwsConfig) -> dict[str, Any]:
     config file, and parsed config cache are those of the exact session the
     command's clients use. Unknown ``[s3]`` keys are intentionally ignored,
     matching `build_transfer_config`, which consumes only aws-cli's declared
-    runtime keys.
+    runtime keys - and matching aws, which carries them into its runtime
+    config through the same ``**`` expansion and then reads none of them.
+
+    One unknown key is not inert. aws expands the whole section into
+    ``RuntimeConfig().build_config(**...)``, so a key spelled like the bound
+    method's own parameter is a duplicate argument and the call fails before
+    any value is read; ``self`` is the only name that can collide, the method
+    declaring no other. Running that expansion here reports the ``TypeError``
+    aws reports - same class name, same method name, so the text falls out of
+    the interpreter rather than being rebuilt - at the point aws reports it
+    (rc 255, past every path and usage validation).
     """
     scoped: dict[str, Any] = {}
+    colliding = config.get_str("s3.self")
+    if colliding is not None:
+        RuntimeConfig().build_config(**{"self": colliding})
     for key in DEFAULTS:
         value = config.get_str(f"s3.{key}")
         if value is not None:

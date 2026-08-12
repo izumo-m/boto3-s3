@@ -18,8 +18,11 @@ are class-1 rules of the parity normalization - design/testing.md section 9).
 
 from __future__ import annotations
 
+import io
 import os
+import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -770,12 +773,11 @@ class TestUnknownOutputEncoding:
         assert cli.main(["help"]) == 255
         assert capsys.readouterr().err == self._REPORT.format("")
 
-    def test_a_valid_codec_changes_nothing(
+    def test_a_valid_codec_leaves_a_clean_run_alone(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Only the validation is ported: aws applies the codec on writer
-        # paths the s3 surface does not reach (measured: byte-identical
-        # output with `utf-8` set on both tools).
+        # The gate rejects nothing a codec lookup accepts; what a valid one
+        # then does to the *reports* is `TestOutputEncodingIsApplied`.
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "utf-8")
         assert cli.main(["help"]) == 0
         assert capsys.readouterr().err == ""
@@ -831,6 +833,122 @@ class TestUnknownOutputEncoding:
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
         )
+
+
+class TestOutputEncodingIsApplied:
+    """A valid `AWS_CLI_OUTPUT_ENCODING` re-encodes the error reports.
+
+    aws builds a text writer for stdout and one for stderr every time it
+    reports an error, and building one reconfigures the stream to the codec
+    (`compat.set_preferred_output_encoding`). So the bytes of a report change,
+    a stateful codec gets to add its BOM, and - because reconfiguring resets
+    the error handler to `strict` - a report the codec cannot represent fails
+    to write, escapes to aws's entry-point chain and is replaced by the codec
+    error at rc 255. Every expectation below was measured against the pinned
+    aws-cli, byte for byte under the program-name mapping (the character
+    position a codec error names shifts by the width of that name, and aws's
+    leading blank line - class-1 rules of the normalization,
+    design/testing.md section 9).
+
+    Nothing else re-encodes: a successful run's result, progress and warning
+    lines are the interpreter's own on both tools (measured).
+    """
+
+    # An unknown option carrying U+00E9: the shortest report with a non-ASCII
+    # character in it that needs no client and no filesystem.
+    _ARGV: ClassVar[list[str]] = ["ls", "--café"]
+    _REPORT = "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --café\n"
+
+    def _stderr_bytes(self, monkeypatch: pytest.MonkeyPatch, encoding: str = "utf-8") -> io.BytesIO:
+        """Swap `sys.stderr` for a real text stream over a byte buffer.
+
+        capsys decodes what it captured as UTF-8, which cannot show what a
+        re-encoded report actually put on the wire - and a `cp1252` report is
+        not valid UTF-8 at all. The replacement is a `TextIOWrapper` because
+        that is the one thing the codec application needs: a stream it can
+        reconfigure.
+        """
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding=encoding, newline="", write_through=True)
+        monkeypatch.setattr(sys, "stderr", stream)
+        return raw
+
+    def test_the_report_is_written_in_the_codec(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # cp1252 spells U+00E9 as the single byte 0xe9 where the stream's own
+        # UTF-8 spells it 0xc3 0xa9 (measured on the pinned aws-cli).
+        raw = self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "cp1252")
+        assert cli.main(self._ARGV) == 252
+        assert raw.getvalue() == self._REPORT.encode("cp1252")
+
+    @pytest.mark.parametrize("codec", ["utf_8_sig", "utf-16"])
+    def test_a_stateful_codec_gets_its_byte_order_mark(
+        self, codec: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", codec)
+        assert cli.main(self._ARGV) == 252
+        assert raw.getvalue() == self._REPORT.encode(codec)
+
+    def test_a_codec_that_cannot_write_it_turns_252_into_255(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The strict handler makes the write raise: aws's renderer drops the
+        # enveloped attempt, retries bare, and lets *that* failure reach its
+        # entry-point chain - which is why the position named below is the
+        # bare message's and the exit code is the general handler's, not the
+        # 252 the run had earned.
+        raw = self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(self._ARGV) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"in position 41: ordinal not in range(128)\n"
+        )
+
+    def test_a_codec_that_swallows_it_reports_nothing_at_255(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `idna` rejects a label longer than 63 characters and buffers any
+        # trailing label that has no dot to close it, so the report raises and
+        # the codec error that replaces it is silently buffered away: rc 255
+        # with an empty stderr, exactly as aws ends this run.
+        raw = self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "idna")
+        assert cli.main(["ls", f"--{'a' * 70}.x"]) == 255
+        assert raw.getvalue() == b""
+
+    def test_pythonutf8_is_the_fallback_codec(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws still honors PYTHONUTF8=1 for the report streams (its frozen
+        # interpreter ignores it everywhere else), so the report goes out as
+        # UTF-8 even where the stream itself is not.
+        raw = self._stderr_bytes(monkeypatch, "latin-1")
+        monkeypatch.delenv("AWS_CLI_OUTPUT_ENCODING", raising=False)
+        monkeypatch.setenv("PYTHONUTF8", "1")
+        assert cli.main(self._ARGV) == 252
+        assert raw.getvalue() == self._REPORT.encode("utf-8")
+
+    def test_without_either_variable_the_stream_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The contrast for both branches above: an untouched stream writes the
+        # report in its own encoding.
+        raw = self._stderr_bytes(monkeypatch, "latin-1")
+        monkeypatch.delenv("AWS_CLI_OUTPUT_ENCODING", raising=False)
+        monkeypatch.delenv("PYTHONUTF8", raising=False)
+        assert cli.main(self._ARGV) == 252
+        assert raw.getvalue() == self._REPORT.encode("latin-1")
+
+    def test_a_run_that_reports_nothing_never_re_encodes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The application point is the report itself, so a run that makes none
+        # leaves both streams as the interpreter set them up (measured: a
+        # narrowed codec changes no byte of a successful command).
+        self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "cp1252")
+        assert cli.main(["help"]) == 0
+        assert sys.stderr.encoding == "utf-8"
 
 
 class TestInvalidBinaryFormat:
@@ -942,3 +1060,89 @@ class TestInvalidBinaryFormat:
         config.write_text("[default]\ncli_binary_format = bogus\n")
         assert cli.main(["--version"]) == 0
         assert capsys.readouterr().err == ""
+
+
+# Every value aws's error-format choice list accepts.
+_ERROR_FORMATS = ["enhanced", "legacy", "json", "yaml", "text", "table"]
+
+
+class TestTheErrorFormatIsAcceptedAndIgnored:
+    """`--cli-error-format` / `AWS_CLI_ERROR_FORMAT` change no report here.
+
+    aws acts on them - `legacy` strips the envelope, `enhanced` restores it
+    where an undeclared profile dropped it, and `json` / `yaml` / `text` /
+    `table` re-render the report altogether - while this command validates the
+    value and does nothing with it. The divergence is deliberate and recorded
+    (docs/cli/aws-differences.md sections 1 and 3,
+    design/aws-cli-option-handling.md section 2); these rows pin that the
+    rendering really is value-independent on both spellings, so the record
+    cannot silently go stale.
+    """
+
+    @pytest.mark.parametrize("value", _ERROR_FORMATS)
+    def test_the_flag_leaves_an_enveloped_report_alone(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["--cli-error-format", value, "bogus"]) == 252
+        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
+
+    @pytest.mark.parametrize("value", _ERROR_FORMATS)
+    def test_the_env_var_leaves_an_enveloped_report_alone(
+        self,
+        config: Path,
+        value: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("AWS_CLI_ERROR_FORMAT", value)
+        assert cli.main(["bogus"]) == 252
+        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
+
+    @pytest.mark.parametrize("value", _ERROR_FORMATS)
+    def test_it_never_restores_a_dropped_envelope(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's `enhanced` puts the envelope back in exactly this situation
+        # (measured on the pinned aws-cli); here the report stays degraded
+        # whatever the value.
+        assert cli.main(["--profile", "nosuch", "--cli-error-format", value, "bogus"]) == 252
+        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
+
+    def test_an_unknown_value_is_still_rejected(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Ignoring the value does not mean skipping its choice list.
+        assert cli.main(["--cli-error-format", "bogus", "ls"]) == 252
+        assert (
+            "argument --cli-error-format: Found invalid choice 'bogus'" in capsys.readouterr().err
+        )
+
+
+class TestCliHistoryIsNotRead:
+    """`cli_history` reaches nothing here (docs/cli/aws-differences.md section 2).
+
+    aws records the run in a history database when the selected profile
+    enables it, and prints `Warning: Unable to record CLI history. ...` on one
+    stderr line when it cannot open one, ahead of the command's own output and
+    without touching the exit code (both measured on the pinned aws-cli).
+    This command has no history mechanism, so every value is inert.
+    """
+
+    @pytest.mark.parametrize("value", ["enabled", "disabled", "bogus"])
+    def test_no_value_changes_the_run(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text(f"[default]\ncli_history = {value}\n")
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_it_adds_no_warning_to_a_failing_run(
+        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's warning rides on an unopenable database, so point the variable
+        # at a directory - the shape that makes aws warn - and pin that the
+        # report is the run's own and nothing else.
+        config.write_text("[default]\ncli_history = enabled\n")
+        monkeypatch.setenv("AWS_CLI_HISTORY_FILE", str(config.parent))
+        assert cli.main(["bogus"]) == 252
+        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE

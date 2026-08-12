@@ -35,6 +35,9 @@ from boto3_s3 import InvalidValueError, ValidationError
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+# What Python appended to a non-text-codec LookupError up to 3.11.
+_ARBITRARY_CODECS_HINT = "; use codecs.open() to handle arbitrary codecs"
+
 
 class ParamfileLoadError(InvalidValueError):
     """A paramfile reference that could not be loaded (aws's ``ResourceLoadingError``).
@@ -95,6 +98,18 @@ def read_text_paramfile(original: str, *, operation: str) -> str:
     try:
         with open(path, encoding=encoding) as handle:
             return handle.read()
+    except LookupError as exc:
+        # A codec that is not a text encoding (`rot13`) reaches the user
+        # through aws's general handler (255) as the interpreter's own
+        # `LookupError`, so its wording is the official distribution's -
+        # Python 3.14, which dropped the `; use codecs.open() ...` half its
+        # predecessors appended. Pin the newer form on every host, like the
+        # argparse corners (design/cli.md section 2). `unknown encoding: <codec>`
+        # needs nothing: it reads the same on both.
+        message = str(exc)
+        if not message.endswith(_ARBITRARY_CODECS_HINT):
+            raise
+        raise LookupError(message.removesuffix(_ARBITRARY_CODECS_HINT)) from None
     except UnicodeDecodeError as exc:
         # aws wording (paramfile.get_file): the decode-error message names the
         # EXPANDED path in parentheses; the OSError one names the full original.

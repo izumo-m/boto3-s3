@@ -249,6 +249,28 @@ class TestLoadScopedS3Config:
         self._write(tmp_path, monkeypatch, "[default]\nregion = us-east-1\n")
         assert runtimeconfig.load_scoped_s3_config(self._config()) == {}
 
+    def test_unknown_keys_are_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws carries them into its runtime config and reads none of them, so
+        # dropping them here is the same run (measured: rc 0 on both).
+        self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  unknown_key = x\n")
+        assert runtimeconfig.load_scoped_s3_config(self._config()) == {}
+
+    def test_a_self_key_collides_with_the_expansion_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws expands the whole section into `RuntimeConfig().build_config(**...)`,
+        # so `self` is a duplicate argument and the run ends there - rc 255
+        # with the interpreter's TypeError (measured on the pinned aws-cli,
+        # which names the same class and method).
+        self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  self = x\n")
+        with pytest.raises(TypeError) as excinfo:
+            runtimeconfig.load_scoped_s3_config(self._config())
+        assert str(excinfo.value) == (
+            "RuntimeConfig.build_config() got multiple values for argument 'self'"
+        )
+
     def test_profile_selects_its_own_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
