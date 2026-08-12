@@ -43,7 +43,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from typing import BinaryIO
 
 
@@ -578,6 +578,20 @@ def scan_s3_source(
     return storage.scan(scan_options)
 
 
+def _retry_info(response: Mapping[str, Any]) -> str:
+    """The `` (reached max retries: N)`` fragment botocore puts in a message.
+
+    botocore's ``ClientError._get_retry_info``, reproduced so a rewritten
+    error message keeps what the original carried: botocore appends this to
+    the operation name whenever the retry handler exhausted its attempts, and
+    a message rebuilt from scratch would silently drop it.
+    """
+    metadata = response.get("ResponseMetadata", {})
+    if metadata.get("MaxAttemptsReached", False) and "RetryAttempts" in metadata:
+        return f" (reached max retries: {metadata['RetryAttempts']})"
+    return ""
+
+
 def head_single(
     src_storage: S3Storage,
     *,
@@ -623,8 +637,12 @@ def head_single(
         # replaces the s3_errors translation wholesale, and the section 2.1
         # reachability guarantee (exceptions.md) promises the ClientError on
         # the *direct* `__cause__` of an error raised for a failed S3 request.
+        # aws rewrites the response and lets botocore render it, so its retry
+        # info lands right after the operation name; this text is composed, so
+        # the fragment has to be placed there by hand.
         raise NotFoundError(
-            "An error occurred (404) when calling the HeadObject operation: "
+            "An error occurred (404) when calling the HeadObject operation"
+            f"{_retry_info(response)}: "
             f'Key "{key}" does not exist',
             operation=operation,
             bucket=src_storage.bucket,

@@ -581,6 +581,49 @@ class TestDownloadRoute:
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
 
+    def test_rewritten_404_keeps_the_retry_info_botocore_added(self, tmp_path: Path) -> None:
+        # aws rewrites the response dict and lets botocore render the message,
+        # so " (reached max retries: N)" survives; composing the text has to
+        # re-insert it in botocore's place, right after the operation name.
+        # Reproduces `AWS_MAX_ATTEMPTS=1 aws s3 cp s3://b/no-such .` on
+        # aws 2.36.1, whose fatal line carries "(reached max retries: 0)".
+        exhausted = ClientError(
+            {
+                "Error": {"Code": "404", "Message": "Not Found"},
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 404,
+                    "MaxAttemptsReached": True,
+                    "RetryAttempts": 0,
+                },
+            },
+            "HeadObject",
+        )
+        client, _ = make_recording_client([exhausted])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        assert str(excinfo.value) == (
+            "An error occurred (404) when calling the HeadObject operation "
+            '(reached max retries: 0): Key "no-such" does not exist'
+        )
+
+    def test_rewritten_404_omits_retry_info_when_attempts_remained(self, tmp_path: Path) -> None:
+        # The retry handler stamps MaxAttemptsReached only once it gives up;
+        # RetryAttempts alone must not produce the fragment.
+        unexhausted = ClientError(
+            {
+                "Error": {"Code": "404", "Message": "Not Found"},
+                "ResponseMetadata": {"HTTPStatusCode": 404, "RetryAttempts": 2},
+            },
+            "HeadObject",
+        )
+        client, _ = make_recording_client([unexhausted])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        assert str(excinfo.value) == (
+            "An error occurred (404) when calling the HeadObject operation: "
+            'Key "no-such" does not exist'
+        )
+
     def test_named_404_code_is_not_rewritten(self, tmp_path: Path) -> None:
         # aws-cli's filegenerator rewrites only `Error.Code == '404'` (the
         # bare HeadObject miss); an endpoint that names a code over HTTP 404
