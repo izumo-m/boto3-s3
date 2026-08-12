@@ -217,7 +217,10 @@ The precedence in `resolve_auto_prompt_mode` (the first one decided wins):
 3. `--cli-auto-prompt` -> **on**.
 4. Otherwise -> env `AWS_CLI_AUTO_PROMPT` -> profile `cli_auto_prompt` -> `'off'`.
    The value is lowercased, and anything other than `on` / `on-partial` is
-   treated as off (aws's else branch).
+   treated as off (aws's else branch). The lowercasing is aws's verbatim
+   operation, not a formality: when the setting is an indented block the
+   config read answers with a map, and `.lower()` raises the same
+   `AttributeError` there as it does on aws, reported at rc 255.
 
 Behavior per mode:
 
@@ -237,14 +240,17 @@ Behavior per mode:
   result (both the parser stage and the usage validation inside `run()`).
 - **off** -> normal dispatch.
 
-**config/env reading currently uses no SDK**: env comes from `os.environ`, and profile
-config is read with `configparser` from the relevant section (`[default]` or
-`[profile <name>]`) of `~/.aws/config` (`AWS_CONFIG_FILE` takes precedence).
-This is an implementation detail, not an import guarantee for usage-error
-paths. The active profile is `--profile` >
-`AWS_PROFILE` > `AWS_DEFAULT_PROFILE` > `default`. This is not botocore's full
-resolution (abbreviations, nesting), but it is sufficient for this interactive
-setting that is outside the charter.
+**config/env reading currently uses no SDK**: env comes from `os.environ`, and
+the profile config comes from the dispatcher's own config scan, which
+`cli.main` passes in (`configfiles.ConfigScan.scoped()` - the stdlib
+`configparser` read that reproduces botocore's `raw_config_parse` +
+`build_profile_map`: both files in botocore's order with the credentials file
+merged in key by key, and an indented block parsed into the map botocore makes
+of it, [`cli.md`](./cli.md) section 1). So this setting is read under
+botocore's own rules while the pre-parse path stays SDK-free - which is an
+implementation detail, not an import guarantee for usage-error paths. The
+active profile is `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` >
+`default`.
 
 Consulting `--profile` here is a deliberate deviation from aws-cli: at
 auto-prompt resolution aws has not yet applied `--profile` to the session, so it

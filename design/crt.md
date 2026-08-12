@@ -421,6 +421,15 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   from how credentials are handled. A user can observe it, so it is recorded
   in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
   (testing.md section 9's recording rule); the mechanism stays here.
+- **A plain-HTTP endpoint named only by the environment**: aws decides its CRT
+  client's `use_ssl` from `--endpoint-url` alone, so an `http://` endpoint
+  supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer
+  dies with `AWS_IO_SOCKET_CLOSED`, where `_derive_endpoint` reads the scheme
+  off the endpoint the client actually resolved and the same run transfers.
+  The user sees a different exit code and a different S3 state, so this one is
+  recorded in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
+  too (testing.md section 9's recording rule); the measurement and the
+  mechanism stay in section 3.
 - **CRT configured x no resolvable region**: aligned, no longer a divergence.
   aws's factory hands `create_s3_crt_client` whatever its region chain
   answered, unvalidated, so an unresolved region reaches
