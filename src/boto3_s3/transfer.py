@@ -78,7 +78,7 @@ from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
 
-from boto3_s3 import crtsupport, requestparams, transferconfig
+from boto3_s3 import crtsupport, mimetable, requestparams, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     BatchError,
@@ -399,15 +399,51 @@ def _set_file_utime(path: str, timestamp: float) -> None:
         ) from exc
 
 
+_mime_db: mimetypes.MimeTypes | None = None
+
+
+def _mime_types() -> mimetypes.MimeTypes:
+    """The MIME datastore an upload's guessed ``Content-Type`` comes from.
+
+    Assembled the way ``mimetypes.init`` assembles the module-level one, with
+    one substitution: the built-in tables come from ``mimetable`` (frozen
+    CPython 3.14) rather than from the running interpreter, because the guess
+    has to be the one aws makes and aws's official distribution is frozen
+    against 3.14. The host-side overlays stay live and keep ``init``'s order -
+    the Windows registry first, then whichever ``knownfiles`` exist - so local
+    mime.types edits reach both tools alike. Built on first use, and only then:
+    an upload that sets ``content_type`` never needs it.
+    """
+    global _mime_db
+    if _mime_db is None:
+        db = mimetypes.MimeTypes()
+        db.encodings_map = dict(mimetable.ENCODINGS_MAP)
+        db.suffix_map = dict(mimetable.SUFFIX_MAP)
+        db.types_map = ({}, {})
+        db.types_map_inv = ({}, {})
+        for extension, mime_type in mimetable.TYPES_MAP.items():
+            db.add_type(mime_type, extension, strict=True)
+        for extension, mime_type in mimetable.COMMON_TYPES.items():
+            db.add_type(mime_type, extension, strict=False)
+        db.read_windows_registry()
+        for name in mimetable.KNOWNFILES:
+            if os.path.isfile(name):
+                db.read(name)
+        _mime_db = db
+    return _mime_db
+
+
 def _guess_content_type(path: str) -> str | None:
     """``mimetypes`` guess with aws-cli's Windows-registry guard.
 
-    ``guess_type`` can raise ``UnicodeDecodeError`` on Windows when a
-    registry MIME entry is in an undecodable encoding (bpo-9291); strict
-    (IANA-only) matching is kept deliberately, like aws.
+    The guess can raise ``UnicodeDecodeError`` on Windows when a registry MIME
+    entry is in an undecodable encoding (bpo-9291) - here from the registry read
+    the first call performs, where aws takes it from its own lazy
+    ``mimetypes.init``; strict (IANA-only) matching is kept deliberately, like
+    aws.
     """
     try:
-        return mimetypes.guess_type(path)[0]
+        return _mime_types().guess_type(path)[0]
     except UnicodeDecodeError:
         return None
 
@@ -1624,11 +1660,18 @@ class Transferrer:
         record with aws's wording - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
+
+        Whole seconds only: aws-cli stamps its source timestamp through
+        ``timetuple`` / ``time.mktime``, which drops the sub-second part, and an
+        endpoint whose listing carries milliseconds (MinIO and other
+        S3-compatible servers - real S3 lists whole seconds) would otherwise
+        leave a stamp that ``--exact-timestamps`` accepts here and rejects
+        there.
         """
         if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dest_path, item.mtime.timestamp())
+            _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
         except Exception as exc:
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "

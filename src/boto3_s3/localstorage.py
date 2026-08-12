@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, cast
@@ -210,15 +211,55 @@ def _is_readable_child(name: str, full: str, dir_fd: int | None, *, is_dir: bool
     return True
 
 
+def _local_zone_representable(ts: float) -> bool:
+    """Whether aws-cli's local-zone rendering of ``ts`` succeeds.
+
+    aws-cli derives a file's mtime as ``datetime.fromtimestamp(st_mtime,
+    tzlocal())`` and treats any failure as an invalid timestamp, so what counts
+    as representable is the *local* calendar's range - UTC's, shifted by the
+    zone's offset. dateutil's ``tzlocal`` is rebuilt per call the way aws-cli
+    does, so a process that changes ``TZ`` (and calls ``time.tzset``) follows;
+    the import is deferred because the whole dateutil package costs about as
+    much to import as boto3-s3 itself. dateutil ships with botocore, so it is
+    always installed.
+    """
+    from dateutil.tz import tzlocal
+
+    try:
+        datetime.fromtimestamp(ts, tzlocal())
+    except (ValueError, OSError, OverflowError):
+        return False
+    return True
+
+
+# datetime.min / datetime.max as epoch seconds, pulled in by two days - more
+# than any zone's UTC offset, so the local and UTC renderings of a timestamp
+# strictly between them either both succeed or both fail.
+_LOCAL_CHECK_FREE_LOW = -62135596800 + 172800
+_LOCAL_CHECK_FREE_HIGH = 253402300800 - 172800
+
+# Windows has no such quiet range: dateutil's DST probe goes through
+# time.localtime, which fails outright below the epoch there.
+_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
+
+
 def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
     """Size and tz-aware UTC mtime from a stat result (the shared derivation).
 
     An unrepresentable timestamp returns ``None`` for mtime - the caller's cue
-    for the epoch fallback. Represented in UTC per the ``FileInfo.mtime``
-    contract (aws-cli uses the local zone - same instant either way).
+    for the epoch fallback. Whether it is representable is decided the way
+    aws-cli decides it, in the host's local zone (``_local_zone_representable``);
+    the value itself is kept in UTC per the ``FileInfo.mtime`` contract. The two
+    zones only disagree near the ends of ``datetime``'s range, so outside those
+    bands the local rendering is skipped - this runs once per walked file.
     """
+    ts = st.st_mtime
     try:
-        mtime: datetime | None = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+        if (
+            _ALWAYS_CHECK_LOCAL_ZONE or not _LOCAL_CHECK_FREE_LOW <= ts <= _LOCAL_CHECK_FREE_HIGH
+        ) and not _local_zone_representable(ts):
+            return st.st_size, None
+        mtime: datetime | None = datetime.fromtimestamp(ts, tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         mtime = None
     return st.st_size, mtime

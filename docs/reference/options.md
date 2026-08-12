@@ -152,7 +152,10 @@ options and have a `request_payer` parameter of their own
 gets a `ContentType` guessed from the source entry's filename. `False`
 suppresses the guess. It applies to the upload route only — a copy never
 guesses, and a stream upload has no filename to guess from, so it is
-unaffected either way.
+unaffected either way. The extension table is pinned to the one the official
+`aws` distribution carries, so the guess does not change with the interpreter
+boto3-s3 runs on; a local `mime.types` file is still read on top of it, as `aws`
+reads it.
 
 `force_glacier_transfer` and `ignore_glacier_warnings` both default to `False`
 and act on the archived-object gate that downloads and copies apply.

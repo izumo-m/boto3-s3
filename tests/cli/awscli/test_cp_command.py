@@ -62,8 +62,11 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   unpaginated call, and no source ``VersionId`` is pinned on the reads.
   ``get_object_annotation_response`` wraps the payload in ``io.BytesIO``
   (the engine calls ``.read()``) where aws-cli builds a ``StreamingBody``.
-- ``mock.patch`` targets translate: ``mimetypes.guess_type`` and ``os.utime``
-  are identical seams; the aws-cli's ``filegenerator.get_file_stat`` (patched in
+- ``mock.patch`` targets translate: ``os.utime`` is an identical seam;
+  ``mimetypes.guess_type`` becomes ``mimetypes.MimeTypes.guess_type``, the
+  datastore method (the guess runs on boto3-s3's own ``MimeTypes``, built from
+  the table aws's frozen interpreter carries, not on the module-level one);
+  the aws-cli's ``filegenerator.get_file_stat`` (patched in
   ``vendor/aws-cli/awscli/customizations/s3/filegenerator.py``) becomes
   ``boto3_s3.localstorage.get_file_stat``; the streaming tests swap ``sys.stdin``
   / ``sys.stdout`` for shims exposing a ``buffer`` instead of patching the
@@ -508,7 +511,7 @@ class TestCPCommand:
     def test_cp_succeeds_with_mimetype_errors(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
-        with mock.patch("mimetypes.guess_type") as mock_guess_type:
+        with mock.patch("mimetypes.MimeTypes.guess_type") as mock_guess_type:
             # This should throw a UnicodeDecodeError.
             mock_guess_type.side_effect = lambda x: b"\xe2".decode("ascii")
             _, calls = _run_cmd(
@@ -751,9 +754,11 @@ class TestCPCommand:
     def test_cp_with_error_and_warning_permissions(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("bar")
-        # Patch the stat helper to report an invalid timestamp (impossible to
-        # produce portably on a real filesystem; aws-cli patches its
-        # get_file_stat the same way).
+        # Patch the stat helper to report an invalid timestamp (a real one needs
+        # a filesystem that stores 64-bit timestamps and a local zone that puts
+        # them past datetime's range - tests/lib/test_localstorage_mtime.py
+        # covers which mtimes those are; aws-cli patches its get_file_stat the
+        # same way).
         with mock.patch("boto3_s3.localstorage.get_file_stat", return_value=(None, None)):
             result, _ = _run_cmd(
                 [_client_error("NoSuchBucket", 404, "PutObject")],
