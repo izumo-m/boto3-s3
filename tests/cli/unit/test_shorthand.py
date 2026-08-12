@@ -4,6 +4,14 @@ Pins the aws-cli shorthand corner cases the naive split/partition parser got
 wrong: duplicate-key rejection, escaped commas, quoted values with commas,
 and the ``@=`` paramfile operator
 (triangulated against the aws-cli awscli/shorthand.py).
+
+It also pins the two boundaries around the grammar, both of which decide which
+*wording* the user sees rather than the exit code: the JSON short-circuit that
+keeps ``[``- and ``{``-led values away from the parser entirely, and the schema
+report that answers a value the grammar accepts but a map of strings cannot
+hold. Every expected string here was measured byte for byte against the pinned
+aws-cli, and the parser itself was differentially fuzzed against aws-cli's
+``ShorthandParser`` over ~750k generated inputs.
 """
 
 from __future__ import annotations
@@ -72,11 +80,12 @@ class TestParseMapOption:
 
 
 class TestCsvSecondValueProbe:
-    """aws's ``_csv_value`` second-value probe, observable in the flat map
-    (``_try_csv_continuation``): an empty segment between pairs is absorbed,
-    a trailing comma is aws's ``'<second>'`` parse error, and a second value
-    that parses still errors as the csv-list shapes. All expectations
-    differentially verified against the pinned aws-cli."""
+    """aws's ``_csv_value`` second-value probe and its backtracking.
+
+    An empty segment between pairs is absorbed, a trailing comma is aws's
+    ``'<second>'`` parse error, and a second value that does parse builds a
+    csv list. All expectations differentially verified against the pinned
+    aws-cli."""
 
     def test_empty_segment_between_pairs_is_absorbed(self) -> None:
         # The failed probe backtracks only to the nearest ',', so the empty
@@ -118,14 +127,104 @@ class TestCsvSecondValueProbe:
         with pytest.raises(ValidationError, match="Expected: '=', received: 'EOF'"):
             _parse("a=b,,")
 
-    def test_csv_list_shapes_still_error(self) -> None:
-        # A second value that parses would form a csv list, schema-invalid for
-        # the flat string map: rc 252 like aws's schema rejection, wording per
-        # the parser's scope note - so only the error class is pinned.
-        with pytest.raises(ValidationError):
+    def test_csv_list_shapes_reach_the_schema_report(self) -> None:
+        # A second value that parses forms a csv list - a well-formed value the
+        # string map cannot hold, so it is the schema's error, not the parser's.
+        with pytest.raises(ValidationError) as excinfo:
             _parse("a=b,c")
-        with pytest.raises(ValidationError):
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: ['b', 'c'], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+        with pytest.raises(ValidationError) as excinfo:
             _parse("a=b,c,d=e")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: ['b', 'c'], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+
+
+class TestNonScalarShapes:
+    """The grammar's list and hash constructs, and the report they draw.
+
+    aws parses ``k=[a,b]`` and ``k={a=b}`` happily - they are legal shorthand -
+    and only then discovers that a map of strings cannot hold them. The user
+    therefore gets botocore's type complaint, naming the key and printing the
+    parsed structure, rather than a syntax error with a caret. Every expected
+    string measured against the pinned aws-cli.
+    """
+
+    def test_explicit_list(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k=[a,b]")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter k, value: ['a', 'b'], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+
+    def test_empty_explicit_list(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k=[]")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter k, value: [], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+
+    def test_hash_literal(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k={a=b}")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter k, value: {'a': 'b'}, "
+            "type: <class 'dict'>, valid types: <class 'str'>"
+        )
+
+    def test_nested_constructs_render_as_plain_python_containers(self) -> None:
+        # Unlike the JSON route there is no OrderedDict here: the shorthand
+        # parser builds plain dicts and lists, and aws prints their bare repr.
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k={a=[b,c],d={e=f}}")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter k, value: {'a': ['b', 'c'], 'd': {'e': 'f'}}, "
+            "type: <class 'dict'>, valid types: <class 'str'>"
+        )
+
+    def test_hash_literal_repeats_a_key_by_overwriting(self) -> None:
+        # Only the top level rejects a duplicate; aws's _hash_literal has no
+        # such guard, so the last write wins (measured: value ends up {'a': 'c'}).
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("k={a=b,a=c}")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter k, value: {'a': 'c'}, "
+            "type: <class 'dict'>, valid types: <class 'str'>"
+        )
+
+    def test_report_names_every_offending_key_in_map_order(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("a=1,2,b=ok,c=[3,4]")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: ['1', '2'], "
+            "type: <class 'list'>, valid types: <class 'str'>\n"
+            "Invalid type for parameter c, value: ['3', '4'], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+
+    def test_opening_bracket_inside_a_value_stays_scalar(self) -> None:
+        # The list / hash dispatch looks only at the first character of the
+        # value, so an opening bracket further in is an ordinary character.
+        # The closing ones are not: they fall outside aws's value character
+        # class and end the value, which is why `k=x[y]z` is a parse error.
+        assert _parse("k=a[b") == {"k": "a[b"}
+        assert _parse("k=a{b,j=c") == {"k": "a{b", "j": "c"}
+        with pytest.raises(ValidationError, match=r"Expected: ',', received: '\]'"):
+            _parse("k=x[y]z")
 
 
 class TestAtEqualsParamfile:
@@ -192,6 +291,127 @@ class TestAtEqualsParamfile:
         ref = tmp_path / "v.txt"
         ref.write_text("x")
         assert _parse(f"k=1,a@=file://{ref}") == {"k": "1", "a": "x"}
+
+    def test_operator_reaches_every_element_of_a_list(self, tmp_path: Path) -> None:
+        # aws arms the operator per pair, not per value, so each element of the
+        # csv / explicit list is resolved; the list itself is then the schema's
+        # error (measured).
+        ref = tmp_path / "v.txt"
+        ref.write_text("loaded")
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(f"a@=[file://{ref},plain]")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            "Invalid type for parameter a, value: ['loaded', 'plain'], "
+            "type: <class 'list'>, valid types: <class 'str'>"
+        )
+
+    def test_operator_is_disarmed_inside_a_hash_literal(self, tmp_path: Path) -> None:
+        # aws's _hash_literal re-arms the operator per inner key, so the outer
+        # "@=" does not carry into the nested values.
+        ref = tmp_path / "v.txt"
+        ref.write_text("loaded")
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(f"a@={{b=file://{ref}}}")
+        assert str(excinfo.value) == (
+            "Parameter validation failed:\n"
+            f"Invalid type for parameter a, value: {{'b': 'file://{ref}'}}, "
+            "type: <class 'dict'>, valid types: <class 'str'>"
+        )
+
+
+class TestJsonShortCircuitGate:
+    """aws's ``_should_parse_as_shorthand`` short-circuit and the branch behind it.
+
+    A value whose leading non-whitespace character is ``[`` or ``{`` never
+    reaches the shorthand parser. The map branch it lands in then accepts only
+    ``{``, so a ``[`` lead gets a bare ``Invalid JSON:`` followed by the value
+    verbatim - no decoder detail, no ``JSON received:`` line, and no lstrip.
+    Measured byte for byte against the pinned aws-cli.
+    """
+
+    @pytest.mark.parametrize("value", ["[]", "[1,2]", '["a"]', "[a=b]", "[", '[{"a":"b"}]', "[1,]"])
+    def test_bracket_lead_is_the_bare_invalid_json_report(self, value: str) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert str(excinfo.value) == (
+            f"Error parsing parameter '--metadata': Invalid JSON:\n{value}"
+        )
+
+    def test_echoed_value_keeps_its_surrounding_whitespace(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse("   []  ")
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Invalid JSON:\n   []  "
+        )
+
+    def test_brace_lead_still_takes_the_json_route(self) -> None:
+        assert _parse('  {"a": "b"}') == {"a": "b"}
+
+
+class TestJsonDecodeMessagePin:
+    """The decoder wording is pinned to the official aws build's Python (3.14).
+
+    Python 3.13 gave the two trailing-comma shapes their own message, anchored
+    on the comma rather than on the closing bracket; older interpreters are
+    re-anchored so the CLI prints the same text everywhere. A corpus of ~930
+    broken documents run under 3.10 / 3.12 / 3.14 showed those two shapes are
+    the whole difference, so nothing else is rewritten.
+    """
+
+    def test_trailing_comma_in_object(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{"a": 1,}')
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Invalid JSON: "
+            "Illegal trailing comma before end of object: line 1 column 8 (char 7)\n"
+            'JSON received: {"a": 1,}'
+        )
+
+    def test_trailing_comma_in_nested_array(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{"a": [1,]}')
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Invalid JSON: "
+            "Illegal trailing comma before end of array: line 1 column 9 (char 8)\n"
+            'JSON received: {"a": [1,]}'
+        )
+
+    def test_comma_position_is_kept_across_whitespace_and_newlines(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{"a": 1,\n  }')
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Invalid JSON: "
+            "Illegal trailing comma before end of object: line 1 column 8 (char 7)\n"
+            'JSON received: {"a": 1,\n  }'
+        )
+
+    def test_comma_position_counts_from_the_last_newline(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse('{\n "a": 1,\n}')
+        assert str(excinfo.value) == (
+            "Error parsing parameter '--metadata': Invalid JSON: "
+            "Illegal trailing comma before end of object: line 2 column 8 (char 9)\n"
+            'JSON received: {\n "a": 1,\n}'
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ('{"a": 1,,}', "Expecting property name enclosed in double quotes"),
+            ('{"a": [1,,2]}', "Expecting value"),
+            ("{,}", "Expecting property name enclosed in double quotes"),
+            ('{"a": [,]}', "Expecting value"),
+            ('{"a" 1}', "Expecting ':' delimiter"),
+        ],
+    )
+    def test_non_trailing_comma_failures_keep_the_decoder_wording(
+        self, value: str, message: str
+    ) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert message in str(excinfo.value)
+        assert "Illegal trailing comma" not in str(excinfo.value)
 
 
 class TestParseMapOptionErrors:
