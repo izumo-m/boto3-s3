@@ -33,6 +33,9 @@ dependencies = [
     # section 2 (boto3 1.28 already requires it, so this is declarative).
     "botocore>=1.31",
     "s3transfer>=0.6.2",
+    # Imported directly (the local-mtime representability probe uses dateutil's
+    # tzlocal, like aws-cli); floor matches botocore's own dateutil pin.
+    "python-dateutil>=2.1",
     "typing-extensions>=4.6",
 ]
 

@@ -87,6 +87,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "botocore" },
+    { name = "python-dateutil" },
     { name = "s3transfer" },
     { name = "typing-extensions" },
 ]
@@ -113,6 +114,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.28" },
     { name = "boto3", extras = ["crt"], marker = "extra == 'crt'", specifier = ">=1.28" },
     { name = "botocore", specifier = ">=1.31" },
+    { name = "python-dateutil", specifier = ">=2.1" },
     { name = "s3transfer", specifier = ">=0.6.2" },
     { name = "typing-extensions", specifier = ">=4.6" },
 ]
@@ -138,6 +140,7 @@ dependencies = [
     { name = "boto3" },
     { name = "boto3-s3" },
     { name = "botocore" },
+    { name = "python-dateutil" },
 ]
 
 [package.optional-dependencies]
@@ -155,6 +158,7 @@ requires-dist = [
     { name = "boto3-s3", extras = ["crt"], marker = "extra == 'crt'", editable = "." },
     { name = "botocore", specifier = ">=1.31" },
     { name = "prompt-toolkit", marker = "extra == 'autoprompt'", specifier = ">=3.0" },
+    { name = "python-dateutil", specifier = ">=2.1" },
 ]
 provides-extras = ["crt", "autoprompt"]
 
