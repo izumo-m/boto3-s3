@@ -269,9 +269,10 @@ reference) are emitted inline on the calling thread
   refused on every route including the streaming one, whose single item builds
   no gate; a `TransferConfig` carrying classic-only settings with
   `preferred_transfer_client="crt"`; a
-  `StdioStorage` whose `stdin` / `stdout` is unavailable in this process; and a
+  `StdioStorage` used as a source in a process with no `sys.stdin`; and a
   case-fold collision under `CaseConflictMode.ERROR`, raised from inside
-  enumeration.
+  enumeration. A `StdioStorage` *destination* has no such precondition,
+  matching the AWS CLI — see `BatchError` below.
 - [`NotFoundError`](../exceptions.md#notfounderror) — a local source path that
   does not exist, checked before any item work and worded as the AWS CLI words
   it; a single S3 source whose `HeadObject` answers 404; a single
@@ -295,7 +296,13 @@ reference) are emitted inline on the calling thread
 - [`BatchError`](../exceptions.md#batcherror) — at least one item failed.
   Raised once at the end, carrying the run's rollup counts and a sampled
   failure on `__cause__`. A single-object `cp` whose one item failed raises it
-  too, reported as 1 of 1. Warnings and skips alone do not raise.
+  too, reported as 1 of 1. Warnings and skips alone do not raise. A
+  `StdioStorage` destination in a process without `sys.stdout` lands here
+  rather than in the `ValidationError` above: the writer reads the process
+  stream on each write, so the run starts and the item fails inside the
+  transfer, with `'NoneType' object has no attribute 'write'` as the sampled
+  failure's message and the operation, bucket and key of the object stamped on
+  it as usual.
 - [`CancelledError`](../exceptions.md#cancellederror) — the run was cancelled
   through `cancel_token`. It supersedes `BatchError`.
 - Anything `filter` itself raises. A predicate's exception surfaces on the

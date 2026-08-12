@@ -188,8 +188,9 @@ server-side query instead.
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
 source setting may widen that view, as `LocalScanOptions.enumerate_all_entries`
-does. A non-recursive scan normally yields the immediate entries plus one
-`FileKind.DIRECTORY` entry per sub-"directory".
+and `S3ScanOptions.include_common_prefixes` do. A non-recursive scan normally
+yields the immediate entries plus one `FileKind.DIRECTORY` entry per
+sub-"directory".
 
 `key` is the entry's full identifier in the backend's own address space; its
 relative form must be stamped on every entry as `compare_key`
@@ -783,6 +784,18 @@ non-recursive scan sends `Delimiter='/'` and additionally emits one
 `FileInfo.key` is the full S3 key, or the prefix for a directory entry, and
 `compare_key` is that key with the listing's `Prefix` removed.
 
+`options.include_common_prefixes` widens a *recursive* scan to emit directory
+entries too: whatever `CommonPrefixes` the service returns to a listing that
+sent no `Delimiter` — none, from a service that follows the API — ahead of that
+page's objects, the same shape a non-recursive page has. It has no effect on a
+non-recursive scan, which always emits them, since the `Delimiter` it sends is
+what asks for them. `S3.ls` sets it, because `aws s3 ls` prints a page's common
+prefixes recursive or not; the transfers leave it off, since a directory record
+is not transferable and a page's leading prefix entries would cost the recursive
+stream the byte order `sync` merge-joins on. As with
+`LocalScanOptions.enumerate_all_entries`, the caller that widens the enumeration
+owns the filtering.
+
 `options.prefix` overrides the storage's own key as the listing anchor, driving
 both the `Prefix` sent and the `compare_key` relativization, so a transfer
 lists through the storage instance it was handed rather than rebuilding one.
@@ -970,14 +983,23 @@ seekable report otherwise, Windows stdin among them.
 `"wb"` writes `sys.stdout` through a write-only view, so a download always
 streams sequentially even when stdout is redirected to a seekable file: a
 `>>`-opened file lands every write at the end regardless of position, which a
-seek-based parallel download would interleave.
+seek-based parallel download would interleave. That view holds nothing from
+`open` time — it reads `sys.stdout` again on every write, as the AWS CLI's
+writer does — and its `close` neither flushes nor closes, so the bytes a
+download hands over sit in the process stream's own buffer until the
+interpreter flushes it at exit. A caller that needs them out earlier flushes
+`sys.stdout` itself.
 
-Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when the
-selected process stream is unavailable, raised here rather than letting a
-transfer worker receive an unusable file object. The error names no operation
-of its own: the run that invoked the storage stamps the one it is performing —
-a streaming `cp` reports `"cp"`, a `mv` onto a stream reports `"mv"` — while a
-direct call leaves `operation` as `None`.
+Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
+`"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
+rather than letting a transfer worker receive an unusable file object. The
+error names no operation of its own: the run that invoked the storage stamps
+the one it is performing — a streaming `cp` reports `"cp"`, a `mv` onto a
+stream reports `"mv"` — while a direct call leaves `operation` as `None`.
+Stdout has no such precondition, again like the AWS CLI: a process without one
+fails on the writer's first `write`, from inside the transfer, so it is that
+item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
+for the run not to start.
 
 ## LocalFileGenerator
 
@@ -1102,7 +1124,10 @@ rather than an `os.name` test, so any platform missing the APIs degrades
 correctly; it is true on POSIX and false on Windows, whose directory scan
 returns entry attributes inline instead. `dir_open_flags` are the flags for the
 one `open()` that turns a directory path into that descriptor. `EPOCH_TIME` is
-the timestamp stamped on a file whose mtime cannot be represented.
+the timestamp stamped on a file whose mtime cannot be represented — which the
+host's local zone decides, the same range the AWS CLI tests, so a timestamp
+close enough to `datetime`'s ends for the zone's offset to matter falls back
+here exactly when it falls back there.
 
 **The override seams, finest first.** Extend at the smallest layer that fits:
 `should_ignore_entry` (one entry's vetting), `entry_stat_result` (the one stat
@@ -1347,8 +1372,9 @@ still warns "not readable".
 ### stat_info(entry, full, st, notify)
 
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
-took. It never fails: the race case was handled upstream, and an unrepresentable
-mtime keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
+took. It never fails: the race case was handled upstream, and an mtime the
+host's local zone cannot represent — the AWS CLI's own test, as above — keeps
+the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
 `stat_result` and the entry's symlink flag.
 
 ## WalkChild

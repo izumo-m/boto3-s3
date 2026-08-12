@@ -88,12 +88,12 @@ front only when the declaration is honest:
   `ScanOptions` subclass still carries them to `scan_pages`, but the caller
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
-  `prefix`; `LocalScanOptions` = `follow_symlinks` / `detect_symlink_loops` /
-  `enumerate_all_entries`, plus the internal `storage` back-reference the walk
-  stamps on each entry). A subclass keeps one backend's knobs from leaking
-  into another's; the built-ins reject a foreign options type, and a custom
-  backend reads its own knobs from its own subclass or from its instance
-  state, taking the common base otherwise.
+  `prefix` / `include_common_prefixes`; `LocalScanOptions` = `follow_symlinks` /
+  `detect_symlink_loops` / `enumerate_all_entries`, plus the internal `storage`
+  back-reference the walk stamps on each entry). A subclass keeps one backend's
+  knobs from leaking into another's; the built-ins reject a foreign options
+  type, and a custom backend reads its own knobs from its own subclass or from
+  its instance state, taking the common base otherwise.
 
   The local complete-entry setting (`enumerate_all_entries`) widens candidates
   before filtering: it includes the root, directories, symlinks, special
@@ -102,6 +102,18 @@ front only when the declaration is honest:
   transfer cannot consume, or accept the operation's normal failure, blocking,
   device-side-effect, and deletion behavior. The default `False` keeps aws-cli
   transfer enumeration.
+
+  The S3 side has one widening of the same kind, `include_common_prefixes`:
+  emit the `CommonPrefixes` of a **recursive** page as `DIRECTORY` entries
+  (a non-recursive page always emits them — its `Delimiter` is what asks for
+  them). Only `S3.ls` sets it, because aws-cli's display prints a page's common
+  prefixes whether or not `--recursive` was given, while its transfer-side
+  generator reads `Contents` only; a listing without a `Delimiter` gets no
+  prefixes from a conforming service, so the setting is visible only against
+  one that returns them anyway. The transfers keep the default `False`: a
+  directory record is not transferable, and a page's prefixes arrive ahead of
+  its objects, which would break the `compare_key` byte order `sync`'s
+  merge-join asserts on (section 3).
 
   `LocalStorage` also takes one **destination-side** constructor knob that is
   *not* a scan source-config: `fsync` (default off = aws parity), a library
@@ -379,4 +391,7 @@ The contract:
 
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the
-equivalent of `aws s3 cp - …` / `aws s3 cp … -`.
+equivalent of `aws s3 cp - …` / `aws s3 cp … -`. Its stdout writer hands each
+chunk straight to `sys.stdout.buffer` and never flushes it, aws's writer having
+neither `flush` nor `close`, so a finished download can still be sitting in the
+process stream's buffer until the interpreter's own flush at exit.

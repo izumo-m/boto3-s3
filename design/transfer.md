@@ -15,6 +15,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` (its backend knowledge stays narrow: the `LocalStorage` `isinstance` for the fsync barrier, section 11) |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
+| `mimetable.py` | Generated data: CPython 3.14's built-in `mimetypes` tables, the ones the official `aws` distribution guesses an upload's `ContentType` from (it is frozen against that interpreter). `transfer.py` builds its own `mimetypes.MimeTypes` from them - plus the same live overlays `mimetypes.init` applies, the Windows registry and the existing `knownfiles` - so the guess is the shipped distribution's on every supported interpreter instead of the running one's (3.10 knows no `.php`, 3.15 re-types `.texinfo`), the same pin the CLI applies to argparse behaviour that moved between releases ([`cli.md`](./cli.md) section 2) |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning fields and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
@@ -316,7 +317,10 @@ chain:
 ## 5. download's incidental processing
 
 - **mtime stamp**: a successful download stamps the source's `LastModified` with
-  `os.utime` (the same timestamp as aws's result). A failure does not
+  `os.utime`, truncated to whole seconds - the same timestamp as aws's result,
+  which loses the sub-second part in its `timetuple` / `time.mktime` round trip
+  (visible only against an endpoint that lists sub-second `LastModified`, where
+  the stamp then decides `--exact-timestamps`). A failure does not
   cancel the transfer but is **WARNED** (rc 2 family) - EPERM is re-worded with
   aws-cli's `set_file_utime` text (the util function: "attempting to modify the
   utime ..."), and the surrounding warning (`Skipping file <path>. Successfully
@@ -380,8 +384,24 @@ The caller's stream is never closed by `IOStorage`.
   `StdoutBytesWriter`), so s3transfer always takes its non-seekable path and
   writes ranged chunks in order - a redirected stdout can report seekable
   while `>>` opened it `O_APPEND`, where seek-based parallel writes would
-  interleave. An `IOStorage` (caller-supplied stream) keeps the stream's own
-  seekability: the caller chose the object, so its protocol governs.
+  interleave. That writer has no `flush` and its `close` does nothing, since
+  aws's has neither method and the non-seekable download manager's final task
+  is a no-op: **nothing in either codebase flushes the process stream**, so the
+  bytes wait for the interpreter's shutdown flush. That decides where an
+  unwritable stdout surfaces: a failing `write` is the item's failure
+  (`download failed:` + rc 1), while a failure only the buffered flush can
+  raise arrives at interpreter shutdown instead, as the process's 120 with no
+  failure line, the boundary between the two being the interpreter's stdout
+  buffer size rather than anything here
+  ([`aws-differences.md`](../docs/cli/aws-differences.md) section 2 records the
+  band). Only stdin is checked ahead of the transfer (`open("rb")` raises
+  `ValidationError`, aws's `StdinMissingError` sentence); stdout has no
+  counterpart on either side, so a process without one fails the item with
+  `'NoneType' object has no attribute 'write'` from inside the transfer.
+  An `IOStorage` (caller-supplied stream) keeps the stream's own
+  seekability: the caller chose the object, so its protocol governs - and its
+  writer view still absorbs the transfer's `close` into a flush, the
+  `StdioStorage` no-op being the aws-shaped exception.
 - The display renders the stream side as `-` (`src_display` / `dest_display`).
   The `BatchError` on failure is `1 of 1 transfers failed`.
 
