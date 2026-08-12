@@ -1017,19 +1017,16 @@ class TestStreamRoutes:
         assert (excinfo.value.operation, excinfo.value.key) == ("cp", "key")
         assert calls == []
 
-    def test_missing_stdio_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_stdin_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # StdioStorage.open names no operation of its own (it serves cp and mv
-        # alike), so the eager open on this route stamps cp - the only
-        # operation the route serves - in both directions.
+        # alike), so the eager open on this route stamps cp. Only stdin has a
+        # precondition (aws's StdinMissingError); a missing stdout surfaces as
+        # a per-item write failure instead - pinned in test_iostorage.py.
         client, calls = make_recording_client([])
         monkeypatch.setattr("sys.stdin", None)
         with pytest.raises(ValidationError, match="stdin is required") as up:
             S3().cp(StdioStorage(), S3Storage("s3://b/k", client=client))
         assert up.value.operation == "cp"
-        monkeypatch.setattr("sys.stdout", None)
-        with pytest.raises(ValidationError, match="stdout is required") as down:
-            S3().cp(S3Storage("s3://b/k", client=client), StdioStorage())
-        assert down.value.operation == "cp"
         # The open precedes every request, so nothing was asked of S3.
         assert calls == []
 

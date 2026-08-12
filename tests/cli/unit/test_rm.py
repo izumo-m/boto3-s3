@@ -151,6 +151,73 @@ class TestDeletePrinterEncoding:
         assert stream.getvalue() == "delete: s3://b/??.txt\n"
 
 
+class TestDeletePrinterWriteFailures:
+    """A line that cannot be written at all is dropped, never raised.
+
+    aws prints its result lines from the ResultProcessor thread, whose
+    ``_process_result`` logs a raising handler at debug level and carries on, so
+    an unwritable stdout leaves the run's outcome untouched: measured on the
+    pinned aws, `aws s3 rm s3://b/k 1>&-` exits 0 in silence with the object
+    deleted.
+    """
+
+    @pytest.mark.parametrize("outcome", [OpOutcome.SUCCEEDED, OpOutcome.DRYRUN, OpOutcome.FAILED])
+    def test_every_line_kind_swallows_the_error(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: OpOutcome
+    ) -> None:
+        # None is the stdout a closed fd 1 leaves behind; the stderr side (the
+        # failure line) gets the same treatment in aws's result thread.
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer(OpResult(transfer_type=TransferType.DELETE, compare_key="k", outcome=outcome))
+
+    def test_an_unwritable_stdout_keeps_the_run_at_rc_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", None)
+        rc = cli.main(["rm", "s3://b/k"], ctx=client_ctx(client))
+        assert rc == 0
+        assert capsys.readouterr().err == ""
+        # The delete happened; only its line was lost (aws: rc 0, no report).
+        assert [c.operation for c in calls] == ["DeleteObject"]
+
+    def test_a_write_error_mid_run_does_not_stop_the_deletes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every key of a recursive run is still deleted with stdout unwritable -
+        # aws's result thread never touches the delete pipeline (measured: 200
+        # objects, --page-size 10, 0 remaining under a closed stdout).
+        class _Enospc(io.StringIO):
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(sys, "stdout", _Enospc())
+        responses: list[dict[str, Any] | Exception] = [
+            {
+                "Contents": [_obj("p/a"), _obj("p/b")],
+                "IsTruncated": True,
+                "NextContinuationToken": "n",
+            },
+            {"Contents": [_obj("p/c")]},
+            {},  # DeleteObjects (one batch, or the first of two)
+            {},
+        ]
+        client, calls = make_recording_client(responses)
+        rc = cli.main(
+            ["rm", "s3://b/p/", "--recursive", "--page-size", "2"], ctx=client_ctx(client)
+        )
+        assert rc == 0
+        deleted = [
+            obj["Key"]
+            for call in calls
+            if call.operation == "DeleteObjects"
+            for obj in call.params["Delete"]["Objects"]
+        ]
+        assert deleted == ["p/a", "p/b", "p/c"]
+
+
 class TestExitCodeShape:
     def test_local_path_is_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["rm", "/tmp/foo"], ctx=Context(client_factory=lambda _a: None))  # pyright: ignore[reportArgumentType]

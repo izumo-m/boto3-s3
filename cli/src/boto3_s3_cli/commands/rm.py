@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 # Module-level imports are fine here: rm is loaded at dispatch (stage 2 of
@@ -26,6 +27,8 @@ from boto3_s3_cli.commands.base import (
     parse_integer_option,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class _DeletePrinter:
     """Stream per-item ``OpResult``s as aws-style delete lines.
@@ -40,6 +43,11 @@ class _DeletePrinter:
     and dryrun lines alike; ``--only-show-errors`` silences successes but
     still prints dryrun lines (aws's ``OnlyShowErrorsResultPrinter`` does not
     override ``_print_dry_run``).
+
+    A line that cannot be written at all is dropped with a debug log and never
+    escapes, aws's ``ResultProcessor._process_result`` shape: the deletes have
+    already happened by then, so an unwritable stdout must leave the run's
+    outcome alone.
     """
 
     def __init__(self, *, bucket: str, quiet: bool, only_show_errors: bool) -> None:
@@ -50,6 +58,12 @@ class _DeletePrinter:
     def __call__(self, result: OpResult) -> None:
         if self._quiet:
             return
+        try:
+            self._write_line(result)
+        except Exception as exc:
+            logger.debug("Error printing result %s: %s", result, exc, exc_info=True)
+
+    def _write_line(self, result: OpResult) -> None:
         # The printed line needs the full object key; a delete record's
         # compare_key is the operation-relative form (design/opresult.md), and
         # the listed entry always rides on src_info.

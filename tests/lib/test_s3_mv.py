@@ -80,10 +80,11 @@ class TestStreams:
     def test_missing_stdout_fails_the_item_attributed_to_mv(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A stream destination opens inside a transfer worker (the s3open arm),
-        # so StdioStorage's missing-stdio ValidationError is a per-item failure,
-        # not a pre-flight raise. The storage names no operation, so the run
-        # fills its own - "mv" here, never cp - plus the item's coordinates.
+        # A stream destination has no stdout precondition (aws guards stdin
+        # only), so a missing stdout fails at the writer's first write inside
+        # the transfer - a per-item failure, not a pre-flight raise. The
+        # storage names no operation, so the run fills its own - "mv" here,
+        # never cp - plus the item's coordinates.
         monkeypatch.setattr("sys.stdout", None)
         client, calls = make_recording_client([head_response(), get_response()])
         results: list[OpResult] = []
@@ -98,7 +99,7 @@ class TestStreams:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert error is not None
-        assert str(error) == "stdout is required for this operation, but is not available."
+        assert str(error) == "'NoneType' object has no attribute 'write'"
         assert (error.operation, error.bucket, error.key) == ("mv", "b", "d/a.txt")
         assert excinfo.value.__cause__ is error
 

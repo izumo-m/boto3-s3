@@ -8,6 +8,7 @@ the operation starts is rc 1 with one ``make_bucket failed:`` line, never 254
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.recorder import make_recording_client
 
 
 class _RaisingCreateClient:
@@ -195,3 +197,20 @@ class TestPostStartErrors:
         assert result.stdout == ""
         assert result.stderr.startswith("make_bucket failed: s3://b ")
         assert "BucketAlreadyOwnedByYou" in result.stderr
+
+    def test_an_unwritable_success_line_is_rc_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's local catch spans the success line, so failing to write it is
+        # just another mb failure. Measured on the pinned aws with a closed
+        # stdout (`aws s3 mb s3://b 1>&-`, where sys.stdout is None): rc 1 and
+        # this exact line, where reaching the dispatcher would give 255.
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", None)
+        rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "make_bucket failed: s3://b 'NoneType' object has no attribute 'write'\n"
+        )
+        # The bucket exists all the same - only the report was lost, like aws.
+        assert [c.operation for c in calls] == ["CreateBucket"]

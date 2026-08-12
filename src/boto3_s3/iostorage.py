@@ -12,8 +12,8 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
 (download). The transfer ``close``s every fileobj ``open`` returns (the open
-route flushes a real backend's writer that way), so each *writer* view here
-absorbs that ``close`` into a flush and each reader view's ``close`` is a
+route flushes a real backend's writer that way), so each ``IOStorage`` *writer*
+view absorbs that ``close`` into a flush and each reader view's ``close`` is a
 no-op (nothing to release): the caller's stream is **never closed** by
 ``IOStorage``
 (it owns only the thin view / codec adapter).
@@ -21,7 +21,10 @@ no-op (nothing to release): the caller's stream is **never closed** by
 ``StdioStorage`` is the convenience for the process's stdio: as a source it reads
 ``sys.stdin`` (forced non-seekable, so s3transfer takes its buffered upload path -
 Windows stdin reports a false ``seekable()``), as a destination it writes
-``sys.stdout``; both via ``.buffer`` (binary).
+``sys.stdout``; both via ``.buffer`` (binary). Its stdout writer buffers nothing
+of its own and swallows the transfer's ``close`` outright, exactly like the
+writer aws hands s3transfer: whatever the process stream buffered is left for
+the interpreter to flush when it exits.
 
 Like its peers it is imported by submodule path and imports no AWS SDK module, so
 ``import boto3_s3.iostorage`` stays SDK-free.
@@ -79,23 +82,26 @@ class _WriteOnly:
     ``O_APPEND``, where every write lands at the end regardless of the seeked
     position - a seek-based parallel download would then interleave chunks in
     completion order. aws always streams stdout sequentially, so this view
-    does too. ``close`` flushes and leaves the process stream open
-    (``_Uncloseable``'s contract).
+    does too.
+
+    The process stream is read per write, like aws's ``bytes_print``, and
+    nothing is held from ``open`` time: a process without a stdout therefore
+    fails on the ``write`` itself, from inside the transfer, which reports it
+    as that item's failure the way aws does - not as a precondition of
+    starting one. ``close`` neither flushes nor closes: aws's writer has no
+    ``close`` at all and a non-seekable download's final task is a no-op, so
+    the bytes the process stream buffered wait for the interpreter's flush at
+    exit. A stdout that cannot take them then fails the *process* on that
+    shutdown flush rather than the transfer, and the caller's stdout is left
+    open either way.
     """
 
-    def __init__(self, raw: Any) -> None:
-        self._raw = raw
-
     def write(self, data: Any) -> int:
-        return self._raw.write(data)
-
-    def flush(self) -> None:
-        flush = getattr(self._raw, "flush", None)
-        if flush is not None:
-            flush()
+        stdout: Any = sys.stdout
+        return getattr(stdout, "buffer", stdout).write(data)
 
     def close(self) -> None:
-        self.flush()
+        pass
 
 
 class _NonSeekable:
@@ -265,13 +271,16 @@ class StdioStorage(IOStorage):
     destination ``open("wb")`` writes ``sys.stdout.buffer`` through a
     write-only view (`_WriteOnly`, aws's ``StdoutBytesWriter``), so a
     download always streams sequentially even when stdout is redirected to
-    a seekable file. The stream is chosen
-    by ``mode`` at ``open`` time, so a single instance serves either direction and
-    picks up a redirected ``sys.stdin`` / ``sys.stdout``. If the selected process
-    stream is unavailable, ``open`` raises ``ValidationError`` before a transfer
-    worker can receive an unusable file object; the error carries no operation
-    name, which the operation that invoked the storage fills in (a direct call
-    leaves it ``None``).
+    a seekable file. The direction is chosen
+    by ``mode``, so a single instance serves either one and
+    picks up a redirected ``sys.stdin`` / ``sys.stdout``.
+
+    A process without a ``sys.stdin`` fails the ``open`` with
+    ``ValidationError`` (aws's ``StdinMissingError``, the same sentence), and
+    the error carries no operation name - the operation that invoked the
+    storage fills it in (a direct call leaves it ``None``). Stdout has no such
+    check, again like aws: a missing one surfaces from the writer's first
+    ``write``, inside the transfer, as that item's failure.
     """
 
     scheme: ClassVar[str] = "stdio"
@@ -292,10 +301,10 @@ class StdioStorage(IOStorage):
                 # layer stamps its own name.
                 raise ValidationError("stdin is required for this operation, but is not available.")
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
-        stdout = sys.stdout
-        if stdout is None:
-            raise ValidationError("stdout is required for this operation, but is not available.")
-        return cast("BinaryIO", _WriteOnly(getattr(stdout, "buffer", stdout)))
+        # No stdout counterpart to the guard above: aws checks stdin only, and
+        # its stdout writer dereferences the process stream per write, so a
+        # process without one fails the item instead of the run.
+        return cast("BinaryIO", _WriteOnly())
 
 
 __all__ = ["IOStorage", "StdioStorage"]
