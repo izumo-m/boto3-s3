@@ -698,7 +698,14 @@ class TestBuildClient:
         )
 
     @pytest.mark.parametrize(
-        "value", [" http://127.0.0.1:9000", "HTTP://127.0.0.1:9000", "h://127.0.0.1:9000"]
+        "value",
+        [
+            " http://127.0.0.1:9000",
+            "http://127.0.0.1:9000 ",
+            "\x1fhttp://127.0.0.1:9000",
+            "HTTP://127.0.0.1:9000",
+            "h://127.0.0.1:9000",
+        ],
     )
     def test_an_unusual_but_present_scheme_still_passes(self, value: str) -> None:
         # The other direction of the same gate, which a first-character test on

@@ -428,8 +428,21 @@ def _has_url_scheme(value: str) -> bool:
     one ``isalpha`` covers it), pinning every supported version to what the
     official aws distribution does - the same pin the argparse corners use
     (``design/cli.md`` section 2).
+
+    The frozen interpreter also strips C0 control and space characters from
+    both ends before parsing (WHATWG alignment; present in some but not all
+    host patch releases - it shipped and was later reverted within the same
+    minor versions, so even two 3.10.x hosts disagree). The strip here applies
+    it to the gate on every host; only the gate - the value handed onward is
+    untouched, and what botocore then makes of an edge character is the
+    installed SDK's own answer, like every other botocore-owned report.
     """
-    return urlparse(value).scheme[:1].isalpha()
+    return urlparse(value.strip(_C0_AND_SPACE)).scheme[:1].isalpha()
+
+
+# What the official build's urlsplit strips from either end of a URL
+# (C0 controls and space; DEL is not stripped - measured on CPython 3.14).
+_C0_AND_SPACE = "".join(map(chr, range(0x21)))
 
 
 def validate_endpoint_url(args: argparse.Namespace) -> None:

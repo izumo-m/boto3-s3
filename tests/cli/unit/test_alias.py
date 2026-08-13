@@ -543,7 +543,10 @@ class TestWhichLeafSectionApplies:
         # An external alias replaces the built-in outright rather than proxying
         # to it, so no leaf table is ever built and neither section applies.
         alias_file.write_text(
-            "[command ls]\nfoo = ls\n[command s3 ls]\nfoo = ls\n[command s3]\nls = !exit 7\n"
+            # `sh -c` so the appended positional lands in $0: a bare `exit 7`
+            # would see it as an argument, which bash rejects (dash does not).
+            "[command ls]\nfoo = ls\n[command s3 ls]\nfoo = ls\n"
+            "[command s3]\nls = !sh -c 'exit 7'\n"
         )
         assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 7
 

@@ -2561,7 +2561,11 @@ class TestAnnotationErrorWordingScope:
         from types import SimpleNamespace
 
         from s3transfer.copies import CopyCompleteMultipartUploadTask
-        from s3transfer.exceptions import S3CopyFailedError
+
+        try:
+            from s3transfer.exceptions import S3CopyFailedError
+        except ImportError:
+            pytest.skip("the floor s3transfer predates the annotation write path")
 
         transfer._align_annotation_copy_error()  # pyright: ignore[reportPrivateUsage]
         call_args = SimpleNamespace(

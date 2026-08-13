@@ -77,7 +77,6 @@ from urllib.parse import quote
 from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
-from s3transfer.exceptions import S3CopyFailedError
 from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
@@ -116,6 +115,11 @@ if TYPE_CHECKING:
     from boto3.s3.transfer import TransferConfig
     from boto3.session import Session
     from mypy_boto3_s3 import S3Client
+
+    # Runtime imports of this name are local to the annotation-copy alignment:
+    # the floor s3transfer predates the class (and the write path that raises
+    # it), and the module must stay importable there.
+    from s3transfer.exceptions import S3CopyFailedError
 
     from boto3_s3.storage import Storage
 
@@ -2494,6 +2498,8 @@ def _annotation_copy_error(
     failures join with ``"; "`` as ``name: message``, and both keep the order
     the source listing gave.
     """
+    from s3transfer.exceptions import S3CopyFailedError
+
     written_names = ", ".join(written) or "(none)"
     failed_descriptions = "; ".join(f"{name}: {message}" for name, message in failed)
     return S3CopyFailedError(
@@ -2538,6 +2544,7 @@ def _align_annotation_copy_error() -> None:
     original = getattr(task_cls, "_apply_annotations", None)
     if original is None or original.__module__ == __name__:
         return
+    from s3transfer.exceptions import S3CopyFailedError
 
     def _apply_annotations(
         task: Any, client: Any, call_args: Any, *args: Any, **kwargs: Any
