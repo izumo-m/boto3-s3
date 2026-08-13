@@ -1214,7 +1214,13 @@ def _resolve_command(
             _build_subcommand_error_parser(aliases.entries).parse_args(["--", name])
         return _PARAM_VALIDATION_ERROR_RC
     return _run_command(
-        name, stage2_tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        name,
+        stage2_tokens,
+        head,
+        ctx,
+        aliases,
+        lineage=alias.COMMAND_LINEAGE,
+        suppress_usage_errors=suppress_usage_errors,
     )
 
 
@@ -1244,7 +1250,19 @@ def _run_alias(
     expansion that names something else (``ls = cp``) still run ``ls``.
     """
     if alias.is_external(value):
-        return alias.run_external(value, arguments)
+        try:
+            return alias.run_external(value, arguments)
+        except AssertionError:
+            raise
+        except Exception as exc:
+            # Launching the shell can fail on the command line itself (an
+            # embedded NUL, an argument list past the OS limit). aws registers
+            # no handler for that either, so it travels to the entry point's
+            # general chain and is reported like any other unexpected failure -
+            # `str(exc)` at rc 255, never a traceback (measured).
+            rc = _exit_code_for_unexpected(exc)
+            _write_error(exc, rc=rc)
+            return rc
     expanded = alias.split_value(name, value)
     # Same capture-and-replay as the top-level pass: a global in the value can
     # fail to parse (rc 252, silenced on the on-partial trial like any other
@@ -1268,8 +1286,17 @@ def _run_alias(
     _apply_alias_globals(name, parser, parsed, head)
     tokens = remainder + arguments
     if name in _COMMAND_TABLE:
+        # The built-in runs as this alias's proxy, which is how aws detaches it
+        # from the command table - so the section it consults is the shadow
+        # one, `[command <name>]` (alias.py, `SHADOW_LINEAGE`).
         return _run_command(
-            name, tokens[1:], head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+            name,
+            tokens[1:],
+            head,
+            ctx,
+            aliases,
+            lineage=alias.SHADOW_LINEAGE,
+            suppress_usage_errors=suppress_usage_errors,
         )
     return _resolve_command(tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors)
 
@@ -1313,11 +1340,18 @@ def _run_command(
     ctx: Context,
     aliases: alias.AliasTable,
     *,
+    lineage: tuple[str, ...],
     suppress_usage_errors: bool,
 ) -> int:
-    """Stage 2: build the matched subcommand's parser, parse, and run it."""
-    if name in aliases.leaves:
-        # A `[command s3 <name>]` section is aws's own crash, not a usable
+    """Stage 2: build the matched subcommand's parser, parse, and run it.
+
+    ``lineage`` is what this subcommand carries above its own name, which is
+    what decides the section it consults: `alias.COMMAND_LINEAGE` when it was
+    reached through the command table, `alias.SHADOW_LINEAGE` when an alias of
+    its own name proxied to it.
+    """
+    if aliases.for_command((*lineage, name)):
+        # A section of this subcommand's own is aws's crash, not a usable
         # alias: injecting into a leaf's table breaks the parser it then
         # builds, for every invocation of that subcommand including its help
         # (measured, rc 255). It settles the run before the parse, as there.

@@ -35,35 +35,63 @@ from boto3_s3 import InvalidConfigError
 _UNPARSEABLE = "Unable to parse config file: {}"
 _NOT_FOUND = "The specified config file ({}) could not be found."
 
-# What aws's injection does to a *leaf* table (a `[command s3 <subcommand>]`
-# section): the subcommand's own table stops being empty, so its parser is
-# built through the path that copies the argument table with ``required =
-# False`` - which argparse rejects for the positional every one of these
-# commands declares. The result is that one report, at rc 255, for every
+# What aws's injection does to a *leaf* table (the section named after a
+# subcommand's own lineage): the subcommand's table stops being empty, so its
+# parser is built through the path that copies the argument table with
+# ``required = False`` - which argparse rejects for the positional every one of
+# these commands declares. The result is that one report, at rc 255, for every
 # invocation of that subcommand, help included (measured). It is the section's
 # mere presence that does it, so the entries themselves are never reached.
 LEAF_SECTION_REPORT = "'required' is an invalid argument for positionals"
 
-# The section names this CLI maps: aws's alias loader turns `[command s3]`
-# into the key ('command', 's3') by splitting on whitespace, so a stray extra
-# space still names the same section.
-_SECTION_PREFIX = "command"
-_COMMAND_SECTION = (_SECTION_PREFIX, "s3")
+# aws's alias loader re-keys a section into a command lineage only when the raw
+# name starts with this literal prefix - ``command`` and one ASCII space - and
+# then splits the whole name on whitespace. So `[command s3]` and
+# `[command  s3]` are one section, while `[command\ts3]` and `[ command s3]`
+# are re-keyed by nothing and stay inert: no lineage ever looks them up.
+_LINEAGE_KEY = "command"
+_SECTION_PREFIX = _LINEAGE_KEY + " "
+
+# The lineage a subcommand carries when it is reached through this CLI's
+# command table, which is `aws s3`'s - so its own section is
+# `[command s3 <name>]` - and the bare lineage a shadow-proxied one carries
+# instead. aws sets a subcommand's lineage while it builds the table the
+# subcommand sits in; an alias that repeats a built-in's name replaces it in
+# that table and keeps the built-in aside as its proxy, so that built-in never
+# receives a lineage and names its own section `[command <name>]` (measured in
+# both directions, including through an alias chain and under the help token).
+COMMAND_LINEAGE = ("s3",)
+SHADOW_LINEAGE: tuple[str, ...] = ()
 
 
 class AliasTable(NamedTuple):
-    """The alias file's entries that bear on this CLI's command table.
+    """The alias file's sections, re-keyed onto the command lineages aws uses.
 
-    ``entries`` maps an alias name to its raw value (``configparser`` lowers
-    the names, so ``LSR`` is invoked as ``lsr``; the values keep their case and
-    are stripped of surrounding whitespace, as aws strips them). ``leaves`` is
-    the set of subcommand names that carry a non-empty ``[command s3 <name>]``
-    section, which is aws's rc-255 crash rather than a usable alias -
-    `LEAF_SECTION_REPORT`.
+    ``sections`` maps a lineage key - aws's ``('command', 's3')`` and its
+    longer relatives - to that section's entries: an alias name to its raw
+    value. ``configparser`` lowers the names, so ``LSR`` is invoked as ``lsr``;
+    the values keep their case and are stripped of surrounding whitespace, as
+    aws strips them. Sections whose raw name aws does not re-key are dropped
+    here, since no lineage can reach them.
     """
 
-    entries: dict[str, str]
-    leaves: frozenset[str]
+    sections: dict[tuple[str, ...], dict[str, str]]
+
+    @property
+    def entries(self) -> dict[str, str]:
+        """The ``[command s3]`` aliases - the ones that join this CLI's table."""
+        return self.for_command(COMMAND_LINEAGE)
+
+    def for_command(self, lineage: tuple[str, ...]) -> dict[str, str]:
+        """aws's ``AliasLoader.get_aliases(command=lineage)``.
+
+        Every command consults this for its own lineage while it builds its
+        subcommand table. For this CLI's table that is `entries`; for a
+        subcommand, whose table has nothing of its own in it, a non-empty
+        answer is aws's crash rather than a usable alias -
+        `LEAF_SECTION_REPORT`.
+        """
+        return self.sections.get((_LINEAGE_KEY, *lineage), {})
 
 
 def alias_file_path() -> str:
@@ -82,24 +110,18 @@ def load() -> AliasTable:
     """
     path = alias_file_path()
     if not os.path.exists(path):
-        return AliasTable({}, frozenset())
+        return AliasTable({})
     if not os.path.isfile(path):
         raise InvalidConfigError(_NOT_FOUND.format(path))
-    sections = _parse(path)
-    entries: dict[str, str] = {}
-    leaves: set[str] = set()
-    for section, options in sections.items():
-        key = tuple(section.split())
-        if key[:1] != (_SECTION_PREFIX,):
+    sections: dict[tuple[str, ...], dict[str, str]] = {}
+    for section, options in _parse(path).items():
+        if not section.startswith(_SECTION_PREFIX):
             continue
-        if key == _COMMAND_SECTION:
-            # Assigned, not merged: aws re-keys each section in turn, so where
-            # two spellings (`[command s3]`, `[command  s3]`) normalize to the
-            # same key the last one read replaces the first.
-            entries = options
-        elif len(key) == 3 and key[1] == _COMMAND_SECTION[1] and options:
-            leaves.add(key[2])
-    return AliasTable(entries, frozenset(leaves))
+        # Assigned, not merged: aws re-keys each section in turn, so where two
+        # spellings (`[command s3]`, `[command  s3]`) normalize to the same key
+        # the last one read replaces the first.
+        sections[tuple(section.split())] = options
+    return AliasTable(sections)
 
 
 def _parse(path: str) -> dict[str, dict[str, str]]:
@@ -162,11 +184,16 @@ def run_external(value: str, arguments: list[str]) -> int:
     from the user's own ``~/.aws/cli/alias``, the same trust level as a shell
     rc file. What the *invocation* contributes is only the arguments, and
     those are quoted (`_shell_quote`) so they stay arguments.
+
+    The child gets `child_environ` rather than this process's own, so the one
+    variable the package drops on import is handed on the way aws hands it.
     """
     import subprocess
 
+    from boto3_s3_cli import child_environ
+
     command = " ".join([value[1:], *(_shell_quote(argument) for argument in arguments)])
-    return subprocess.call(command, shell=True)
+    return subprocess.call(command, shell=True, env=child_environ())
 
 
 def _shell_quote(value: str) -> str:

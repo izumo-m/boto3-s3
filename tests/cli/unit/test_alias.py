@@ -297,6 +297,37 @@ class TestExternalAliases:
         assert cli.main(["hi", "--region", "eu-west-1"], ctx=unused_ctx()) == 0
         assert written.read_text() == "0\n"
 
+    def test_a_command_line_the_shell_cannot_be_given_is_reported_at_255(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A NUL cannot go into a command line, and the launch raises before
+        # any shell exists. aws registers no handler of its own for that, so
+        # the failure reaches its entry point's general one: `str(exc)` at rc
+        # 255 (measured), never a traceback.
+        alias_file.write_text("[command s3]\ne = !echo A\x00B\n")
+        assert cli.main(["e"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: embedded null byte\n"
+
+    def test_an_os_refusal_to_launch_is_that_same_report(
+        self,
+        alias_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The other measured shape - a command line past the OS argument limit
+        # - without building the multi-megabyte value it takes to provoke it.
+        import subprocess
+
+        def refuse(*_args: object, **_kwargs: object) -> int:
+            raise OSError(7, "Argument list too long", "/bin/sh")
+
+        monkeypatch.setattr(subprocess, "call", refuse)
+        alias_file.write_text("[command s3]\ne = !echo hi\n")
+        assert cli.main(["e"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: [Errno 7] Argument list too long: '/bin/sh'\n"
+        )
+
 
 class TestReportsAndSections:
     """What the alias table does to the reports, and which sections count."""
@@ -330,6 +361,64 @@ class TestReportsAndSections:
         alias_file.write_text(text)
         assert cli.main(["who"], ctx=unused_ctx()) == 252
 
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "command\ts3",
+            " command s3",
+            "\tcommand s3",
+            "command\vs3",
+            "command\fs3",
+            "command\xa0s3",
+            "command　s3",
+            "commands3",
+        ],
+        ids=[
+            "tab",
+            "leading-space",
+            "leading-tab",
+            "vtab",
+            "formfeed",
+            "nbsp",
+            "ideographic",
+            "none",
+        ],
+    )
+    def test_only_a_command_space_prefix_names_the_section(
+        self, alias_file: Path, header: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws re-keys a section onto a command lineage only when the raw name
+        # starts with `command ` - that one ASCII space - and nothing here
+        # does, so none of them declares an alias at all. Measured: every one
+        # is the invalid-choice report on the pinned aws-cli.
+        alias_file.write_text(f"[{header}]\nsay = ls s3://bkt\n")
+        assert cli.main(["say"], ctx=unused_ctx()) == 252
+        assert "Found invalid choice 'say'" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "header",
+        ["command s3", "command  s3", "command \ts3", "command s3 ", "command s3\t"],
+        ids=["plain", "two-spaces", "space-tab", "trailing-space", "trailing-tab"],
+    )
+    def test_whitespace_past_that_prefix_still_names_it(
+        self, alias_file: Path, header: str
+    ) -> None:
+        # Once the prefix is there aws splits the whole name on whitespace, so
+        # every spelling below is the one section (measured: the alias runs).
+        alias_file.write_text(f"[{header}]\nlsr = ls --recursive\n")
+        result, _calls = run_recorded(_EMPTY_PAGE, ["lsr", "s3://bkt"])
+        assert result.rc == 0
+
+    def test_a_leaf_section_follows_the_same_naming_rule(self, alias_file: Path) -> None:
+        # The prefix is what decides, not the separators after it: a tab
+        # between `s3` and `ls` still names the leaf and breaks it, while a
+        # tab in the prefix leaves the subcommand untouched (measured).
+        alias_file.write_text("[command s3\tls]\nr = --recursive\n")
+        assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 255
+        alias_file.write_text("[command\ts3 ls]\nr = --recursive\n")
+        result, _calls = run_recorded(_EMPTY_PAGE, ["ls", "s3://bkt"])
+        assert result.rc == 0
+
     def test_a_leaf_section_breaks_that_subcommand(
         self, alias_file: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -356,6 +445,101 @@ class TestReportsAndSections:
         alias_file.write_text("[command s3 ls]\n")
         result, _calls = run_recorded(_EMPTY_PAGE, ["ls", "s3://bkt"])
         assert result.rc == 0
+
+
+class TestWhichLeafSectionApplies:
+    """A subcommand's leaf section is named after the lineage it was reached by.
+
+    aws gives a subcommand its lineage while it builds the table the subcommand
+    sits in, so one reached through this CLI's table looks for
+    ``[command s3 <name>]``; an alias that repeats a built-in's name replaces it
+    in that table and keeps it aside as a proxy, and that copy - never given a
+    lineage - looks for ``[command <name>]`` instead. Every expectation below
+    was measured on the pinned aws-cli in both directions.
+    """
+
+    _CRASH = "boto3-s3: [ERROR]: 'required' is an invalid argument for positionals\n"
+    _SHADOW = "[command s3]\nls = ls --recursive\n"
+
+    def test_a_shadowed_built_in_breaks_on_the_bare_section(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alias_file.write_text(f"[command ls]\nfoo = ls\n{self._SHADOW}")
+        assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._CRASH
+
+    def test_a_shadowed_built_in_ignores_the_command_table_section(self, alias_file: Path) -> None:
+        # `[command s3 ls]` belongs to the lineage the alias took `ls` out of,
+        # so the run goes through - recursively, as the alias asked.
+        alias_file.write_text(f"[command s3 ls]\nfoo = ls\n{self._SHADOW}")
+        result, calls = run_recorded(_EMPTY_PAGE, ["ls", "s3://bkt"])
+        assert result.rc == 0
+        assert "Delimiter" not in calls[0].params
+
+    def test_a_bare_section_leaves_a_directly_invoked_built_in_alone(
+        self, alias_file: Path
+    ) -> None:
+        alias_file.write_text("[command ls]\nfoo = ls\n")
+        result, _calls = run_recorded(_EMPTY_PAGE, ["ls", "s3://bkt"])
+        assert result.rc == 0
+
+    def test_the_shadow_proxy_is_named_by_the_alias_not_by_its_value(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `ls = rm --dryrun` still proxies to `ls`, so `[command ls]` is what
+        # breaks the run even though the value names `rm`.
+        alias_file.write_text("[command ls]\nfoo = ls\n[command s3]\nls = rm --dryrun\n")
+        assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._CRASH
+
+    @pytest.mark.parametrize("section", ["command rm", "command s3 rm"])
+    def test_the_section_of_the_command_the_value_names_does_nothing(
+        self, alias_file: Path, section: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The other half of the same rule: neither `rm` section is consulted,
+        # so `ls` runs and rejects the option the value carried (measured).
+        alias_file.write_text(f"[{section}]\nfoo = ls\n[command s3]\nls = rm --dryrun\n")
+        assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --dryrun\n"
+        )
+
+    def test_a_chain_that_ends_in_a_shadow_uses_the_bare_section(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alias_file.write_text("[command ls]\nfoo = ls\n[command s3]\na = ls\nls = ls --recursive\n")
+        assert cli.main(["a", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._CRASH
+
+    def test_an_alias_that_shadows_nothing_keeps_the_command_table_section(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `xls = ls` re-enters the resolution instead of proxying, so the
+        # built-in is reached through the table and carries its lineage again.
+        alias_file.write_text("[command s3 ls]\nfoo = ls\n[command s3]\nxls = ls\n")
+        assert cli.main(["xls", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._CRASH
+        alias_file.write_text("[command ls]\nfoo = ls\n[command s3]\nxls = ls\n")
+        result, _calls = run_recorded(_EMPTY_PAGE, ["xls", "s3://bkt"])
+        assert result.rc == 0
+
+    def test_the_help_token_does_not_escape_the_shadow_section(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The table is built before the parse, so the crash beats the help
+        # page here exactly as it does on the direct path.
+        alias_file.write_text(f"[command ls]\nfoo = ls\n{self._SHADOW}")
+        assert cli.main(["ls", "help"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._CRASH
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the external alias here is an sh command")
+    def test_an_external_shadow_alias_consults_no_leaf_section(self, alias_file: Path) -> None:
+        # An external alias replaces the built-in outright rather than proxying
+        # to it, so no leaf table is ever built and neither section applies.
+        alias_file.write_text(
+            "[command ls]\nfoo = ls\n[command s3 ls]\nfoo = ls\n[command s3]\nls = !exit 7\n"
+        )
+        assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 7
 
 
 class TestUnreadableAliasFile:
