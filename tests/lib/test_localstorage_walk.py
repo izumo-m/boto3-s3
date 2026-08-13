@@ -351,22 +351,28 @@ class TestFullPathBoundaryProbe:
 
 
 class _MutateAtFinalize(LocalFileGenerator):
-    """A walker that changes one directory the moment its parent has enumerated it.
+    """A walker that changes one child the moment its parent has enumerated it.
 
     ``finalize_children`` is the last step of the parent's ``scan_children``, so
     firing there lands the change exactly in the window the walk cannot see: the
-    child was classified from the parent's ``os.scandir`` stat, and the descent
-    that follows addresses a path that has changed underneath. Deterministic on
-    every platform - the race needs no sleep and no listing-order luck.
+    child was classified from the parent's ``os.scandir`` stat, and what follows -
+    the descent into a directory, the submission of a leaf - addresses a path that
+    has changed underneath. Deterministic on every platform: the race needs no
+    sleep and no listing-order luck.
+
+    The target is matched by key in either shape, with the trailing ``/`` a
+    directory child's key carries and without it, so the same tool fires on a
+    directory about to be descended and on a leaf about to be submitted.
     """
 
     def __init__(self, target: Path, action: Callable[[], None]) -> None:
-        self._target_key = str(target).replace(os.sep, "/") + "/"
+        key = str(target).replace(os.sep, "/")
+        self._target_keys = (key, key + "/")
         self._action = action
         self.fired = False
 
     def finalize_children(self, children: list[WalkChild]) -> list[WalkChild]:
-        if not self.fired and any(child.info.key == self._target_key for child in children):
+        if not self.fired and any(child.info.key in self._target_keys for child in children):
             self.fired = True
             self._action()
         return super().finalize_children(children)
@@ -457,6 +463,387 @@ class TestDirectoryChangedBeforeItsDescent:
         assert walker.fired
         assert keys == ["aaa.txt", "zzz/inner.txt"]
         assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+
+
+def _replace_with_a_directory(target: Path) -> Callable[[], None]:
+    """Swap a file for a directory of the same name, holding one child."""
+
+    def action() -> None:
+        target.unlink()
+        target.mkdir()
+        (target / "child.txt").write_bytes(b"c")
+
+    return action
+
+
+class TestLeafBecameADirectoryBeforeItsTurn:
+    """A child classified as a leaf that is a directory by the time the walk reaches it.
+
+    The other half of the mid-walk race: aws-cli re-runs ``os.path.isdir`` on every
+    name in its descent loop, so a file replaced by a directory after its parent's
+    ``listdir`` is descended and the new children are transferred - addressed by
+    the bare name the leaf sorted under, since the separator was appended only to
+    names that were directories at scan time. Measured against the pinned aws (a
+    file swapped for a directory holding ``child.txt`` while the walk was inside an
+    earlier sibling): ``cp --recursive``, ``mv --recursive`` and ``sync`` all exit 0
+    having uploaded ``mmm.txt/child.txt``, and ``--dryrun`` previews that key,
+    never ``mmm.txt`` itself. Without the re-test the stale leaf was submitted
+    instead, the upload failed with ``[Errno 21] Is a directory`` (rc 1), and the
+    subtree was lost. The reverse race (a directory that stopped being one) is
+    ``TestDirectoryChangedBeforeItsDescent``.
+    """
+
+    def _raced(
+        self, tmp_path: Path, action: Callable[[], None], **config: bool
+    ) -> tuple[list[LocalFileInfo], list[str], _MutateAtFinalize]:
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        walker = _MutateAtFinalize(tmp_path / "mmm.txt", action)
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), walker=walker, **config)
+        infos = list(storage.walk_local(on_warning=warnings.append))
+        return infos, warnings, walker
+
+    def test_file_replaced_by_a_directory_is_descended(self, tmp_path: Path) -> None:
+        target = tmp_path / "mmm.txt"
+        infos, warnings, walker = self._raced(tmp_path, _replace_with_a_directory(target))
+        assert walker.fired
+        # The new child is enumerated where the leaf sorted, and the stale file
+        # record is gone - so a transfer uploads mmm.txt/child.txt and --dryrun
+        # previews it, both reading this same enumeration.
+        assert [i.compare_key for i in infos] == [
+            "aaa.txt",
+            "mmm.txt/child.txt",
+            "zzz/inner.txt",
+        ]
+        assert warnings == []
+
+    def test_the_promoted_directory_is_walked_to_the_bottom(self, tmp_path: Path) -> None:
+        # The descent addresses the promoted child by its bare path, so the
+        # recursion under it has to keep joining child paths correctly - a
+        # sub-directory of the new directory is walked like any other.
+        target = tmp_path / "mmm.txt"
+
+        def swap() -> None:
+            target.unlink()
+            (target / "deep").mkdir(parents=True)
+            (target / "deep" / "inner.txt").write_bytes(b"i")
+            (target / "child.txt").write_bytes(b"c")
+
+        infos, warnings, walker = self._raced(tmp_path, swap)
+        assert walker.fired
+        assert [i.compare_key for i in infos] == [
+            "aaa.txt",
+            "mmm.txt/child.txt",
+            "mmm.txt/deep/inner.txt",
+            "zzz/inner.txt",
+        ]
+        assert warnings == []
+
+    def test_the_paged_scan_descends_it_too(self, tmp_path: Path) -> None:
+        # sync consumes the walk through scan_pages, so pin the promoted descent
+        # there as well: it splits the pages on its own boundary, exactly as a
+        # directory the scan itself classified would.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm.txt"
+        walker = _MutateAtFinalize(target, _replace_with_a_directory(target))
+        storage = LocalStorage(str(tmp_path), walker=walker)
+        pages = [
+            [info.compare_key for info in page]
+            for page in storage.scan_pages(LocalScanOptions(recursive=True))
+        ]
+        assert walker.fired
+        assert pages == [["aaa.txt"], ["mmm.txt/child.txt"], ["zzz/inner.txt"]]
+
+    def test_complete_view_reports_the_directory_it_has_become(self, tmp_path: Path) -> None:
+        target = tmp_path / "mmm.txt"
+        infos, warnings, walker = self._raced(
+            tmp_path, _replace_with_a_directory(target), enumerate_all_entries=True
+        )
+        assert walker.fired
+        # The record on the page flushed before the descent is the directory's,
+        # rebuilt from the re-test stat - not the file record the scan took.
+        assert [i.compare_key for i in infos] == [
+            "",
+            "aaa.txt",
+            "mmm.txt/",
+            "mmm.txt/child.txt",
+            "zzz/",
+            "zzz/inner.txt",
+        ]
+        promoted = infos[2]
+        assert promoted.kind is FileKind.DIRECTORY
+        assert promoted.key == str(target).replace(os.sep, "/") + "/"
+        assert promoted.stat_result is not None
+        assert stat.S_ISDIR(promoted.stat_result.st_mode)
+        assert promoted.is_symlink is False
+        assert warnings == []
+
+    def test_link_to_a_directory_is_dropped_when_links_are_not_followed(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "mmm.txt"
+        _make_tree(tmp_path, "elsewhere/child.txt")
+
+        def swap() -> None:
+            target.unlink()
+            # target_is_directory: Windows needs a directory-type symlink (no-op on POSIX).
+            target.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+        infos, warnings, walker = self._raced(tmp_path, swap, follow_symlinks=False)
+        assert walker.fired
+        # aws-cli descends (its isdir follows the link) and the recursion's own
+        # should_ignore_file then drops the link with no warning, so a no-follow
+        # walk leaves no trace of the entry at all.
+        assert [i.compare_key for i in infos] == [
+            "aaa.txt",
+            "elsewhere/child.txt",
+            "zzz/inner.txt",
+        ]
+        assert warnings == []
+
+    def test_complete_no_follow_view_keeps_the_record_it_has(self, tmp_path: Path) -> None:
+        # The complete view exists to surface every entry, so the leaf record
+        # stays rather than the entry vanishing; the link is still not descended.
+        target = tmp_path / "mmm.txt"
+        _make_tree(tmp_path, "elsewhere/child.txt")
+
+        def swap() -> None:
+            target.unlink()
+            target.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+        infos, warnings, walker = self._raced(
+            tmp_path, swap, follow_symlinks=False, enumerate_all_entries=True
+        )
+        assert walker.fired
+        assert [i.compare_key for i in infos] == [
+            "",
+            "aaa.txt",
+            "elsewhere/",
+            "elsewhere/child.txt",
+            "mmm.txt",
+            "zzz/",
+            "zzz/inner.txt",
+        ]
+        assert warnings == []
+
+    def test_link_to_an_ancestor_is_caught_by_loop_detection(self, tmp_path: Path) -> None:
+        # The promoted child is registered with the identity of the re-test stat,
+        # so it takes the cycle guard like any other descent instead of recursing
+        # until the OS refuses the path.
+        target = tmp_path / "mmm.txt"
+
+        def swap() -> None:
+            target.unlink()
+            target.symlink_to(tmp_path, target_is_directory=True)
+
+        infos, warnings, walker = self._raced(tmp_path, swap, detect_symlink_loops=True)
+        assert walker.fired
+        assert [i.compare_key for i in infos] == ["aaa.txt", "zzz/inner.txt"]
+        # The bare path, the way the leaf was addressed.
+        assert warnings == [f"Skipping file {target}. Symbolic link loop detected."]
+
+    def test_restat_leaf_override_turns_the_re_stat_off(self, tmp_path: Path) -> None:
+        # The documented escape hatch for a walker whose children are not live
+        # filesystem paths: returning the record as classified skips the
+        # yield-time stat, so the leaf is submitted as it was and nothing is
+        # descended.
+        target = tmp_path / "mmm.txt"
+
+        class _NoRetest(_MutateAtFinalize):
+            def restat_leaf(
+                self,
+                path: str,
+                info: LocalFileInfo,
+                *,
+                options: LocalScanOptions,
+                notify: Callable[[str], None],
+            ) -> LocalFileInfo | None:
+                return info
+
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        walker = _NoRetest(target, _replace_with_a_directory(target))
+        keys = [i.compare_key for i in LocalStorage(str(tmp_path), walker=walker).walk_local()]
+        assert walker.fired
+        assert keys == ["aaa.txt", "mmm.txt", "zzz/inner.txt"]
+
+
+class TestLeafVanishedBeforeItsTurn:
+    """A leaf that is gone by the time the walk reaches it.
+
+    The third shape of the mid-walk race: aws-cli takes every leaf's stats in its
+    descent loop (``_safely_get_file_stats``), so a name deleted after its
+    parent's ``listdir`` fails there, runs the warning battery, and is skipped -
+    the file never enters the transfer stream. Measured against the pinned aws (a
+    leaf deleted while the walk was inside an earlier sibling): ``cp --recursive``
+    prints ``warning: Skipping file <abs>. File does not exist.`` and exits 2,
+    with nothing uploaded for that name, and ``--dryrun`` previews the same
+    skip. Without the re-stat the stale record was submitted and the upload
+    failed with ``[Errno 2] No such file or directory`` (rc 1).
+    """
+
+    def _vanished(
+        self, tmp_path: Path, **config: bool
+    ) -> tuple[list[str | None], list[str], _MutateAtFinalize]:
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm.txt"
+        walker = _MutateAtFinalize(target, target.unlink)
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), walker=walker, **config)
+        keys = [info.compare_key for info in storage.walk_local(on_warning=warnings.append)]
+        return keys, warnings, walker
+
+    def test_warns_does_not_exist_and_drops_the_leaf(self, tmp_path: Path) -> None:
+        keys, warnings, walker = self._vanished(tmp_path)
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {tmp_path / 'mmm.txt'}. File does not exist."]
+
+    def test_the_complete_view_drops_it_too(self, tmp_path: Path) -> None:
+        # The complete view surfaces entries the transfer vetting rejects, not
+        # entries that are no longer there - the same call in classify_child
+        # warns and skips a child that races away mid-scan.
+        keys, warnings, walker = self._vanished(tmp_path, enumerate_all_entries=True)
+        assert walker.fired
+        assert keys == ["", "aaa.txt", "zzz/", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {tmp_path / 'mmm.txt'}. File does not exist."]
+
+    def test_the_paged_scan_drops_it_too(self, tmp_path: Path) -> None:
+        # sync consumes the walk through scan, so pin the warn-skip there as well.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm.txt"
+        walker = _MutateAtFinalize(target, target.unlink)
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), walker=walker)
+        options = LocalScanOptions(recursive=True, on_warning=warnings.append)
+        assert [info.compare_key for info in storage.scan(options)] == ["aaa.txt", "zzz/inner.txt"]
+        assert walker.fired
+        assert warnings == [f"Skipping file {target}. File does not exist."]
+
+    def test_a_healed_race_drops_the_leaf_silently(self, tmp_path: Path) -> None:
+        # aws-cli skips whatever it could not stat, warning only for what its
+        # battery can still see wrong: a leaf whose stat failed and that is back
+        # by the time the battery looks is dropped with no warning at all.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
+        target = str(tmp_path / "mmm.txt")
+        real_stat = os.stat
+        failed: list[str] = []
+
+        def flaky_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if path == target and not failed:
+                failed.append(target)
+                raise FileNotFoundError(2, "No such file or directory", target)
+            return real_stat(path, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+        warnings: list[str] = []
+        with pytest.MonkeyPatch.context() as patch:
+            # os.path.exists / is_readable go through this same os.stat, so the
+            # battery sees the file the failing call missed.
+            patch.setattr(os, "stat", flaky_stat)
+            keys = _keys(tmp_path, on_warning=warnings.append)
+        assert failed == [target]
+        assert keys == ["aaa.txt"]
+        assert warnings == []
+
+
+class TestLeafRewrittenBeforeItsTurn:
+    """A leaf whose bytes changed between its parent's scan and its turn.
+
+    aws-cli reads every leaf's size and timestamp in its descent loop, never at
+    scan time, so what it transfers - and what ``sync`` compares - is the file as
+    of the moment it is emitted. Measured against the pinned aws (an 8-byte leaf
+    rewritten to 120 bytes while the walk was inside an earlier sibling):
+    ``cp --recursive`` and ``mv --recursive`` both put a 120-byte object, rc 0,
+    where the scan-time size put an 8-byte truncation of it.
+    """
+
+    def _rewritten(self, tmp_path: Path) -> tuple[list[LocalFileInfo], _MutateAtFinalize]:
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm.txt"
+
+        def rewrite() -> None:
+            target.write_bytes(b"y" * 120)
+            os.utime(target, (0, 0))
+
+        walker = _MutateAtFinalize(target, rewrite)
+        infos = list(LocalStorage(str(tmp_path), walker=walker).walk_local())
+        return infos, walker
+
+    def test_size_and_mtime_come_from_the_yield_time_stat(self, tmp_path: Path) -> None:
+        infos, walker = self._rewritten(tmp_path)
+        assert walker.fired
+        assert [info.compare_key for info in infos] == ["aaa.txt", "mmm.txt", "zzz/inner.txt"]
+        rewritten = infos[1]
+        assert rewritten.size == 120  # _make_tree wrote 3 bytes at scan time
+        assert rewritten.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
+        # The record's stat is the one those two were derived from, so a filter
+        # or a content compare reading it sees the same file.
+        assert rewritten.stat_result is not None
+        assert rewritten.stat_result.st_size == 120
+
+    def test_the_other_leaves_keep_their_own_stats(self, tmp_path: Path) -> None:
+        infos, _walker = self._rewritten(tmp_path)
+        assert [
+            (info.compare_key, info.size) for info in infos if info.compare_key != "mmm.txt"
+        ] == [
+            ("aaa.txt", 3),
+            ("zzz/inner.txt", 3),
+        ]
+
+    def test_a_link_leaf_is_left_as_the_scan_lstat_ed_it(self, tmp_path: Path) -> None:
+        # The complete no-follow view keeps a link as its own lstat leaf and never
+        # follows it, so the yield-time re-stat does not apply: a followed one
+        # would describe the target instead and contradict that walker's rule.
+        _make_tree(tmp_path, "aaa.txt", "real.txt")
+        link = tmp_path / "mmm.txt"
+        link.symlink_to(tmp_path / "real.txt")
+        walker = _MutateAtFinalize(link, lambda: (tmp_path / "real.txt").write_bytes(b"y" * 120))
+        infos = list(
+            LocalStorage(
+                str(tmp_path),
+                walker=walker,
+                follow_symlinks=False,
+                enumerate_all_entries=True,
+            ).walk_local()
+        )
+        assert walker.fired
+        leaf = next(info for info in infos if info.compare_key == "mmm.txt")
+        assert leaf.is_symlink
+        assert leaf.stat_result is not None
+        assert stat.S_ISLNK(leaf.stat_result.st_mode)
+        assert leaf.size == len(str(tmp_path / "real.txt"))  # the link's own size
+
+    def test_an_mtime_that_becomes_unrepresentable_warns_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The epoch fallback belongs to whichever stat first cannot represent the
+        # timestamp; aws-cli warns once per file, so the yield-time stat warns
+        # only when the scan's stat was still representable (that one already
+        # warned - see TestWalkWarnings.test_invalid_timestamp_falls_back_to_epoch).
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
+        target = tmp_path / "mmm.txt"
+        unrepresentable = 1234567890.0  # the stamp this host is pretending it cannot render
+        real_fromtimestamp = datetime.fromtimestamp
+
+        class _BoomOnOneStamp:
+            @staticmethod
+            def fromtimestamp(ts: float, tz: object = None) -> datetime:
+                if ts == unrepresentable:
+                    raise OverflowError("timestamp out of range")
+                return real_fromtimestamp(ts, tz)  # pyright: ignore[reportArgumentType]
+
+        monkeypatch.setattr("boto3_s3.localstorage.datetime", _BoomOnOneStamp)
+        walker = _MutateAtFinalize(
+            target, lambda: os.utime(target, (unrepresentable, unrepresentable))
+        )
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), walker=walker)
+        infos = list(storage.walk_local(on_warning=warnings.append))
+        assert walker.fired
+        assert [(info.compare_key, info.mtime) for info in infos][1] == (
+            "mmm.txt",
+            datetime(1970, 1, 1, tzinfo=timezone.utc),
+        )
+        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
 
 class TestSymlinks:
@@ -587,6 +974,10 @@ class TestWalkIsCustomizable:
         assert keys == ["keep.txt"]  # the override pruned skip.tmp
 
     def test_stat_info_override_can_rewrite_entries(self, tmp_path: Path) -> None:
+        # stat_info shapes the record the scan builds; restat_leaf owns a leaf's
+        # final size / mtime / stat_result (that is where aws-cli takes them), so
+        # a rewrite of those three pairs the two seams while everything else
+        # stat_info stamps rides through untouched.
         _make_tree(tmp_path, "a.txt")
 
         class _Tagged(LocalFileGenerator):
@@ -598,11 +989,26 @@ class TestWalkIsCustomizable:
                 notify: Callable[[str], None],
             ) -> LocalFileInfo:
                 info = super().stat_info(entry, full, st, notify)
+                info.key += ".tagged"  # compare_key is stamped from it afterwards
                 info.size = 999
                 return info
 
         infos = list(LocalStorage(str(tmp_path), walker=_Tagged()).walk_local())
-        assert [(info.compare_key, info.size) for info in infos] == [("a.txt", 999)]
+        assert [(info.compare_key, info.size) for info in infos] == [("a.txt.tagged", 3)]
+
+        class _TaggedSize(_Tagged):
+            def restat_leaf(
+                self,
+                path: str,
+                info: LocalFileInfo,
+                *,
+                options: LocalScanOptions,
+                notify: Callable[[str], None],
+            ) -> LocalFileInfo | None:
+                return info
+
+        infos = list(LocalStorage(str(tmp_path), walker=_TaggedSize()).walk_local())
+        assert [(info.compare_key, info.size) for info in infos] == [("a.txt.tagged", 999)]
 
     def test_classify_child_override_filters_per_entry(self, tmp_path: Path) -> None:
         # The per-entry seam: decide file/dir/skip without touching the scan loop.
@@ -659,6 +1065,21 @@ class TestWalkIsCustomizable:
                     None,
                 )
                 return self.normalize_sort([*children, extra])
+
+            def restat_leaf(
+                self,
+                path: str,
+                info: LocalFileInfo,
+                *,
+                options: LocalScanOptions,
+                notify: Callable[[str], None],
+            ) -> LocalFileInfo | None:
+                # An injected child is not a live path, so the yield-time re-stat
+                # cannot apply to it (it would warn-skip the entry as missing);
+                # the real children still take it.
+                if path.endswith("_synthetic"):
+                    return info
+                return super().restat_leaf(path, info, options=options, notify=notify)
 
         walker = _WithSynthetic()
         keys = [
