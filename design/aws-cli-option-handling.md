@@ -370,6 +370,26 @@ itself mirrors aws-cli's `ResultProcessor`):
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
+Two more are in the result text itself rather than in its rendering:
+
+- **A batched delete's per-key failure line** names the `DeleteObjects`
+  operation and carries no `(reached max retries: N)` suffix, where aws's line
+  names `DeleteObject` and lets botocore append the suffix. It follows from the
+  accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
+  composed from the batch response's own `Errors[]` entry rather than by
+  botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
+  `sync --delete`, `rb --force` - while a single-key `rm` still issues
+  `DeleteObject` and writes aws's bytes.
+- **The element a doubly-malformed listing entry is blamed on.** aws reads an
+  entry's required elements in one order while displaying a listing
+  (`LastModified` -> `Size` -> `Key`) and in another while enumerating a
+  transfer (`Key` -> `LastModified` -> `Size`); one shared listing converter
+  here follows the transfer order. So an `ls` against an entry missing `Key`
+  *together with* another required element quotes `'Key'` where aws quotes the
+  other name. Reproducing both orders would make a backend's read order depend
+  on its consumer. The exit code, the entries printed before it and the stream
+  they go to all agree, and the transfer commands agree entirely.
+
 The rest sit outside the pipeline:
 
 - **Help pages** are rendered from this CLI's own argparse parsers, while aws

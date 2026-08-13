@@ -472,12 +472,31 @@ dest-existence check for download. We ported the same three faces:
   (`Transferrer.warner`, a `Warner`), the same sink the engine's own warnings use
   (aws-cli's wording) - so the walk reports a warning without reaching into the
   transfer engine.
+- **an S3-side timestamp the local calendar cannot hold ends the run** - the
+  mirror image of that last walk warning, and deliberately not a warning.
+  aws-cli converts every timestamp an S3 response carries to the local zone the
+  moment it reads it (a listing entry through `BucketLister`'s date parser, a
+  single object as the last thing `_list_single_object` does), so a
+  `LastModified` that leaves `datetime`'s range once the local offset is added
+  fails right there with `date value out of range` and nothing is transferred -
+  where a *local* mtime it cannot represent is warned away and stamped with the
+  epoch instead. `s3storage.reject_unrepresentable_stamp` runs that exact
+  conversion for its exception alone, at both of aws-cli's points: the listing
+  conversion inside the S3 backend, and `producers.head_single` for the
+  single-object HEAD route. The value carried on stays UTC per the
+  `FileInfo.mtime` contract, and the conversion is skipped for the years that
+  cannot reach either end (only years 1 and 9999 on POSIX, always on Windows,
+  the same banding the local side uses). A single blind delete is exempt
+  because aws issues no HeadObject for it - `rm s3://bkt/key` stays rc 0 on
+  both tools.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
   boundary ends it with aws's `File does not exist.` warning battery and the
   walk skips the directory, exactly like aws-cli (the boundary comes long
-  before any `RecursionError` could); on
+  before any `RecursionError` could - and the stop now comes from the
+  vetting-time boundary probe one level up rather than from the descent's own
+  `os.open`, which is what keeps aws's wording on the bare path); on
   (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
   `(st_dev, st_ino)` and skips a directory that resolves to one of its own
   ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
@@ -491,18 +510,33 @@ dest-existence check for download. We ported the same three faces:
   enumerate_all_entries=…)`) and seeded into
   every scan by `default_scan_options`, not passed per operation (the CLI bakes
   `--follow-symlinks` into the storage it builds).
+- **a directory that changes underneath the walk** - replaced by a file,
+  removed, or locked away between its parent's scan and its own descent:
+  aws-cli re-tests every child immediately before recursing into it, on the
+  *separator-terminated* path its sort key carries, and warn-skips it
+  (`Skipping file <dir>/. File does not exist.`, or `... File/Directory is not
+  readable.` for the chmod race - rc 2) rather than failing the run.
+  Establishing the descent's own scan **is** that re-test here, so the same
+  battery runs on the path as given, separator and all, and the walk continues;
+  when the battery finds nothing wrong the `OSError` propagates instead, so
+  nothing is ever pruned silently.
 - **fd-relative walk boundary fallback**: the fast walk vets each entry through
   the owning directory's fd (`fstatat`/`openat`, `localstorage.py`'s
   `have_dir_fd` path), which re-anchors resolution one level at a time and so
   hides what aws-cli's own full-path `stat` would trip on - an ancestor
   symlink chain crossing `SYMLOOP_MAX`, or a path crossing `PATH_MAX` - and can
-  admit a leaf the transfer then fails to open (rc 1) where aws warn-skips it
+  admit a child the transfer then fails to open (rc 1) where aws warn-skips it
   at enumeration (rc 2, `File does not exist.`). Only near either boundary
-  (`sym_depth` for a symlink leaf, the full path's length for any leaf - both
+  (`sym_depth` for a symlink child, the full path's length for any child - both
   floors sit well below the real OS limits, so an ordinary walk never reaches
   them) does the walk re-run the full-path warning battery
-  (`LocalFileGenerator.crosses_full_path_boundary`) and drop a leaf it would
-  warn away, so the two agree. On Windows (`have_dir_fd` false) the walk
+  (`LocalFileGenerator.crosses_full_path_boundary`) and drop a child it would
+  warn away, so the two agree. **Directories take that probe too**, by their
+  bare full path: aws-cli names a child by its bare path when it vets it and
+  with the trailing separator when it descends, so a boundary-crossing
+  directory left to fail its own descent would be warned with the separator
+  aws-cli's vetting-time warning does not carry.
+  On Windows (`have_dir_fd` false) the walk
   addresses entries by full path, but the scandir-cached stat still hides an
   over-`MAX_PATH` length on a host without long-path support
   (`LongPathsEnabled=0`, the default), so the readability probe is what fails
@@ -572,8 +606,14 @@ dest-existence check for download. We ported the same three faces:
 - The computation of the CRT-family algorithms (`CRC32C` / `CRC64NVME` /
   `XXHASH64` / `XXHASH3` / `XXHASH128`) is delegated by botocore to `awscrt`.
   Because botocore auto-detects awscrt at import time, it is enabled with no
-  extra configuration as long as awscrt is present. awscrt is **not a default
-  dependency but an opt-in extra**: the library provides `boto3-s3[crt]`
+  extra configuration as long as awscrt is present. The installed botocore lets
+  `BOTO_DISABLE_CRT` turn that detection off, and the botocore aws bundles has
+  no such switch; the CLI drops the variable before any of its modules can
+  reach botocore, so it decides nothing there either (cli.md section 4 item 10).
+  The library leaves it alone - an application embedding `boto3_s3` keeps its
+  own botocore's behavior.
+  awscrt is **not a default dependency but an opt-in extra**: the library
+  provides `boto3-s3[crt]`
   (delegating to boto3's own `boto3[crt]`), and the CLI's `boto3-s3-cli[crt]`
   delegates to that - the management of awscrt's version range rides on the SDK
   side. In an environment without awscrt, only the explicit specification of a

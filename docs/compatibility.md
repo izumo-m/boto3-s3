@@ -51,6 +51,15 @@ before the run starts (exit code 253), while an explicit CRT-only
 awscrt, so neither situation can arise there (see
 [`exit-codes.md`](./cli/exit-codes.md)).
 
+It also gates the asymmetric **SigV4a** signature, which a Multi-Region Access
+Point and an S3 on Outposts access point are signed with. Those two do not fail
+alike. An MRAP offers no other signature, so without awscrt it is refused
+loudly — the same `Missing Dependency` report at exit code 253. An Outposts
+access point offers plain SigV4 as well, so it falls back to it **silently**:
+`presign` returns exit code 0 and a URL signed `AWS4-HMAC-SHA256` with no
+`X-Amz-Region-Set`, which the Outposts endpoint rejects when it is used.
+Install the `crt` extra before presigning an Outposts access point.
+
 ## 3. Three `[s3]` keys that never take effect
 
 `should_stream`, `disk_throughput` and `direct_io` are accepted and validated

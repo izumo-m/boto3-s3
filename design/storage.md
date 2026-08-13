@@ -68,6 +68,19 @@ front only when the declaration is honest:
   pages and overlaps them with a background prefetch worker; `cancel_token`
   stops the prefetch producer before its next page pull.
 
+  **A producer that fails part-way through a page** should yield what it has
+  already built and only then raise: `scan`'s prefetch re-raises a producer
+  error after the chunks it had queued are consumed, so the entries ahead of
+  the failure reach the consumer first - the entry-by-entry order aws-cli dies
+  in, where a page is the smallest chunk this interface can deliver. The
+  built-in S3 backend is what needs it: it reads the elements a listing entry
+  must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
+  `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
+  for a bucket), so an entry missing one raises `KeyError` naming the element
+  instead of being silently dropped - the object listing emitting the part of
+  the page it had converted, the bucket listing being streamed entry by entry
+  to begin with.
+
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
   cannot silently leak excluded entries into `--exclude`/`--include` or, on a

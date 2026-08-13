@@ -11,7 +11,7 @@ is the operational definition every output comparison applies.
 |---|---|---|---|
 | `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (one moto-backed file, `test_capture_response.py` - the capture rides botocore's real event stream) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
-| `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection | always |
+| `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
 | `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against MinIO / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
 

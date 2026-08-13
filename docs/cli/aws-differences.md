@@ -17,8 +17,10 @@ state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a transfer whose connection
 dies below the HTTP layer, a download body cut mid-stream, a plain-HTTP
-endpoint taken from the environment under the CRT engine, the `PYTHON*`
-environment variables, and three failures the interpreter decides rather than
+endpoint taken from the environment under the CRT engine, an `aws` plugin the
+config file declares, the modification time a download stamps for an object
+older than the local zone's present rules, the `PYTHON*` environment
+variables, and three failures the interpreter decides rather than
 either tool: a stdout that cannot take a streamed object, an error report that
 cannot be written at all, and a standard stream that cannot be set up at all —
 that last one settling before either tool's first line of code runs. A mismatch
@@ -29,15 +31,16 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Ten of section 2's entries
+does change from one `aws` release to the next. Twelve of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
-engine, the closing line of a Ctrl-C `aws` cannot attribute to a cancelled
-classic transfer, the failure line of a directory copied without
-`--recursive`, the invalid-bucket-name reports this command writes itself,
-the `--version` line, two argument-parsing corners, the history warning `aws`
-writes and this command has not, and the messages the installed botocore
-itself writes. The interactive prompt
+engine, the failure lines of a batched delete, the closing line of a Ctrl-C
+`aws` cannot attribute to a cancelled classic transfer, the failure line of a
+directory copied without `--recursive`, the invalid-bucket-name reports this
+command writes itself, the `--version` line, two argument-parsing corners, the
+history warning `aws` writes and this command has not, the messages the
+installed botocore itself writes, and the element a listing entry missing two
+required ones is blamed on. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -120,6 +123,20 @@ run comes out differently, listed in section 1.
   break and prints that same underlying error. This lives in the installed
   `botocore` / `s3transfer` rather than in either tool's own code — the same
   split as the default checksum algorithm below — so no option here changes it.
+- **A download stamps an old object on a different second.** Both tools give
+  the downloaded file the object's `LastModified`, and for every timestamp
+  today's zone rules cover they agree to the second. They part on one old
+  enough that the zone's rule for it differs from the rule in force now: `aws`
+  converts the timestamp to local time and then re-reads those wall-clock
+  fields with `time.mktime`, which resolves them under the zone's *historical*
+  rule and so settles on a different instant than the object carries, while
+  here the object's own instant is stamped. Under `TZ=Asia/Tokyo` an object
+  whose `LastModified` is `1601-01-01T00:00:00Z` comes out stamped
+  `1601-01-01 09:00:00 +0918` on `aws` and `1601-01-01 09:18:59 +0918` here —
+  the latter being the moment the object names. Neither tool warns, the exit
+  codes agree, and the bytes are identical. Real S3 never reports a
+  `LastModified` that old, so reaching this at all takes an S3-compatible
+  implementation that does.
 - **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
   integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
   neither changes the result or the exit code. An explicit
@@ -159,6 +176,21 @@ run comes out differently, listed in section 1.
   a Python `Exception ignored in:` block) where this command prints botocore's
   `Unable to locate credentials`. Uploads and downloads use the CRT engine on
   both tools.
+- **A batched delete names a different operation when a key fails.** Deletes go
+  out in batches here — up to a thousand keys per `DeleteObjects` request —
+  where `aws` sends one `DeleteObject` per key. The objects removed and the exit
+  code are the same; the per-key failure line is not. It reads `delete failed:
+  s3://bkt/key An error occurred (AccessDenied) when calling the DeleteObjects
+  operation: <message>` — the plural operation name, and no
+  `(reached max retries: N)` suffix — because the line is composed from that
+  batch response's own per-key error rather than written by botocore, where
+  `aws`'s reads `... when calling the DeleteObject operation (reached max
+  retries: 0): <message>`. Only the batching routes are affected —
+  `rm --recursive`, an S3-side `sync --delete`, and `rb --force` — while a
+  single `rm s3://bkt/key` still issues `DeleteObject` and its line is byte for
+  byte aws's. So a script grepping for the singular name, or for the retry
+  suffix, keeps matching on single deletes and quietly stops matching on
+  recursive ones.
 - **A plain-HTTP endpoint given only by the environment still reaches the CRT
   engine.** Under `preferred_transfer_client = crt`, `aws` decides whether its
   CRT client speaks TLS from `--endpoint-url` alone, so an endpoint supplied
@@ -234,6 +266,20 @@ run comes out differently, listed in section 1.
   `Warning: Unable to record CLI history. Check file permissions for <path>` —
   without changing the exit code. This command has no history mechanism, so it
   records nothing and warns about nothing; the rest of the run is unchanged.
+- **The `[plugins]` section is not read.** `aws` hands its merged
+  configuration to a plugin loader before it parses anything: the
+  `cli_legacy_plugin_path` entry is added to its import path, and every other
+  entry of `[plugins]` is imported and its `awscli_initialize` called — on
+  every invocation, `--version` included. This command has no plugin mechanism
+  and never reads the section, so whatever a plugin was doing on your `aws`
+  runs — registering handlers, auditing, extra output — simply does not
+  happen. **When the plugin cannot be imported the run comes out
+  differently**: `aws` refuses to start at all (exit code 255, `No module
+  named '<name>'`, nothing done), while this command runs the operation and
+  exits normally — so a `rm --recursive` that `aws` would never have begun
+  deletes the objects here. This one is not a matter of effort: a plugin is
+  written against `aws`'s own internals, so nothing outside that codebase can
+  run one.
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
@@ -244,16 +290,28 @@ run comes out differently, listed in section 1.
   installed botocore's, not the one in aws's bundled copy — the two are
   separate codebases. The one reachable instance is a rejected `max_attempts`,
   which `aws` ends "greater than or equal to one." and this command ends
-  "greater than or equal to 1."; the exit code is the same either way. Give an
-  out-of-range `max_attempts` (`0`, `-1`) and an invalid `retry_mode` in the
-  same run and the two even report different halves of the problem — `aws` the
-  range, this command the mode — because each validates them in a different
-  order; either one alone is reported identically. The order is left as it is,
-  since the range message can never match byte for byte anyway. The
+  "greater than or equal to 1."; the exit code is the same either way. It is
+  the only one left because the order around it agrees: the retry settings are
+  resolved and validated where `aws` resolves them, so a configuration carrying
+  several mistakes at once — an out-of-range `max_attempts` (`0`, `-1`)
+  together with an invalid `retry_mode`, or either of them beside a broken
+  `[s3]` section — reports the same one of them on both tools. The
   invalid-bucket-name report above belongs to the same SDK-owned family: the
   two copies word it identically today, and it is because that wording is
   theirs to change that the reports this command writes itself stop before the
   regex tail.
+- **A listing entry missing two required elements is blamed on a different
+  one.** When a service returns an entry without `Key` *and* without
+  `LastModified` or `Size`, `ls` stops and quotes the name of an element it
+  could not read — and the two tools quote different names. `aws` reads them in
+  one order while displaying a listing (`LastModified`, `Size`, `Key`) and in
+  another while enumerating a transfer (`Key`, `LastModified`, `Size`); this
+  command has a single listing converter, which follows the transfer order. So
+  an entry missing `Key` and `LastModified` ends `'LastModified'` on `aws` and
+  `'Key'` here. The exit code, the entries printed before the bad one and the
+  stream they go to all agree, and `cp` / `mv` / `sync` / `rm` agree
+  completely, their order being the shared one. An entry missing exactly one
+  required element names that element on both tools.
 - **`AWS_DEFAULTS_MODE` is honored.** The installed botocore implements
   defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
   Setting it changes retry/timeout defaults here where `aws` would not, and an

@@ -157,10 +157,12 @@ also read as `'auto'`) with the same rules as boto3.
     with the region and endpoint (the serializer merges
     `signature_version=UNSIGNED` on top). This keeps a `None` endpoint's
     per-request re-resolution under the caller's configuration rather than
-    stock botocore's defaults: us-east-1 stays on the regional endpoint like
-    the classic engine's `us_east_1_regional_endpoint` override (one Host
-    across engines), and addressing-style and accelerate/dualstack settings
-    carry over the same way
+    stock botocore's defaults: addressing-style and accelerate/dualstack
+    settings carry over that way, while us-east-1 stays on the regional
+    endpoint through the session instead - the serializer builds its own client
+    from the session it is handed, so the CLI's session-level
+    `us_east_1_regional_endpoint` pin (cli.md section 4 item 3) reaches it as it
+    reaches every other client (one Host across engines)
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`

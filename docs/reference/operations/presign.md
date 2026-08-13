@@ -119,9 +119,10 @@ signature disagree. `presign` keeps the resolved regional host, matching
 
 As with the signing above, the correction reaches only the case botocore
 applies the substitution to. These already resolved regionally and are
-unchanged: a `us-east-1` client whose configuration sets
-`s3={"us_east_1_regional_endpoint": "regional"}` (what the `boto3-s3` command
-builds), a dualstack or accelerate endpoint, an explicit
+unchanged: a `us-east-1` client that resolves
+`us_east_1_regional_endpoint` to `regional` (the value the `boto3-s3` command
+pins on its session, so every client it builds resolves
+it), a dualstack or accelerate endpoint, an explicit
 `s3={"addressing_style": ...}`, an access point ARN, a directory bucket, and a
 bucket name too long or DNS-incompatible for virtual hosting, which addresses
 path-style. An explicit `endpoint_url` overrides the host either way.

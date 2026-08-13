@@ -777,6 +777,21 @@ Returns an `S3ScanOptions` seeded with the constructor's `page_size` and
 Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 `S3ScanOptions`; a foreign `ScanOptions` raises `TypeError`.
 
+An entry the service returned incomplete stops the listing rather than being
+dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
+a `CommonPrefixes` entry missing `Prefix`, raises `KeyError` naming the element,
+read in that order. The entries converted before it are still delivered — that
+page is emitted short and the error follows it — so a consumer sees them ahead
+of the failure exactly as the AWS CLI's entry-by-entry listing does. A
+`LastModified` the host's local zone cannot represent raises `OverflowError`
+(`date value out of range`) at the same point, for the same reason — the AWS
+CLI converts every timestamp it reads to local time, so such an object ends the
+run there. Note the asymmetry with
+`LocalStorage`, which applies the same local-zone test to a file's mtime and
+*keeps* the file with a warning and `EPOCH_TIME`: that is the AWS CLI's own
+split between a local file it cannot represent and an S3 object it cannot
+represent.
+
 This is object listing only — the openable-entity enumeration `scan` promises.
 A recursive scan omits `Delimiter` and yields every object as a `FILE` entry; a
 non-recursive scan sends `Delimiter='/'` and additionally emits one
@@ -826,6 +841,11 @@ container rather than an openable entity, so no transfer scan ever yields one.
 
 `name_prefix` and `region` map to `ListBuckets`'s `Prefix` and `BucketRegion`,
 omitted when falsy. The page size is the storage's own `page_size`.
+
+As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
+`KeyError` naming the element, read in that order — the order the AWS CLI
+renders them in — at that bucket, with the buckets ahead of it already
+delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
 matching input member raises `ConfigurationError` naming the version they need
@@ -887,8 +907,11 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined. This is the generic HEAD; the SSE-C-aware single-source HEAD lives
-in the transfer engine.
+determined. A `LastModified` the host's local zone cannot represent raises
+`OverflowError` (`date value out of range`) instead of being returned, the same
+test `scan_pages` applies and at the point the AWS CLI applies it to its own
+single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
+HEAD lives in the transfer engine, which applies the test at the same point.
 
 ## IOStorage
 
@@ -1233,14 +1256,19 @@ A path contributes at most one child, never two: a followed symlink describes
 its target, and a non-followed symlink in the complete view describes the link
 itself.
 
-A directory that cannot be opened or scanned — a symlink cycle stopped by the
-kernel, an over-long path, or a race after its parent vetted it readable — is
-put through the `triggers_warning` battery and yields an empty list. If that
-battery finds nothing wrong, the `OSError` propagates instead of pruning
-silently. That handling is scoped to establishing the scan; a per-entry
-`OSError` raised mid-scan propagates.
+A directory that cannot be opened or scanned — replaced, removed or locked away
+in the race between its parent's scan and this descent — is put through the
+`triggers_warning` battery and yields an empty list, so the walk goes on. The
+battery runs on `dir_path` as passed, which for a descended child carries the
+trailing separator the AWS CLI's own re-test names it by. If that battery finds
+nothing wrong, the `OSError` propagates instead of pruning silently. That
+handling is scoped to establishing the scan; a per-entry `OSError` raised
+mid-scan propagates. The deterministic full-path limits — a symlink cycle
+stopped by the kernel, an over-long path — are caught one level up instead, by
+`crosses_full_path_boundary`, which addresses the child by its bare full path,
+the way the AWS CLI words those two.
 
-`sym_depth` lets a file leaf near the symlink-loop or path-length limit be
+`sym_depth` lets any child near the symlink-loop or path-length limit be
 re-vetted by full path, so it warn-skips the way the AWS CLI's full-path stat
 would rather than being admitted and failing at transfer time.
 
@@ -1250,14 +1278,17 @@ rather than reproducing the sort key and directory-info shape, and must stamp
 
 ### crosses_full_path_boundary(info, full, \*, sym_depth, notify)
 
-Whether a vetted file leaf must be dropped because a full-path stat would have
+Whether a vetted child must be dropped because a full-path stat would have
 rejected it. The fast walk vets each entry through the owning directory's
 descriptor, which re-anchors resolution and so hides both the ancestor symlink
 chain and the full path's length; near either OS limit this re-runs the
-full-path warning battery so the two agree. Returns `False` for a directory,
-which is already covered by its own descent failing. `scan_children` consults
-it only in the normal view — under `enumerate_all_entries` the vetting is
-bypassed and this probe with it.
+full-path warning battery so the two agree. A directory takes the same probe as
+a file, and by the same bare full path: that is where the AWS CLI names a child
+it vets, while a descent addresses it with a trailing separator, so leaving a
+boundary-crossing directory to fail its own descent would warn with a separator
+the AWS CLI's message does not carry. `scan_children` consults this only in the
+normal view — under `enumerate_all_entries` the vetting is bypassed and this
+probe with it.
 
 ### entry_stat_result(entry)
 

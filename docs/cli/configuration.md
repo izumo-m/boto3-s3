@@ -31,7 +31,10 @@ this command does from the same environment.
 Every standard AWS variable works, because credentials and endpoints resolve
 through botocore exactly as they do for `aws` — `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SHARED_CREDENTIALS_FILE`,
-`AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL_S3` and the rest.
+`AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL_S3` and the rest. The proxy variables
+(`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) work the same way, down to the wire:
+an HTTPS proxy is opened with the same `CONNECT` request `aws` sends, on
+whichever Python this command runs.
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
@@ -50,6 +53,20 @@ Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
 `on-partial` — anything else counts as off.
+
+Three variables the installed SDK would otherwise act on are ignored here,
+because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter
+ignores the environment for that), `BOTO_DISABLE_CRT` (a switch its bundled SDK
+does not have) and `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`, along with the
+matching `us_east_1_regional_endpoint` config key (dropped from its bundled SDK
+— us-east-1 is regional there, always). Setting any of them changes nothing
+here, an unusable value included.
+
+One section of `~/.aws/config` is not read at all: `[plugins]`, from which
+`aws` imports and initializes aws-cli plugins on every invocation. This command
+has no plugin mechanism, so the section is inert — including the case where an
+entry cannot be imported, which stops `aws` before it does anything and does not
+stop this command (see [`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section
 
@@ -142,6 +159,11 @@ recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
 appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
 applies; `[toplevel]`, whose entries name services, has no counterpart here and
 is ignored.
+
+The section header must be spelled `command` followed by a single ASCII space,
+as `aws` requires. Extra spaces are fine (`[command  s3]` is the same section),
+but any other whitespace — a tab, a space before `command` — makes the section
+declare nothing at all, on either tool.
 
 - A value that starts with `!` is a **shell command line**. The invocation's
   remaining arguments are appended (quoted, so a space inside one is safe) and
