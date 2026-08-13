@@ -311,6 +311,153 @@ class TestFullPathBoundaryProbe:
         # the hot path, and the battery is never consulted for it).
         assert str(tmp_path / "short.txt") not in recorded
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="targets the POSIX dir_fd fast path; Windows length limits "
+        "depend on the LongPathsEnabled policy",
+    )
+    def test_a_directory_takes_the_probe_too_and_by_its_bare_path(self, tmp_path: Path) -> None:
+        # A directory child near the floor is re-vetted here, exactly like a file
+        # leaf, and by the *bare* full path aws-cli's vetting loop uses. Leaving
+        # it to fail its own descent instead would warn from scan_children, whose
+        # battery reproduces aws-cli's descent wording - the separator-terminated
+        # path - and so would name a boundary-crossing directory differently from
+        # aws-cli.
+        recorded: list[str] = []
+
+        class _Recording(LocalFileGenerator):
+            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
+                recorded.append(path)
+                return super().triggers_warning(path, notify)
+
+        # The same construction as the leaf case above, one level shallower, so
+        # that the *directory* itself lands just past the byte floor (its inner
+        # file then stays well under macOS's 1024-byte cap).
+        component = "あ" * 80  # 80 characters, 240 bytes
+        deep = tmp_path
+        while (pad := 1000 - 1 - len(os.fsencode(str(deep)))) > 240:
+            deep = deep / component
+        deep = deep / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
+        deep.mkdir(parents=True)
+        (deep / "i.txt").write_bytes(b"x")
+        assert 1000 <= len(os.fsencode(str(deep))) < 1024
+
+        storage = LocalStorage(str(tmp_path), walker=_Recording())
+        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
+        # This host's PATH_MAX sits above the floor, so the battery finds nothing
+        # wrong and the subtree stays in the scan set.
+        assert any(key.endswith("i.txt") for key in keys)
+        assert str(deep) in recorded  # the directory, named without a separator
+
+
+class _MutateAtFinalize(LocalFileGenerator):
+    """A walker that changes one directory the moment its parent has enumerated it.
+
+    ``finalize_children`` is the last step of the parent's ``scan_children``, so
+    firing there lands the change exactly in the window the walk cannot see: the
+    child was classified from the parent's ``os.scandir`` stat, and the descent
+    that follows addresses a path that has changed underneath. Deterministic on
+    every platform - the race needs no sleep and no listing-order luck.
+    """
+
+    def __init__(self, target: Path, action: Callable[[], None]) -> None:
+        self._target_key = str(target).replace(os.sep, "/") + "/"
+        self._action = action
+        self.fired = False
+
+    def finalize_children(self, children: list[WalkChild]) -> list[WalkChild]:
+        if not self.fired and any(child.info.key == self._target_key for child in children):
+            self.fired = True
+            self._action()
+        return super().finalize_children(children)
+
+
+class TestDirectoryChangedBeforeItsDescent:
+    """A sub-directory that stops being an openable directory between its parent's
+    scan and the descent into it.
+
+    aws-cli re-tests such a child immediately before recursing, on the
+    separator-terminated path its sort key carries: gone or no longer a
+    directory falls to the file-stat path, whose ``os.stat`` raises and warns
+    through the battery, and unreadable warns through the recursion's own
+    ``should_ignore_file``. Either way it is one warning, on the
+    separator-terminated path, and the walk continues (rc 2). Measured against
+    the pinned aws (a directory swapped mid-walk under
+    ``cp --recursive --dryrun``): ``warning: Skipping file <dir>/. File does not
+    exist.`` for the replaced and the removed shape, ``... File/Directory is not
+    readable.`` for the chmod'd one, every remaining entry still transferred.
+    cp / mv / sync share this walk, so all three inherit the behaviour.
+    """
+
+    def _swapped(
+        self, tmp_path: Path, action: Callable[[], None]
+    ) -> tuple[list[str | None], list[str], _MutateAtFinalize]:
+        _make_tree(tmp_path, "aaa.txt", "mmm/inner.txt", "zzz/inner.txt")
+        walker = _MutateAtFinalize(tmp_path / "mmm", action)
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), walker=walker)
+        keys = [info.compare_key for info in storage.walk_local(on_warning=warnings.append)]
+        return keys, warnings, walker
+
+    def test_replaced_by_a_regular_file_warns_and_the_walk_goes_on(self, tmp_path: Path) -> None:
+        target = tmp_path / "mmm"
+
+        def replace_with_a_file() -> None:
+            (target / "inner.txt").unlink()
+            target.rmdir()
+            target.write_bytes(b"x")
+
+        keys, warnings, walker = self._swapped(tmp_path, replace_with_a_file)
+        assert walker.fired
+        # The descent's ENOTDIR is a warning, not a fatal error - everything
+        # sorting after the swapped directory is still enumerated.
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+
+    def test_removed_warns_with_the_trailing_separator(self, tmp_path: Path) -> None:
+        target = tmp_path / "mmm"
+
+        def remove_it() -> None:
+            (target / "inner.txt").unlink()
+            target.rmdir()
+
+        keys, warnings, walker = self._swapped(tmp_path, remove_it)
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        # The separator is aws-cli's: the name it carries for a vetted
+        # sub-directory has one appended, and its warning keeps it.
+        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+
+    @skip_if_chmod_is_inert
+    def test_made_unreadable_warns_not_readable_with_the_separator(self, tmp_path: Path) -> None:
+        target = tmp_path / "mmm"
+        try:
+            keys, warnings, walker = self._swapped(tmp_path, lambda: target.chmod(0))
+        finally:
+            target.chmod(0o755)
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {target}{os.sep}. File/Directory is not readable."]
+
+    def test_the_paged_scan_behaves_the_same(self, tmp_path: Path) -> None:
+        # sync consumes the walk through scan (the sortable paged surface), not
+        # through walk_local, so pin the warn-and-continue there too.
+        _make_tree(tmp_path, "aaa.txt", "mmm/inner.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm"
+
+        def remove_it() -> None:
+            (target / "inner.txt").unlink()
+            target.rmdir()
+
+        warnings: list[str] = []
+        walker = _MutateAtFinalize(target, remove_it)
+        storage = LocalStorage(str(tmp_path), walker=walker)
+        options = LocalScanOptions(recursive=True, on_warning=warnings.append)
+        keys = [info.compare_key for info in storage.scan(options)]
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+
 
 class TestSymlinks:
     def test_followed_by_default(self, tmp_path: Path) -> None:

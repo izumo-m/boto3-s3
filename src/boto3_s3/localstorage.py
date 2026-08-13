@@ -123,12 +123,12 @@ if TYPE_CHECKING:
 # aws-cli EPOCH_TIME: the stamp used when a file's mtime cannot be represented.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# Boundary thresholds for the full-path leaf fallback (see
-# LocalFileGenerator.scan_children). The fast walk vets each entry through the
-# owning directory's fd (fstatat / openat), which re-anchors resolution and so
-# hides the ancestor symlink chain / long-path length that aws-cli's full-path
+# Boundary thresholds for the full-path fallback (see
+# LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
+# through the owning directory's fd (fstatat / openat), which re-anchors resolution
+# and so hides the ancestor symlink chain / long-path length that aws-cli's full-path
 # stat would trip on (ELOOP / ENAMETOOLONG). Near either OS limit a dir_fd-relative
-# probe can therefore admit a leaf the transfer then fails to open (rc 1) where
+# probe can therefore admit a child the transfer then fails to open (rc 1) where
 # aws warn-skips it (rc 2). These floors gate a full-path re-vetting so the two
 # agree; they sit well below the common OS limits (SYMLOOP_MAX ~32-40, PATH_MAX
 # 1024-4096) so a normal walk never crosses them, and correctness rests on the
@@ -685,16 +685,17 @@ class LocalFileGenerator:
         classification reads (``follow_symlinks`` / ``enumerate_all_entries``).
         A path contributes one child: a followed symlink describes its target;
         a no-follow symlink in the complete view describes the link itself. A
-        directory that cannot be opened or scanned
-        (a symlink cycle stopped by the kernel, an over-long path, or a race
-        after its parent vetted it readable) is skipped through the
-        ``triggers_warning`` battery - the aws-cli warning its full-path
-        vetting would emit - and yields an empty list; if the battery sees
-        nothing wrong, the ``OSError`` propagates instead. ``sym_depth`` (the
+        directory that cannot be opened or scanned - replaced, deleted or
+        chmod'd away since its parent vetted it - is skipped through the
+        ``triggers_warning`` battery on ``dir_path`` as passed, which is the
+        aws-cli warning its own re-test before descending would emit, and yields
+        an empty list (the walk goes on); if the battery sees nothing wrong, the
+        ``OSError`` propagates instead. ``sym_depth`` (the
         number of followed symlinks from the walk root down to ``dir_path``) lets
-        a file leaf near the symlink-loop / path-length limit be re-vetted by full
+        a child near the symlink-loop / path-length limit be re-vetted by full
         path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
-        rather than being admitted to fail at transfer-open.
+        rather than being admitted to fail at transfer-open or at its own
+        descent.
 
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe
@@ -722,22 +723,30 @@ class LocalFileGenerator:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
             scan = os.scandir(dir_fd if dir_fd is not None else dir_path)
         except OSError:
-            # The directory became unopenable even though its parent vetted it:
-            # deterministically (a symlink cycle the kernel stops with ``ELOOP``
-            # once a path accumulates SYMLOOP_MAX links - the per-entry vetting
-            # is dir-relative and resolves one link at a time, so it admits each
-            # level - or an over-long path), or by a race (deleted / chmod'd
-            # since). aws-cli vets children by *full path*, so its battery fails
-            # right here: run the same path battery for the same warning + rc 2
-            # (``ELOOP`` fails ``os.path.exists`` -> "File does not exist.").
-            # If the probes see nothing wrong (e.g. fd exhaustion resolved by the
-            # probe's close), re-raise like aws-cli's ``listdir`` would - never
-            # prune silently. Scoped to the open/scandir establishment only - a
-            # per-entry OSError (from a race mid-scan or an override's
-            # classify_child) propagates rather than dropping the directory.
+            # The directory stopped being an openable directory between its
+            # parent's scan and this descent - replaced by a file, deleted, or
+            # chmod'd away. aws-cli re-tests the child immediately before
+            # recursing into it, on the *separator-terminated* path its sort key
+            # carries: no longer a directory falls to ``_safely_get_file_stats``,
+            # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
+            # the battery, and still-a-directory-but-unreadable warns through the
+            # ``should_ignore_file`` at the top of the recursion. Establishing
+            # this scan *is* that re-test, so run the same battery on ``dir_path``
+            # as given - it keeps the separator every descended child was
+            # addressed with, and aws-cli's warning keeps it too - then keep
+            # walking (a warning, rc 2) instead of failing the run. If the probes
+            # see nothing wrong (e.g. fd exhaustion resolved by the probe's
+            # close), re-raise like aws-cli's ``listdir`` would - never prune
+            # silently. The deterministic full-path limits this fd-relative walk
+            # hides (``ELOOP`` / an over-long path) are caught one level up
+            # instead, at vetting time, by ``crosses_full_path_boundary``, so
+            # they carry aws-cli's vetting-time wording. Scoped to the
+            # open/scandir establishment only - a per-entry OSError (from a race
+            # mid-scan or an override's classify_child) propagates rather than
+            # dropping the directory.
             if dir_fd is not None:
                 os.close(dir_fd)
-            if not self.triggers_warning(dir_path.rstrip(os.sep), notify):
+            if not self.triggers_warning(dir_path, notify):
                 raise
             return []
         try:
@@ -767,27 +776,31 @@ class LocalFileGenerator:
         sym_depth: int,
         notify: Callable[[str], None],
     ) -> bool:
-        """Whether a vetted file leaf must be dropped as aws-cli's full-path stat would.
+        """Whether a vetted child must be dropped as aws-cli's full-path stat would.
 
         The fast walk vets each entry through the owning directory's fd
         (``fstatat`` / ``openat``), which re-anchors resolution: it resolves a
-        leaf's own symlink relative to the already-open directory, hiding the
+        child's own symlink relative to the already-open directory, hiding the
         ancestor symlink chain, and it addresses the entry by its short name,
         hiding the full-path length. aws-cli instead stats every entry by full
-        path, so a leaf whose full-path resolution crosses ``SYMLOOP_MAX`` (an
-        ancestor chain plus the leaf's own link) or ``PATH_MAX`` fails there -
+        path, so a child whose full-path resolution crosses ``SYMLOOP_MAX`` (an
+        ancestor chain plus the child's own link) or ``PATH_MAX`` fails there -
         ``os.path.exists`` is ``False``, its warn-skip counts toward rc 2 - while
         the fd-relative probe admits it and the transfer then fails to open it
-        (rc 1). Near either limit (``sym_depth`` for a symlink leaf, the full
-        path's byte length for any leaf - the floors sit well below the OS
+        (rc 1). Near either limit (``sym_depth`` for a symlink child, the full
+        path's byte length for any child - the floors sit well below the OS
         limits, so a normal walk never reaches this probe) re-run the full-path
         warning battery
-        (``triggers_warning``); a leaf it warns away is dropped here so the two
-        agree. Directories are already covered - a boundary-crossing descent fails
-        its own ``os.open`` in ``scan_children`` and warn-skips there.
+        (``triggers_warning``); a child it warns away is dropped here so the two
+        agree.
+
+        Directories take the same probe as file leaves, and by the same path:
+        aws-cli's vetting names a child by its bare full path, while the descent
+        addresses it with the trailing separator - so a boundary-crossing
+        directory left to fail its own ``os.open`` in ``scan_children`` would be
+        warned there, where the battery reproduces aws-cli's *descent* wording
+        (separator included) rather than its vetting wording.
         """
-        if info.kind is FileKind.DIRECTORY:
-            return False
         # PATH_MAX is a byte limit, so the length floor is measured in bytes
         # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
         # characters); the character pre-check (UTF-8 spends at most 4 bytes
@@ -1363,8 +1376,13 @@ class LocalStorage(Storage):
             if root_record.kind is not FileKind.DIRECTORY:
                 return
             strip = len(root_anchor.replace(os.sep, "/"))
+            # The anchor, not the bare root: it names each child the same way
+            # (os.path.join collapses the doubled separator) and it is the path a
+            # failed scan warns about, so this one-level scan and the recursive
+            # walk - which descends from that same anchor - name the scanned
+            # directory identically.
             for _sort_name, info, _loop_key in self._walker.scan_children(
-                root, strip=strip, options=options, notify=notify
+                root_anchor, strip=strip, options=options, notify=notify
             ):
                 info.storage = options.storage
                 if item_filter is None or item_filter(info):
@@ -1396,10 +1414,11 @@ class LocalStorage(Storage):
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized prefix length of the directory being enumerated
         # (root_anchor = root + a sep, the prefix of every child key). One level
-        # down this equals the name.
+        # down this equals the name. The anchor is also what is scanned, so a
+        # failed scan names the scanned directory as the recursive walk would.
         strip = len(root_anchor.replace(os.sep, "/"))
         for _sort_name, info, _loop_key in self._walker.scan_children(
-            root, strip=strip, options=options, notify=notify
+            root_anchor, strip=strip, options=options, notify=notify
         ):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
