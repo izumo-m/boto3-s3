@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `~/.aws/cli/alias` is now read like aws: `[command s3]` entries run as subcommands, internal and external (`!`) alike.
 - Assumed-role, web-identity and SSO credentials are now cached in `~/.aws/cli/cache` like aws, so repeated commands stop re-calling STS and an `mfa_serial` profile no longer prompts — or fails non-interactively — on every run.
+- The credential chain now runs with the command's own settings like aws: `--region` / `AWS_REGION`, the `--cli-*-timeout` values and aws's retry defaults reach the STS and SSO calls it makes, and the cache entry it writes is aws's own form.
+- Malformed S3 listing entries and timestamps the local zone cannot represent now stop `ls` and the transfer commands where aws stops, instead of being silently skipped (exit codes changed).
+- A directory that changes underneath a recursive walk is now warn-skipped like aws instead of aborting the run, so the rest of the tree still transfers.
+- HTTPS proxies that require a standards-form CONNECT tunnel now work on every host interpreter, like aws.
+- `SSLKEYLOGFILE`, `BOTO_DISABLE_CRT` and a configured `us_east_1_regional_endpoint` are now ignored the way aws ignores them, and a config carrying several mistakes reports the one aws reports.
 - `ls` timestamps now match aws byte for byte, including zones whose UTC rules changed and years below 1000, and recursive listings keep the `PRE` lines aws prints.
 - A broken or missing stdout is now reported the way aws reports it (exit codes changed for `mb`, `rb`, `rm`, streaming `cp` and piped listings).
 - More parse-layer parity: a scheme-less `--endpoint-url` starting with a digit, an `--endpoint-url` or `--query` that cannot be parsed at all, and a broken `AWS_MAX_ATTEMPTS` beside a broken `AWS_RETRY_MODE` all now fail the way aws fails, without tracebacks.

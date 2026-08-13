@@ -5,7 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, and a download stamps whole seconds on the local file like aws.
+- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.
+- S3 listings and single-object heads now fail on an entry missing a required element the way aws fails, instead of silently dropping it.
+- A directory replaced or removed while a recursive walk is running is now warned and skipped like `aws s3` instead of failing the whole scan.
 - `guess_mime_type` now guesses from the MIME table of the official aws-cli build on every host interpreter, so the stored `Content-Type` no longer depends on the Python version.
 - A stream destination no longer checks stdout up front or flushes it on completion (aws's writer shape): a missing or failing stdout is a per-item transfer failure.
 - Added `S3ScanOptions.include_common_prefixes`; `ls` uses it to keep prefix entries in recursive listings the way aws displays them.
