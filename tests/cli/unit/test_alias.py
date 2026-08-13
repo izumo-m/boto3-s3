@@ -391,7 +391,13 @@ class TestReportsAndSections:
         # starts with `command ` - that one ASCII space - and nothing here
         # does, so none of them declares an alias at all. Measured: every one
         # is the invalid-choice report on the pinned aws-cli.
-        alias_file.write_text(f"[{header}]\nsay = ls s3://bkt\n")
+        try:
+            alias_file.write_text(f"[{header}]\nsay = ls s3://bkt\n")
+        except UnicodeEncodeError:
+            # Both tools read the alias file with the locale codec; a heading
+            # the codec cannot even write (NBSP on cp932, U+3000 on cp1252)
+            # has no on-disk form on this host to measure.
+            pytest.skip("the locale codec cannot encode this heading")
         assert cli.main(["say"], ctx=unused_ctx()) == 252
         assert "Found invalid choice 'say'" in capsys.readouterr().err
 

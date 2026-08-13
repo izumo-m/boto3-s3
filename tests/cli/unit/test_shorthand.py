@@ -313,9 +313,13 @@ class TestAtEqualsParamfile:
         ref.write_text("loaded")
         with pytest.raises(ValidationError) as excinfo:
             _parse(f"a@={{b=file://{ref}}}")
+        # The report embeds str(dict), whose values render as reprs - on
+        # Windows the path's backslashes come out doubled, so the expectation
+        # must be built the same way, not by interpolating the raw path.
+        value = {"b": f"file://{ref}"}
         assert str(excinfo.value) == (
             "Parameter validation failed:\n"
-            f"Invalid type for parameter a, value: {{'b': 'file://{ref}'}}, "
+            f"Invalid type for parameter a, value: {value}, "
             "type: <class 'dict'>, valid types: <class 'str'>"
         )
 

@@ -810,7 +810,9 @@ class TestLeafRewrittenBeforeItsTurn:
         assert leaf.is_symlink
         assert leaf.stat_result is not None
         assert stat.S_ISLNK(leaf.stat_result.st_mode)
-        assert leaf.size == len(str(tmp_path / "real.txt"))  # the link's own size
+        # The link's own lstat size (0 on Windows, the target-path length on
+        # POSIX) - never the rewritten target's 120 bytes.
+        assert leaf.size == link.lstat().st_size
 
     def test_an_mtime_that_becomes_unrepresentable_warns_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

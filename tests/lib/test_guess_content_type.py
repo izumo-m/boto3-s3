@@ -13,6 +13,7 @@ at once in probes/fixA/p2-all-extension-content-type.py).
 
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,24 @@ from boto3_s3.transfer import _guess_content_type
 
 
 class TestFrozenTable:
+    """The frozen layers alone, host augmentation neutralized.
+
+    `_mime_types` deliberately overlays the Windows registry and the host's
+    mime.types on top of the frozen table (aws's lazy `mimetypes.init` does
+    the same), so a host that happens to map one of these extensions - the
+    GitHub Windows runner's registry maps `.cjs` - would flip the row without
+    any parity being wrong. The fixture pins the cache to a db built from the
+    frozen layers only; `TestHostOverlays` covers the augmentation.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _frozen_layers_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(transfer, "_mime_db", None)
+        monkeypatch.setattr(mimetable, "KNOWNFILES", [])
+        monkeypatch.setattr(
+            mimetypes.MimeTypes, "read_windows_registry", lambda self, strict=True: None
+        )
+
     @pytest.mark.parametrize(
         ("name", "expected"),
         [
