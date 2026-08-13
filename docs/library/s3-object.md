@@ -16,7 +16,7 @@ S3().cp("local.txt", "s3://bucket/key")
 S3(session=None, *, endpoint_url=None, config=None,
    transfer_config=None, reusable_after_interrupt=True,
    crt_allow_absent_credentials=False, crt_allow_lockless=False,
-   crt_region=CLIENT_REGION)
+   crt_region=CLIENT_REGION, crt_sign_requests=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -57,6 +57,14 @@ S3(session=None, *, endpoint_url=None, config=None,
   then refuses to build a client at all. Only reproducing that refusal needs
   it. Like the flag above it does nothing unless
   `TransferConfig.preferred_transfer_client` selects the CRT engine.
+- **`crt_sign_requests`** — whether the CRT transfer engine signs its
+  requests. `None` (the default) derives the answer from the built client,
+  boto3's rule. An explicit `False` builds the CRT client with no credentials
+  provider (nothing is resolved, every CRT request goes out anonymous);
+  `True` forces a provider. Only reproducing `aws s3` needs it — aws's CRT
+  factory decides from its own `sign_request` flag and never from the client,
+  which is how `--no-sign-request --sse aws:kms` transfers anonymously on
+  aws's CRT engine while its classic engine signs.
 
 ## 2. Which client a location uses
 

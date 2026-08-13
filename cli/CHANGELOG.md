@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The credential chain now runs with the command's own settings like aws: `--region` / `AWS_REGION`, the `--cli-*-timeout` values and aws's retry defaults reach the STS and SSO calls it makes, and the cache entry it writes is aws's own form.
 - Malformed S3 listing entries and timestamps the local zone cannot represent now stop `ls` and the transfer commands where aws stops, instead of being silently skipped (exit codes changed).
 - A file or directory that changes underneath a recursive walk is now handled like aws — warn-skipped when it vanishes, descended when a file became a directory, re-read at its turn when rewritten — so the rest of the tree still transfers (exit codes changed in those corners).
-- `--no-sign-request` now yields to `--sse aws:kms` like aws: that combination signs and requires credentials instead of uploading anonymously.
+- `--no-sign-request` now handles `--sse aws:kms` exactly like aws, engine split included: the classic engine signs and requires credentials instead of uploading anonymously, while the CRT engine stays anonymous (it previously signed).
 - An out-of-order S3 listing stops `sync` with one `fatal error:` line instead of a traceback (aws keeps going there; see the differences guide), and `sync --delete` no longer reports spurious delete failures on a local destination aliased through symlinked directories.
 - HTTPS proxies that require a standards-form CONNECT tunnel now work on every host interpreter, like aws.
 - `SSLKEYLOGFILE`, `BOTO_DISABLE_CRT` and a configured `us_east_1_regional_endpoint` are now ignored the way aws ignores them, and a config carrying several mistakes reports the one aws reports.

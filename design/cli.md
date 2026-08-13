@@ -387,7 +387,10 @@ These implement the policy in
   `signature_version=UNSIGNED` in the **session's default client config**
   (`_default_client_config`, where aws's own `no_sign_request` handler puts it -
   which is what leaves the credential chain's STS / SSO clients unsigned too,
-  and what lets a per-client `signature_version` beat it, item 2 below),
+  and what lets a per-client `signature_version` beat it, item 2 below; the
+  CRT transfer lane takes the flag directly instead, as
+  `S3(crt_sign_requests=not args.no_sign_request)` - aws's CRT factory reads
+  its `sign_request` parameter and never the client's signature version),
   `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config` and the session's default client config
   (item 9 below). The assembled client is handed to the
@@ -1645,7 +1648,11 @@ the library. The overall design and the library side (boto3-faithful) are in
   `S3(crt_allow_absent_credentials=True)` (crt.md section 4). The lock
   posture is declared the same way: `S3(crt_allow_lockless=True)` makes an
   explicit `crt` preference build the CRT client even when another process
-  holds the cross-process slot, aws's factory shape (crt.md section 4).
+  holds the cross-process slot, aws's factory shape (crt.md section 4). The
+  signing posture too: `S3(crt_sign_requests=not args.no_sign_request)`
+  mirrors aws's CRT factory, which reads only its `sign_request` parameter -
+  so `--no-sign-request --sse aws:kms` transfers anonymously on the CRT lane
+  while the classic lane signs, exactly aws's engine split (crt.md section 4).
 - **Annotation staging**: `build_transfer_options` always sets the library-only
   `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
   multipart source annotation before creating the destination, matching

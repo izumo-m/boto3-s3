@@ -143,9 +143,14 @@ also read as `'auto'`) with the same rules as boto3.
     `ca_bundle` config variable > `REQUESTS_CA_BUNDLE` > botocore's
     `get_cert_path(True)`), so both engines trust the same roots and every
     CLI client passes the verify half of the compatibility check below
-  - credentials = no provider if `signature_version is UNSIGNED`
-    (`--no-sign-request`), otherwise
-    `BotocoreCRTCredentialsWrapper(client._get_credentials())`
+  - credentials = decided by the `sign_requests` declaration when the caller
+    makes one (aws-cli's `sign_request` parameter: `False` = no provider,
+    `True` = `BotocoreCRTCredentialsWrapper(client._get_credentials())`);
+    undeclared (`None`, the default) derives boto3's rule from the client -
+    no provider if `signature_version is UNSIGNED`, otherwise the wrapper.
+    No new singleton field encodes the mode: `_CrtS3Client.cred_wrapper`'s
+    presence already does, so the compatibility pin rejects a later request
+    declaring the other mode (classic fallback, never a wrong-mode transfer)
   - serializer session = the caller's session (`S3(session=)` ->
     `Transferrer(session=)` -> `create_crt_transfer_manager(session=)`), falling
     back to boto3's default session when one exists, then to a fresh botocore
@@ -318,7 +323,15 @@ credentials`.
 The split of section 1 decides where the difference is absorbed: **the library
 keeps boto3's rule and the CLI opts out of it**, through
 `S3(crt_allow_absent_credentials=True)` (`clientfactory.build_s3`), which
-threads to `create_crt_transfer_manager(allow_absent_credentials=...)`. Two
+threads to `create_crt_transfer_manager(allow_absent_credentials=...)`. The
+signing posture is declared the same way: aws-cli's CRT factory attaches a
+credentials provider on its `sign_request` parameter alone - the per-client
+`Config(signature_version='s3v4')` that `--sse aws:kms` adds reaches its
+botocore client only - so aws itself is inconsistent across engines for
+`--no-sign-request --sse aws:kms` (anonymous on CRT, signed on classic), and
+`build_s3` mirrors both halves by declaring
+`S3(crt_sign_requests=not args.no_sign_request)` while the classic-lane
+signature logic stays as clientfactory resolves it. Two
 properties make that opt-in narrow enough to live in the library:
 
 - it relaxes exactly one branch of the compatibility check - a client with no
