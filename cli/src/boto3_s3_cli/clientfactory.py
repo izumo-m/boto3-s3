@@ -948,9 +948,17 @@ def _create_client(
     mode is judged where botocore judges it - rewording the rejection botocore
     raises, and rejecting the ``legacy`` it lets through, once the client is
     built and every earlier report has had its turn.
+
+    Every client this CLI hands out is created here, which is what makes this
+    the place the CONNECT pin goes on (`proxytunnel`): an HTTPS proxy sees the
+    tunnel request the *host interpreter* writes, and only 3.12 and later write
+    aws's.
     """
     from botocore.exceptions import InvalidRetryModeError
 
+    from boto3_s3_cli import proxytunnel
+
+    proxytunnel.pin_connect_request()
     try:
         client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
     except InvalidRetryModeError:
