@@ -62,6 +62,7 @@ def walk_source_scan_options(
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
     reusable_after_interrupt: bool,
+    read_ahead: bool = True,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
 
@@ -85,14 +86,22 @@ def walk_source_scan_options(
     reach the operation and may fail, block, have device side effects, or be
     deleted by ``mv`` / ``sync --delete`` according to that operation's normal
     behavior. The default ``False`` preserves aws-cli transfer enumeration.
+
+    ``read_ahead`` is the one run-level knob that can only *narrow* the storage's
+    own setting: ``False`` (asked for by an enumeration whose consumer mutates
+    the tree - ``sync_entries`` for a deleting destination) turns the page-ahead
+    overlap off, while ``True`` leaves a backend that seeded ``read_ahead=False``
+    in its ``default_scan_options`` untouched.
     """
+    base = storage.default_scan_options()
     options = replace(
-        storage.default_scan_options(),
+        base,
         recursive=recursive,
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
         reusable_after_interrupt=reusable_after_interrupt,
+        read_ahead=base.read_ahead and read_ahead,
     )
     return options
 
@@ -1166,6 +1175,7 @@ def sync_entries(
     transferrer: Transferrer,
     options: TransferOptions,
     reusable_after_interrupt: bool,
+    deletes_orphans: bool = False,
 ) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
@@ -1180,6 +1190,21 @@ def sync_entries(
     path fetches no owner. Both sides'
     producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
     it and the pair key is taken from it.
+
+    ``deletes_orphans`` says this side is the destination whose orphans the run's
+    delete lane removes as the merge-join streams them - the caller passes it for
+    the destination side of a ``sync --delete``. For a *local* destination that
+    turns the walk's read-ahead off (``ScanOptions.read_ahead``), because the
+    delete lane mutates the very tree being walked: two paths can name one file
+    (a symlinked directory aliasing its target), and a walk running ahead of the
+    deletes would hand out the second path after the first delete already
+    unlinked the file - an ENOENT delete failure, or the walk's own "File does
+    not exist." warning, where aws (which walks lazily and interleaves its
+    deletes) simply never lists it. The other sides keep the overlap: a source
+    walk is not mutated by the run, an S3 destination's orphans go to the batched
+    deleter and its listing is a server-side snapshot either way, and a custom
+    backend owns its key space (one that must not run ahead of its own ``delete``
+    seeds ``read_ahead=False`` in its ``default_scan_options``).
     """
     if isinstance(storage, S3Storage):
         key_prefix = root[len(storage.bucket) + 1 :]
@@ -1200,6 +1225,7 @@ def sync_entries(
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
             reusable_after_interrupt=reusable_after_interrupt,
+            read_ahead=not (deletes_orphans and isinstance(storage, LocalStorage)),
         )
     ):
         yield _compare_key(info), info

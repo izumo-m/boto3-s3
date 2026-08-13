@@ -76,6 +76,26 @@ def sieve_pages(
             yield kept
 
 
+def _pull_pages(
+    pages: Iterator[Sequence[FileInfo]], cancel_token: CancelToken | None
+) -> Iterator[FileInfo]:
+    """Flatten ``pages`` on the calling thread, one page per consumer demand.
+
+    ``Storage.scan``'s ``read_ahead=False`` arm (the ``prefetch`` counterpart):
+    each page is produced only once the consumer has drained the previous one,
+    so a consumer that mutates what it is enumerating - ``sync --delete``
+    removing local orphans as the merge-join streams them - never receives an
+    entry captured before its own change. `cancel_token` is honored where
+    ``prefetch`` honors it: before a page pull, leaving entries already yielded
+    untouched.
+    """
+    while cancel_token is None or not cancel_token.cancelled:
+        page = next(pages, None)
+        if page is None:
+            return
+        yield from page
+
+
 class StorageCapability(Flag):
     """Which transfer operations a ``Storage`` *kind* actually implements.
 
@@ -231,7 +251,12 @@ class Storage(abc.ABC):
         producer and overlaps it with a background ``prefetch`` worker, so the
         next page's I/O (an S3 ``ListObjectsV2`` round-trip, a local ``stat``
         batch) runs while the consumer handles the current page; a producer error
-        surfaces on the consumer's pull. ``options.filter`` is applied here as a
+        surfaces on the consumer's pull. ``options.read_ahead=False`` drops that
+        overlap and pulls each page on the calling thread when the consumer
+        reaches it, for a consumer that mutates what it enumerates (see
+        ``ScanOptions``); the stream is otherwise identical - only the thread
+        the producer, the filter and ``on_warning`` run on changes.
+        ``options.filter`` is applied here as a
         safety net (on the prefetch worker) **unless** the backend declares
         ``scan_pages_filters`` - so a custom backend that does not filter in
         ``scan_pages`` cannot silently leak excluded entries; a backend that
@@ -266,6 +291,9 @@ class Storage(abc.ABC):
         pages = stamped()
         if opts.filter is not None and not self.scan_pages_filters:
             pages = sieve_pages(pages, opts.filter)
+        if not opts.read_ahead:
+            yield from _pull_pages(pages, cancel_token)
+            return
         with prefetch(
             pages,
             queue_size=self._scan_prefetch_pages,

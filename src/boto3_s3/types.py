@@ -213,6 +213,21 @@ class ScanOptions:
     high-level operations overlay it from ``S3(reusable_after_interrupt=...)`` - the
     application declares the posture once there - so it reaches every scan an
     operation starts; set it here only when calling ``Storage.scan`` directly.
+
+    ``read_ahead`` is whether ``scan`` may read pages ahead of the consumer.
+    ``True`` (the default) runs the page producer on a background worker, so the
+    next page's I/O overlaps the current page's consumption. ``False`` pulls each
+    page on the consuming thread at the moment the consumer reaches it - the mode
+    for a consumer that **mutates the container it is enumerating**, where a page
+    read early would describe state that consumer has since changed. ``sync
+    --delete`` sets it on the local destination walk for exactly that reason: the
+    walk must see the orphans it has already deleted as gone (aws lists its
+    destination lazily too, so a file reached through one path and deleted is
+    never listed again under another - a symlinked self-alias names one file
+    twice). It costs the enumeration's I/O overlap, so leave it on everywhere
+    else. A backend whose own listing must never run ahead of its consumer can
+    seed ``False`` in ``default_scan_options``; the high-level operations only
+    ever narrow it (they never turn a backend's own ``False`` back on).
     """
 
     recursive: bool = False
@@ -220,6 +235,7 @@ class ScanOptions:
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
     reusable_after_interrupt: bool = True
+    read_ahead: bool = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

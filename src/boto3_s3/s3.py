@@ -1866,6 +1866,10 @@ class S3:
                 transferrer=transferrer,
                 options=options,
                 reusable_after_interrupt=self._reusable_after_interrupt,
+                # The delete lane removes this side's orphans while this same
+                # listing is still running, so a walked destination must not be
+                # read ahead of it (see sync_entries).
+                deletes_orphans=delete_decide is not None,
             )
 
             def _close_scans(
