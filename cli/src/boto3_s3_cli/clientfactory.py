@@ -190,6 +190,26 @@ class _RegionalS3Section:
         pinned["us_east_1_regional_endpoint"] = "regional"
         return pinned
 
+    def set_default_provider(self, key: str, default_provider: Any) -> None:
+        """Pass botocore's smart-defaults write through to the wrapped provider.
+
+        A ``defaults_mode`` other than ``legacy`` - the config key or
+        ``AWS_DEFAULTS_MODE`` - sends botocore's smart-defaults machinery at
+        the ``[s3]`` section provider with
+        ``set_default_provider('us_east_1_regional_endpoint', ...)``, on a
+        deepcopy of whatever the config store holds. A wrapper answering only
+        ``provide()`` therefore failed *every* command at rc 255 with
+        ``'_RegionalS3Section' object has no attribute 'set_default_provider'``
+        where aws - whose bundled botocore has no defaults modes at all -
+        simply ran (measured for every valid mode, config key and env var
+        alike). Delegating leaves botocore's own bookkeeping intact; the value
+        it writes for that key is ``regional``, which is what `provide` pins
+        anyway, so the pin still decides. A wrapped provider that has no such
+        method fails exactly as the unwrapped one would, with the wording
+        botocore itself would produce.
+        """
+        self._section_provider.set_default_provider(key, default_provider)
+
 
 def _pin_regional_s3_endpoint(session: BotocoreSession) -> None:
     """Wrap the session's ``[s3]`` section provider in `_RegionalS3Section`.
@@ -250,12 +270,23 @@ def _default_client_config(args: argparse.Namespace) -> Any:
     ``--cli-read-timeout 2`` against an STS stalling 8s is rc 255 and a read
     timeout on aws, and was rc 254 with the server's own error here).
 
-    The clients this module builds pass the same two values in their own
+    ``--no-sign-request`` lands in the very same config, from aws's
+    ``no_sign_request`` handler, and that placement is load-bearing twice
+    over. It reaches the clients botocore builds for itself, so an unsigned
+    run that still resolves credentials sends an *unsigned* ``AssumeRole``
+    (measured: with a working assume-role profile,
+    ``cp --no-sign-request --sse aws:kms`` has aws call STS unsigned and then
+    sign the upload with what it got back). And being the session *default*
+    is what lets a per-client ``signature_version`` beat it, which is how
+    ``--sse aws:kms`` restores signing (`_sends_unsigned_requests`).
+
+    The clients this module builds pass the same two timeouts in their own
     ``Config`` as well, which botocore merges on top of this one - the same
     number either way. The read timeout is coerced first, aws's registration
     order (`resolve_cli_timeouts`), so a run with both values broken reports
     the same one aws reports.
     """
+    from botocore import UNSIGNED
     from botocore.config import Config
     from botocore.endpoint import DEFAULT_TIMEOUT
 
@@ -269,7 +300,10 @@ def _default_client_config(args: argparse.Namespace) -> Any:
         if args.cli_connect_timeout is None
         else _coerce_cli_timeout(args.cli_connect_timeout)
     )
-    return Config(connect_timeout=connect, read_timeout=read)
+    overrides: dict[str, Any] = {}
+    if args.no_sign_request:
+        overrides["signature_version"] = UNSIGNED
+    return Config(connect_timeout=connect, read_timeout=read, **overrides)
 
 
 def _credential_cache_dir() -> str:
@@ -477,7 +511,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     session = build_session(args)
     botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
     region = _resolve_region(args.region, botocore_session)
-    _bind_region(botocore_session, region)
+    _bind_region(botocore_session, args.region, region)
 
     class CliS3(S3):
         def client(self) -> S3Client:
@@ -521,18 +555,33 @@ def build_s3(args: argparse.Namespace) -> S3:
 
 
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
-    """The region to build the client in, via aws-cli's region chain.
+    """The region to build a client in: the *explicit* value, else the chain.
 
-    Mirrors aws-cli's ``_construct_cli_region_chain``: the *explicit* value
-    (``--region``, or the caller's region for ``build_service_client``) >
+    The *explicit* value is ``--region``, or the caller's region for
+    ``build_service_client`` - and it wins whenever it was supplied at all,
+    the empty string included. aws's s3 commands hand ``parsed_globals.region``
+    straight to ``create_client``, so ``--region ""`` reaches the S3 client as
+    itself and fails construction there on both tools (rc 255). What the
+    *session* is bound to is a different question with a different answer for
+    that one value - see `_bind_region`.
+    """
+    if explicit is not None:
+        return explicit
+    return _region_chain(session)
+
+
+def _region_chain(session: BotocoreSession) -> str | None:
+    """aws-cli's region chain below the flag.
+
+    Mirrors the tail of aws-cli's ``_construct_cli_region_chain``:
     ``AWS_REGION`` env > ``AWS_DEFAULT_REGION`` env > the profile's config-file
     ``region`` > the EC2 IMDS region. Stock botocore never adopted ``AWS_REGION``
     (its region env is ``AWS_DEFAULT_REGION`` alone) and reserves its
     ``IMDSRegionProvider`` for smart-defaults, so a bare client would resolve a
     *different* region whenever ``AWS_REGION`` is the only source, or on an EC2
     host with no region configured. The env vars are present-wins, an empty value
-    included (``AWS_REGION=`` -> ``""`` -> the same ``Invalid endpoint`` failure
-    as aws, rc 255). Only the CLI corrects this; the library
+    included (``AWS_REGION=`` -> ``""``, which aws signs with and this CLI walked
+    past). Only the CLI corrects this; the library
     (``S3.client``'s ``boto3.client`` fallback) keeps stock botocore order on
     purpose - the same library=boto3 / CLI=aws split as the profile chain.
 
@@ -544,8 +593,6 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     invocation (rc 255) where aws logs it and walks on with an unresolved
     region.
     """
-    if explicit is not None:
-        return explicit
     # Import the providers only when region resolution needs them.
     from botocore.configprovider import (
         ChainProvider,
@@ -572,8 +619,10 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         return None
 
 
-def _bind_region(botocore_session: BotocoreSession, region: str | None) -> None:
-    """Bind the invocation's region onto the session, as aws's driver does.
+def _bind_region(
+    botocore_session: BotocoreSession, explicit: str | None, resolved: str | None
+) -> None:
+    """Bind onto the session the region aws's own chain answers.
 
     aws installs its region chain as the session's own ``region`` config
     provider and binds a truthy ``--region`` at the head of it
@@ -587,14 +636,30 @@ def _bind_region(botocore_session: BotocoreSession, region: str | None) -> None:
     under ``cn-*`` / ``us-gov-*`` - or failed outright with ``NoRegion``
     (measured: rc 253 where aws exits 0).
 
-    Binding the chain's already-resolved answer rather than re-installing the
-    chain keeps its cost at one walk per invocation (its last link is the IMDS
-    probe). Nothing is bound when the chain resolved nothing, which is aws's
-    own truthy guard, and leaves the session on botocore's identical answer;
-    the empty string ``AWS_REGION=`` can resolve to fails client construction
-    on both tools before any credential is fetched.
+    What binds is not what the client is built with. Only a *truthy*
+    ``--region`` heads aws's chain, so a falsy ``--region ""`` leaves the rest
+    of the chain to answer for the session while the empty string still reaches
+    the S3 client as its own ``region_name`` (`_resolve_region`): measured,
+    ``--region ""`` with ``AWS_REGION=eu-west-1`` has aws sign ``AssumeRole``
+    in eu-west-1 where this CLI exited 253 with ``NoRegion`` and called STS not
+    at all. An ``AWS_REGION=`` that is present but empty is the chain's own
+    answer and binds as itself - aws signs with an empty region scope, where
+    this CLI walked on to ``AWS_DEFAULT_REGION`` and the profile and signed in
+    a region aws never used.
+
+    *resolved* is the answer `_resolve_region` already computed for the same
+    flag, so the chain - whose last link is the IMDS probe - is walked once per
+    invocation. Only the falsy-flag corner asks it again, no client's region
+    being able to carry that answer. Nothing is bound when the chain resolved
+    nothing, which leaves the session on botocore's identical answer.
     """
-    if region:
+    if explicit:
+        region = explicit
+    elif explicit is None:
+        region = resolved
+    else:
+        region = _region_chain(botocore_session)
+    if region is not None:
         botocore_session.set_config_variable("region", region)
 
 
@@ -659,18 +724,18 @@ def build_service_client(
     ``_resolve_region`` chain (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` >
     config > IMDS), and by binding the same answer onto a session this builder
     opened itself (`_bind_region`). aws likewise resolves
-    ``--cli-read-timeout`` / ``--cli-connect-timeout`` and ``--no-sign-request``
-    into the *session* default client config at startup, so ``from_session``'s
-    ``create_client`` inherits them; fold the same timeouts and the UNSIGNED
-    signature into this client's ``Config``. The retry posture arrives through
-    the session as well (`_open_botocore_session`), so this client is created
-    through the shared `_create_client`.
+    ``--cli-read-timeout`` / ``--cli-connect-timeout`` into the *session*
+    default client config at startup, so ``from_session``'s ``create_client``
+    inherits them; fold the same timeouts into this client's ``Config``.
+    ``--no-sign-request`` and the retry posture arrive through the session
+    itself (`_default_client_config`, `_open_botocore_session`), which is
+    where aws puts them too, so this client is created through the shared
+    `_create_client`.
     """
     # Deferred like build_client: only a command that opts into path
     # resolution (mv's --validate-same-s3-paths, which builds both resolver
     # clients regardless of the path shapes) pays the boto3 import.
     import boto3
-    from botocore import UNSIGNED
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
@@ -689,15 +754,18 @@ def build_service_client(
                 timestamp_parser=fast_parse_timestamp
             )
             session = boto3.Session(botocore_session=botocore_session)
-            _bind_region(botocore_session, _resolve_region(args.region, botocore_session))
+            _bind_region(
+                botocore_session, args.region, _resolve_region(args.region, botocore_session)
+            )
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
-        # aws's startup handlers thread the timeouts / UNSIGNED signature
-        # through the session default config that from_session's create_client
-        # inherits (build_client mirrors the same).
+        # aws's startup handlers thread the timeouts through the session
+        # default config that from_session's create_client inherits
+        # (build_client mirrors the same); the UNSIGNED signature arrives
+        # through that config too, so this client never names one - which is
+        # what keeps `mv`'s resolver clients anonymous under
+        # --no-sign-request even when --sse aws:kms signs the transfer.
         service_overrides: dict[str, Any] = {}
-        if args.no_sign_request:
-            service_overrides["signature_version"] = UNSIGNED
         if args.cli_read_timeout is not None:
             service_overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
         if args.cli_connect_timeout is not None:
@@ -809,6 +877,30 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     )
 
 
+def _sends_unsigned_requests(args: argparse.Namespace) -> bool:
+    """Whether this run's S3 client is the anonymous one ``--no-sign-request`` asks for.
+
+    aws leaves UNSIGNED where its startup handler put it - the session default
+    client config (`_default_client_config`) - and names a per-client
+    ``signature_version`` in exactly one case: ``--sse aws:kms``, for which its
+    ``ClientFactory.create_client`` passes ``Config(signature_version='s3v4')``.
+    botocore merges the per-client config on top of the session's, so that one
+    case signs, resolves credentials, and reaches the credential chain, while
+    every other unsigned run stays anonymous. Measured without credentials:
+    ``cp``/``mv``/``sync``/``cp s3://.. s3://..`` with
+    ``--no-sign-request --sse aws:kms`` are rc 1 ``Unable to locate
+    credentials`` and send nothing under aws (this CLI uploaded anonymously,
+    rc 0), and a broken ``source_profile`` under the same flags is aws's
+    rc 255 profile report; ``--sse AES256`` and ``--sse-c AES256`` upload
+    anonymously on both.
+
+    ``--sse`` belongs to the transfer family alone, hence the ``getattr``, and
+    the comparison is aws's own exact string - ``aws:kms:dsse`` gets no
+    per-client config there either.
+    """
+    return bool(args.no_sign_request) and getattr(args, "sse", None) != "aws:kms"
+
+
 def build_client(
     args: argparse.Namespace,
     *,
@@ -823,22 +915,22 @@ def build_client(
     ``AWS_DEFAULT_REGION`` > config > IMDS - ``_resolve_region``), unless
     *region* supplies the chain's already-computed answer (what `build_s3`
     threads in so one invocation walks the chain - and its IMDS probe - once);
-    ``--endpoint-url``, the timeouts, and ``--no-sign-request`` map to client
-    kwargs / a botocore ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
+    ``--endpoint-url`` and the timeouts map to client kwargs / a botocore
+    ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
     the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
     value so both transfer engines trust the same roots). Every client also
     carries aws's S3 error-message rewriter (`s3errormsg`). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
 
-    The retry posture and the ``[s3]`` regional pin are not client kwargs at
-    all: they belong to the session (`_open_botocore_session`), which is what
-    puts the clients botocore builds for itself on them too.
+    ``--no-sign-request``, the retry posture and the ``[s3]`` regional pin are
+    not client kwargs at all: they belong to the session
+    (`_default_client_config`, `_open_botocore_session`), which is what puts
+    the clients botocore builds for itself on them too.
     """
     # Importing boto3 drags in botocore and s3transfer. The informational exits
     # (`--version`, the help token) return before this normal-dispatch path.
     import boto3
-    from botocore import UNSIGNED
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
@@ -870,11 +962,13 @@ def build_client(
     # Outposts) surfaces botocore's own MissingDependencyException
     # (-> ConfigurationError, 253) instead of a silently mis-signed SigV4
     # request.
+    # The pin also stands down for an anonymous run (`_sends_unsigned_requests`),
+    # where the UNSIGNED signature waiting in the session default client config
+    # is what must reach the client - a per-client signature_version, this pin
+    # included, beats it in botocore's merge.
     overrides: dict[str, Any] = {}
-    if not _includes_endpoint_auth_path(args):
+    if not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args):
         overrides["signature_version"] = "s3v4"
-    if args.no_sign_request:
-        overrides["signature_version"] = UNSIGNED
     # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
     # and are coerced here, aws-cli-style: int() with a 0 -> None ("no timeout")
     # sentinel, a bad value mapped to rc 255 rather than a parse-time rc 252.
@@ -905,7 +999,7 @@ def build_client(
         client_region = (
             _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
         )
-        _bind_region(botocore_session, client_region)
+        _bind_region(botocore_session, args.region, client_region)
         client = _create_client(
             session,
             botocore_session,
