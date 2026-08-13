@@ -68,6 +68,19 @@ front only when the declaration is honest:
   pages and overlaps them with a background prefetch worker; `cancel_token`
   stops the prefetch producer before its next page pull.
 
+  **`ScanOptions(read_ahead=False)`** drops that overlap: each page is pulled on
+  the calling thread when the consumer reaches it, and `options.filter` and
+  `options.on_warning` then run there too. The cancel point is the same one (a
+  page pull), and the stream of entries is unchanged - only the timing and the
+  thread differ. Its reason is a consumer that mutates what it is enumerating:
+  `sync --delete` walking a **local destination** deletes the orphans the
+  merge-join hands it while the same walk is still running, so a page read ahead
+  could describe a file the run has since removed. Nothing else asks for it -
+  `sync` narrows the option for a `LocalStorage` destination of a deleting run
+  only - and a backend that must never list ahead of its own `delete` can seed
+  `read_ahead=False` in its `default_scan_options`, which the operations narrow
+  but never widen.
+
   **A producer that fails part-way through a page** should yield what it has
   already built and only then raise: `scan`'s prefetch re-raises a producer
   error after the chunks it had queued are consumed, so the entries ahead of
@@ -270,7 +283,12 @@ of deep inside the run:
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination.
+manufacture phantom pairs and, with `--delete`, corrupt the destination. The
+promise is checked as the merge consumes it rather than taken on trust: the
+first strict descent on either side raises `ValidationError` and ends the run
+(`comparator._byte_ordered`; the check is unconditional, so `python -O` keeps
+it), which is also what an S3-compatible endpoint returning an unsorted
+`ListObjectsV2` runs into.
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee

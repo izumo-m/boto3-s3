@@ -59,7 +59,13 @@ apply it in `scan_pages` and set `scan_pages_filters = True` to skip the
 redundant second pass.
 
 The predicate runs on the prefetch worker thread. Keep that in mind if your
-implementation shares state.
+implementation shares state. The one exception is a scan with
+`ScanOptions.read_ahead` off, where the pages — and so the predicate — are
+pulled on the consuming thread instead. That is for a listing whose consumer
+mutates what is being enumerated: if your backend must never list ahead of its
+own `delete`, seed `read_ahead=False` in `default_scan_options` and the
+operations will keep it off. `sync`'s own opt-out is narrower — it applies only
+to a `LocalStorage` destination whose orphans it is deleting.
 
 ## 3. Capabilities
 
@@ -81,10 +87,12 @@ The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 
 **`SORTABLE_SCAN` is not optional for `sync`.** Its pairing walks both listings
 in UTF-8 byte order; an unsorted listing manufactures pairs that do not exist
-and, with `delete_filter`, deletes objects that were never orphans. `sync` is
-the only order-sensitive consumer — recursive `cp` and `mv` take entries in
-whatever order you yield them, so a plain `SCAN` backend needs no ordering
-guarantee at all.
+and, with `delete_filter`, deletes objects that were never orphans. Declaring
+the flag and then yielding out of order does not do that silently: the merge
+raises `ValidationError` at the first key smaller than the one before it and the
+run stops there. `sync` is the only order-sensitive consumer — recursive `cp`
+and `mv` take entries in whatever order you yield them, so a plain `SCAN`
+backend needs no ordering guarantee at all.
 
 The gates are also callable directly, so an application can check before it
 starts: `storage.supports(needed)` and `storage.missing_capabilities(needed)`,

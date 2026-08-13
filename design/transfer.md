@@ -16,7 +16,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` (its backend knowledge stays narrow: the `LocalStorage` `isinstance` for the fsync barrier, section 11) |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
 | `mimetable.py` | Generated data: CPython 3.14's built-in `mimetypes` tables, the ones the official `aws` distribution guesses an upload's `ContentType` from (it is frozen against that interpreter). `transfer.py` builds its own `mimetypes.MimeTypes` from them - plus the same live overlays `mimetypes.init` applies, the Windows registry and the existing `knownfiles` - so the guess is the shipped distribution's on every supported interpreter instead of the running one's (3.10 knows no `.php`, 3.15 re-types `.texinfo`), the same pin the CLI applies to argparse behaviour that moved between releases ([`cli.md`](./cli.md) section 2) |
-| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
+| `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `restat_leaf` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning fields and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock. The design is in [`crt.md`](./crt.md) |
@@ -209,6 +209,23 @@ chain:
   the source. This mirrors aws-cli's own double-failure outcome rather than
   being a gap to close - the exit-code charter (overview.md section 3) is what
   requires reproducing it, not just tolerating it.
+- **Where that tagging write sits relative to the annotation writes**
+  (`all`, multipart, a tag set too large for the create header - recorded, not
+  fixed): aws-cli writes both from `on_done` subscribers registered tags-first,
+  so its PutObjectTagging goes out ahead of its PutObjectAnnotation calls,
+  while here the annotations ride upstream s3transfer's native write path
+  inside the CompleteMultipartUpload task, which finishes before any
+  subscriber's `on_done` - so the tagging write goes out last. The same
+  requests are sent, and the console lines and the exit code are the same; only
+  the order differs, and so does the destination in exactly one corner. When
+  the tagging write fails and the rollback delete succeeds, both tools leave no
+  destination object. When the rollback delete fails too (the bullet above,
+  rc 0 on both), the surviving object carries the copied annotations here and
+  carries none on aws-cli, which had not written them yet - aws-cli's
+  annotations subscriber sees a future already settled with the tagging failure
+  and writes nothing. Moving the write point would mean giving up upstream's
+  native path, which is what carries the annotations at all; recorded for the
+  reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
 - **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
   of `all` appends `_ExcludeAnnotationDirective` (aws-cli's
   ExcludeAnnotationDirectiveSubscriber), sending `AnnotationDirective=EXCLUDE`
@@ -243,7 +260,13 @@ chain:
   s3transfer >= 0.19, so its `_apply_annotations` still performs
   PutObjectAnnotation with `ObjectIfMatch` pinned to the new ETag. A partial
   destination write failure names succeeded/failed annotations and performs
-  **no destination rollback**, matching aws-cli's AnnotationCopyError outcome;
+  **no destination rollback** - aws-cli's AnnotationCopyError outcome, and its
+  wording too: the reported sentence is rebuilt to aws's
+  (`_align_annotation_copy_error`), because upstream keeps the per-name
+  outcomes only as formatted text inside the exception it raises, so they are
+  recorded as each PutObjectAnnotation returns or fails and re-worded from
+  that record. The exception type upstream raises is reused, so the taxonomy
+  translation and the exit code are unchanged; only the text moves.
   s3transfer additionally attempts a harmless AbortMultipartUpload after the
   upload has already completed. When the source HeadObject supplied a
   `VersionId`, preload list/get calls pin it like aws-cli. The boto3-s3 CLI
@@ -264,9 +287,9 @@ chain:
   never touches `AnnotationDirective` on that path either).
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
-  guarded spots, realigns two of upstream's tables at manager build - the
-  same idempotent-mutation pattern as the IfNoneMatch patch - and flips one
-  request parameter per copy):
+  guarded spots, realigns two of upstream's tables and one of its methods at
+  manager build - the same idempotent-mutation pattern as the IfNoneMatch
+  patch - and flips one request parameter per copy):
   upstream 0.19 grew its own multipart copy-props handling -
   it strips the seven injected properties from CreateMultipartUpload unless
   `MetadataDirective` is REPLACE, and blacklists inline `Tagging` from the
@@ -303,6 +326,17 @@ chain:
   (`_align_annotation_put_args`): `all`'s annotation writes ride upstream's
   native path, which would forward the copy's checksum algorithm onto every
   PutObjectAnnotation, while aws-cli maps only `RequestPayer` there.
+  **The annotation write path is wrapped so a partial failure reads as aws's**
+  (`_align_annotation_copy_error`): upstream formats the succeeded and failed
+  names straight into its own exception message and keeps no structured record
+  of them, so the destination client is stood in for during that one call to
+  capture each outcome, and the exception is re-raised with aws-cli's
+  `AnnotationCopyError` sentence. Like the table patches it is
+  process-shared and stays inert for a plain s3transfer caller - the wrapping
+  and the re-wording happen only for a copy carrying this module's own
+  annotation subscriber - and both lookups are `getattr` guards, so an upstream
+  that reshapes or drops the private write path degrades to upstream's own
+  wording rather than failing at manager build.
   s3transfer 0.19's own
   `TaggingDirective`-driven tag copy is deliberately not used: it has no
   destination rollback when the tagging write fails. Its post-complete
@@ -520,6 +554,25 @@ dest-existence check for download. We ported the same three faces:
   battery runs on the path as given, separator and all, and the walk continues;
   when the battery finds nothing wrong the `OSError` propagates instead, so
   nothing is ever pruned silently.
+- **a leaf that changes between its parent's scan and its own turn** - the other
+  direction of the same race, and the one aws-cli spends a second syscall on per
+  name (`os.path.isdir` then `_safely_get_file_stats`, both in its descent loop).
+  `LocalFileGenerator.restat_leaf` is that one `os.stat`, taken just before the
+  leaf is emitted - after every earlier sibling's whole subtree has been read -
+  and it decides three outcomes. Gone: the `File does not exist.` battery runs on
+  the path and the leaf is dropped (rc 2) rather than submitted and failed at
+  open (rc 1). A directory by now: the record comes back promoted
+  (`promoted_directory`) and the walk descends it, so its children are
+  transferred and `--dryrun` previews them - addressed by the **bare** name the
+  leaf sorted under, since the separator-terminated addressing above belongs to
+  names that were directories at scan time, which is also where the subtree
+  lands in the emitted order. Still a leaf: `size` / `mtime` / `stat_result` are
+  refreshed from that stat, so what is uploaded and what `sync` compares is the
+  file as of its turn rather than as of the scan. The cost is that one extra
+  `os.stat` per leaf. A record classified from a link's own stat (`S_IFLNK` - the
+  complete no-follow view, or an lstat-style `entry_stat_result` override) is
+  returned untouched, so a link stays that walker's own leaf; and a walker whose
+  children are not live filesystem paths overrides the seam to `return info`.
 - **fd-relative walk boundary fallback**: the fast walk vets each entry through
   the owning directory's fd (`fstatat`/`openat`, `localstorage.py`'s
   `have_dir_fd` path), which re-anchors resolution one level at a time and so

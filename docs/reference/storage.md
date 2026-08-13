@@ -161,9 +161,8 @@ raised by the producer surfaces on the consumer's pull.
 the base knobs must arrive on its own `ScanOptions` subclass; the built-ins
 reject a foreign options type.
 
-`cancel_token` ([`./results.md`](./results.md)) stops the prefetch producer
-before its next page pull. Entries already yielded to the consumer are
-unaffected.
+`cancel_token` ([`./results.md`](./results.md)) stops the producer before its
+next page pull. Entries already yielded to the consumer are unaffected.
 
 Two things happen between the producer and the consumer. Each entry whose
 `storage` is still `None` is stamped with this backend — a safety net for a
@@ -171,6 +170,11 @@ Two things happen between the producer and the consumer. Each entry whose
 always sees the producing backend. Then, unless the class declares
 `scan_pages_filters`, `options.filter` is applied page by page on the prefetch
 worker; a page emptied by the predicate is dropped rather than yielded empty.
+
+`ScanOptions(read_ahead=False)` ([`./options.md`](./options.md)) drops the
+overlap: each page is pulled on the calling thread when the consumer reaches
+it, and the stamping, the filter and `on_warning` run there too. The entries and
+the cancel point are the same; only the timing and the thread change.
 
 ### scan_pages(options)
 
@@ -325,7 +329,9 @@ its instance — how this particular source is read, set once on the constructor
 `enumerate_all_entries`, `S3Storage` seeds `page_size` / `fetch_owner`. The
 high-level operations build from this value and overlay only the run-level
 knobs, so a storage's configuration reaches every operation, not just an
-arg-less `scan()`.
+arg-less `scan()`. `read_ahead` is seeded here too by a backend whose listing
+must never run ahead of its own `delete`, and it is the one knob the operations
+only narrow: an overlay can turn the overlap off but never back on.
 
 ### supports(needed)
 
@@ -344,7 +350,9 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.**
+honor `sort=True`; nothing else promises any order.** The promise is checked as
+`sync` consumes it: a stream that descends raises `ValidationError` from the
+merge rather than mis-pairing ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it
@@ -1067,6 +1075,21 @@ class LocalFileGenerator:
         detector: LoopDetector | None,
         sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]: ...
+    def restat_leaf(
+        self,
+        path: str,
+        info: LocalFileInfo,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None: ...
+    def promoted_directory(
+        self,
+        info: LocalFileInfo,
+        st: os.stat_result,
+        *,
+        is_symlink: bool,
+    ) -> LocalFileInfo: ...
     def root_info(
         self,
         root: str,
@@ -1154,19 +1177,22 @@ here exactly when it falls back there.
 
 **The override seams, finest first.** Extend at the smallest layer that fits:
 `should_ignore_entry` (one entry's vetting), `entry_stat_result` (the one stat
-per entry), `stat_info` and `dir_child` (one entry's `LocalFileInfo`),
-`classify_child` (one directory entry to a `WalkChild` or a skip),
-`finalize_children` (a directory's children as a whole),
-`scan_children` (how a directory is read), `walk_dir` (how the tree is
-descended), `list_file_pages` (the paged entry point), `list_files` (the flat
-one).
+per entry at scan time), `stat_info`, `dir_child` and `promoted_directory` (one
+entry's `LocalFileInfo`), `classify_child` (one directory entry to a
+`WalkChild` or a skip), `finalize_children` (a directory's children as a
+whole), `scan_children` (how a directory is read), `restat_leaf` (one leaf as
+it is at the moment it is emitted), `walk_dir` (how the tree is descended),
+`list_file_pages` (the paged entry point), `list_files` (the flat one).
 
-Two invariants an override must preserve. `compare_key` is stamped in
+Three invariants an override must preserve. `compare_key` is stamped in
 `scan_children`, before `finalize_children` runs, so any injected child needs
 its own `compare_key` stamped as `info.key[strip:]`. `FileInfo.storage` is
 *not* the walker's to set — `list_file_pages` stamps the producing backend on
 each yielded page, before the visibility filter — so an override shapes the
-subtree from `compare_key`, `key` and `kind`, not from a backend handle.
+subtree from `compare_key`, `key` and `kind`, not from a backend handle. And a
+child injected as a leaf is stat'ed again by `restat_leaf` when its turn comes,
+so one that is not a live filesystem path needs that seam overridden too —
+otherwise the yield-time stat fails and warn-skips it as missing.
 
 ### list_files(root, options)
 
@@ -1211,6 +1237,13 @@ in full, its files collected into a run, and the run handed off as one page just
 before descending into each sub-directory — via `self.walk_dir`, so an override
 applies at every level.
 
+Each leaf is re-stat'ed through `restat_leaf` just before its turn, since a name
+classified when its parent was scanned may have changed while the earlier
+siblings' subtrees were being read: one that is gone is warn-skipped, one that
+has become a directory is descended — by the bare name it sorted under, the
+separator being appended only to names that were directories at scan time — and
+one that is still a leaf carries the size and mtime it has at that moment.
+
 `dir_path` has already been vetted, by `list_file_pages` for the root and by
 the parent's `scan_children` for a child. `strip` is the prefix length of the
 directory passed to `list_file_pages` and stays constant across the recursion;
@@ -1225,6 +1258,40 @@ Override it and return early for a directory to prune its subtree, or
 re-implement the loop to cap depth — preserving the depth-first byte order
 `sync`'s merge-join relies on. `compare_key` stamping and `options.filter` are
 not this method's job.
+
+### restat_leaf(path, info, \*, options, notify)
+
+One already-classified leaf as it is at the moment `walk_dir` emits it, or
+`None` to drop it — the walk's second and last stat of a leaf, and the one the
+AWS CLI takes per name in its own descent loop. Returns the record to yield.
+
+A single `os.stat` on `path` decides three outcomes. It fails: the
+`triggers_warning` battery runs on the path — normally "File does not exist.",
+a warning and exit code 2 — and the leaf is dropped whether or not the battery
+found anything, so a stale record is never submitted for a transfer that would
+then fail to open it. It reports a directory: the returned record is the
+promoted directory (`promoted_directory`), which `walk_dir` descends, so the
+children of a name swapped for a directory are transferred rather than the name
+being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
+`stat_result` refreshed from this stat, which is where the AWS CLI takes every
+leaf's size and timestamp, so what is transferred and what `sync` compares is
+the file as of its turn. An mtime that has become unrepresentable stamps
+`EPOCH_TIME` as `stat_info` does, and warns unless the scan's stat was already
+unrepresentable, so one file draws one warning rather than two.
+
+`is_symlink` is left as classified — re-testing it would cost a second syscall
+per leaf. A record whose classification stat is a symlink's own (the complete
+no-follow view, or an lstat-style `entry_stat_result` override) is returned
+untouched, so a walker that keeps a link as its own leaf is not contradicted by
+a followed re-stat. A name that has become a symlink to a directory while
+symlinks are not followed emits nothing in the normal view — the AWS CLI
+descends it and its own recursion then drops it silently — while the complete
+view keeps the leaf record it already has.
+
+Override it to `return info` in a walker whose `scan_children` yields entries
+that are not live filesystem paths, which saves the syscall and is what keeps
+synthetic children in the stream. The reverse race — a directory that stopped
+being one — belongs to `scan_children` instead.
 
 ### root_info(root, \*, options, notify)
 
@@ -1292,12 +1359,16 @@ probe with it.
 
 ### entry_stat_result(entry)
 
-The walk's **one** stat snapshot per entry, and a single-point override seam.
-`classify_child` calls it once and threads the result through everything
-downstream — the vetting, the file-versus-directory decision, the size and
-mtime, the loop key, and the stored `stat_result`. The default reads the
-directory entry's cache, one syscall for the whole entry, and returns the
-**followed** stat, so the walk follows symlinks like `aws s3`.
+The **scan's** stat accessor — one snapshot per entry, and a single-point
+override seam. `classify_child` calls it once and threads the result through
+everything downstream — the vetting, the file-versus-directory decision, the
+size and mtime, the loop key, and the stored `stat_result`. The default reads
+the directory entry's cache, one syscall for the whole entry, and returns the
+**followed** stat, so the walk follows symlinks like `aws s3`. It is not the
+yield-time accessor: a leaf is stat'ed once more when its turn comes
+(`restat_leaf`, which leaves a record classified from a link's own stat alone
+and so keeps an lstat-based walk's rule). Override that one too for a walk whose
+every stat must come from one place.
 
 Override it to return the link's own lstat and the walk turns lstat-based in
 one place, still one syscall: a symlink then surfaces as its own entry, a
@@ -1336,6 +1407,16 @@ key ending in `/` (the appended separator is folded with the rest of the path),
 and a `loop_key` of `(st_dev, st_ino)` — `None` when the inode number is zero,
 which some FAT, exFAT and FUSE volumes report, so loop detection fails open
 there.
+
+### promoted_directory(info, st, \*, is_symlink)
+
+Builds the `DIRECTORY`-kind record for a leaf that `restat_leaf` found to be a
+directory at its turn — the yield-time counterpart of `dir_child`, from the same
+re-stat. `st` is the followed stat, and the key and `compare_key` are the leaf's
+plus the separator the sort appends to a directory, so the subtree lands where
+the leaf sorted rather than where a directory of that name would have. `info` is
+the leaf record the scan built, and `is_symlink` says whether the name is a link
+now — the walk knows only that it was not one at scan time.
 
 ### symlink_child(entry, full, \*, notify)
 
@@ -1403,10 +1484,16 @@ still warns "not readable".
 ### stat_info(entry, full, st, notify)
 
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
-took. It never fails: the race case was handled upstream, and an mtime the
-host's local zone cannot represent — the AWS CLI's own test, as above — keeps
-the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
+took, at scan time. It never fails: the race case was handled upstream, and an
+mtime the host's local zone cannot represent — the AWS CLI's own test, as
+above — keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
 `stat_result` and the entry's symlink flag.
+
+Of what this stamps, `size`, `mtime` and `stat_result` are refreshed by
+`restat_leaf` when the leaf's turn comes, which is where the AWS CLI takes them;
+everything else survives to the stream. So an override that *rewrites* those
+three rather than adding to the record pairs with that seam, while a link leaf
+and a non-recursive scan keep the record built here as it is.
 
 ## WalkChild
 

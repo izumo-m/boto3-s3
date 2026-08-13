@@ -16,10 +16,13 @@ Under the same arguments and configuration you get **the same resulting S3
 state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a transfer whose connection
-dies below the HTTP layer, a download body cut mid-stream, a plain-HTTP
+dies below the HTTP layer, a download body cut mid-stream, a listing an
+S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
+part way, a plain-HTTP
 endpoint taken from the environment under the CRT engine, an `aws` plugin the
 config file declares, the modification time a download stamps for an object
-older than the local zone's present rules, the `PYTHON*` environment
+older than the local zone's present rules, a `--copy-props all` copy whose
+oversized tag write and its rollback both fail, the `PYTHON*` environment
 variables, and three failures the interpreter decides rather than
 either tool: a stdout that cannot take a streamed object, an error report that
 cannot be written at all, and a standard stream that cannot be set up at all —
@@ -31,11 +34,13 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Twelve of section 2's entries
+does change from one `aws` release to the next. Thirteen of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
 engine, the failure lines of a batched delete, the closing line of a Ctrl-C
-`aws` cannot attribute to a cancelled classic transfer, the failure line of a
+`aws` cannot attribute to a cancelled classic transfer, the `move:` lines an
+interrupted `mv` on `aws` can leave out for sources it has already deleted, the
+failure line of a
 directory copied without `--recursive`, the invalid-bucket-name reports this
 command writes itself, the `--version` line, two argument-parsing corners, the
 history warning `aws` writes and this command has not, the messages the
@@ -76,7 +81,9 @@ both tools.
 
 The first two can leave you with something wrong without saying so, one on each
 side: a corrupted ranged download is a silent success here, and a transfer
-whose connection dies is a silent success on `aws`. The rest are visible, or
+whose connection dies is a silent success on `aws`. One more case is silent on
+`aws`'s side — an unsorted listing — but it takes an S3-compatible endpoint
+that returns one to reach at all. The rest are visible, or
 make no difference to the result — except the ones that say outright that the
 run comes out differently, listed in section 1.
 
@@ -123,6 +130,21 @@ run comes out differently, listed in section 1.
   break and prints that same underlying error. This lives in the installed
   `botocore` / `s3transfer` rather than in either tool's own code — the same
   split as the default checksum algorithm below — so no option here changes it.
+- **An unsorted listing stops `sync` here and not on `aws`.** `sync` pairs its
+  two sides by walking both listings in key order — what real S3 and MinIO
+  return, and what the local walk sorts to match. Against an S3-compatible
+  endpoint whose `ListObjectsV2` hands back keys out of order, `aws` keeps
+  merging and exits 0, pairing keys that do not belong together; with
+  `--delete` that means deleting a key present on **both** sides and then
+  copying it again (measured). Here the descent is caught as the stream is
+  read, and the run ends with one line — `fatal error: source sync stream is
+  not byte-ordered by compare_key (...)`, or `destination` for the other
+  side — and exit code 1. Transfers and deletions already reported before that
+  point stand on both tools; nothing past it happens here. This is deliberately
+  not mirrored, for the same reason as the swallowed per-item failure above:
+  mirroring would mean deleting data that is present on both sides. Reaching it
+  takes such an endpoint — S3 Express directory buckets, whose listings promise
+  no order, are refused by `sync` up front on both tools.
 - **A download stamps an old object on a different second.** Both tools give
   the downloaded file the object's `LastModified`, and for every timestamp
   today's zone rules cover they agree to the second. They part on one old
@@ -137,10 +159,13 @@ run comes out differently, listed in section 1.
   codes agree, and the bytes are identical. Real S3 never reports a
   `LastModified` that old, so reaching this at all takes an S3-compatible
   implementation that does.
-- **Default checksum algorithm.** Without `--checksum-algorithm`, uploads are
-  integrity-checked with `CRC32`; `aws` v2 uses `CRC64NVME`. Both are valid and
+- **Default checksum algorithm.** Without `--checksum-algorithm`, the requests
+  that carry a client-computed checksum are checked with `CRC32` here and with
+  `CRC64NVME` on `aws` v2 — uploads chiefly, and also the annotation writes a
+  `--copy-props all` multipart copy sends. The default belongs to the installed
+  botocore rather than to either tool's own code. Both algorithms are valid and
   neither changes the result or the exit code. An explicit
-  `--checksum-algorithm` makes the two agree.
+  `--checksum-algorithm` makes uploads agree.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -178,8 +203,10 @@ run comes out differently, listed in section 1.
   both tools.
 - **A batched delete names a different operation when a key fails.** Deletes go
   out in batches here — up to a thousand keys per `DeleteObjects` request —
-  where `aws` sends one `DeleteObject` per key. The objects removed and the exit
-  code are the same; the per-key failure line is not. It reads `delete failed:
+  where `aws` sends one `DeleteObject` per key. For a run that finishes
+  enumerating, the objects removed and the exit code are the same (a key that
+  no longer exists is a success on both wire shapes); the per-key failure line
+  is not. It reads `delete failed:
   s3://bkt/key An error occurred (AccessDenied) when calling the DeleteObjects
   operation: <message>` — the plural operation name, and no
   `(reached max retries: N)` suffix — because the line is composed from that
@@ -191,6 +218,29 @@ run comes out differently, listed in section 1.
   byte aws's. So a script grepping for the singular name, or for the retry
   suffix, keeps matching on single deletes and quietly stops matching on
   recursive ones.
+
+  Batching is also what makes those same three routes end differently when the
+  **listing that feeds them dies part way** — the service failing mid-pagination,
+  an entry the response cannot supply. Both tools stop and exit nonzero, but
+  `aws` has already issued its own `DeleteObject` for every key enumerated so
+  far, while here the keys still sitting in the unsent buffer are dropped
+  without being deleted and without a record: **up to 999 objects that `aws`
+  would have removed survive**. Re-running the command deletes them, and a run
+  that enumerates to the end is unaffected.
+- **A big tag set is written at a different point of a `--copy-props all`
+  copy.** For an S3-to-S3 copy above the multipart threshold whose source tags
+  do not fit the create call's header — roughly 2 KiB once percent-encoded —
+  both tools fall back to a `PutObjectTagging` after the copy, and both carry
+  the source's object annotations over. `aws` sends that tagging write first
+  and the annotation writes after it; here the annotations ride the transfer
+  library's own write path, which finishes before the tagging write goes out.
+  The same requests are sent, and the console lines and the exit code agree. So
+  does the destination whenever the tagging write succeeds, and whenever it
+  fails and the rollback delete that follows it succeeds — both tools then
+  leave no object at all. **They part when that rollback delete fails too**:
+  both report the copy as a success (exit code 0, the destination left as the
+  copy produced it, untagged), but the object `aws` leaves carries no
+  annotations, never having got that far, while the one left here carries them.
 - **A plain-HTTP endpoint given only by the environment still reaches the CRT
   engine.** Under `preferred_transfer_client = crt`, `aws` decides whether its
   CRT client speaks TLS from `--endpoint-url` alone, so an endpoint supplied
@@ -216,6 +266,17 @@ run comes out differently, listed in section 1.
   interrupt landing in the CRT engine's transfer drain is a different shape
   with no divergence at all: the CRT manager swallows it on both tools, which
   print their per-item failure lines and no closing line.)
+- **An interrupted `mv` on `aws` can delete a source it never reported.** A
+  recursive `mv` copies each object and then deletes its source, printing one
+  `move:` line for the pair. Interrupt one and `aws` can finish with sources
+  deleted for which no `move:` line was ever printed — measured, nine of them
+  in each of four runs — while here every source that is deleted is reported.
+  Neither tool deletes a source whose copy has not succeeded, and which objects
+  a given interrupt catches is not reproducible on either tool; what differs is
+  that aws's record can come out short of what it did, so a script reading its
+  output to learn what moved would under-count. This belongs to the
+  rendering accidents above, so this command keeps the complete record instead
+  of copying it.
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory always fails — exit code 1 on both tools, the source
   left in place — and only the failed line's wording differs. `aws` threads
@@ -266,6 +327,15 @@ run comes out differently, listed in section 1.
   `Warning: Unable to record CLI history. Check file permissions for <path>` —
   without changing the exit code. This command has no history mechanism, so it
   records nothing and warns about nothing; the rest of the run is unchanged.
+- **`~/.aws/cli/cache/session.db` is not written.** On the first client it
+  builds, `aws` opens — creating the directory and the file if they are not
+  there — an SQLite database at that path, and keeps a host id and a rolling
+  session id in it; the session id then rides its User-Agent as a `sid/`
+  component. This command has no such store: it creates nothing, reads nothing,
+  and sends no `sid/` component (its User-Agent already differs, below). `aws`
+  swallows every failure of that machinery, so a directory it cannot write
+  changes nothing observable there either — the file simply stops being touched
+  once a script switches over.
 - **The `[plugins]` section is not read.** `aws` hands its merged
   configuration to a plugin loader before it parses anything: the
   `cli_legacy_plugin_path` entry is added to its import path, and every other
@@ -312,10 +382,16 @@ run comes out differently, listed in section 1.
   stream they go to all agree, and `cp` / `mv` / `sync` / `rm` agree
   completely, their order being the shared one. An entry missing exactly one
   required element names that element on both tools.
-- **`AWS_DEFAULTS_MODE` is honored.** The installed botocore implements
-  defaults modes; `aws` v2's bundled botocore ignores the variable entirely.
-  Setting it changes retry/timeout defaults here where `aws` would not, and an
-  invalid value is an error here (`aws` runs as if it were unset).
+- **`AWS_DEFAULTS_MODE` is read here and not by `aws`.** The installed botocore
+  implements defaults modes; `aws` v2's bundled botocore ignores the variable —
+  and the `defaults_mode` config key — entirely. A *valid* mode nonetheless
+  changes nothing you can observe here, because every setting a mode vends is
+  one this command already fixes to the same value: the connect timeout stays
+  at 60 s (the session names it explicitly, so a mode's 3.1 s or 30 s never
+  applies), the retry posture stays `standard` with 3 attempts, and both the
+  `[s3]` section's `us_east_1_regional_endpoint` and the profile's
+  `sts_regional_endpoints` are already `regional`. What does differ is an invalid or empty value: an error here
+  (exit code 255) where `aws` runs as if the variable were unset.
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit

@@ -384,7 +384,11 @@ These implement the policy in
   (`_open_botocore_session`, item 5 below - not a
   `boto3.Session(profile_name=)`), `--region` / `--endpoint-url` -> client kwargs,
   `--no-verify-ssl` / `--ca-bundle` -> `verify`, `--no-sign-request` ->
-  `Config(signature_version=UNSIGNED)`, `--cli-read-timeout` /
+  `signature_version=UNSIGNED` in the **session's default client config**
+  (`_default_client_config`, where aws's own `no_sign_request` handler puts it -
+  which is what leaves the credential chain's STS / SSO clients unsigned too,
+  and what lets a per-client `signature_version` beat it, item 2 below),
+  `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config` and the session's default client config
   (item 9 below). The assembled client is handed to the
   library via `S3Storage(uri, client=...)` (the library does not rebuild the
@@ -417,9 +421,8 @@ These implement the policy in
      `ScopedConfigProvider` / `IMDSRegionProvider`); an empty `AWS_REGION=`
      therefore selects the empty region too -> the same `Invalid endpoint` failure
      as aws (rc 255), not a fall-through to `AWS_DEFAULT_REGION`. The chain's
-     answer is then **bound onto the session** (`_bind_region`, under aws's own
-     truthy guard - aws installs its chain as the session's `region` provider
-     and binds `--region` at the head of it), because handing each client a
+     answer is then **bound onto the session** (`_bind_region`), because handing
+     each client a
      `region_name` never reached the STS client the assume-role /
      web-identity providers create for themselves: an assume-role profile whose
      only region source was `--region` or `AWS_REGION` signed `AssumeRole`
@@ -427,7 +430,16 @@ These implement the policy in
      `us-gov-*` - or failed outright with `NoRegion` where aws exits 0
      (measured). The already-resolved answer is bound rather than the chain
      re-installed, so the chain - whose last link is the IMDS probe - is still
-     walked once per invocation. The library
+     walked once per invocation. What binds is not always what the client is
+     built with, because aws's **truthy guard belongs to the `--region` flag at
+     the head of its chain, not to the chain's answer**: an s3 command hands
+     `parsed_globals.region` straight to `create_client`, so `--region ""`
+     reaches the client as the empty string (rc 255 on both tools) while the
+     rest of the chain answers for the session - measured, `--region ""` with
+     `AWS_REGION=eu-west-1` has aws sign `AssumeRole` in eu-west-1. A present
+     but empty `AWS_REGION=` is a different case: it *is* the chain's answer, so
+     it binds as itself and aws signs with an empty region scope, rather than
+     being walked past to `AWS_DEFAULT_REGION` and the profile. The library
      keeps stock botocore order on purpose (the boto3=library / aws=CLI split, as
      for the profile chain in item 5).
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
@@ -435,8 +447,7 @@ These implement the policy in
      botocore. `Config(signature_version="s3v4")` is set for every command whose
      positionals name none of four targets: an MRAP ARN, an S3 Outposts
      access-point ARN, an S3 Outposts access-point *alias*, and an S3 Express
-     directory bucket
-     (`--no-sign-request` overrides it with UNSIGNED). For those four
+     directory bucket. For those four
      the pin stands down: an explicit `signature_version` suppresses botocore's
      auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP and
      for an Outposts access point in either notation
@@ -445,6 +456,19 @@ These implement the policy in
      first dash and would silently sign a plain SigV4 request instead. A plain,
      region-qualified access-point ARN is *not* in the set: it signs symmetric
      SigV4 like a bucket (every shape measured against the pinned aws-cli).
+     The pin stands down for one further reason, unrelated to the targets: an
+     **unsigned run**, so that the UNSIGNED waiting in the session default
+     client config is what reaches the client (a per-client
+     `signature_version`, this pin included, beats it in botocore's merge) -
+     **except under `--sse aws:kms`**, the one case for which aws's own
+     `ClientFactory.create_client` passes `Config(signature_version='s3v4')`.
+     That combination therefore signs, resolves credentials and reaches the
+     credential chain on both tools, while every other unsigned run stays
+     anonymous (`_sends_unsigned_requests`; measured without credentials across
+     `cp` / `mv` / `sync` / s3-to-s3 `cp`, where aws is rc 1 `Unable to locate
+     credentials` and sends nothing). `--sse AES256` and `--sse-c AES256`
+     upload anonymously on both, and `mv`'s path-resolver clients stay
+     anonymous throughout, since they name no `signature_version` of their own.
      **The gate is shaped after botocore's endpoint rules, not after aws-cli's
      resolver regexes**, because the two answer different questions - the
      regexes say which spellings `mv` can resolve to an underlying bucket
@@ -477,7 +501,15 @@ These implement the policy in
      would select the legacy global endpoint here (a missing key reads as
      `legacy`; botocore's own name for that table is private, so a botocore
      that renames it simply reads the key again, with the pin still deciding
-     the value). The store is where every client reads the section, so mv's
+     the value). The wrapper also passes botocore's smart-defaults write
+     through to the provider it wraps (`set_default_provider`): a
+     `defaults_mode` other than `legacy`, from the config key or
+     `AWS_DEFAULTS_MODE`, sends that call at the `[s3]` section provider, and a
+     wrapper answering only `provide()` failed *every* command at rc 255 where
+     aws - whose bundled botocore has no defaults modes at all - simply ran.
+     Delegating leaves botocore's bookkeeping intact and changes nothing the
+     pin decides, since the value it writes for the key is `regional` too.
+     The store is where every client reads the section, so mv's
      s3control / sts resolver clients and the credential chain's own are
      covered too, where a client `Config` covered only what this module passes
      it (measured: with an invalid value in the environment, `mv

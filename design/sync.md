@@ -109,10 +109,14 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->
   `SrcOnlyPair`, `file_at_src_and_dest` -> `SyncPair`, `file_not_at_src` ->
   `DestOnlyPair`. The merge emits one pair **per entry**, which is one pair per
-  key only while each side's keys are unique. The order guard accepts equal
-  consecutive keys, so a custom `SORTABLE_SCAN` backend that yields a key twice
-  produces a pair per occurrence rather than one merged pair; the built-in
-  local and S3 scans never duplicate a key, so this is a custom-backend concern.
+  key only while each side's keys are unique. The `SORTABLE_SCAN` order contract
+  is enforced at merge time: a strict descent on either side raises
+  `ValidationError` naming the side and the key pair, and the enforcement is
+  unconditional (a plain comparison, not a `__debug__` assert, so `python -O`
+  does not remove it). Equal consecutive keys are accepted, so a custom
+  `SORTABLE_SCAN` backend that yields a key twice produces a pair per occurrence
+  rather than one merged pair; the built-in local and S3 scans never duplicate a
+  key, so this is a custom-backend concern.
 - `create_filter` is the new (`SrcOnlyPair`) lane: `True` (default) copies every new
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
   source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli
@@ -200,7 +204,17 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   not a conflict).
 - delete: an S3 dest uses `S3Deleter` (the `DeleteObjects` batch; the known
   wire divergence from aws-cli's per-key `DeleteObject` - same as rm,
-  deleter.md section 4). A local dest uses a synchronous `Storage.delete` (`LocalStorage.delete`, an `os.remove`). The output is
+  deleter.md section 4). A local dest uses a synchronous `Storage.delete`
+  (`LocalStorage.delete`, an `os.remove`), and its walk runs **without
+  read-ahead** (`ScanOptions.read_ahead`, [`storage.md`](./storage.md)
+  section 2): the lane
+  removes files while that same walk is still running, so the walk must see its
+  own deletions - aws walks its destination lazily and interleaves its deletes
+  the same way, which is why a tree that aliases itself through a symlinked
+  directory deletes the file once there and never lists it under the second
+  name. The other sides keep the page-ahead overlap - a source walk is not
+  mutated by the run, and an S3 destination's orphans ride the batched deleter
+  rather than being removed as the listing advances. The output is
   `delete: <endpoint>` (no `to` clause; the library emits the `s3://bucket/key`
   endpoint for an S3 dest and the full native path for a local dest - matching
   section 2 - which the CLI then renders cwd-relative) / `(dryrun) delete: ...`.
@@ -247,7 +261,11 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 ## 7. Known divergences (recorded only)
 
 - **delete batching and output timing**: the batch is finalized all at once on
-  flush (the final state, line set, and rc match; as with the rm precedent).
+  flush. That matches aws on the **success path** - final state, line set and rc
+  all agree, as with the rm precedent - and only there: a listing that dies
+  mid-run leaves aws having already deleted everything it enumerated, while the
+  unsent buffer here is abandoned ([`deleter.md`](./deleter.md) section 4 for
+  the bound and the reason).
 - **restored glacier**: because sync decides from the listing, `Restore` is not
   visible, so even a restored object is skip-warned - this is identical to
   aws-cli's behavior (they too look at the listing's response_data).

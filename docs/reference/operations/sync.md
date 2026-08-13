@@ -111,6 +111,16 @@ open-route destination, no `DELETE` capability is required. `True` deletes
 every orphan. A `FileFilter` deletes only the orphans it keeps, receiving the
 destination-side `FileInfo`.
 
+Once the lane is on and the destination is local, that destination is walked
+**without read-ahead** (`ScanOptions.read_ahead`,
+[`../options.md`](../options.md)): the lane removes files while the same walk is
+still running, so the walk must see its own deletions. This is what makes a tree
+that aliases itself — a symlinked directory naming the same file under a second
+path — behave as `aws s3` does, deleting the file once and never listing it
+again under the other name. The other sides keep the overlap: a source walk is
+not mutated by the run, and an S3 destination's orphans go to the batched
+deleter rather than being removed as the listing advances.
+
 Any one of the three may instead be a `ParallelFilter` wrapping the same
 predicate, which runs that lane's decisions on a caller-supplied thread pool —
 `ParallelFilter[FileInfo]` for `create_filter` / `delete_filter`,
@@ -119,8 +129,11 @@ survivors on the calling thread. For a stateless predicate, wrapping does not
 change which entries are acted on; it changes ordering, and parallelizing
 `create_filter` makes the case-conflict gate's first-key-wins outcome
 non-deterministic. A stateful predicate can observe the concurrency and can
-therefore decide differently. The wrapper's contract, including pool
-ownership, is in [`../comparator.md`](../comparator.md).
+therefore decide differently. Wrapping `delete_filter` also lets the pair loop
+advance while decisions are still outstanding, which re-introduces the overlap
+the no-read-ahead walk above removes — the self-aliasing local tree behaves as
+`aws s3` does on the default, inline lane. The wrapper's contract, including
+pool ownership, is in [`../comparator.md`](../comparator.md).
 
 `dryrun` reports every transfer and deletion that would have happened as a
 `DRYRUN` record and issues no mutating API call. Both sides are still

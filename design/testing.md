@@ -704,6 +704,13 @@ which leaves the record set and the line count fully compared. Either way the
 relaxation is narrow: the same records must still appear on both sides, and the
 exit codes must still be equal.
 
+One member of this class does take class 2's device, because what varies is a
+span rather than a whole record: the temporary file `s3transfer` downloads into
+before renaming it into place. Its name is the destination's basename plus
+`os.extsep` and eight randomly drawn hexadecimal characters, so two runs of the
+*same* tool spell it differently and the suffix can carry no byte requirement
+wherever a report names the path being written.
+
 ### Everything else is comparable surface
 
 Message wording, punctuation, line counts, record formats, and which stream a

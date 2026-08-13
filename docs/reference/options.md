@@ -320,6 +320,7 @@ class ScanOptions:
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
     reusable_after_interrupt: bool = True
+    read_ahead: bool = True
 ```
 
 It is frozen, so a modified copy is made with `dataclasses.replace`. That is
@@ -390,6 +391,21 @@ The policy is scoped to `KeyboardInterrupt` alone — every other exit,
 field from `S3(reusable_after_interrupt=...)`, where the application declares the
 posture once ([`s3.md`](./s3.md)), so it reaches every scan they start; set it
 here only when calling `Storage.scan` directly.
+
+`read_ahead` (default `True`) is whether `scan` may read pages ahead of the
+consumer. `True` runs the page producer on a background worker, so the next
+page's I/O overlaps the current page's consumption. `False` pulls each page on
+the consuming thread at the moment the consumer reaches it — the mode for a
+consumer that **mutates what it is enumerating**, where a page read early would
+describe state that consumer has since changed. `sync` sets it on the
+destination walk when its `delete_filter` lane is on and that destination is a
+`LocalStorage`, so the walk sees the orphans the run has already removed —
+which is what makes a self-aliasing tree behave as `aws s3` does
+([`./operations/sync.md`](./operations/sync.md)). Nothing else asks for it, since
+the overlap is what keeps enumeration off the critical path. It is also the one
+knob the operations only ever *narrow*: a backend that seeds `read_ahead=False`
+in its `default_scan_options` — one whose listing must never run ahead of its
+own `delete` — keeps that setting through every operation.
 
 ## LocalScanOptions
 

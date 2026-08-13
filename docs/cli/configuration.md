@@ -62,6 +62,13 @@ matching `us_east_1_regional_endpoint` config key (dropped from its bundled SDK
 — us-east-1 is regional there, always). Setting any of them changes nothing
 here, an unusable value included.
 
+`AWS_PAGER` and the `cli_pager` config key change nothing on either tool's `s3`
+commands: `aws` routes only the structured output of its API commands through a
+pager, and the `s3` commands produce none. Setting one is inert here for the
+same reason it is inert there, which is why `--no-cli-pager` is among the
+options accepted and ignored
+(see [`aws-differences.md`](./aws-differences.md)).
+
 One section of `~/.aws/config` is not read at all: `[plugins]`, from which
 `aws` imports and initializes aws-cli plugins on every invocation. This command
 has no plugin mechanism, so the section is inert — including the case where an
