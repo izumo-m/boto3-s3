@@ -779,6 +779,17 @@ class S3:
     str)``). Passing ``crt_region=None`` declares that absence and reproduces
     that refusal; again only the CLI distribution sets it (design/crt.md
     section 6).
+
+    ``crt_sign_requests`` is the fifth, and says whether the CRT engine signs
+    at all. ``None`` (the default) derives it from the built client, boto3's
+    rule: only a client configured with botocore's ``UNSIGNED`` signature
+    transfers anonymously. ``True`` / ``False`` is the application's own
+    answer, aws-cli's ``sign_request``: its CRT factory attaches a credentials
+    provider on ``--no-sign-request`` alone and never reads the client, so
+    ``--no-sign-request --sse aws:kms`` - where the per-client
+    ``signature_version`` restores signing for botocore - still transfers
+    anonymously on aws's CRT lane while its classic lane signs. Only the CLI
+    distribution sets it (design/crt.md section 4).
     """
 
     def __init__(
@@ -792,6 +803,7 @@ class S3:
         crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
+        crt_sign_requests: bool | None = None,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
@@ -801,6 +813,7 @@ class S3:
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
         self._crt_allow_lockless = crt_allow_lockless
         self._crt_region: crtsupport.CrtRegion = crt_region
+        self._crt_sign_requests = crt_sign_requests
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -886,6 +899,7 @@ class S3:
                 allow_absent_credentials=self._crt_allow_absent_credentials,
                 allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
+                sign_requests=self._crt_sign_requests,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' config validation, kept inside the taxonomy
@@ -1257,6 +1271,7 @@ class S3:
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
@@ -1485,6 +1500,7 @@ class S3:
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         with transferrer:
@@ -1834,6 +1850,7 @@ class S3:
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         deletes = _SyncDeletes(

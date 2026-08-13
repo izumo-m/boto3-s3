@@ -2021,6 +2021,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -2047,6 +2048,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -2086,6 +2088,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -2115,6 +2118,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(session)
             return object()
@@ -2150,6 +2154,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(allow_absent_credentials)
             return object()
@@ -2166,6 +2171,45 @@ class TestEngineSelection:
         transferrer._get_manager()
         assert seen == [allow]
 
+    @pytest.mark.parametrize(
+        "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
+    )
+    def test_sign_requests_posture_is_threaded_to_crtsupport(
+        self, monkeypatch: pytest.MonkeyPatch, declaration: bool | None
+    ) -> None:
+        # None keeps boto3's rule (derive the mode from the client); a
+        # declaration is aws-cli's `sign_request`, which is what keeps
+        # `--no-sign-request --sse aws:kms` anonymous on the CRT lane.
+        from boto3_s3 import crtsupport
+
+        seen: list[bool | None] = []
+
+        def fake_create(
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
+        ) -> Any:
+            seen.append(sign_requests)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])
+        kwargs: dict[str, Any] = {} if declaration is None else {"crt_sign_requests": declaration}
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            **kwargs,
+        )
+        transferrer._get_manager()
+        assert seen == [declaration]
+
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
@@ -2180,6 +2224,7 @@ class TestEngineSelection:
             allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 

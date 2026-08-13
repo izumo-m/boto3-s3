@@ -1248,6 +1248,28 @@ class TestNoSignRequestPosture:
         client = clientfactory.build_service_client("sts", args, region="us-east-1")
         assert client.meta.config.signature_version is UNSIGNED
 
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (["./local.txt", "s3://bkt/key", "--region", "us-east-1"], True),
+            ([*_KMS_ARGV], False),
+            ([*_KMS_ARGV, "--sse", "aws:kms"], False),
+        ],
+        ids=["signed", "unsigned", "unsigned-kms"],
+    )
+    def test_build_s3_declares_the_flag_itself_for_the_crt_engine(
+        self, argv: list[str], expected: bool
+    ) -> None:
+        # aws's CRT factory attaches a credentials provider on its own
+        # `sign_request` parameter alone and never reads the client, so the
+        # `--sse aws:kms` case that signs above is still anonymous there:
+        # measured against the pinned aws-cli on a fake S3, every CRT request
+        # of `--no-sign-request --sse aws:kms` goes out unsigned (single PUT,
+        # the multipart trio, download HEAD/GET, mv, sync, stream) and the run
+        # uploads at rc 0 with no credentials at all.
+        s3 = clientfactory.build_s3(_parse_transfer(argv))
+        assert s3._crt_sign_requests is expected  # pyright: ignore[reportPrivateUsage]
+
     def test_a_signed_run_is_untouched_by_the_kms_case(self, _broken_role_profile: None) -> None:
         # Without --no-sign-request the s3v4 pin was always there; --sse
         # aws:kms changes nothing, credentials included.

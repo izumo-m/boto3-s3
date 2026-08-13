@@ -544,6 +544,17 @@ def build_s3(args: argparse.Namespace) -> S3:
     # client the `aws-global` pseudo-region. Declaring the chain's answer is
     # what lets awscrt's own region assertion fire, as it does under aws
     # (design/crt.md section 6).
+    # crt_sign_requests: aws-cli's CRT factory attaches a credentials provider
+    # on its own `sign_request` parameter - `--no-sign-request` and nothing
+    # else - so the per-client Config(signature_version='s3v4') that
+    # `--sse aws:kms` adds, which does restore signing on the classic lane
+    # (`_sends_unsigned_requests`), never reaches its CRT client. Declaring the
+    # flag directly reproduces that: measured on the pinned aws-cli against a
+    # fake S3, `--no-sign-request --sse aws:kms` sends every CRT request
+    # anonymously (single PUT, the multipart trio, download HEAD/GET, mv, sync,
+    # stream) and uploads with no credentials at all, rc 0. Deriving the mode
+    # from the client instead signed those requests here (design/crt.md
+    # section 4).
     return CliS3(
         session=session,
         endpoint_url=args.endpoint_url,
@@ -551,6 +562,7 @@ def build_s3(args: argparse.Namespace) -> S3:
         crt_allow_absent_credentials=True,
         crt_allow_lockless=True,
         crt_region=region,
+        crt_sign_requests=not args.no_sign_request,
     )
 
 
@@ -897,6 +909,11 @@ def _sends_unsigned_requests(args: argparse.Namespace) -> bool:
     ``--sse`` belongs to the transfer family alone, hence the ``getattr``, and
     the comparison is aws's own exact string - ``aws:kms:dsse`` gets no
     per-client config there either.
+
+    This governs the *botocore* client alone, which is aws's own split: its
+    CRT factory reads ``--no-sign-request`` directly and never the client, so
+    the same KMS run transfers anonymously on the CRT lane. `build_s3`
+    declares that separately (``crt_sign_requests``).
     """
     return bool(args.no_sign_request) and getattr(args, "sse", None) != "aws:kms"
 

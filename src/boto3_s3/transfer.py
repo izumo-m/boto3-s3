@@ -721,6 +721,7 @@ class Transferrer:
         crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
+        crt_sign_requests: bool | None = None,
         session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
@@ -817,6 +818,11 @@ class Transferrer:
         # off the client, boto3's source); a declared None is what reaches
         # awscrt's own region assertion, as aws-cli's region chain does.
         self._crt_region: crtsupport.CrtRegion = crt_region
+        # The caller's CRT signing declaration, aws-cli's sign_request. None =
+        # derive it from the client, boto3's rule; a declared False is what
+        # keeps --no-sign-request anonymous on the CRT lane even when
+        # --sse aws:kms restores signing on the botocore client.
+        self._crt_sign_requests = crt_sign_requests
         # The caller's boto3 session (S3.session), threaded to the CRT engine
         # so its request serializer reuses the warm session instead of paying
         # a fresh one per process (crtsupport._botocore_session); None = the
@@ -1400,9 +1406,10 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_absent_credentials`` and ``crt_region`` are the
-        caller-declared posture departures from boto3's rules available here,
-        and apply only when the caller asks for them.
+        ``crt_allow_absent_credentials``, ``crt_allow_lockless``,
+        ``crt_region`` and ``crt_sign_requests`` are the caller-declared
+        posture departures from boto3's rules available here, and apply only
+        when the caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1436,6 +1443,7 @@ class Transferrer:
                 allow_absent_credentials=self._crt_allow_absent_credentials,
                 allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
+                sign_requests=self._crt_sign_requests,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig

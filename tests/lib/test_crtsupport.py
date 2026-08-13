@@ -740,6 +740,118 @@ class TestCrtRegionPosture:
         assert len(stubs.create_kwargs) == 1
 
 
+class TestCrtSigningPosture:
+    """Whether the CRT client signs (design/crt.md section 4).
+
+    boto3 reads it off the built client - only an ``UNSIGNED`` one transfers
+    anonymously. aws-cli reads its own ``sign_request`` parameter
+    (``--no-sign-request``) and never the client, so the per-client
+    ``Config(signature_version='s3v4')`` that ``--sse aws:kms`` adds restores
+    signing on its *classic* lane alone: measured against the pinned aws-cli,
+    ``--no-sign-request --sse aws:kms`` sends every CRT request anonymously
+    (single PUT, the multipart trio, download HEAD/GET, mv, sync, stream) and
+    uploads with no credentials at all at rc 0, while the same run's classic
+    lane signs. `sign_requests` is the declaration that reproduces it.
+    """
+
+    def test_the_default_derives_the_mode_from_the_client(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["crt_credentials_provider"] == "crt-provider"
+
+    def test_a_declared_unsigned_run_omits_the_provider_on_a_signing_client(
+        self, stubs: CrtStubs
+    ) -> None:
+        # The `--no-sign-request --sse aws:kms` shape: the client signs (aws
+        # gives it s3v4 too) and the CRT lane must still be anonymous.
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(),  # pyright: ignore[reportArgumentType]
+            None,
+            sign_requests=False,
+        )
+        [kwargs] = stubs.create_kwargs
+        assert "crt_credentials_provider" not in kwargs
+
+    def test_a_declared_unsigned_run_never_resolves_credentials(self, stubs: CrtStubs) -> None:
+        # aws uploads anonymously at rc 0 with no credentials configured, so
+        # the declaration must short-circuit ahead of the credential lookup -
+        # not merely drop what it returns.
+        class CountingClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.credential_lookups = 0
+
+            def _get_credentials(self) -> Any:
+                self.credential_lookups += 1
+                return super()._get_credentials()
+
+        client = CountingClient()
+        assert crtsupport.create_crt_transfer_manager(client, None, sign_requests=False)  # pyright: ignore[reportArgumentType]
+        assert client.credential_lookups == 0
+
+    def test_a_declared_unsigned_run_admits_a_client_with_no_credentials(
+        self, stubs: CrtStubs
+    ) -> None:
+        # Nothing signs, so there is no identity to compare and the
+        # absent-credentials gate (boto3's classic fallback) must not fire -
+        # aws is rc 0 here, credentials or not.
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
+            None,
+            sign_requests=False,
+        )
+        [kwargs] = stubs.create_kwargs
+        assert "crt_credentials_provider" not in kwargs
+
+    def test_a_declared_signing_run_wins_over_an_unsigned_client(self, stubs: CrtStubs) -> None:
+        # The mirror direction: the declaration is the answer, not a veto.
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(unsigned=True),  # pyright: ignore[reportArgumentType]
+            None,
+            sign_requests=True,
+        )
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["crt_credentials_provider"] == "crt-provider"
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [(False, None), (None, False), (False, True), (True, False)],
+        ids=[
+            "unsigned-then-derived",
+            "derived-then-unsigned",
+            "unsigned-then-signed",
+            "signed-then-unsigned",
+        ],
+    )
+    def test_the_singleton_pin_compares_the_declared_mode(
+        self, stubs: CrtStubs, first: bool | None, second: bool | None
+    ) -> None:
+        # One CRT client per process bakes in its credentials provider (or the
+        # absence of one), so a later request declaring the other mode must
+        # fall back to classic rather than transfer under the first's.
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None, sign_requests=first)  # pyright: ignore[reportArgumentType]
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(), None, sign_requests=second)  # pyright: ignore[reportArgumentType]
+            is None
+        )
+
+    def test_the_same_declaration_reuses_the_singleton(self, stubs: CrtStubs) -> None:
+        for _ in range(2):
+            assert crtsupport.create_crt_transfer_manager(
+                FakeClient(),  # pyright: ignore[reportArgumentType]
+                None,
+                sign_requests=False,
+            )
+        assert len(stubs.create_kwargs) == 1
+
+    def test_materialize_threads_the_declaration(self, stubs: CrtStubs) -> None:
+        # `rm`'s eager construction pays the same wiring the transfers get.
+        config = TransferConfig(preferred_transfer_client="crt")
+        crtsupport.materialize_crt_engine(FakeClient(), config, sign_requests=False)  # pyright: ignore[reportArgumentType]
+        [kwargs] = stubs.create_kwargs
+        assert "crt_credentials_provider" not in kwargs
+
+
 class TestMaterializeCrtEngine:
     """The eager-construction seam ``rm`` uses: build the engine, use nothing."""
 

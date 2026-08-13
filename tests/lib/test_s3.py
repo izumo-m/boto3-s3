@@ -557,6 +557,41 @@ class TestCrtRegionPosture:
         assert _captured_transferrer_kwargs["crt_region"] is declared
 
 
+class TestCrtSignRequestsPosture:
+    """``crt_sign_requests`` reaches every route that builds a Transferrer.
+
+    The declaration is what keeps ``boto3-s3-cli``'s ``--no-sign-request``
+    anonymous on the CRT lane even where ``--sse aws:kms`` restores signing on
+    the client (design/crt.md section 4); a route that forgot to thread it
+    would sign that route's transfers where ``aws s3`` sends them
+    unsigned.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize("declared", [None, False, True], ids=["default", "unsigned", "signed"])
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        declared: bool | None,
+    ) -> None:
+        s3 = S3() if declared is None else S3(crt_sign_requests=declared)
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_sign_requests"] is declared
+
+
 class TestMaterializeCrtEngine:
     """`S3.materialize_crt_engine` hands the instance's postures to crtsupport.
 
@@ -584,6 +619,7 @@ class TestMaterializeCrtEngine:
             crt_allow_absent_credentials=True,
             crt_allow_lockless=True,
             crt_region=None,
+            crt_sign_requests=False,
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
         assert seen == [
@@ -595,6 +631,7 @@ class TestMaterializeCrtEngine:
                 "allow_absent_credentials": True,
                 "allow_lockless": True,
                 "region": None,
+                "sign_requests": False,
             }
         ]
 
