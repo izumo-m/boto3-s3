@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -251,32 +255,32 @@ class TestBuildClient:
         with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
             clientfactory.build_client(_parse([]))
 
-    def test_legacy_retry_mode_rejected_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws v2's bundled botocore restricts retry modes to standard/adaptive;
-        # stock botocore would accept "legacy" (its own valid mode), so the
-        # factory validates with aws's exact wording (measured: rc 255).
-        monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
-        with pytest.raises(
-            InvalidConfigError,
-            match='Invalid value provided to "mode": "legacy" must be one of: '
-            '"standard" or "adaptive"',
-        ):
+    @pytest.mark.parametrize("mode", ["legacy", "bogus", "LEGACY", ""])
+    def test_an_unsupported_retry_mode_is_rejected_in_aws_s_words(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        # aws v2's bundled botocore restricts retry modes to standard/adaptive
+        # and names those two in its report. The installed botocore accepts
+        # "legacy" (its own valid mode) and, for the rest, names all three -
+        # so every one of these values needs the aws report, measured on the
+        # pinned aws-cli at rc 255.
+        monkeypatch.setenv("AWS_RETRY_MODE", mode)
+        with pytest.raises(InvalidConfigError) as excinfo:
             clientfactory.build_client(_parse([]))
+        assert str(excinfo.value) == (
+            f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
+        )
+        assert exit_code_for(excinfo.value) == 255
 
     def test_empty_retry_env_is_present_and_fatal_like_aws(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Present-wins, like the profile/region chains: aws treats an empty
-        # AWS_MAX_ATTEMPTS / AWS_RETRY_MODE as a fatal value (rc 255), never
-        # as unset. int("") -> ValueError (main's backstop maps it to 255);
-        # an empty mode fails botocore's retry-config validation at client
-        # creation -> InvalidConfigError (255).
+        # AWS_MAX_ATTEMPTS as a fatal value (rc 255), never as unset - int("")
+        # -> ValueError, which main's backstop maps to 255. (The empty mode is
+        # the last case of the test above.)
         monkeypatch.setenv("AWS_MAX_ATTEMPTS", "")
         with pytest.raises(ValueError, match="invalid literal"):
-            clientfactory.build_client(_parse([]))
-        monkeypatch.delenv("AWS_MAX_ATTEMPTS")
-        monkeypatch.setenv("AWS_RETRY_MODE", "")
-        with pytest.raises(InvalidConfigError):
             clientfactory.build_client(_parse([]))
 
     def test_aws_region_env_honored_like_aws_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -976,10 +980,82 @@ class TestCredentialCache:
     ) -> None:
         session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
         caches = self._caches(session)
-        assert [type(cache) for cache in caches] == [JSONFileCache] * 3
+        # botocore's own cache, with aws's write and expiry rendering on top
+        # (the two tests below) - and one class for all three providers.
+        assert {type(cache) for cache in caches} == {type(caches[0])}
+        assert [isinstance(cache, JSONFileCache) for cache in caches] == [True] * 3
         for cache in caches:
             assert "planted-key" in cache
             assert cache["planted-key"] == {"AccessKeyId": "ASIAPLANTED"}
+
+    def test_an_expiry_is_stored_the_way_aws_stores_it(self, tmp_path: Path) -> None:
+        # aws's cli_timestamp_format handler makes the response parser return
+        # ISO-8601 *strings*, so an STS Expiration lands in the file verbatim -
+        # `2026-08-13T11:27:42+09:00`, measured. This CLI parses timestamps to
+        # datetime for speed, and botocore's default rendering would write
+        # `2026-08-13T11:27:42UTC+09:00` (`strftime('%Z')` of a
+        # datetime.timezone), which dateutil reads back with POSIX's inverted
+        # sign: measured, the entry stayed "valid" 18 hours past its expiry -
+        # for this CLI *and* for an aws sharing ~/.aws/cli/cache.
+        cache = self._caches(clientfactory.build_session(_parse([]))._session)[0]  # pyright: ignore[reportPrivateUsage]
+        expiry = datetime(2026, 8, 13, 11, 27, 42, tzinfo=timezone(timedelta(hours=9)))
+        cache["expiring-key"] = {"AccessKeyId": "ASIAX", "Expiration": expiry}
+        assert (self._cache_dir(tmp_path) / "expiring-key.json").read_text() == (
+            '{"AccessKeyId": "ASIAX", "Expiration": "2026-08-13T11:27:42+09:00"}'
+        )
+        # The plain `Z` wire form aws's STS actually sends renders the same on
+        # both sides too.
+        cache["utc-key"] = {"Expiration": datetime(2099, 1, 1, tzinfo=timezone.utc)}
+        assert (self._cache_dir(tmp_path) / "utc-key.json").read_text() == (
+            '{"Expiration": "2099-01-01T00:00:00+00:00"}'
+        )
+
+    def test_an_entry_is_written_straight_to_its_final_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's bundled botocore opens the entry itself (O_WRONLY | O_CREAT,
+        # 0600); the installed one writes a `tempfile.mkstemp` file and
+        # renames it, so a failed write named a random `tmpXXXXXXXX.tmp` where
+        # aws named the entry (measured on an unwritable cache directory: rc
+        # 255 on both, different paths, and ours differed between its own
+        # runs). Tripwire: mkstemp must not be reached at all.
+        import tempfile
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the credential cache must not write through a temp file")
+
+        monkeypatch.setattr(tempfile, "mkstemp", refuse)
+        cache = self._caches(clientfactory.build_session(_parse([]))._session)[0]  # pyright: ignore[reportPrivateUsage]
+        cache["direct-key"] = {"AccessKeyId": "ASIADIRECT"}
+        entry = self._cache_dir(tmp_path) / "direct-key.json"
+        assert entry.read_text() == '{"AccessKeyId": "ASIADIRECT"}'
+        assert sorted(path.suffix for path in self._cache_dir(tmp_path).iterdir()) == [
+            ".json",
+            ".json",
+        ]
+        if sys.platform != "win32":
+            assert stat.S_IMODE(entry.stat().st_mode) == 0o600
+        # Rewriting a shorter value must not leave the old tail behind (aws
+        # truncates after opening).
+        cache["direct-key"] = {"A": "B"}
+        assert entry.read_text() == '{"A": "B"}'
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory permissions")
+    @pytest.mark.skipif(
+        getattr(os, "geteuid", lambda: -1)() == 0, reason="root ignores the write bit"
+    )
+    def test_an_unwritable_cache_names_the_entry_like_aws(self, tmp_path: Path) -> None:
+        # The report a user greps to fix the permissions: aws names the cache
+        # entry (`.../c3cb4750....json`), byte-stable across runs.
+        cache_dir = self._cache_dir(tmp_path)
+        cache = self._caches(clientfactory.build_session(_parse([]))._session)[0]  # pyright: ignore[reportPrivateUsage]
+        cache_dir.chmod(0o500)
+        try:
+            with pytest.raises(PermissionError) as excinfo:
+                cache["denied-key"] = {"AccessKeyId": "ASIADENIED"}
+        finally:
+            cache_dir.chmod(0o700)
+        assert excinfo.value.filename == str(cache_dir / "denied-key.json")
 
     def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
         # The write half: whatever a provider caches becomes a file under the
@@ -1053,6 +1129,376 @@ class TestApiVersionsIsIgnored:
     def test_the_session_pins_an_empty_map(self) -> None:
         session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
         assert session.get_config_variable("api_versions") == {}
+
+
+def _provider_client(session: Any, service: str = "sts") -> Any:
+    """A client built the way the credential providers build their own.
+
+    botocore's assume-role / web-identity / SSO providers create their STS and
+    SSO clients through ``session.create_client(...)`` with no region, no
+    config and no verify - so whatever those clients resolve, they resolve off
+    the session alone. That is the surface aws configures at startup and this
+    CLI configured per client, which is why these tests reach for it directly.
+    """
+    return session.create_client(service)
+
+
+class TestRegionSessionBinding:
+    """The resolved region binds to the session, as aws's driver binds it.
+
+    aws installs its region chain as the session's own ``region`` provider and
+    binds a truthy ``--region`` at its head, so the clients *botocore* builds
+    for itself - chiefly the credential chain's STS client - resolve the same
+    region as the S3 client. Measured against the pinned aws-cli: with an
+    assume-role profile carrying no ``region`` key, ``--region eu-west-1``
+    (or ``AWS_REGION``) has aws call ``sts.eu-west-1.amazonaws.com`` and exit
+    0, where this CLI called the global endpoint - or, with no other region
+    source at all, exited 253 with ``NoRegion`` before a single request.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_region(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+    def _session_of(self, s3: Any) -> Any:
+        return s3.session._session
+
+    def test_the_region_flag_reaches_a_client_botocore_builds_itself(self) -> None:
+        session = self._session_of(clientfactory.build_s3(_parse(["--region", "eu-west-1"])))
+        assert session.get_config_variable("region") == "eu-west-1"
+        assert _provider_client(session).meta.region_name == "eu-west-1"
+
+    def test_aws_region_reaches_it_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Stock botocore's session region reads AWS_DEFAULT_REGION alone, so
+        # the modern spelling only arrives through the CLI chain.
+        monkeypatch.setenv("AWS_REGION", "eu-west-2")
+        session = self._session_of(clientfactory.build_s3(_parse([])))
+        assert _provider_client(session).meta.region_name == "eu-west-2"
+
+    def test_the_flag_beats_a_profile_region_there_as_well(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The softer face of the same gap: with a profile region *and* a
+        # differing --region, the two tools signed AssumeRole in different
+        # regions - the wrong regional STS endpoint, and a scope mismatch for
+        # an opt-in region.
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = ap-south-1\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        session = self._session_of(clientfactory.build_s3(_parse(["--region", "eu-west-1"])))
+        assert _provider_client(session).meta.region_name == "eu-west-1"
+
+    @pytest.mark.parametrize("build", ["client", "service_client"])
+    def test_a_builder_that_opens_its_own_session_binds_it_too(
+        self, monkeypatch: pytest.MonkeyPatch, build: str
+    ) -> None:
+        # Both client builders can open a session themselves, and the binding
+        # is a property of the session, not of the caller.
+        opened: list[Any] = []
+        real_opener = clientfactory._open_botocore_session  # pyright: ignore[reportPrivateUsage]
+
+        def recording(args: argparse.Namespace) -> Any:
+            session = real_opener(args)
+            opened.append(session)
+            return session
+
+        monkeypatch.setattr(clientfactory, "_open_botocore_session", recording)
+        args = _parse(["--region", "eu-north-1"])
+        if build == "client":
+            clientfactory.build_client(args)
+        else:
+            clientfactory.build_service_client("sts", args)
+        assert [_provider_client(session).meta.region_name for session in opened] == ["eu-north-1"]
+
+    def test_an_unresolved_region_binds_nothing(self) -> None:
+        # aws's truthy guard. Nothing resolved means the session keeps
+        # botocore's own (identical) answer - and the NoRegion envelope that
+        # answer produces for s3control stays exactly where it was.
+        s3 = clientfactory.build_s3(_parse([]))
+        session = self._session_of(s3)
+        assert session.instance_variables().get("region") is None
+        assert session.get_config_variable("region") is None
+        with pytest.raises(ConfigurationError) as excinfo:
+            clientfactory.build_service_client("s3control", _parse([]), session=s3.session)
+        assert exit_code_for(excinfo.value) == 253
+
+    def test_an_empty_region_flag_binds_nothing_and_still_fails_the_build(self) -> None:
+        # `--region ""` is falsy, so aws binds nothing either; the empty
+        # string reaches the client as itself and fails construction on both
+        # tools (rc 255) before any credential is fetched.
+        args = _parse(["--region", ""])
+        with pytest.raises(ValueError, match="Invalid endpoint"):
+            clientfactory.build_client(args)
+
+    def test_the_region_chain_is_still_walked_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Binding must not cost a second walk: the chain's last link is the
+        # IMDS probe (seconds on a host with no region and no metadata
+        # service), which is why the answer is threaded rather than re-asked.
+        real_resolve = clientfactory._resolve_region  # pyright: ignore[reportPrivateUsage]
+        walks: list[str | None] = []
+
+        def counting_resolve(explicit: str | None, session: Any) -> Any:
+            resolved = real_resolve(explicit, session)
+            walks.append(resolved)
+            return resolved
+
+        monkeypatch.setenv("AWS_REGION", "eu-west-2")
+        monkeypatch.setattr(clientfactory, "_resolve_region", counting_resolve)
+        s3 = clientfactory.build_s3(_parse([]))
+        s3.client()
+        s3.client()
+        assert walks == ["eu-west-2"]
+
+
+class TestSessionRetryPosture:
+    """aws v2's retry defaults belong to the session, not to one client.
+
+    Its bundled botocore declares ``retry_mode = standard`` / ``max_attempts =
+    3`` as session defaults, so every client inherits them - the STS and SSO
+    clients the credential chain builds for itself included. Measured against
+    the pinned aws-cli: a failing ``AssumeRole`` is attempted 3 times and the
+    report ends ``(reached max retries: 2)``, where this CLI attempted it 5
+    times and ended ``(reached max retries: 4)``.
+    """
+
+    def test_a_provider_client_inherits_the_aws_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for var in ("AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+            monkeypatch.delenv(var, raising=False)
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        assert session.get_config_variable("retry_mode") == "standard"
+        assert session.get_config_variable("max_attempts") == 3
+        assert _provider_client(session).meta.config.retries == {
+            "mode": "standard",
+            "total_max_attempts": 3,
+        }
+
+    def test_the_user_s_overrides_still_win_there(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWS_RETRY_MODE", "adaptive")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "7")
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        assert _provider_client(session).meta.config.retries == {
+            "mode": "adaptive",
+            "total_max_attempts": 7,
+        }
+
+    def test_the_cli_timeouts_reach_a_provider_client(self) -> None:
+        # aws's globalargs writes both timeouts into the session default client
+        # config, so a stalled STS aborts on the flag's budget: measured,
+        # `--cli-read-timeout 2` against an STS stalling 8s is rc 255 and a
+        # read timeout on aws, where this CLI ran to botocore's default and
+        # reported the server's own error at rc 254.
+        args = _parse(["--cli-read-timeout", "2", "--cli-connect-timeout", "3"])
+        session = clientfactory.build_session(args)._session  # pyright: ignore[reportPrivateUsage]
+        client = _provider_client(session)
+        assert client.meta.config.read_timeout == 2
+        assert client.meta.config.connect_timeout == 3
+
+    def test_the_default_timeouts_are_aws_s_own(self) -> None:
+        # aws defaults both to botocore's 60s rather than leaving them unset.
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        default = session.get_default_client_config()
+        assert (default.connect_timeout, default.read_timeout) == (60, 60)
+
+    def test_a_zero_timeout_reaches_it_as_no_timeout(self) -> None:
+        session = clientfactory.build_session(_parse(["--cli-read-timeout", "0"]))._session  # pyright: ignore[reportPrivateUsage]
+        assert _provider_client(session).meta.config.read_timeout is None
+
+
+class TestConfigErrorOrder:
+    """A config carrying several mistakes reports the one aws reports.
+
+    Measured on the pinned aws-cli, its order is: the profile's ``services``
+    section, then the raw ``[s3]`` read, then the ``max_attempts`` int cast,
+    then ``[s3] addressing_style``, and only then the attempt range and the
+    retry mode. Resolving the retry configuration before ``create_client``, as
+    this module used to, put the last two in front of all of them.
+    """
+
+    def _config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
+        config = tmp_path / "config"
+        config.write_text(body)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        for var in ("AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+            monkeypatch.delenv(var, raising=False)
+
+    _SERVICES = 'The profile is configured to use the services section but the "nope" '
+    _ADDRESSING = "S3 addressing style bogus is invalid."
+
+    def test_a_missing_services_section_outranks_a_bad_retry_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nretry_mode = legacy\n")
+        with pytest.raises(InvalidConfigError, match=self._SERVICES):
+            clientfactory.build_client(_parse([]))
+
+    def test_a_missing_services_section_outranks_a_bad_attempt_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nmax_attempts = abc\n")
+        with pytest.raises(InvalidConfigError, match=self._SERVICES):
+            clientfactory.build_client(_parse([]))
+
+    def test_a_missing_services_section_outranks_a_degenerate_s3_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\ns3 =\n")
+        with pytest.raises(InvalidConfigError, match=self._SERVICES):
+            clientfactory.build_client(_parse([]))
+
+    def test_an_explicit_endpoint_stands_the_services_lookup_down(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore consults the services section only when the client resolves
+        # its own endpoint, so with --endpoint-url the retry mode is what aws
+        # reports (measured).
+        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nretry_mode = legacy\n")
+        with pytest.raises(InvalidConfigError, match='Invalid value provided to "mode"'):
+            clientfactory.build_client(_parse(["--endpoint-url", "http://localhost:9000"]))
+
+    def test_a_degenerate_s3_section_outranks_a_bad_attempt_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path, monkeypatch, "[default]\ns3 =\nmax_attempts = abc\n")
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
+    def test_a_bad_attempt_count_outranks_a_bogus_addressing_style(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(
+            tmp_path,
+            monkeypatch,
+            "[default]\nmax_attempts = abc\ns3 =\n  addressing_style = bogus\n",
+        )
+        with pytest.raises(ValueError, match="invalid literal for int"):
+            clientfactory.build_client(_parse([]))
+
+    @pytest.mark.parametrize("broken", ["retry_mode = legacy", "max_attempts = 0"])
+    def test_a_bogus_addressing_style_outranks_the_retry_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
+    ) -> None:
+        self._config(
+            tmp_path, monkeypatch, f"[default]\n{broken}\ns3 =\n  addressing_style = bogus\n"
+        )
+        with pytest.raises(InvalidConfigError, match=self._ADDRESSING):
+            clientfactory.build_client(_parse([]))
+
+    def test_a_bad_attempt_range_outranks_a_bad_retry_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both live in botocore's own Config validation, which checks the
+        # attempt count first (measured: aws reports the count).
+        self._config(tmp_path, monkeypatch, "[default]\nmax_attempts = 0\nretry_mode = legacy\n")
+        with pytest.raises(InvalidConfigError, match='Value provided to "max_attempts"'):
+            clientfactory.build_client(_parse([]))
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ("[default]\nservices = nope\n", _SERVICES),
+            ("[default]\ns3 =\n  addressing_style = bogus\n", _ADDRESSING),
+            ("[default]\nretry_mode = legacy\n", 'Invalid value provided to "mode"'),
+        ],
+        ids=["services", "addressing", "retry-mode"],
+    )
+    def test_each_error_alone_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, expected: str
+    ) -> None:
+        # The controls: reordering must not change what a single mistake says.
+        self._config(tmp_path, monkeypatch, body)
+        with pytest.raises(InvalidConfigError, match=expected):
+            clientfactory.build_client(_parse([]))
+
+
+class TestTlsKeyLogIsIgnored:
+    """``SSLKEYLOGFILE`` decides nothing here, as it decides nothing for aws.
+
+    botocore hands the variable to every client's SSL context under a
+    ``sys.flags.ignore_environment`` guard; aws ships a frozen interpreter that
+    runs isolated, so the guard is always true there. Measured: with a writable
+    path aws writes no key log and this CLI wrote one; with an unopenable path
+    aws runs normally (``presign`` rc 0, ``mb`` rc 1 on the refused endpoint)
+    and this CLI exited 255 from the open.
+    """
+
+    def test_opening_a_session_takes_the_variable_out_of_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        keylog = tmp_path / "keys.log"
+        monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+        clientfactory.build_session(_parse([]))
+        assert "SSLKEYLOGFILE" not in os.environ
+
+    def test_no_key_material_is_written_by_a_built_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The quiet half: with the directory present, this CLI used to write
+        # the process's TLS session keys where aws writes none. The file is
+        # created while the client's HTTP session builds its SSL context, so
+        # building the client is the whole exposure.
+        keylog = tmp_path / "keys.log"
+        monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+        clientfactory.build_client(_parse([]))
+        assert not keylog.exists()
+
+    def test_an_unopenable_path_no_longer_fails_the_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "absent" / "keys.log"))
+        assert clientfactory.build_client(_parse([])).meta.service_model.service_name == "s3"
+
+    def test_a_child_process_still_receives_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws passes the variable on untouched, and an external `!` alias -
+        # the only child this CLI launches - runs without opening a session,
+        # so the environment it inherits still carries it.
+        from boto3_s3_cli import child_environ
+
+        monkeypatch.setenv("SSLKEYLOGFILE", "/tmp/keys.log")
+        assert child_environ()["SSLKEYLOGFILE"] == "/tmp/keys.log"
+
+
+class TestUsEast1RegionalEndpointIsIgnored:
+    """``us_east_1_regional_endpoint`` decides nothing, and never errors.
+
+    aws v2's bundled botocore dropped the key from its ``[s3]`` table (us-east-1
+    is regional there, always), so neither ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT``
+    nor the config key is read or validated. The installed botocore validates
+    it for every client that resolves an endpoint ruleset, so an invalid or
+    empty value turned ``mv --validate-same-s3-paths`` into rc 255 where aws
+    ran the move (measured).
+    """
+
+    @pytest.mark.parametrize("value", ["zzz", "", "legacy"])
+    def test_an_env_value_reaches_no_client(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("AWS_S3_US_EAST_1_REGIONAL_ENDPOINT", value)
+        args = _parse(["--region", "us-east-1"])
+        client = clientfactory.build_client(args)
+        assert client.meta.config.s3["us_east_1_regional_endpoint"] == "regional"
+        clientfactory.build_service_client("s3control", args, region="us-east-1")
+        session = clientfactory.build_session(args)._session  # pyright: ignore[reportPrivateUsage]
+        assert _provider_client(session).meta.service_model.service_name == "sts"
+
+    @pytest.mark.parametrize("value", ["zzz", "legacy"])
+    def test_a_config_value_reaches_no_client_either(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        config = tmp_path / "config"
+        config.write_text(f"[default]\ns3 =\n  us_east_1_regional_endpoint = {value}\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        args = _parse(["--region", "us-east-1"])
+        client = clientfactory.build_client(args)
+        assert client.meta.config.s3["us_east_1_regional_endpoint"] == "regional"
+        # The pin is what keeps us-east-1 on the regional endpoint aws v2 uses;
+        # a dropped key would send it to the legacy global one.
+        assert client.meta.endpoint_url == "https://s3.us-east-1.amazonaws.com"
+        clientfactory.build_service_client("sts", args, region="us-east-1")
 
 
 class TestS3ErrorMsgRegistration:
@@ -1208,9 +1654,11 @@ class TestMalformedS3Section:
     `s3 =` with no nested keys survives botocore's section provider as the
     string "" (the provider's truthy guard discards every other non-dict);
     a truthy scalar like `s3 = foo` is discarded there but still sits in the
-    raw scoped config both tools read. Either way the first touch must be
-    aws's raw `.get` (build_client's pre-read), not the Config(s3=...)
-    merge's `.copy`, so the crash line matches aws byte-for-byte (rc 255).
+    raw scoped config both tools read. Either way the failure has to stay
+    botocore's own - the `.get` its endpoint resolution performs on the raw
+    section, which is the line aws prints (rc 255 on both). Anything this
+    module puts in front of that read (a `Config(s3=...)` whose merge reaches
+    the string first, with `.copy`) would reword it.
     """
 
     def _write_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> None:
@@ -1228,11 +1676,28 @@ class TestMalformedS3Section:
     def test_truthy_junk_s3_section_keeps_the_same_report(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Both tools already crashed at a `.get` for this shape (the provider
-        # discards the value, the raw read still returns the string); the
-        # pre-read only moves the same failure earlier.
+        # The provider discards this value, the raw read still returns the
+        # string, and both tools crash at the same `.get`.
         self._write_config(tmp_path, monkeypatch, "[default]\ns3 = foo\n")
         with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+
+    def test_the_regional_pin_does_not_reword_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The key aws v2 does not read must not be the one that fails here:
+        # botocore writes its `[s3]` env overrides into the section value, and
+        # into a string that is `'str' object does not support item
+        # assignment`. With AWS_S3_US_EAST_1_REGIONAL_ENDPOINT set, aws still
+        # reports the `.get` (measured) because its table has no such entry;
+        # dropping the entry is what keeps the reports equal. Its neighbours
+        # aws *does* read still report the assignment on both tools.
+        self._write_config(tmp_path, monkeypatch, "[default]\ns3 =\n")
+        monkeypatch.setenv("AWS_S3_US_EAST_1_REGIONAL_ENDPOINT", "regional")
+        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
+            clientfactory.build_client(_parse([]))
+        monkeypatch.setenv("AWS_S3_USE_ARN_REGION", "true")
+        with pytest.raises(TypeError, match="'str' object does not support item assignment"):
             clientfactory.build_client(_parse([]))
 
 

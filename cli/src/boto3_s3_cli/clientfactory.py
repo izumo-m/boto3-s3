@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import argparse
 import enum
+import json
 import os
+from datetime import datetime
+from functools import cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import urlparse
 
@@ -120,6 +123,17 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     the config chain, so no env var or config file can put one back. The
     library's own ``S3()`` keeps reading it, staying boto3-faithful.
 
+    ``retry_mode`` / ``max_attempts`` are redeclared with the defaults aws v2's
+    bundled botocore hard-codes (``standard`` / 3, where stock botocore
+    declares ``legacy`` and no cap). Declaring them on the *session* is what
+    puts every client it builds on aws's retry posture - not just the ones this
+    module builds, but the STS / SSO clients the credential chain creates for
+    itself, which a per-client ``Config`` never reaches (measured: a failing
+    ``AssumeRole`` is attempted 3 times under aws and was attempted 5 here).
+    The ``[s3]`` regional pin (`_pin_regional_s3_endpoint`) and the timeouts in
+    the session default client config (`_default_client_config`) reach the same
+    clients for the same reason.
+
     Finally the temporary-credential providers get their on-disk cache, the
     last thing aws does to a session before running a command
     (`_inject_credential_cache`).
@@ -129,12 +143,133 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     # (config-file key, env var names, default, converter). botocore walks the
     # env names in order and only recognizes several of them as a `list`.
     profile_var = (None, list(PROFILE_ENV_VARS), None, None)
-    session = botocore.session.Session(session_vars={"profile": profile_var})
+    session = botocore.session.Session(
+        session_vars={
+            "profile": profile_var,
+            "retry_mode": ("retry_mode", "AWS_RETRY_MODE", "standard", None),
+            "max_attempts": ("max_attempts", "AWS_MAX_ATTEMPTS", 3, int),
+        }
+    )
     if args.profile:
         session.set_config_variable("profile", args.profile)
     session.set_config_variable("api_versions", {})
+    _pin_regional_s3_endpoint(session)
+    _drop_tls_key_log()
+    session.set_default_client_config(_default_client_config(args))
     _inject_credential_cache(session)
     return session
+
+
+class _RegionalS3Section:
+    """The profile's ``[s3]`` section with ``us_east_1_regional_endpoint`` pinned.
+
+    aws v2's bundled botocore dropped that key from its ``[s3]`` table outright
+    - us-east-1 is regional there, always - so neither
+    ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`` nor the config key decides anything
+    on that side, an invalid or empty value included. The installed botocore
+    still reads *and validates* it, for every client that resolves an endpoint
+    ruleset: dropping the key alone would not do, because its absence selects
+    the legacy global endpoint here (``_should_force_s3_global`` reads a
+    missing key as ``legacy``), so the value is pinned to ``regional`` instead.
+
+    A value botocore's own section provider hands over as something other than
+    a mapping (a degenerate ``s3 =`` line arrives as ``""``) is passed through
+    untouched: that shape is botocore's to report, in the place and with the
+    wording it reports it (``'str' object has no attribute 'get'``, which aws
+    produces from the same read).
+    """
+
+    def __init__(self, section_provider: Any) -> None:
+        self._section_provider = section_provider
+
+    def provide(self) -> Any:
+        section = self._section_provider.provide()
+        if section is not None and not isinstance(section, dict):
+            return section
+        pinned: dict[str, Any] = dict(cast("dict[str, Any]", section or {}))
+        pinned["us_east_1_regional_endpoint"] = "regional"
+        return pinned
+
+
+def _pin_regional_s3_endpoint(session: BotocoreSession) -> None:
+    """Wrap the session's ``[s3]`` section provider in `_RegionalS3Section`.
+
+    The session's config store is the one place every client reads the section
+    from - the S3 client, ``mv``'s s3control / sts resolver clients, and the
+    clients the credential providers build for themselves - so pinning it here
+    covers all of them at once, where a ``Config(s3=...)`` covers only what
+    this module passes it (measured: with
+    ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT=zzz``, ``mv
+    --validate-same-s3-paths`` exited 255 on the validator's client where aws
+    ran the move).
+
+    The section provider's own entry for the key goes first, so the env var
+    and the top-level ``s3_us_east_1_regional_endpoint`` key are not read at
+    all - what a table without the key does. It shows through on a degenerate
+    ``s3 =`` line, where botocore writes an override into what is still a
+    string: the key aws does not have must not be the one that fails there.
+    Botocore's own name for that table is private, so a botocore that renames
+    it simply keeps reading the key, and the pin above still decides the
+    value.
+    """
+    config_store = session.get_component("config_store")
+    section_provider = config_store.get_config_provider("s3")
+    section_overrides = getattr(section_provider, "_override_providers", None)
+    if isinstance(section_overrides, dict):
+        cast("dict[str, Any]", section_overrides).pop("us_east_1_regional_endpoint", None)
+    config_store.set_config_provider("s3", _RegionalS3Section(section_provider))
+
+
+def _drop_tls_key_log() -> None:
+    """Take ``SSLKEYLOGFILE`` out of the environment, as the aws build does.
+
+    botocore hands the variable to the SSL context it builds for every client,
+    under a ``sys.flags.ignore_environment`` guard. aws ships a frozen
+    interpreter that runs isolated, so the guard is always false there and the
+    variable decides nothing: with a writable path aws writes no key log, and
+    with an unopenable one it runs normally. Here the same botocore code runs
+    on the host interpreter, so the path is opened while the client's HTTP
+    session builds - writing TLS session keys aws would not write, and failing
+    every client-building command (``presign`` included, rc 255) when the path
+    cannot be opened. Dropping the variable as the session opens reproduces
+    aws's outcome; an external ``!`` alias opens no session, so the child
+    process this CLI launches still receives it, exactly as under aws.
+    """
+    os.environ.pop("SSLKEYLOGFILE", None)
+
+
+def _default_client_config(args: argparse.Namespace) -> Any:
+    """The session default client config aws's startup handlers build.
+
+    aws's globalargs resolves ``--cli-read-timeout`` / ``--cli-connect-timeout``
+    into the session's default client config (``_resolve_timeout`` ->
+    ``_update_default_client_config``), defaulting both to botocore's 60s, so
+    every client created from that session inherits them - the credential
+    chain's own STS / SSO clients included. Without that, a stalled STS ran to
+    botocore's default here while aws gave up on the flag's budget (measured:
+    ``--cli-read-timeout 2`` against an STS stalling 8s is rc 255 and a read
+    timeout on aws, and was rc 254 with the server's own error here).
+
+    The clients this module builds pass the same two values in their own
+    ``Config`` as well, which botocore merges on top of this one - the same
+    number either way. The read timeout is coerced first, aws's registration
+    order (`resolve_cli_timeouts`), so a run with both values broken reports
+    the same one aws reports.
+    """
+    from botocore.config import Config
+    from botocore.endpoint import DEFAULT_TIMEOUT
+
+    read = (
+        DEFAULT_TIMEOUT
+        if args.cli_read_timeout is None
+        else _coerce_cli_timeout(args.cli_read_timeout)
+    )
+    connect = (
+        DEFAULT_TIMEOUT
+        if args.cli_connect_timeout is None
+        else _coerce_cli_timeout(args.cli_connect_timeout)
+    )
+    return Config(connect_timeout=connect, read_timeout=read)
 
 
 def _credential_cache_dir() -> str:
@@ -168,22 +303,82 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     fetched separately, under aws's wider ``UnknownCredentialError`` guard for
     a botocore whose chain has no such provider.
     """
-    # botocore.credentials re-exports this very class; `utils` is where it is
-    # defined, and the only spelling botocore-stubs declares.
     from botocore.exceptions import ProfileNotFound, UnknownCredentialError
-    from botocore.utils import JSONFileCache
 
+    cache = _credential_cache_class()
     cache_dir = _credential_cache_dir()
     try:
         chain = session.get_component("credential_provider")
-        chain.get_provider("assume-role").cache = JSONFileCache(cache_dir)
-        chain.get_provider("assume-role-with-web-identity").cache = JSONFileCache(cache_dir)
+        chain.get_provider("assume-role").cache = cache(cache_dir)
+        chain.get_provider("assume-role-with-web-identity").cache = cache(cache_dir)
     except ProfileNotFound:
         return
     try:
-        chain.get_provider("sso").cache = JSONFileCache(cache_dir)
+        chain.get_provider("sso").cache = cache(cache_dir)
     except (ProfileNotFound, UnknownCredentialError):
         return
+
+
+def _serialize_cache_entry(value: Any) -> Any:
+    """Render for `json.dumps` what it cannot render itself: a ``datetime``.
+
+    aws never reaches this case - its ``cli_timestamp_format`` handler makes
+    the response parser return timestamps as ISO-8601 *strings*, so a
+    credential's ``Expiration`` is already text by the time the cache stores it
+    and lands in the file verbatim (``2026-08-13T10:23:54+09:00``). This CLI
+    parses timestamps to ``datetime`` for speed, and botocore's own default
+    renders one with ``strftime('%Y-%m-%dT%H:%M:%S%Z')``, whose ``%Z`` for an
+    offset-carrying ``datetime.timezone`` is the literal ``UTC+09:00`` - which
+    dateutil reads back with POSIX's inverted sign, leaving the entry looking
+    valid for hours after it expired (for this CLI and for any aws sharing the
+    directory). ``isoformat()`` is the text aws stores, byte for byte.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+@cache
+def _credential_cache_class() -> type[Any]:
+    """botocore's ``JSONFileCache`` with aws's write, built on first use.
+
+    The installed botocore writes an entry through ``tempfile.mkstemp`` +
+    ``os.replace``; the botocore aws ships opens the *final* path directly
+    (``O_WRONLY | O_CREAT``, mode 0600, then truncate). The difference is only
+    visible when the write fails, which is exactly when it is read: an
+    unwritable ``~/.aws/cli/cache`` makes aws report the cache entry's own
+    name, stable across runs, where this CLI reported a random
+    ``tmpXXXXXXXX.tmp`` (rc 255 on both).
+
+    The class is built lazily because botocore is imported lazily, and cached
+    so every cache this CLI installs is of one type.
+    """
+    # botocore.credentials re-exports this very class; `utils` is where it is
+    # defined, and the only spelling botocore-stubs declares.
+    from botocore.utils import JSONFileCache
+
+    class CliCredentialCache(JSONFileCache):
+        def __init__(self, working_dir: str) -> None:
+            super().__init__(working_dir)
+            # The base keeps its own copy under a private name botocore-stubs
+            # does not declare, so hold one here rather than reach for it.
+            self._dir = working_dir
+
+        def __setitem__(self, cache_key: str, value: Any) -> None:
+            full_key = os.path.join(self._dir, cache_key + ".json")
+            try:
+                file_content = json.dumps(value, default=_serialize_cache_entry)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Value cannot be cached, must be JSON serializable: {value}"
+                ) from exc
+            if not os.path.isdir(self._dir):
+                os.makedirs(self._dir, exist_ok=True)
+            with os.fdopen(os.open(full_key, os.O_WRONLY | os.O_CREAT, 0o600), "w") as entry:
+                entry.truncate()
+                entry.write(file_content)
+
+    return CliCredentialCache
 
 
 def _has_url_scheme(value: str) -> bool:
@@ -273,15 +468,16 @@ def build_s3(args: argparse.Namespace) -> S3:
     and no metadata service answering costs seconds - and the chain's answer
     cannot change within one invocation, since the env, the bound session's
     config and IMDS are all fixed by then. The same value is what the CRT
-    posture below declares, so client and engine can never disagree on it.
+    posture below declares, so client and engine can never disagree on it, and
+    `_bind_region` puts it on the session so the clients *botocore* builds
+    resolve it too.
     """
     from boto3_s3 import S3
 
     session = build_session(args)
-    region = _resolve_region(
-        args.region,
-        session._session,  # pyright: ignore[reportPrivateUsage]
-    )
+    botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
+    region = _resolve_region(args.region, botocore_session)
+    _bind_region(botocore_session, region)
 
     class CliS3(S3):
         def client(self) -> S3Client:
@@ -376,6 +572,32 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
         return None
 
 
+def _bind_region(botocore_session: BotocoreSession, region: str | None) -> None:
+    """Bind the invocation's region onto the session, as aws's driver does.
+
+    aws installs its region chain as the session's own ``region`` config
+    provider and binds a truthy ``--region`` at the head of it
+    (``_update_config_chain`` / ``_handle_top_level_args``), so every client
+    built from that session resolves the chain's answer - including the clients
+    *botocore itself* builds, chiefly the STS client the assume-role and
+    web-identity providers create for their own use. Passing the answer to each
+    client as ``region_name`` never reached those, so an assume-role profile
+    whose only region source was ``--region`` or ``AWS_REGION`` signed
+    ``AssumeRole`` against the global STS endpoint - a different partition
+    under ``cn-*`` / ``us-gov-*`` - or failed outright with ``NoRegion``
+    (measured: rc 253 where aws exits 0).
+
+    Binding the chain's already-resolved answer rather than re-installing the
+    chain keeps its cost at one walk per invocation (its last link is the IMDS
+    probe). Nothing is bound when the chain resolved nothing, which is aws's
+    own truthy guard, and leaves the session on botocore's identical answer;
+    the empty string ``AWS_REGION=`` can resolve to fails client construction
+    on both tools before any credential is fetched.
+    """
+    if region:
+        botocore_session.set_config_variable("region", region)
+
+
 def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession) -> bool | str:
     """The TLS trust source, resolved to an explicit value for every CLI client.
 
@@ -435,11 +657,14 @@ def build_service_client(
     ``region_name`` still lands in ``--region``; mirror that by falling back
     from the caller's ``None`` to ``args.region`` before the shared
     ``_resolve_region`` chain (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` >
-    config > IMDS). aws likewise resolves ``--cli-read-timeout`` /
-    ``--cli-connect-timeout`` and ``--no-sign-request`` into the *session*
-    default client config at startup, so ``from_session``'s ``create_client``
-    inherits them; fold the same timeouts and the UNSIGNED signature into this
-    client's ``Config``.
+    config > IMDS), and by binding the same answer onto a session this builder
+    opened itself (`_bind_region`). aws likewise resolves
+    ``--cli-read-timeout`` / ``--cli-connect-timeout`` and ``--no-sign-request``
+    into the *session* default client config at startup, so ``from_session``'s
+    ``create_client`` inherits them; fold the same timeouts and the UNSIGNED
+    signature into this client's ``Config``. The retry posture arrives through
+    the session as well (`_open_botocore_session`), so this client is created
+    through the shared `_create_client`.
     """
     # Deferred like build_client: only a command that opts into path
     # resolution (mv's --validate-same-s3-paths, which builds both resolver
@@ -464,20 +689,22 @@ def build_service_client(
                 timestamp_parser=fast_parse_timestamp
             )
             session = boto3.Session(botocore_session=botocore_session)
+            _bind_region(botocore_session, _resolve_region(args.region, botocore_session))
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
-        # aws's bundled botocore applies its standard/3 retry defaults to
-        # these validator clients too, and its startup handlers thread the
-        # timeouts / UNSIGNED signature through the session default config that
-        # from_session's create_client inherits (build_client mirrors the same).
-        service_overrides: dict[str, Any] = {"retries": _retry_defaults(botocore_session)}
+        # aws's startup handlers thread the timeouts / UNSIGNED signature
+        # through the session default config that from_session's create_client
+        # inherits (build_client mirrors the same).
+        service_overrides: dict[str, Any] = {}
         if args.no_sign_request:
             service_overrides["signature_version"] = UNSIGNED
         if args.cli_read_timeout is not None:
             service_overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
         if args.cli_connect_timeout is not None:
             service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
-        return session.client(
+        return _create_client(
+            session,
+            botocore_session,
             service,
             region_name=_resolve_region(
                 region if region is not None else args.region, botocore_session
@@ -603,6 +830,10 @@ def build_client(
     carries aws's S3 error-message rewriter (`s3errormsg`). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
+
+    The retry posture and the ``[s3]`` regional pin are not client kwargs at
+    all: they belong to the session (`_open_botocore_session`), which is what
+    puts the clients botocore builds for itself on them too.
     """
     # Importing boto3 drags in botocore and s3transfer. The informational exits
     # (`--version`, the help token) return before this normal-dispatch path.
@@ -622,9 +853,10 @@ def build_client(
     # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
     # signers) left - only the generic query-protocol "v2" - while stock
     # botocore still downgrades *presigned URLs* to SigV2 in regions that
-    # accept it (a default us-east-1 client) and resolves us-east-1
-    # to the legacy global endpoint where aws v2 uses the regional one. Pin
-    # both so every command - visibly, presign's URLs - matches aws v2.
+    # accept it (a default us-east-1 client). Pin s3v4 so every command -
+    # visibly, presign's URLs - matches aws v2. (The other half of that
+    # divergence, us-east-1 resolving to the legacy global endpoint, is pinned
+    # on the session instead: `_pin_regional_s3_endpoint`.)
     # The pin stands down when the command targets an MRAP ARN, an S3 Outposts
     # access point (ARN or `--op-s3` alias), or an S3 Express directory
     # bucket: an explicit signature_version suppresses botocore's auth-scheme
@@ -638,9 +870,7 @@ def build_client(
     # Outposts) surfaces botocore's own MissingDependencyException
     # (-> ConfigurationError, 253) instead of a silently mis-signed SigV4
     # request.
-    overrides: dict[str, Any] = {
-        "s3": {"us_east_1_regional_endpoint": "regional"},
-    }
+    overrides: dict[str, Any] = {}
     if not _includes_endpoint_auth_path(args):
         overrides["signature_version"] = "s3v4"
     if args.no_sign_request:
@@ -672,30 +902,18 @@ def build_client(
             session = boto3.Session(botocore_session=botocore_session)
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
-        # aws's first reader of the profile's raw `s3` section is a plain
-        # `scoped_config.get('s3', {}).get('use_dualstack_endpoint')` inside
-        # client creation (botocore's dualstack probe). A degenerate `s3 =`
-        # line (no nested keys) rides botocore's section provider as the
-        # string "" - the provider's truthy guard discards every other
-        # non-dict - and this client passes Config(s3=...) (the regional pin
-        # above), so botocore's merge (`s3_configuration.copy()`) would
-        # otherwise touch that string first and report `.copy` where aws
-        # reports `.get`. Performing aws's read up front keeps the report
-        # byte-identical - a real AttributeError from the same operation, rc
-        # 255 on both tools - and is a no-op read on a well-formed section.
-        # It sits before the retry-defaults read: aws reports the broken
-        # section ahead of a broken retry_mode (measured, the combined case).
-        botocore_session.get_scoped_config().get("s3", {}).get("use_dualstack_endpoint")
-        overrides["retries"] = _retry_defaults(botocore_session)
-        config = Config(**overrides)
-        client = session.client(
+        client_region = (
+            _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
+        )
+        _bind_region(botocore_session, client_region)
+        client = _create_client(
+            session,
+            botocore_session,
             "s3",
-            region_name=(
-                _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
-            ),
+            region_name=client_region,
             endpoint_url=args.endpoint_url,
             verify=_resolve_verify(args, botocore_session),
-            config=config,
+            config=Config(**overrides),
         )
         s3errormsg.register(client)
         return client
@@ -709,43 +927,50 @@ def build_client(
         raise InvalidConfigError(str(exc)) from exc
 
 
-def _retry_defaults(botocore_session: BotocoreSession) -> dict[str, Any]:
-    """aws v2's retry defaults, honoring the user's env/config overrides.
+def _create_client(
+    session: Boto3Session, botocore_session: BotocoreSession, service: str, **kwargs: Any
+) -> Any:
+    """``session.client`` with aws v2's retry-mode vocabulary around it.
 
-    aws v2's bundled botocore hard-codes ``retry_mode='standard'`` and
-    ``max_attempts=3`` as its session defaults (its ``configprovider``),
-    where stock botocore defaults to ``legacy`` with 5 total attempts - a
-    user-visible difference in how ``aws s3`` behaves under throttling. The
-    aws default fills in only when neither ``AWS_RETRY_MODE`` /
-    ``AWS_MAX_ATTEMPTS`` nor the profile's ``retry_mode`` / ``max_attempts``
-    supplies a value, exactly like the bundled default chain. A supplied mode
-    is validated here against the bundled botocore's restricted set -
-    ``standard`` / ``adaptive`` only, with aws's exact wording (measured, rc
-    255): stock botocore would otherwise *accept* ``legacy`` (its own valid
-    mode) where aws v2 rejects it. An unconvertible ``max_attempts`` raises
-    ``ValueError`` like the bundled botocore's int cast (aws's general
-    handler, rc 255 - main()'s backstop maps it the same).
+    The retry configuration itself is the session's (`_open_botocore_session`
+    declares aws v2's ``standard`` / 3 defaults), so botocore resolves and
+    validates it exactly where aws's does - and that placement is what a
+    config carrying several mistakes reports: measured on the pinned aws-cli,
+    the profile's ``services`` section is reported first, then the raw ``[s3]``
+    read, then the ``max_attempts`` int cast, then ``[s3] addressing_style``,
+    and only then the attempt range and the mode. Resolving the retry
+    configuration ahead of ``create_client``, as this module used to, put the
+    mode and the range in front of all four.
 
-    The attempts are resolved *first* because that is the order aws resolves
-    them in (its bundled ``_compute_retry_config`` calls
-    ``_compute_retry_max_attempts`` ahead of ``_compute_retry_mode``, and the
-    int conversion is the config store's read-time type), so with both values
-    broken the int cast is what fails - measured on the pinned aws-cli.
+    Only the vocabulary differs: aws v2's bundled botocore accepts
+    ``standard`` / ``adaptive`` alone, while the installed botocore still
+    counts ``legacy`` as valid and lists all three in its own report. So the
+    mode is judged where botocore judges it - rewording the rejection botocore
+    raises, and rejecting the ``legacy`` it lets through, once the client is
+    built and every earlier report has had its turn.
     """
-    scoped = botocore_session.get_scoped_config()
-    # Present-wins reads, like the profile/region env chains: aws treats a
-    # present-but-empty AWS_RETRY_MODE / AWS_MAX_ATTEMPTS as a fatal value
-    # (rc 255), never as "unset" - the empty string fails the int cast below
-    # (mode via the value validation).
-    attempts_raw = os.environ.get("AWS_MAX_ATTEMPTS")
-    if attempts_raw is None:
-        attempts_raw = scoped.get("max_attempts")
-    attempts = 3 if attempts_raw is None else int(attempts_raw)
-    mode = os.environ.get("AWS_RETRY_MODE")
-    if mode is None:
-        mode = scoped.get("retry_mode", "standard")
-    if mode not in ("standard", "adaptive"):
-        raise InvalidConfigError(
-            f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
-        )
-    return {"mode": mode, "total_max_attempts": attempts}
+    from botocore.exceptions import InvalidRetryModeError
+
+    try:
+        client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
+    except InvalidRetryModeError:
+        _reject_unsupported_retry_mode(botocore_session.get_config_variable("retry_mode"))
+        raise
+    retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
+    _reject_unsupported_retry_mode(retries.get("mode"))
+    return client
+
+
+def _reject_unsupported_retry_mode(mode: Any) -> None:
+    """Reject a retry mode aws v2 does not have, with aws's own wording.
+
+    ``legacy`` is stock botocore's default and one of its three valid modes;
+    aws v2's bundled botocore dropped it, so a profile carrying the aws-cli v1
+    value (or any other typo) is rc 255 there - and the report names the two
+    modes that remain, where the installed botocore names all three.
+    """
+    if mode is None or mode in ("standard", "adaptive"):
+        return
+    raise InvalidConfigError(
+        f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
+    )
