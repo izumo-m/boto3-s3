@@ -29,7 +29,14 @@ from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
-from boto3_s3.s3storage import S3Storage, s3_errors
+from boto3_s3.s3storage import (
+    S3Storage,
+    # The one out-of-module caller: the local-zone band this encodes belongs
+    # with the backend that reads S3 timestamps, while aws-cli runs the same
+    # conversion on the single-object HEAD this module owns.
+    reject_unrepresentable_stamp,
+    s3_errors,
+)
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
@@ -604,7 +611,9 @@ def head_single(
     Any 404 is rewritten to aws's ``Key "..." does not exist`` message; a
     copy source is headed with the copy-source SSE-C parameters. Like aws-cli's
     filegenerator, the HEAD carries ``ChecksumMode=ENABLED`` when the client
-    resolves checksum validation to ``when_supported`` (the botocore default).
+    resolves checksum validation to ``when_supported`` (the botocore default),
+    and the stamp the response carries is rejected here when the local calendar
+    cannot hold it, aws-cli's conversion at the same slot.
     """
     key = src_storage.key
     if transfer_type is TransferType.COPY:
@@ -649,6 +658,15 @@ def head_single(
             key=key,
         ) from (exc.__cause__ or exc)
     etag = head.get("ETag")
+    mtime = head.get("LastModified")
+    # aws-cli converts the HeadObject stamp to the local zone as the last thing
+    # `_list_single_object` does, so a stamp the local calendar cannot hold
+    # ends the run right here - before the transfer, and before a dryrun would
+    # have recorded it - instead of riding on. The listing routes run the same
+    # check inside the S3 backend; this route never passes through it, so it
+    # gets the check at aws's own slot. The value handed on stays UTC per the
+    # `FileInfo.mtime` contract - only the conversion's failure is wanted.
+    reject_unrepresentable_stamp(mtime)
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees
@@ -656,7 +674,7 @@ def head_single(
     yield S3FileInfo(
         key=key,
         size=head.get("ContentLength"),
-        mtime=head.get("LastModified"),
+        mtime=mtime,
         etag=etag.strip('"') if etag else None,
         storage_class=head.get("StorageClass"),
         head=head,

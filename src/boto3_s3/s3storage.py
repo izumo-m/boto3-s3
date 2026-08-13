@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
+from datetime import datetime
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -254,14 +256,53 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
+# Years a listing timestamp can carry without its local-zone rendering being
+# able to leave datetime's range: everything strictly inside the first and the
+# last calendar year is more than a day from either end, further than any zone's
+# UTC offset. Only years 1 and 9999 need the real conversion (the local side
+# bands the same way in localstorage, there in epoch seconds).
+_LOCAL_CHECK_FREE_YEARS = range(datetime.min.year + 1, datetime.max.year)
+
+# Windows has no such quiet range: dateutil's DST probe goes through
+# time.localtime, which fails outright below the epoch there.
+_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
+
+
+def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
+    """Run aws-cli's local-zone conversion of an S3 timestamp for its failure alone.
+
+    aws-cli turns every timestamp an S3 response carries into
+    ``parse(...).astimezone(tzlocal())`` the moment it reads it - a listing entry
+    through ``_date_parser``, a single object through the filegenerator's
+    HeadObject branch - so a stamp the *local* calendar cannot hold (an offset
+    away from the end of ``datetime``'s range) aborts the whole run with
+    ``date value out of range`` instead of being listed or transferred. The value
+    kept here stays UTC per the ``FileInfo.mtime`` contract, so this runs the
+    conversion only for the exception it may raise. dateutil's ``tzlocal`` is
+    rebuilt per call the way aws-cli does, so a process that changes ``TZ`` (and
+    calls ``time.tzset``) follows; the import is deferred because the whole
+    dateutil package costs about as much to import as boto3-s3 itself.
+
+    ``None`` (a response that carried no timestamp at all) has nothing to judge;
+    whether its absence is itself an error is the caller's question.
+    """
+    if mtime is None:
+        return
+    if not _ALWAYS_CHECK_LOCAL_ZONE and mtime.year in _LOCAL_CHECK_FREE_YEARS:
+        return
+    from dateutil.tz import tzlocal
+
+    mtime.astimezone(tzlocal())
+
+
 def _page_to_infos(
     page: ListObjectsV2OutputTypeDef,
     *,
     include_common_prefixes: bool,
     prefix: str,
     storage: S3Storage,
-) -> list[S3FileInfo]:
-    """Convert one ``ListObjectsV2`` page into ``FileInfo`` items (no I/O).
+) -> Iterator[S3FileInfo]:
+    """Convert one ``ListObjectsV2`` page into ``FileInfo`` items, entry by entry (no I/O).
 
     Runs on the prefetch worker thread under ``Storage.scan`` (a direct
     ``scan_pages`` consumer drives it on its own thread). With
@@ -278,44 +319,68 @@ def _page_to_infos(
     ``storage`` (the listing backend) is stamped on every entry alongside
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
+
+    The elements a listing entry must carry are read by subscript, not by
+    ``get``: aws-cli reads them the same way (``BucketLister`` takes ``Key`` then
+    ``LastModified``, its consumer ``Size``; a common prefix is read as
+    ``Prefix``), so an entry missing one raises ``KeyError`` naming the element
+    and stops the listing right there rather than being dropped from it. That is
+    what the ignores below mark: the subscripts may raise at runtime on purpose.
+    This is a generator, entry by entry, for the same reason - the entries ahead
+    of the bad one are already emitted when it is reached, as in aws-cli.
     """
-    infos: list[S3FileInfo] = []
     if include_common_prefixes:
         for common in page.get("CommonPrefixes", []):
-            dir_prefix = common.get("Prefix")
-            if dir_prefix is not None:
-                infos.append(
-                    S3FileInfo(
-                        key=dir_prefix,
-                        kind=FileKind.DIRECTORY,
-                        compare_key=dir_prefix[len(prefix) :],
-                        storage=storage,
-                    )
-                )
-    for obj in page.get("Contents", []):
-        key = obj.get("Key")
-        size = obj.get("Size")
-        mtime = obj.get("LastModified")
-        if key is None or size is None or mtime is None:
-            continue  # ListObjectsV2 always populates these; stay defensive
-        etag = obj.get("ETag")
-        owner = obj.get("Owner")
-        infos.append(
-            S3FileInfo(
-                key=key,
-                size=size,
-                mtime=mtime,
-                etag=etag.strip('"') if etag else None,
-                storage_class=obj.get("StorageClass"),
-                owner=owner.get("ID") if owner else None,
-                compare_key=key[len(prefix) :],
+            dir_prefix = common["Prefix"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            yield S3FileInfo(
+                key=dir_prefix,
+                kind=FileKind.DIRECTORY,
+                compare_key=dir_prefix[len(prefix) :],
                 storage=storage,
             )
+    for obj in page.get("Contents", []):
+        key = obj["Key"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        mtime = obj["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        reject_unrepresentable_stamp(mtime)
+        size = obj["Size"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        etag = obj.get("ETag")
+        owner = obj.get("Owner")
+        yield S3FileInfo(
+            key=key,
+            size=size,
+            mtime=mtime,
+            etag=etag.strip('"') if etag else None,
+            storage_class=obj.get("StorageClass"),
+            owner=owner.get("ID") if owner else None,
+            compare_key=key[len(prefix) :],
+            storage=storage,
         )
-    return infos
 
 
-def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> list[S3FileInfo]:
+def _collect_page(entries: Iterator[S3FileInfo]) -> Iterator[list[S3FileInfo]]:
+    """Collect one page's entries, emitting those built before a rejected one stopped it.
+
+    ``Storage.scan`` hands whole pages to its prefetch worker, so a page is the
+    smallest chunk this producer can deliver, while aws-cli reads its listing one
+    entry at a time and dies on the first entry it cannot read - with the entries
+    ahead of it already on their way out. Emitting the prefix and only then
+    re-raising reproduces that order end to end, because ``prefetch`` re-raises a
+    producer error after the chunks it has already queued have been consumed. A
+    page that converts cleanly is emitted whole (empty pages included, the shape
+    a page-level ``scan_pages`` consumer sees).
+    """
+    built: list[S3FileInfo] = []
+    try:
+        for info in entries:
+            built.append(info)
+    except Exception:
+        if built:
+            yield built
+        raise
+    yield built
+
+
+def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> Iterator[S3FileInfo]:
     """Convert one ``ListBuckets`` page into ``BUCKET``-kind ``FileInfo`` items (no I/O).
 
     Runs on the consumer's iteration thread - ``S3.ls`` iterates
@@ -326,22 +391,25 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> l
     listing supplies no ``Prefix``, so ``compare_key`` is the bucket name itself;
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
+
+    Both elements are read by subscript, in the order aws-cli's bucket listing
+    reads them (it renders the creation date, then appends the name), so a bucket
+    entry missing one raises ``KeyError`` naming the element and stops the
+    listing at that bucket - the buckets ahead of it are already delivered,
+    this being a generator its caller yields straight through. The date needs no
+    local-zone check here: nothing but the ``ls`` rendering consumes it, and that
+    conversion is aws-cli's own (``output.format_entry``).
     """
-    infos: list[S3FileInfo] = []
     for bucket in page.get("Buckets", []):
-        name = bucket.get("Name")
-        if name is None:
-            continue  # ListBuckets always populates Name; stay defensive
-        infos.append(
-            S3FileInfo(
-                key=name,
-                kind=FileKind.BUCKET,
-                mtime=bucket.get("CreationDate"),
-                compare_key=name,
-                storage=storage,
-            )
+        creation = bucket["CreationDate"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        name = bucket["Name"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        yield S3FileInfo(
+            key=name,
+            kind=FileKind.BUCKET,
+            mtime=creation,
+            compare_key=name,
+            storage=storage,
         )
-    return infos
 
 
 # Back-compat (supported floor botocore 1.31, docs/compatibility.md): the
@@ -805,11 +873,13 @@ class S3Storage(Storage):
         with s3_errors(operation=None, bucket=self._bucket):
             paginator = self.get_client().get_paginator("list_objects_v2")
             for page in paginator.paginate(**paging):
-                yield _page_to_infos(
-                    page,
-                    include_common_prefixes=include_common_prefixes,
-                    prefix=prefix,
-                    storage=self,
+                yield from _collect_page(
+                    _page_to_infos(
+                        page,
+                        include_common_prefixes=include_common_prefixes,
+                        prefix=prefix,
+                        storage=self,
+                    )
                 )
 
     def list_buckets(
@@ -950,10 +1020,15 @@ class S3Storage(Storage):
         except NotFoundError:
             return None
         etag = head.get("ETag")
+        mtime = head.get("LastModified")
+        # aws-cli converts the HeadObject stamp to the local zone as it reads the
+        # response (filegenerator's single-object branch), so an unrepresentable
+        # one kills the run there rather than downstream.
+        reject_unrepresentable_stamp(mtime)
         return S3FileInfo(
             key=target_key,
             size=head.get("ContentLength"),
-            mtime=head.get("LastModified"),
+            mtime=mtime,
             etag=etag.strip('"') if etag else None,
             storage_class=head.get("StorageClass"),
             head=head,
