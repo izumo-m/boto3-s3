@@ -49,6 +49,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from boto3_s3.exceptions import ValidationError
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 
 if TYPE_CHECKING:
@@ -179,25 +180,36 @@ class ParallelFilter(Generic[_T]):
 def _byte_ordered(
     entries: Iterable[tuple[str, FileInfo]], side: str
 ) -> Iterator[tuple[str, FileInfo]]:
-    """Dev-only pass-through that asserts a side ascends by ``compare_key``.
+    """Pass-through that kills the run when a side descends by ``compare_key``.
 
     ``Comparator.compare``'s merge-join assumes both sides arrive in UTF-8
     byte order (what a ``SORTABLE_SCAN`` backend promises; ``str``
     code-point order equals UTF-8 byte order for Unicode scalar values - a
     surrogateescaped local name sits outside that equivalence, but both the
     walk's sort and this guard use the same ``str`` order, so the two stay
-    consistent with each other). A custom backend that declares ``SORTABLE_SCAN`` but yields out of
-    order would *silently* mis-pair - phantom src-only / dest-only pairs, and with
-    ``--delete`` the deletion of files present on both sides. This trips a loud
-    ``AssertionError`` in tests instead. Guarded by ``if __debug__`` at the call
-    site, so it is compiled out entirely under ``-O`` (zero production cost).
+    consistent with each other). A source that yields out of order - a custom
+    backend that declares ``SORTABLE_SCAN`` and breaks the promise, or an
+    S3-compatible endpoint whose ``ListObjectsV2`` does not sort - would
+    *silently* mis-pair: phantom src-only / dest-only pairs, and with the delete
+    lane on, the deletion of entries that exist on both sides. Continuing on
+    such a stream is data loss, so this raises a ``ValidationError`` naming the
+    offending side and key pair, aborting the run at the first descent instead.
+    The check runs unconditionally (it is not an ``assert``): the failure it
+    catches is destructive rather than a mere internal-invariant bug, and it
+    must not evaporate under ``-O`` or leak a bare ``AssertionError`` past a
+    consumer's error handling. The cost is one string comparison per entry.
+
+    Equal consecutive keys pass (only a strict descent is rejected), so a
+    backend repeating a key stays the ``Comparator`` docstring's
+    pair-per-occurrence case rather than a failure.
     """
     prev: str | None = None
     for key, info in entries:
-        assert prev is None or key >= prev, (
-            f"{side} sync stream is not byte-ordered by compare_key "
-            f"({prev!r} then {key!r}); a SORTABLE_SCAN backend must yield ascending keys"
-        )
+        if prev is not None and key < prev:
+            raise ValidationError(
+                f"{side} sync stream is not byte-ordered by compare_key "
+                f"({prev!r} then {key!r}); a SORTABLE_SCAN backend must yield ascending keys"
+            )
         prev = key
         yield key, info
 
@@ -241,11 +253,18 @@ class Comparator:
         ``DestOnlyPair``. ``src_entries`` / ``dest_entries`` are
         ``(compare_key, info)`` streams, lazily consumed - pairing streams
         page-by-page listings without materializing either side.
+
+        Raises ``ValidationError`` from the pull that first sees a key smaller
+        than the one before it on the same side (the order guard,
+        ``_byte_ordered``): the merge cannot pair an unordered stream, and
+        continuing would delete entries present on both sides. Detection is as
+        late as the descent itself, so pairs already yielded stand - the caller
+        keeps whatever it did with them - but the offending entry is never
+        paired and nothing after it is read.
         """
         transfer_type = self.transfer_type
-        if __debug__:  # dev guard: catch an unsorted SORTABLE_SCAN side (compiled out under -O)
-            src_entries = _byte_ordered(src_entries, "source")
-            dest_entries = _byte_ordered(dest_entries, "destination")
+        src_entries = _byte_ordered(src_entries, "source")
+        dest_entries = _byte_ordered(dest_entries, "destination")
         src_iter = iter(src_entries)
         dest_iter = iter(dest_entries)
         src = next(src_iter, None)
