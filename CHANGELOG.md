@@ -3,6 +3,29 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.10.0] - 2026-08-13
+
+- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.
+- S3 listings and single-object heads now fail on an entry missing a required element the way aws fails, instead of silently dropping it.
+- A local entry that changes underneath a recursive walk — a directory replaced or removed, a file that became a directory, one that vanished or was rewritten — is now handled the way `aws s3` handles it (warned and skipped, descended, or transferred as it now is) instead of failing the scan.
+- `sync` now refuses a listing that arrives out of order with a `ValidationError` instead of an internal assertion (aws keeps merging there and can delete files present on both sides — deliberately not mirrored).
+- Added `ScanOptions.read_ahead`; a deleting `sync` walks its local destination without read-ahead, so a tree aliased through symlinked directories no longer reports spurious delete failures (aws's shape).
+- `guess_mime_type` now guesses from the MIME table of the official aws-cli build on every host interpreter, so the stored `Content-Type` no longer depends on the Python version.
+- A stream destination no longer checks stdout up front or flushes it on completion (aws's writer shape): a missing or failing stdout is a per-item transfer failure.
+- Added `S3ScanOptions.include_common_prefixes`; `ls` uses it to keep prefix entries in recursive listings the way aws displays them.
+- Fixed a rare hang: a cancellation upgraded to immediate while `sync` was already settling pooled filter decisions now cancels them instead of waiting forever.
+- `wait_on_interrupt` was renamed `reusable_after_interrupt`: the flag declares whether operations stay callable after a caught Ctrl-C, which the old name did not convey. Declaring `False` now also abandons an in-flight listing page pull whichever window the interrupt lands in; previously an interrupt outside the pull itself waited the pull out.
+- `presign` URLs now name the client's own regional endpoint like `aws s3 presign`; outside `us-east-1` they named the legacy global host while carrying the real region in their credential scope.
+- Added `pathresolver.is_outpost_path` and `is_outpost_alias_path`, the S3 Outposts counterparts of `is_mrap_path` for callers that pin a signature version; all three probes now recognize every spelling botocore signs with SigV4a, not just aws-cli's canonical ones.
+- More aws-cli parity on transfer wording and shapes: a single-file copy to the bare `s3:///` root keeps the explicit slash and names its destination key like aws, a rewritten `HeadObject` 404 keeps botocore's retry note, and a failed annotation copy reports aws-cli's failure text.
+- `TransferConfig`'s download IO queue now defaults to the depth `aws s3` runs at, so passing a default-constructed config no longer shrinks it tenfold.
+- A CRT-engine run cut short — by Ctrl-C or by a fatal error elsewhere in the run — now counts the cancelled items as failures the way `aws s3` does (a Ctrl-C that previously returned as if the run had succeeded now raises `BatchError`); only a `CancelToken` cancel still reports them cancelled.
+- Added two more `aws s3` CRT postures to `S3(...)`: `crt_allow_lockless` lets an explicit `crt` preference build the CRT engine under cross-process lock contention the way `aws s3` does (an `auto` run never inherits the opt-in through the process singleton), and `crt_sign_requests` declares whether the CRT engine signs its requests instead of deriving it from the client. Every default keeps boto3's own behavior.
+- Building a transfer engine no longer rewrites the multipart-copy defaults of plain s3transfer callers sharing the process.
+- More aws-cli parity in how the transfer engine is driven: a multipart copy under an explicit `metadata_directive="COPY"` keeps the properties you passed instead of silently dropping them, an annotation copy no longer sends a checksum header `aws s3` omits, a bad option is now reported ahead of an unusable source, and the case-conflict gate holds a key until its download has fully torn down.
+
 ## [0.9.0] - 2026-08-01
 
 - Added a user guide covering both packages under `docs/`; the design documents moved to `design/`.
@@ -58,7 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...HEAD
+[0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...boto3-s3-v0.9.0
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...boto3-s3-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.6.0...boto3-s3-v0.7.0

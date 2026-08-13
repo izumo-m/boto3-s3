@@ -13,11 +13,13 @@ flag before transfer). Plus ``identify_type`` (aws-cli's
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
 
 from boto3_s3.exceptions import InvalidValueError, ValidationError
+from boto3_s3.types import CaseConflictMode
 from boto3_s3_cli.commands import transferargs
 from tests.utils.fakemodel import model_only_client
 
@@ -239,6 +241,16 @@ class TestMetadataParamfile:
             transferargs.resolve_metadata_option(args, operation="cp")
         assert str(excinfo.value) == "'in <string>' requires string as left operand, not int"
 
+    def test_whole_value_fileb_empty_payload_is_the_bytes_type_error(self, tmp_path: Path) -> None:
+        # An empty payload fails one step earlier in aws's parser: the
+        # bytes-vs-str TypeError, not the int-index one (measured).
+        p = tmp_path / "m.bin"
+        p.write_bytes(b"")
+        args = argparse.Namespace(metadata=f"fileb://{p}")
+        with pytest.raises(InvalidValueError) as excinfo:
+            transferargs.resolve_metadata_option(args, operation="cp")
+        assert str(excinfo.value) == "a bytes-like object is required, not 'str'"
+
     def test_whole_value_fileb_missing_is_the_load_252(self) -> None:
         args = argparse.Namespace(metadata="fileb:///nonexistent/boto3_s3_md")
         with pytest.raises(ValidationError, match="Unable to load paramfile"):
@@ -293,3 +305,71 @@ class TestMetadataParamfile:
             transferargs.resolve_text_paramfile(f"file://{p}", "--content-type", operation="cp")
             == "caf\xe9"
         )
+
+
+class TestExpressCaseConflictWarning:
+    def test_warning_rides_uni_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The standing S3 Express warning has no trailing newline (aws's
+        # measured byte shape), so it must ride the uni_print port - write plus
+        # flush. A raw stderr.write sits in a block-buffered redirect until
+        # process exit, inverting aws's output order.
+        writes: list[tuple[object, str]] = []
+        monkeypatch.setattr(
+            transferargs, "uni_write", lambda stream, text: writes.append((stream, text))
+        )
+        args = argparse.Namespace(case_conflict="warn", recursive=True)
+        mode = transferargs.resolve_case_conflict(
+            args, "s3://b--use1-az4--x-s3/p/", "s3local", operation="cp"
+        )
+        assert mode is CaseConflictMode.IGNORE
+        [(stream, text)] = writes
+        assert stream is sys.stderr
+        assert text.startswith("warning: Recursive copies/moves")
+        assert not text.endswith("\n")
+
+
+class TestBuildPrinter:
+    """Every display flag reaches the printer it configures.
+
+    The four flags share one construction site, so a wiring slip here silences
+    or reshapes output for a whole command family while the printer's own tests
+    stay green. ``--progress-multiline`` is the reason this class exists: its
+    rendering is covered in ``test_progress.py``, but nothing pinned the flag
+    that selects it.
+    """
+
+    @staticmethod
+    def _args(**overrides: object) -> argparse.Namespace:
+        defaults = {
+            "quiet": False,
+            "only_show_errors": False,
+            "progress": True,
+            "progress_multiline": False,
+        }
+        return argparse.Namespace(**{**defaults, **overrides})
+
+    def test_defaults(self) -> None:
+        printer = transferargs.build_printer(self._args(), 0)
+        assert (printer._quiet, printer._only_show_errors) == (False, False)
+        assert printer._show_progress
+        assert not printer._multiline
+
+    def test_progress_multiline_selects_the_multiline_renderer(self) -> None:
+        printer = transferargs.build_printer(self._args(progress_multiline=True), 0)
+        assert printer._multiline
+
+    def test_no_progress_and_quiet_reach_the_printer(self) -> None:
+        assert not transferargs.build_printer(self._args(progress=False), 0)._show_progress
+        assert transferargs.build_printer(self._args(quiet=True), 0)._quiet
+
+    def test_only_show_errors_ors_in_the_stream_rule(self) -> None:
+        # cp's streaming download forces the errors-only printer even without
+        # the flag, because the object bytes own stdout.
+        assert transferargs.build_printer(self._args(), 0, only_show_errors=True)._only_show_errors
+        assert transferargs.build_printer(self._args(only_show_errors=True), 0)._only_show_errors
+
+    def test_progress_frequency_floors_at_the_repaint_minimum(self) -> None:
+        # --progress-frequency 0 (aws's default) is raised to the repaint
+        # floor; a larger value wins (aws-cli-option-handling.md section 6).
+        assert transferargs.build_printer(self._args(), 0)._frequency == pytest.approx(0.1)
+        assert transferargs.build_printer(self._args(), 5)._frequency == pytest.approx(5.0)

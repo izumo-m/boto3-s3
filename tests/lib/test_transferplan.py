@@ -173,6 +173,25 @@ class TestS3Format:
     def test_bare_service_root_stays_empty(self) -> None:
         assert S3Storage("s3://").format(dir_op=False) == ("", False)
 
+    def test_service_root_spellings_differ_by_their_trailing_slash(self) -> None:
+        # "s3://" and "s3:///" both hold an empty bucket and key, but aws
+        # reaches s3_format with the scheme merely stripped, so the second
+        # still ends in "/" and takes the source's name: `cp a.txt s3:///`
+        # prints ".. to s3:///a.txt" while `cp a.txt s3://` prints ".. to
+        # s3://" (aws 2.36.1). Only the raw URI can tell them apart here.
+        assert S3Storage("s3:///").format(dir_op=False) == ("/", True)
+        assert S3Storage("s3://").format(dir_op=False) == ("", False)
+
+    def test_both_service_roots_are_slash_rooted_under_dir_op(self) -> None:
+        assert S3Storage("s3:///").format(dir_op=True) == ("/", True)
+        assert S3Storage("s3://").format(dir_op=True) == ("/", True)
+
+    def test_bucketless_key_keeps_its_leading_slash(self) -> None:
+        # Not a service root: the empty bucket joins with the key, so the
+        # ordinary trailing-slash rule applies.
+        assert S3Storage("s3:///k").format(dir_op=False) == ("/k", False)
+        assert S3Storage("s3:///k").format(dir_op=True) == ("/k/", True)
+
 
 class TestFormatDefaults:
     """The ``Storage`` base: the open-route rule and the ``sep`` attribute."""

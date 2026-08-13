@@ -159,6 +159,94 @@ class TestPresign:
         assert "X-Amz-Algorithm" in param_keys(via_library)  # SigV4, not downgraded
 
 
+class TestPresignEndpointRegion:
+    """The URL names the client's own region, like ``aws s3 presign``.
+
+    Real botocore (no fake): its presign path asks the endpoint resolver for
+    the ``aws-global`` region, so a bare non-us-east-1 client signs a
+    ``s3.amazonaws.com`` host while carrying that region in its credential
+    scope. aws-cli's bundled botocore has no such step. Each expectation below
+    was measured against the pinned aws-cli.
+    """
+
+    @staticmethod
+    def _client(region: str, **config: object) -> object:
+        import boto3
+        from botocore.config import Config
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        return session.client("s3", region_name=region, config=Config(**config) if config else None)
+
+    @staticmethod
+    def _host(url: str) -> str:
+        import urllib.parse
+
+        return urllib.parse.urlsplit(url).netloc
+
+    def test_non_us_east_1_signs_the_regional_host(self) -> None:
+        client = self._client("eu-west-1")
+        # Sanity: the bare client really does fall back to the global host.
+        bare = client.generate_presigned_url(  # pyright: ignore[reportAttributeAccessIssue]
+            "get_object", Params={"Bucket": "bkt", "Key": "k"}, ExpiresIn=60
+        )
+        assert self._host(bare) == "bkt.s3.amazonaws.com"
+
+        url = S3().presign(S3Storage("s3://bkt/k", client=client))
+        assert self._host(url) == "bkt.s3.eu-west-1.amazonaws.com"
+        assert "%2Feu-west-1%2Fs3%2Faws4_request" in url  # scope unchanged
+
+        # Scoped to the call: the client's own default returns.
+        after = client.generate_presigned_url(  # pyright: ignore[reportAttributeAccessIssue]
+            "get_object", Params={"Bucket": "bkt", "Key": "k"}, ExpiresIn=60
+        )
+        assert self._host(after) == "bkt.s3.amazonaws.com"
+
+    def test_us_east_1_regional_pin_is_untouched(self) -> None:
+        # The CLI's own build: botocore never set the flag here, so the
+        # override changes nothing.
+        client = self._client(
+            "us-east-1",
+            signature_version="s3v4",
+            s3={"us_east_1_regional_endpoint": "regional"},
+        )
+        url = S3().presign(S3Storage("s3://bkt/k", client=client))
+        assert self._host(url) == "bkt.s3.us-east-1.amazonaws.com"
+
+    def test_shapes_botocore_already_exempts_are_unchanged(self) -> None:
+        # dualstack and an explicit addressing style never set the flag; a
+        # DNS-incompatible name forces path style, which botocore's own
+        # handler already excludes. All three match aws before and after.
+        dualstack = self._client("eu-west-1", s3={"use_dualstack_endpoint": True})
+        assert (
+            self._host(S3().presign(S3Storage("s3://bkt/k", client=dualstack)))
+            == "bkt.s3.dualstack.eu-west-1.amazonaws.com"
+        )
+        path = self._client("eu-west-1", s3={"addressing_style": "path"})
+        assert (
+            self._host(S3().presign(S3Storage("s3://bkt/k", client=path)))
+            == "s3.eu-west-1.amazonaws.com"
+        )
+        dotted = self._client("eu-west-1")
+        assert (
+            self._host(S3().presign(S3Storage("s3://my.dotted.bucket/k", client=dotted)))
+            == "s3.eu-west-1.amazonaws.com"
+        )
+
+    def test_explicit_endpoint_url_still_wins(self) -> None:
+        import boto3
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        client = session.client("s3", region_name="eu-west-1", endpoint_url="http://127.0.0.1:9000")
+        url = S3().presign(S3Storage("s3://bkt/k", client=client))
+        assert self._host(url) == "127.0.0.1:9000"
+
+
 class TestPresignErrors:
     def test_param_validation_error_becomes_validation_error(self) -> None:
         cause = ParamValidationError(report='Invalid bucket name ""')

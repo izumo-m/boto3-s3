@@ -138,7 +138,15 @@ versioned bucket) cannot be mapped back to submission order.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing
-  `delete failed: ...`).
+  `delete failed: ...`). The shape is aws's; the bytes are not, and that is the
+  visible edge of the batching above. A per-key line composed from a
+  `DeleteObjects` `Errors[]` entry names the **plural** operation and carries no
+  `(reached max retries: N)` suffix, where aws - issuing one `DeleteObject` per
+  key - names the singular one and lets botocore append the suffix. The
+  non-batched single-key delete keeps `DeleteObject` and matches aws byte for
+  byte, so the difference is confined to the batched routes
+  (`rm --recursive`, an S3-side `sync --delete`, `rb --force`). Recorded for
+  the reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
 - User-facing output such as `delete: s3://...` / `delete failed: s3://... <error>` /
   `(dryrun) delete: ...` (the format of aws-cli's `results.py`) is the CLI layer's
   responsibility to assemble from `on_result`. The library does not print; it

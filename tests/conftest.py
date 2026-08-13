@@ -90,6 +90,14 @@ def _classic_aws_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(autouse=True)
 def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) -> None:
     """Force fake AWS credentials so moto never sees the host's real ones."""
+    # The dispatch reads ~/.aws/cli/alias on every invocation (aws's hardcoded
+    # path) and the credential cache writes ~/.aws/cli/cache, so ~ must point
+    # away from the developer's home: their own alias file would change what
+    # every CLI test dispatches, and an unreadable one would fail them all.
+    home = _classic_aws_config.parent / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
@@ -114,6 +122,20 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     import boto3
 
     monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_interrupt_unwinding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the process-fatal interrupt marker between tests.
+
+    ``concurrency.mark_interrupt_unwinding`` is monotonic on purpose - the
+    posture's contract is that the process is about to die - but the test
+    process survives its simulated Ctrl-Cs, and a marker leaked from one test
+    would make every later posture-False scan teardown abandon its worker.
+    """
+    from boto3_s3 import concurrency
+
+    monkeypatch.setattr(concurrency, "_interrupt_unwinding", False)
 
 
 @pytest.fixture(autouse=True)

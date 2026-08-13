@@ -274,6 +274,26 @@ class TestUploadRoute:
         assert "Is a directory" in str(results[0].error)
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
 
+    def test_directory_source_still_fails_on_a_bad_option_first(self, tmp_path: Path) -> None:
+        # aws-cli's _do_submit maps the request params before it ever looks at
+        # the source, so a malformed --grants beats the directory: the run dies
+        # on the option (a fatal, not a per-item failure) exactly as aws does.
+        src = tmp_path / "adir"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(ValidationError) as excinfo:
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/k", client=client),
+                grants=["bogus"],
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert str(excinfo.value) == "grants should be of the form permission=principal"
+        assert calls == []
+        assert results == []
+
     def test_local_to_local_is_rejected(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
@@ -561,6 +581,49 @@ class TestDownloadRoute:
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
 
+    def test_rewritten_404_keeps_the_retry_info_botocore_added(self, tmp_path: Path) -> None:
+        # aws rewrites the response dict and lets botocore render the message,
+        # so " (reached max retries: N)" survives; composing the text has to
+        # re-insert it in botocore's place, right after the operation name.
+        # Reproduces `AWS_MAX_ATTEMPTS=1 aws s3 cp s3://b/no-such .` on
+        # aws 2.36.1, whose fatal line carries "(reached max retries: 0)".
+        exhausted = ClientError(
+            {
+                "Error": {"Code": "404", "Message": "Not Found"},
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 404,
+                    "MaxAttemptsReached": True,
+                    "RetryAttempts": 0,
+                },
+            },
+            "HeadObject",
+        )
+        client, _ = make_recording_client([exhausted])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        assert str(excinfo.value) == (
+            "An error occurred (404) when calling the HeadObject operation "
+            '(reached max retries: 0): Key "no-such" does not exist'
+        )
+
+    def test_rewritten_404_omits_retry_info_when_attempts_remained(self, tmp_path: Path) -> None:
+        # The retry handler stamps MaxAttemptsReached only once it gives up;
+        # RetryAttempts alone must not produce the fragment.
+        unexhausted = ClientError(
+            {
+                "Error": {"Code": "404", "Message": "Not Found"},
+                "ResponseMetadata": {"HTTPStatusCode": 404, "RetryAttempts": 2},
+            },
+            "HeadObject",
+        )
+        client, _ = make_recording_client([unexhausted])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        assert str(excinfo.value) == (
+            "An error occurred (404) when calling the HeadObject operation: "
+            'Key "no-such" does not exist'
+        )
+
     def test_named_404_code_is_not_rewritten(self, tmp_path: Path) -> None:
         # aws-cli's filegenerator rewrites only `Error.Code == '404'` (the
         # bare HeadObject miss); an endpoint that names a code over HTTP 404
@@ -804,6 +867,64 @@ class TestCopyRoute:
         ]
         assert dest_calls == []
 
+    @pytest.mark.parametrize(
+        "annotation_copy_mode",
+        [AnnotationCopyMode.PRELOAD_MEMORY, AnnotationCopyMode.DEFERRED],
+    )
+    def test_annotation_write_failure_reports_what_was_written(
+        self, annotation_copy_mode: AnnotationCopyMode
+    ) -> None:
+        # The write runs inside s3transfer's CompleteMultipartUpload task, which
+        # words its own failure with Python reprs; the engine records the
+        # per-name outcomes and re-raises with aws-cli's AnnotationCopyError
+        # text instead. Both staging modes hand s3transfer a different source
+        # client, and neither is what the wording is keyed on.
+        denied = client_error("AccessDenied", 403, "PutObjectAnnotation")
+        src_client, _ = make_recording_client(
+            [
+                head_response(ContentLength=9 * 1024 * 1024),
+                {"TagSet": []},
+                {"Annotations": [{"AnnotationName": "ann1"}, {"AnnotationName": "ann2"}]},
+                {"AnnotationPayload": io.BytesIO(b"payload-1")},
+                {"AnnotationPayload": io.BytesIO(b"payload-2")},
+            ]
+        )
+        dest_client, dest_calls = make_recording_client(
+            [
+                {"UploadId": "upload-id"},
+                {"CopyPartResult": {"ETag": '"part-1"'}},
+                {"CopyPartResult": {"ETag": '"part-2"'}},
+                {"ETag": '"dest-etag"', "VersionId": "dest-version-id"},
+                {},  # PutObjectAnnotation ann1 succeeds
+                denied,
+                {},  # s3transfer's best-effort abort of the completed upload
+            ]
+        )
+        results: list[OpResult] = []
+
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://src-b/d/a.txt", client=src_client),
+                S3Storage("s3://dest-b/cp/", client=dest_client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+                **TransferOptions(
+                    copy_props=CopyPropsMode.ALL,
+                    annotation_copy_mode=annotation_copy_mode,
+                ),
+            )
+
+        # The copied object stays: a failed annotation is not rolled back the
+        # way a failed tagging write is.
+        assert "DeleteObject" not in ops(dest_calls)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert str(results[0].error) == (
+            "Failed to copy all annotations to s3://dest-b/cp/a.txt. "
+            "The object was copied successfully and was not deleted. "
+            "Annotations written: ann1. "
+            f"Annotations that failed: ann2: {denied}."
+        )
+
 
 class TestStreamRoutes:
     def test_stream_upload_uses_the_key_verbatim(self) -> None:
@@ -954,19 +1075,16 @@ class TestStreamRoutes:
         assert (excinfo.value.operation, excinfo.value.key) == ("cp", "key")
         assert calls == []
 
-    def test_missing_stdio_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_stdin_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # StdioStorage.open names no operation of its own (it serves cp and mv
-        # alike), so the eager open on this route stamps cp - the only
-        # operation the route serves - in both directions.
+        # alike), so the eager open on this route stamps cp. Only stdin has a
+        # precondition (aws's StdinMissingError); a missing stdout surfaces as
+        # a per-item write failure instead - pinned in test_iostorage.py.
         client, calls = make_recording_client([])
         monkeypatch.setattr("sys.stdin", None)
         with pytest.raises(ValidationError, match="stdin is required") as up:
             S3().cp(StdioStorage(), S3Storage("s3://b/k", client=client))
         assert up.value.operation == "cp"
-        monkeypatch.setattr("sys.stdout", None)
-        with pytest.raises(ValidationError, match="stdout is required") as down:
-            S3().cp(S3Storage("s3://b/k", client=client), StdioStorage())
-        assert down.value.operation == "cp"
         # The open precedes every request, so nothing was asked of S3.
         assert calls == []
 
@@ -1146,7 +1264,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=None,
             operation="mv",
-            wait_on_interrupt=True,
+            reusable_after_interrupt=True,
         )
         assert gate is not None
         first = TransferItem(
@@ -1256,7 +1374,7 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=item_filter,
             operation="cp",
-            wait_on_interrupt=True,
+            reusable_after_interrupt=True,
         )
         return gate, transferrer
 

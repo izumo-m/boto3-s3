@@ -823,6 +823,30 @@ class TestSyncDownload:
         assert calls == []
 
 
+class TestSyncS3SourceCommonPrefixes:
+    """A listing page's ``CommonPrefixes`` never enter sync's item stream.
+
+    ``ls`` opts into them (``S3ScanOptions.include_common_prefixes``, so that a
+    recursive listing prints the ``PRE`` lines aws prints); a transfer must not,
+    on both counts sync is strict about - a directory record is not a
+    transferable item, and a page yields its prefixes *ahead* of its objects,
+    which would break the merge-join's requirement that each side arrive in
+    ``compare_key`` byte order.
+    """
+
+    def test_a_prefix_carrying_page_syncs_only_the_object(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        page = listing(("d/a.txt", 7))
+        # A service that answers a Delimiter-less listing with prefixes anyway;
+        # 'zdir/' sorts after 'a.txt', so a leaked entry breaks the byte order.
+        page["CommonPrefixes"] = [{"Prefix": "d/zdir/"}]
+        client, calls = make_recording_client([page, get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert ops(calls) == ["ListObjectsV2", "GetObject"]
+        assert calls[1].params["Key"] == "d/a.txt"
+        assert sorted(path.name for path in out.iterdir()) == ["a.txt"]
+
+
 class TestSyncCopy:
     def test_copies_and_deletes_through_the_dest_client(self, tmp_path: Path) -> None:
         src_client, src_calls = make_recording_client([listing(("s/new.txt", 2))])
@@ -957,6 +981,93 @@ class TestParallelFilter:
         assert decided == ["a.txt"]
         assert cancelled_before_release.is_set()
         assert len(pool.queued) == 2 and pool.queued[1].cancelled()
+        assert not [call for call in calls if call.operation == "PutObject"]
+
+    def test_graceful_settle_observes_a_later_immediate_upgrade(self, tmp_path: Path) -> None:
+        # CancelToken's escalation contract applied to the settle loop itself:
+        # the IMMEDIATE upgrade lands only after sync is already awaiting its
+        # pooled decisions gracefully, and the queued decision can complete
+        # through nothing but cancel() - so only re-observing the token inside
+        # the wait can end it. Freezing the mode at entry hung a CI run here
+        # (28 minutes of silence until the job timeout).
+        settle_probe = threading.Event()  # the settle loop polled the queued future
+
+        class _ProbedFuture(Future[Any]):
+            def done(self) -> bool:
+                settle_probe.set()
+                return super().done()
+
+        class _ProbedWindow(Executor):
+            _max_workers = 2
+
+            def __init__(self) -> None:
+                self._pool = ThreadPoolExecutor(1)
+                self.queued: list[Future[Any]] = []
+                self.queued_ready = threading.Event()
+
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                if not self.queued:
+                    future = self._pool.submit(fn, *args, **kwargs)
+                    self.queued.append(future)
+                    return future
+                future = _ProbedFuture()
+                self.queued.append(future)
+                self.queued_ready.set()
+                return future
+
+            def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+                self._pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"a")
+        _write(src, "b.txt", b"b")
+        client, calls = make_recording_client([listing(), {}, {}])
+        token = CancelToken()
+        first_started = threading.Event()
+        release_first = threading.Event()
+
+        def decide(_info: FileInfo) -> bool:
+            first_started.set()
+            assert release_first.wait(5.0)
+            return True
+
+        errors: list[BaseException] = []
+        pool = _ProbedWindow()
+
+        def run_sync() -> None:
+            try:
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    create_filter=ParallelFilter(decide, executor=pool),
+                    transfer_config=_SERIAL,
+                    cancel_token=token,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        # daemon: on regression the runner is pinned in the settle loop forever;
+        # the join(5.0) below then fails the test without wedging session exit.
+        runner = threading.Thread(target=run_sync, daemon=True)
+        runner.start()
+        try:
+            assert first_started.wait(5.0)
+            assert pool.queued_ready.wait(5.0)
+            token.cancel()  # graceful: sync starts awaiting both decisions
+            assert settle_probe.wait(5.0)  # the graceful wait is under way
+            token.cancel(mode=CancelMode.IMMEDIATE)  # upgrade lands mid-settle
+            for _ in range(500):
+                if pool.queued[1].cancelled():
+                    break
+                threading.Event().wait(0.01)
+        finally:
+            release_first.set()
+            runner.join(5.0)
+            pool.shutdown()
+
+        assert not runner.is_alive()
+        assert pool.queued[1].cancelled()  # the settle loop observed the upgrade
+        assert len(errors) == 1 and isinstance(errors[0], CancelledError)
         assert not [call for call in calls if call.operation == "PutObject"]
 
     def test_update_lane_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:

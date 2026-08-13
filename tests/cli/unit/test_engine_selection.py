@@ -189,9 +189,9 @@ class TestBuildTransferConfig:
 
     def test_download_io_queue_depth_matches_awscli(self) -> None:
         # aws-cli's bundled s3transfer defaults max_io_queue_size to 1000 and
-        # no [s3] key maps to it; boto3's TransferConfig dials the same
-        # s3transfer default down to 100, so an unpinned config would give
-        # slow disks a tenth of aws's download readahead.
+        # no [s3] key maps to it, so aws always runs there. The library's
+        # TransferConfig already defaults to that depth (where boto3 alone would
+        # have dialed it to 100), so the CLI inherits it without a pin.
         config = runtimeconfig.build_transfer_config({}, _runtime_config(), "classic")
         assert config.max_io_queue_size == 1000
 
@@ -233,6 +233,18 @@ class TestBuildTransferConfig:
         assert config.multipart_chunksize == 64 * _MIB
         crtsupport._validate_crt_transfer_config(config)
 
+    def test_crt_threshold_pin_never_drops_below_the_5_mib_part_floor(self) -> None:
+        # aws-c-s3's fallback is max(part size, 5 MiB), not the part size, so a
+        # chunksize under S3's minimum part size leaves aws single-putting up
+        # to 5 MiB. Pinning the raw chunksize would multipart a 3 MiB file aws
+        # sends as one PutObject; the part size itself still carries the
+        # configured value (aws passes it to the client verbatim).
+        scoped = {"multipart_chunksize": "1MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
+        assert config.multipart_threshold == 5 * _MIB
+        assert config.multipart_chunksize == _MIB
+        crtsupport._validate_crt_transfer_config(config)
+
     def test_crt_without_an_explicit_chunksize_leaves_the_threshold_unset(self) -> None:
         # No pin without an explicit chunksize: the stamped 8 MiB resolved
         # default equals aws-c-s3's default part size - the same effective
@@ -240,6 +252,16 @@ class TestBuildTransferConfig:
         scoped = {"multipart_threshold": "10MB"}
         config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
         assert config.get_deep_attr("multipart_threshold") is config.UNSET_DEFAULT
+
+    def test_classic_keeps_an_explicit_threshold_alongside_a_chunksize(self) -> None:
+        # The threshold pin is CRT-only: under the classic engine both keys
+        # are aws's own [s3] knobs and ride verbatim (aws-cli's translation
+        # map), so an explicit multipart_threshold must survive an explicit
+        # chunksize instead of being overwritten by the pin.
+        scoped = {"multipart_chunksize": "64MB", "multipart_threshold": "10MB"}
+        config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "classic")
+        assert config.multipart_threshold == 10 * _MIB
+        assert config.multipart_chunksize == 64 * _MIB
 
     def test_classic_keeps_io_chunksize_and_max_bandwidth(self) -> None:
         # The same keys are honored verbatim under the classic engine.
@@ -249,18 +271,16 @@ class TestBuildTransferConfig:
         assert config.max_bandwidth == 10 * _MIB
 
     def test_crt_omits_classic_only_attributes(self) -> None:
-        # The request queue size, in-memory chunk caps, and download IO queue
-        # depth are classic-only tuning aws-cli never applies to the CRT
-        # client.
+        # The request queue size and the in-memory chunk caps are classic-only
+        # tuning aws-cli never applies to the CRT client.
         scoped = {"max_queue_size": "500"}
         config = runtimeconfig.build_transfer_config(scoped, _runtime_config(**scoped), "crt")
-        # All four knobs sit at a fresh constructor's own defaults: the scoped
+        # All three knobs sit at a fresh constructor's own defaults: the scoped
         # queue size was not applied and the classic pins did not run.
         base = type(config)()
         assert config.max_request_queue_size == base.max_request_queue_size
         assert config.max_in_memory_upload_chunks == base.max_in_memory_upload_chunks
         assert config.max_in_memory_download_chunks == base.max_in_memory_download_chunks
-        assert config.max_io_queue_size == base.max_io_queue_size
 
 
 class TestResolveTransferConfig:

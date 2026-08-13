@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from boto3_s3_cli import cli
+from boto3_s3_cli import cli, configfiles
 from boto3_s3_cli.autoprompt import completers as c
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.autoprompt.model import ROOT, build_model, subparser_map
@@ -597,8 +597,13 @@ class TestAutoPromptModeResolution:
         assert "prompt_toolkit" not in err  # the install hint was NOT shown
 
 
+def _resolve_from_files(argv: list[str] | None = None) -> str:
+    """The mode `cli._main` would resolve, over a fresh scan of the config files."""
+    return resolve.resolve_auto_prompt_mode(argv or ["ls"], configfiles.scan())
+
+
 class TestScopedConfigFileChoice:
-    """``_read_scoped_cli_auto_prompt`` is present-wins on ``AWS_CONFIG_FILE``
+    """The scoped read is present-wins on ``AWS_CONFIG_FILE``
     (botocore's EnvironmentProvider): an *empty* value means "no config file",
     never a fallback to ``~/.aws/config`` - a scripted run neutralizing the
     config must not get an interactive prompt from the fallback file."""
@@ -611,29 +616,31 @@ class TestScopedConfigFileChoice:
         config.write_text("[default]\ncli_auto_prompt = on\n")
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads this, not HOME
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
 
     def test_empty_env_value_disables_the_fallback_read(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._seed_fallback_config(monkeypatch, tmp_path)
         monkeypatch.setenv("AWS_CONFIG_FILE", "")
-        assert resolve._read_scoped_cli_auto_prompt("default") is None
+        assert _resolve_from_files() == "off"
 
     def test_unset_env_reads_the_fallback_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._seed_fallback_config(monkeypatch, tmp_path)
         monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
-        assert resolve._read_scoped_cli_auto_prompt("default") == "on"
+        assert _resolve_from_files() == "on"
 
 
 class TestScopedConfigReadTolerance:
-    """A config this read cannot parse answers "absent", never a traceback.
+    """A config the scan cannot parse resolves to "off", never a traceback.
 
-    `cli._main`'s config scan rejects such a file upstream now, so on the
-    normal dispatch this is defensive - it covers a config rewritten between
-    the two reads, and any direct caller. Exercised directly because that
-    upstream scan makes it unreachable through `main`.
+    `cli._main` rejects such a file upstream (rc 255) before it resolves the
+    mode, so on the normal dispatch this is defensive - it covers a config
+    rewritten between the two reads, and any direct caller. Exercised through
+    the resolution directly because that upstream gate makes it unreachable
+    through `main`.
     """
 
     @pytest.mark.parametrize(
@@ -651,7 +658,8 @@ class TestScopedConfigReadTolerance:
         config = tmp_path / "config"
         config.write_bytes(content)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        assert resolve._read_scoped_cli_auto_prompt("default") is None
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
+        assert _resolve_from_files() == "off"
 
     def test_an_unreadable_config_reads_as_absent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -662,19 +670,74 @@ class TestScopedConfigReadTolerance:
         if os.access(config, os.R_OK):  # running as root: the mode is advisory
             pytest.skip("cannot make a file unreadable for this user")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
         try:
-            assert resolve._read_scoped_cli_auto_prompt("default") is None
+            assert _resolve_from_files() == "off"
         finally:
             config.chmod(0o644)
 
     def test_a_readable_config_is_still_read(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # The contrast: the tolerance must not be a blanket "always absent".
+        # The contrast: the tolerance must not be a blanket "always off".
         config = tmp_path / "config"
         config.write_text("[default]\ncli_auto_prompt = on\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        assert resolve._read_scoped_cli_auto_prompt("default") == "on"
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
+        assert _resolve_from_files() == "on"
+
+
+class TestNestedConfigBlock:
+    """An indented ``cli_auto_prompt`` block is aws's rc-255 `AttributeError`.
+
+    botocore parses an indented block into a map, and aws lowercases whatever
+    its config chain answered with (`clidriver.resolve_auto_prompt_mode`:
+    `config.lower()`), so the map raises there and its entry-point chain
+    reports it. Measured on the pinned aws-cli: rc 255, `'dict' object has no
+    attribute 'lower'`, with the command never run.
+    """
+
+    _REPORT = "boto3-s3: [ERROR]: 'dict' object has no attribute 'lower'\n"
+
+    @pytest.fixture
+    def nested(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = us-east-1\ncli_auto_prompt =\n    a = b\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
+
+    def test_the_run_ends_before_the_command(
+        self, nested: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["ls", "s3://bucket/p/"]) == 255
+        assert capsys.readouterr().err == self._REPORT
+
+    def test_the_help_token_does_not_escape_it(
+        self, nested: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `help` / `--version` short-circuit the chain ahead of the config read
+        # (aws's _NO_AUTO_PROMPT_ARGS), so they page as usual - the contrast
+        # that keeps the report attributable to the read itself.
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_the_env_value_short_circuits_the_read(
+        self, nested: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's chain is env > scoped config, so a value in the environment
+        # means the block is never read at all.
+        monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "off")
+        assert cli.main(["bogus"]) == 252
+        assert "lower" not in capsys.readouterr().err
+
+    def test_the_mutual_exclusion_still_outranks_it(
+        self, nested: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws validates the two flags inside the same resolver, before it
+        # consults the chain (measured: the 252 wins).
+        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 252
+        assert "lower" not in capsys.readouterr().err
 
 
 class TestPromptToolkitAdapter:

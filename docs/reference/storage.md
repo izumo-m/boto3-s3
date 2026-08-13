@@ -161,9 +161,8 @@ raised by the producer surfaces on the consumer's pull.
 the base knobs must arrive on its own `ScanOptions` subclass; the built-ins
 reject a foreign options type.
 
-`cancel_token` ([`./results.md`](./results.md)) stops the prefetch producer
-before its next page pull. Entries already yielded to the consumer are
-unaffected.
+`cancel_token` ([`./results.md`](./results.md)) stops the producer before its
+next page pull. Entries already yielded to the consumer are unaffected.
 
 Two things happen between the producer and the consumer. Each entry whose
 `storage` is still `None` is stamped with this backend — a safety net for a
@@ -171,6 +170,11 @@ Two things happen between the producer and the consumer. Each entry whose
 always sees the producing backend. Then, unless the class declares
 `scan_pages_filters`, `options.filter` is applied page by page on the prefetch
 worker; a page emptied by the predicate is dropped rather than yielded empty.
+
+`ScanOptions(read_ahead=False)` ([`./options.md`](./options.md)) drops the
+overlap: each page is pulled on the calling thread when the consumer reaches
+it, and the stamping, the filter and `on_warning` run there too. The entries and
+the cancel point are the same; only the timing and the thread change.
 
 ### scan_pages(options)
 
@@ -188,8 +192,9 @@ server-side query instead.
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
 source setting may widen that view, as `LocalScanOptions.enumerate_all_entries`
-does. A non-recursive scan normally yields the immediate entries plus one
-`FileKind.DIRECTORY` entry per sub-"directory".
+and `S3ScanOptions.include_common_prefixes` do. A non-recursive scan normally
+yields the immediate entries plus one `FileKind.DIRECTORY` entry per
+sub-"directory".
 
 `key` is the entry's full identifier in the backend's own address space; its
 relative form must be stamped on every entry as `compare_key`
@@ -324,7 +329,9 @@ its instance — how this particular source is read, set once on the constructor
 `enumerate_all_entries`, `S3Storage` seeds `page_size` / `fetch_owner`. The
 high-level operations build from this value and overlay only the run-level
 knobs, so a storage's configuration reaches every operation, not just an
-arg-less `scan()`.
+arg-less `scan()`. `read_ahead` is seeded here too by a backend whose listing
+must never run ahead of its own `delete`, and it is the one knob the operations
+only narrow: an overlay can turn the overlap off but never back on.
 
 ### supports(needed)
 
@@ -343,7 +350,9 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.**
+honor `sort=True`; nothing else promises any order.** The promise is checked as
+`sync` consumes it: a stream that descends raises `ValidationError` from the
+merge rather than mis-pairing ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it
@@ -776,12 +785,39 @@ Returns an `S3ScanOptions` seeded with the constructor's `page_size` and
 Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 `S3ScanOptions`; a foreign `ScanOptions` raises `TypeError`.
 
+An entry the service returned incomplete stops the listing rather than being
+dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
+a `CommonPrefixes` entry missing `Prefix`, raises `KeyError` naming the element,
+read in that order. The entries converted before it are still delivered — that
+page is emitted short and the error follows it — so a consumer sees them ahead
+of the failure exactly as the AWS CLI's entry-by-entry listing does. A
+`LastModified` the host's local zone cannot represent raises `OverflowError`
+(`date value out of range`) at the same point, for the same reason — the AWS
+CLI converts every timestamp it reads to local time, so such an object ends the
+run there. Note the asymmetry with
+`LocalStorage`, which applies the same local-zone test to a file's mtime and
+*keeps* the file with a warning and `EPOCH_TIME`: that is the AWS CLI's own
+split between a local file it cannot represent and an S3 object it cannot
+represent.
+
 This is object listing only — the openable-entity enumeration `scan` promises.
 A recursive scan omits `Delimiter` and yields every object as a `FILE` entry; a
 non-recursive scan sends `Delimiter='/'` and additionally emits one
 `DIRECTORY`-kind entry per sub-"directory", ahead of that page's objects.
 `FileInfo.key` is the full S3 key, or the prefix for a directory entry, and
 `compare_key` is that key with the listing's `Prefix` removed.
+
+`options.include_common_prefixes` widens a *recursive* scan to emit directory
+entries too: whatever `CommonPrefixes` the service returns to a listing that
+sent no `Delimiter` — none, from a service that follows the API — ahead of that
+page's objects, the same shape a non-recursive page has. It has no effect on a
+non-recursive scan, which always emits them, since the `Delimiter` it sends is
+what asks for them. `S3.ls` sets it, because `aws s3 ls` prints a page's common
+prefixes recursive or not; the transfers leave it off, since a directory record
+is not transferable and a page's leading prefix entries would cost the recursive
+stream the byte order `sync` merge-joins on. As with
+`LocalScanOptions.enumerate_all_entries`, the caller that widens the enumeration
+owns the filtering.
 
 `options.prefix` overrides the storage's own key as the listing anchor, driving
 both the `Prefix` sent and the `compare_key` relativization, so a transfer
@@ -813,6 +849,11 @@ container rather than an openable entity, so no transfer scan ever yields one.
 
 `name_prefix` and `region` map to `ListBuckets`'s `Prefix` and `BucketRegion`,
 omitted when falsy. The page size is the storage's own `page_size`.
+
+As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
+`KeyError` naming the element, read in that order — the order the AWS CLI
+renders them in — at that bucket, with the buckets ahead of it already
+delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
 matching input member raises `ConfigurationError` naming the version they need
@@ -874,8 +915,11 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined. This is the generic HEAD; the SSE-C-aware single-source HEAD lives
-in the transfer engine.
+determined. A `LastModified` the host's local zone cannot represent raises
+`OverflowError` (`date value out of range`) instead of being returned, the same
+test `scan_pages` applies and at the point the AWS CLI applies it to its own
+single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
+HEAD lives in the transfer engine, which applies the test at the same point.
 
 ## IOStorage
 
@@ -970,14 +1014,23 @@ seekable report otherwise, Windows stdin among them.
 `"wb"` writes `sys.stdout` through a write-only view, so a download always
 streams sequentially even when stdout is redirected to a seekable file: a
 `>>`-opened file lands every write at the end regardless of position, which a
-seek-based parallel download would interleave.
+seek-based parallel download would interleave. That view holds nothing from
+`open` time — it reads `sys.stdout` again on every write, as the AWS CLI's
+writer does — and its `close` neither flushes nor closes, so the bytes a
+download hands over sit in the process stream's own buffer until the
+interpreter flushes it at exit. A caller that needs them out earlier flushes
+`sys.stdout` itself.
 
-Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when the
-selected process stream is unavailable, raised here rather than letting a
-transfer worker receive an unusable file object. The error names no operation
-of its own: the run that invoked the storage stamps the one it is performing —
-a streaming `cp` reports `"cp"`, a `mv` onto a stream reports `"mv"` — while a
-direct call leaves `operation` as `None`.
+Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
+`"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
+rather than letting a transfer worker receive an unusable file object. The
+error names no operation of its own: the run that invoked the storage stamps
+the one it is performing — a streaming `cp` reports `"cp"`, a `mv` onto a
+stream reports `"mv"` — while a direct call leaves `operation` as `None`.
+Stdout has no such precondition, again like the AWS CLI: a process without one
+fails on the writer's first `write`, from inside the transfer, so it is that
+item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
+for the run not to start.
 
 ## LocalFileGenerator
 
@@ -1022,6 +1075,21 @@ class LocalFileGenerator:
         detector: LoopDetector | None,
         sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]: ...
+    def restat_leaf(
+        self,
+        path: str,
+        info: LocalFileInfo,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None: ...
+    def promoted_directory(
+        self,
+        info: LocalFileInfo,
+        st: os.stat_result,
+        *,
+        is_symlink: bool,
+    ) -> LocalFileInfo: ...
     def root_info(
         self,
         root: str,
@@ -1102,23 +1170,29 @@ rather than an `os.name` test, so any platform missing the APIs degrades
 correctly; it is true on POSIX and false on Windows, whose directory scan
 returns entry attributes inline instead. `dir_open_flags` are the flags for the
 one `open()` that turns a directory path into that descriptor. `EPOCH_TIME` is
-the timestamp stamped on a file whose mtime cannot be represented.
+the timestamp stamped on a file whose mtime cannot be represented — which the
+host's local zone decides, the same range the AWS CLI tests, so a timestamp
+close enough to `datetime`'s ends for the zone's offset to matter falls back
+here exactly when it falls back there.
 
 **The override seams, finest first.** Extend at the smallest layer that fits:
 `should_ignore_entry` (one entry's vetting), `entry_stat_result` (the one stat
-per entry), `stat_info` and `dir_child` (one entry's `LocalFileInfo`),
-`classify_child` (one directory entry to a `WalkChild` or a skip),
-`finalize_children` (a directory's children as a whole),
-`scan_children` (how a directory is read), `walk_dir` (how the tree is
-descended), `list_file_pages` (the paged entry point), `list_files` (the flat
-one).
+per entry at scan time), `stat_info`, `dir_child` and `promoted_directory` (one
+entry's `LocalFileInfo`), `classify_child` (one directory entry to a
+`WalkChild` or a skip), `finalize_children` (a directory's children as a
+whole), `scan_children` (how a directory is read), `restat_leaf` (one leaf as
+it is at the moment it is emitted), `walk_dir` (how the tree is descended),
+`list_file_pages` (the paged entry point), `list_files` (the flat one).
 
-Two invariants an override must preserve. `compare_key` is stamped in
+Three invariants an override must preserve. `compare_key` is stamped in
 `scan_children`, before `finalize_children` runs, so any injected child needs
 its own `compare_key` stamped as `info.key[strip:]`. `FileInfo.storage` is
 *not* the walker's to set — `list_file_pages` stamps the producing backend on
 each yielded page, before the visibility filter — so an override shapes the
-subtree from `compare_key`, `key` and `kind`, not from a backend handle.
+subtree from `compare_key`, `key` and `kind`, not from a backend handle. And a
+child injected as a leaf is stat'ed again by `restat_leaf` when its turn comes,
+so one that is not a live filesystem path needs that seam overridden too —
+otherwise the yield-time stat fails and warn-skips it as missing.
 
 ### list_files(root, options)
 
@@ -1163,6 +1237,13 @@ in full, its files collected into a run, and the run handed off as one page just
 before descending into each sub-directory — via `self.walk_dir`, so an override
 applies at every level.
 
+Each leaf is re-stat'ed through `restat_leaf` just before its turn, since a name
+classified when its parent was scanned may have changed while the earlier
+siblings' subtrees were being read: one that is gone is warn-skipped, one that
+has become a directory is descended — by the bare name it sorted under, the
+separator being appended only to names that were directories at scan time — and
+one that is still a leaf carries the size and mtime it has at that moment.
+
 `dir_path` has already been vetted, by `list_file_pages` for the root and by
 the parent's `scan_children` for a child. `strip` is the prefix length of the
 directory passed to `list_file_pages` and stays constant across the recursion;
@@ -1177,6 +1258,40 @@ Override it and return early for a directory to prune its subtree, or
 re-implement the loop to cap depth — preserving the depth-first byte order
 `sync`'s merge-join relies on. `compare_key` stamping and `options.filter` are
 not this method's job.
+
+### restat_leaf(path, info, \*, options, notify)
+
+One already-classified leaf as it is at the moment `walk_dir` emits it, or
+`None` to drop it — the walk's second and last stat of a leaf, and the one the
+AWS CLI takes per name in its own descent loop. Returns the record to yield.
+
+A single `os.stat` on `path` decides three outcomes. It fails: the
+`triggers_warning` battery runs on the path — normally "File does not exist.",
+a warning and exit code 2 — and the leaf is dropped whether or not the battery
+found anything, so a stale record is never submitted for a transfer that would
+then fail to open it. It reports a directory: the returned record is the
+promoted directory (`promoted_directory`), which `walk_dir` descends, so the
+children of a name swapped for a directory are transferred rather than the name
+being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
+`stat_result` refreshed from this stat, which is where the AWS CLI takes every
+leaf's size and timestamp, so what is transferred and what `sync` compares is
+the file as of its turn. An mtime that has become unrepresentable stamps
+`EPOCH_TIME` as `stat_info` does, and warns unless the scan's stat was already
+unrepresentable, so one file draws one warning rather than two.
+
+`is_symlink` is left as classified — re-testing it would cost a second syscall
+per leaf. A record whose classification stat is a symlink's own (the complete
+no-follow view, or an lstat-style `entry_stat_result` override) is returned
+untouched, so a walker that keeps a link as its own leaf is not contradicted by
+a followed re-stat. A name that has become a symlink to a directory while
+symlinks are not followed emits nothing in the normal view — the AWS CLI
+descends it and its own recursion then drops it silently — while the complete
+view keeps the leaf record it already has.
+
+Override it to `return info` in a walker whose `scan_children` yields entries
+that are not live filesystem paths, which saves the syscall and is what keeps
+synthetic children in the stream. The reverse race — a directory that stopped
+being one — belongs to `scan_children` instead.
 
 ### root_info(root, \*, options, notify)
 
@@ -1208,14 +1323,19 @@ A path contributes at most one child, never two: a followed symlink describes
 its target, and a non-followed symlink in the complete view describes the link
 itself.
 
-A directory that cannot be opened or scanned — a symlink cycle stopped by the
-kernel, an over-long path, or a race after its parent vetted it readable — is
-put through the `triggers_warning` battery and yields an empty list. If that
-battery finds nothing wrong, the `OSError` propagates instead of pruning
-silently. That handling is scoped to establishing the scan; a per-entry
-`OSError` raised mid-scan propagates.
+A directory that cannot be opened or scanned — replaced, removed or locked away
+in the race between its parent's scan and this descent — is put through the
+`triggers_warning` battery and yields an empty list, so the walk goes on. The
+battery runs on `dir_path` as passed, which for a descended child carries the
+trailing separator the AWS CLI's own re-test names it by. If that battery finds
+nothing wrong, the `OSError` propagates instead of pruning silently. That
+handling is scoped to establishing the scan; a per-entry `OSError` raised
+mid-scan propagates. The deterministic full-path limits — a symlink cycle
+stopped by the kernel, an over-long path — are caught one level up instead, by
+`crosses_full_path_boundary`, which addresses the child by its bare full path,
+the way the AWS CLI words those two.
 
-`sym_depth` lets a file leaf near the symlink-loop or path-length limit be
+`sym_depth` lets any child near the symlink-loop or path-length limit be
 re-vetted by full path, so it warn-skips the way the AWS CLI's full-path stat
 would rather than being admitted and failing at transfer time.
 
@@ -1225,23 +1345,30 @@ rather than reproducing the sort key and directory-info shape, and must stamp
 
 ### crosses_full_path_boundary(info, full, \*, sym_depth, notify)
 
-Whether a vetted file leaf must be dropped because a full-path stat would have
+Whether a vetted child must be dropped because a full-path stat would have
 rejected it. The fast walk vets each entry through the owning directory's
 descriptor, which re-anchors resolution and so hides both the ancestor symlink
 chain and the full path's length; near either OS limit this re-runs the
-full-path warning battery so the two agree. Returns `False` for a directory,
-which is already covered by its own descent failing. `scan_children` consults
-it only in the normal view — under `enumerate_all_entries` the vetting is
-bypassed and this probe with it.
+full-path warning battery so the two agree. A directory takes the same probe as
+a file, and by the same bare full path: that is where the AWS CLI names a child
+it vets, while a descent addresses it with a trailing separator, so leaving a
+boundary-crossing directory to fail its own descent would warn with a separator
+the AWS CLI's message does not carry. `scan_children` consults this only in the
+normal view — under `enumerate_all_entries` the vetting is bypassed and this
+probe with it.
 
 ### entry_stat_result(entry)
 
-The walk's **one** stat snapshot per entry, and a single-point override seam.
-`classify_child` calls it once and threads the result through everything
-downstream — the vetting, the file-versus-directory decision, the size and
-mtime, the loop key, and the stored `stat_result`. The default reads the
-directory entry's cache, one syscall for the whole entry, and returns the
-**followed** stat, so the walk follows symlinks like `aws s3`.
+The **scan's** stat accessor — one snapshot per entry, and a single-point
+override seam. `classify_child` calls it once and threads the result through
+everything downstream — the vetting, the file-versus-directory decision, the
+size and mtime, the loop key, and the stored `stat_result`. The default reads
+the directory entry's cache, one syscall for the whole entry, and returns the
+**followed** stat, so the walk follows symlinks like `aws s3`. It is not the
+yield-time accessor: a leaf is stat'ed once more when its turn comes
+(`restat_leaf`, which leaves a record classified from a link's own stat alone
+and so keeps an lstat-based walk's rule). Override that one too for a walk whose
+every stat must come from one place.
 
 Override it to return the link's own lstat and the walk turns lstat-based in
 one place, still one syscall: a symlink then surfaces as its own entry, a
@@ -1280,6 +1407,16 @@ key ending in `/` (the appended separator is folded with the rest of the path),
 and a `loop_key` of `(st_dev, st_ino)` — `None` when the inode number is zero,
 which some FAT, exFAT and FUSE volumes report, so loop detection fails open
 there.
+
+### promoted_directory(info, st, \*, is_symlink)
+
+Builds the `DIRECTORY`-kind record for a leaf that `restat_leaf` found to be a
+directory at its turn — the yield-time counterpart of `dir_child`, from the same
+re-stat. `st` is the followed stat, and the key and `compare_key` are the leaf's
+plus the separator the sort appends to a directory, so the subtree lands where
+the leaf sorted rather than where a directory of that name would have. `info` is
+the leaf record the scan built, and `is_symlink` says whether the name is a link
+now — the walk knows only that it was not one at scan time.
 
 ### symlink_child(entry, full, \*, notify)
 
@@ -1347,9 +1484,16 @@ still warns "not readable".
 ### stat_info(entry, full, st, notify)
 
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
-took. It never fails: the race case was handled upstream, and an unrepresentable
-mtime keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
+took, at scan time. It never fails: the race case was handled upstream, and an
+mtime the host's local zone cannot represent — the AWS CLI's own test, as
+above — keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
 `stat_result` and the entry's symlink flag.
+
+Of what this stamps, `size`, `mtime` and `stat_result` are refreshed by
+`restat_leaf` when the leaf's turn comes, which is where the AWS CLI takes them;
+everything else survives to the stream. So an override that *rewrites* those
+three rather than adding to the record pairs with that seam, while a link leaf
+and a non-recursive scan keep the record built here as it is.
 
 ## WalkChild
 

@@ -152,8 +152,30 @@ fileb://...` loads the bytes and then crashes indexing them inside aws's own
 shorthand parser (`'in <string>' requires string as left operand, not int`).
 `boto3-s3-cli` reproduces that crash verbatim: a missing file is still the
 paramfile's rc 252, but an *existing* one is aws's rc 255, not a clean usage
-error. (A `fileb://` value inside the `key@=...` shorthand form, by contrast,
-is rejected at parse like aws's schema validation - rc 252.)
+error.
+
+The `key@=...` shorthand form splits the same two outcomes differently, because
+the load happens one level down. aws wraps a paramfile failure into the
+`Error parsing parameter '<name>'` form only in the `load-cli-arg` handler it
+registers for *named* arguments; its shorthand parser calls the loader itself,
+so a reference it cannot load - missing, or binary through the text `file://` -
+skips that wrapping and reaches the general handler as **rc 255 with the bare
+`Unable to load paramfile ...` line**, naming no option. A reference that
+*does* load is then schema-checked like any map value, so a `fileb://` one is
+rejected for being bytes (rc 252, botocore's `Parameter validation failed:`
+wording rather than the parser's). `boto3-s3-cli` keeps that split by scoping
+its wrapper the same way (`paramfile.named_argument`, entered by the option and
+positional resolution and skipped by `shorthand.py`).
+
+**How far the operator reaches** follows from where aws arms it: per key/value
+pair, not per scalar. So it covers every element of a csv or explicit list -
+`a@=[file://f,plain]` loads the first and passes the second through, and the
+list is then the schema's error - while a hash literal re-arms it for each
+inner key, which *disarms* the outer one: in `a@={b=file://f}` the inner value
+stays the unresolved text. Both shapes end at the same schema report, since a
+map of strings holds neither a list nor a nested map, but which references
+were loaded on the way there is observable in it - and in whether a missing
+file turns the run into the bare rc 255 above.
 
 A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
 expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally
@@ -311,7 +333,7 @@ explicit decision a new normalization rule takes. All but the last are
 user-reachable and are therefore carried in
 [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well.
 
-The first three are the output pipeline's (`progress.py`; the rendering thread
+The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
 
 - **Bounded printer queue.** aws-cli feeds its printer thread through an
@@ -330,6 +352,43 @@ itself mirrors aws-cli's `ResultProcessor`):
   progress line while its enumeration is still running. The library has no
   enumeration-finished signal to drive it, so the total is painted plain
   ([`cli.md`](./cli.md) section 5.7).
+- **Progress is painted only from byte progress.** aws repaints the meter
+  after every result line it prints as well (`_redisplay_progress`), so a run
+  that never reports a byte - every transfer failing before its first chunk,
+  or a `sync --delete` that only deletes - still shows a meter there and none
+  here. The printer thread renders snapshots taken on the worker side at
+  progress time, so painting on a result would mean reading the live counters
+  from the rendering thread; taken together with the repaint floor above, the
+  cadence is this pipeline's rather than aws's.
+- **Deletions stay out of the meter's byte totals.** aws queues a
+  `sync --delete` deletion like a transfer, so an S3-side deletion's size
+  joins the expected bytes from the start — and only the expected: no bytes
+  are ever counted transferred for it, so aws's byte meter ends short of its
+  denominator (a local-side deletion queues with size 0 and moves neither).
+  The library's delete lane reports only terminals, so here a deletion joins
+  the file count at its own completion and its size joins neither byte
+  total: the byte meter reads done over expected for the real transfers
+  alone, and the two meters disagree mid-run and at the end.
+
+Two more are in the result text itself rather than in its rendering:
+
+- **A batched delete's per-key failure line** names the `DeleteObjects`
+  operation and carries no `(reached max retries: N)` suffix, where aws's line
+  names `DeleteObject` and lets botocore append the suffix. It follows from the
+  accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
+  composed from the batch response's own `Errors[]` entry rather than by
+  botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
+  `sync --delete`, `rb --force` - while a single-key `rm` still issues
+  `DeleteObject` and writes aws's bytes.
+- **The element a doubly-malformed listing entry is blamed on.** aws reads an
+  entry's required elements in one order while displaying a listing
+  (`LastModified` -> `Size` -> `Key`) and in another while enumerating a
+  transfer (`Key` -> `LastModified` -> `Size`); one shared listing converter
+  here follows the transfer order. So an `ls` against an entry missing `Key`
+  *together with* another required element quotes `'Key'` where aws quotes the
+  other name. Reproducing both orders would make a backend's read order depend
+  on its consumer. The exit code, the entries printed before it and the stream
+  they go to all agree, and the transfer commands agree entirely.
 
 The rest sit outside the pipeline:
 
@@ -347,10 +406,37 @@ The rest sit outside the pipeline:
   the program identifying itself, but the shape of the line differs beyond a
   token rewrite, so it is recorded here rather than folded into the
   program-identity mapping.
+- **Ctrl-C's closing line.** `aws` produces its `cancelled: ctrl-c received`
+  closing line only from a cancelled classic transfer future; every other
+  interrupted shape closes with an empty `fatal error:` line (a rendering
+  accident), or with no closing line at all when the CRT manager swallows a
+  drain-time interrupt. This command keeps one uniform
+  `cancelled: ctrl-c received` ending wherever the interrupt reaches its
+  handler ([`crt.md`](./crt.md) section 6).
+- **The non-recursive directory-source failure line** keeps the up-front
+  `[Errno 21]` report (`./d`) where aws threads the trailing-separator form
+  through its engines — under CRT an untranslated `Unknown Error Code` —
+  because mirroring that rendering would cost the clear errno report
+  (decided 2026-08-01).
 - **The invalid-bucket-name report is truncated** to botocore's leading
   `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
-  after it (`usage.py`; the tail is botocore-version-fragile). The exit code
-  is unaffected - mb / rb 1, website 252.
+  after it (`usage.py`; the tail is botocore-version-fragile). It reaches only
+  the reports this command synthesizes rather than lets botocore raise - the
+  bucket-less URIs mb / rb / rm refuse up front, and the key-carrying website
+  URIs - because a name that reaches botocore's own check carries botocore's
+  own text on both tools, tail included (measured 2026-08-12). The exit code
+  is unaffected - mb / rb / rm 1, website 252.
+- **A message botocore itself writes is the installed botocore's wording**,
+  where aws prints its bundled fork's. This is not class 2: the same aws
+  version installed from PyPI still carries the fork, so the difference is ours
+  to record. It reaches the console on exactly one input on this surface - a
+  `max_attempts` below the minimum, which aws ends `greater than or equal to
+  one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
+  2026-08-08). Rewriting an SDK sentence to match would be a fragile string
+  patch on a report neither tool authors, so the difference is taken. The
+  invalid-bucket-name entry above is the same family, and the rest of the
+  fork's wording differences sit on aws's SSO / login paths, which this command
+  does not have.
 - **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
   and renders `None`; `human_readable_size` keeps counting in EiB instead
   (`output.py`). Unreachable in practice - a total below 1 EiB never gets

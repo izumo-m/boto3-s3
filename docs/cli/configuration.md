@@ -31,17 +31,49 @@ this command does from the same environment.
 Every standard AWS variable works, because credentials and endpoints resolve
 through botocore exactly as they do for `aws` — `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SHARED_CREDENTIALS_FILE`,
-`AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL_S3` and the rest.
+`AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL_S3` and the rest. The proxy variables
+(`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) work the same way, down to the wire:
+an HTTPS proxy is opened with the same `CONNECT` request `aws` sends, on
+whichever Python this command runs.
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
-`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING` and
-`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
+`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`,
+`AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
+
+The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
+`file://` paramfile is read with (section 7); `AWS_CLI_OUTPUT_ENCODING` is the
+one an error report is written with, and reaches nothing else — result lines
+and warnings keep the stream's own codec, as they do under `aws`. A codec
+Python does not know is a configuration error, exit code 255, on either
+variable. With `AWS_CLI_OUTPUT_ENCODING` unset, `PYTHONUTF8=1` selects UTF-8
+for that same report — aws's own compatibility fallback, matched here.
 
 Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
 `on-partial` — anything else counts as off.
+
+Three variables the installed SDK would otherwise act on are ignored here,
+because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter
+ignores the environment for that), `BOTO_DISABLE_CRT` (a switch its bundled SDK
+does not have) and `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`, along with the
+matching `us_east_1_regional_endpoint` config key (dropped from its bundled SDK
+— us-east-1 is regional there, always). Setting any of them changes nothing
+here, an unusable value included.
+
+`AWS_PAGER` and the `cli_pager` config key change nothing on either tool's `s3`
+commands: `aws` routes only the structured output of its API commands through a
+pager, and the `s3` commands produce none. Setting one is inert here for the
+same reason it is inert there, which is why `--no-cli-pager` is among the
+options accepted and ignored
+(see [`aws-differences.md`](./aws-differences.md)).
+
+One section of `~/.aws/config` is not read at all: `[plugins]`, from which
+`aws` imports and initializes aws-cli plugins on every invocation. This command
+has no plugin mechanism, so the section is inert — including the case where an
+entry cannot be imported, which stops `aws` before it does anything and does not
+stop this command (see [`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section
 
@@ -117,7 +149,53 @@ The value is read from the selected profile only — a `[profile x]` setting
 applies under `--profile x` or `AWS_PROFILE=x`, not otherwise — and the shared
 credentials file is read for it too, winning over `~/.aws/config`.
 
-## 5. Reading a value from a file
+## 5. Aliases: `~/.aws/cli/alias`
+
+The `[command s3]` section of `~/.aws/cli/alias` — the same file, at the same
+fixed path, that `aws` reads (`AWS_CONFIG_FILE` does not move it) — declares
+extra subcommands:
+
+```ini
+[command s3]
+lsr = ls --recursive
+recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
+```
+
+`boto3-s3 lsr s3://bucket` then runs `ls --recursive s3://bucket`, and
+`boto3-s3 recent s3://bucket` runs the shell command with `s3://bucket`
+appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
+applies; `[toplevel]`, whose entries name services, has no counterpart here and
+is ignored.
+
+The section header must be spelled `command` followed by a single ASCII space,
+as `aws` requires. Extra spaces are fine (`[command  s3]` is the same section),
+but any other whitespace — a tab, a space before `command` — makes the section
+declare nothing at all, on either tool.
+
+- A value that starts with `!` is a **shell command line**. The invocation's
+  remaining arguments are appended (quoted, so a space inside one is safe) and
+  the command's exit status becomes this command's.
+- Any other value is **CLI arguments**. They are split with shell quoting rules
+  and placed ahead of what was typed, then parsed again — so an alias may
+  expand to another alias, and a global option in the value (say `--region`)
+  applies to the run, overriding one typed on the command line. `--debug` and
+  `--profile` are refused there, as they are under `aws`.
+- An alias named after a built-in subcommand **replaces** it and proxies to it,
+  dropping the first word of the expansion: `ls = ls --recursive` makes every
+  `ls` recursive.
+
+A file that is not valid INI aborts the run with exit code 255 before anything
+else, `--version` and `help` included — again matching `aws`.
+
+## 6. Cached temporary credentials
+
+Credentials fetched for an `assume_role` / web-identity / SSO profile are cached
+in `~/.aws/cli/cache`, aws's own directory and file format, so consecutive
+commands do not repeat the `AssumeRole` call and an `mfa_serial` profile asks
+for a code once rather than on every invocation. The cache is shared with
+`aws`: either command reuses what the other fetched.
+
+## 7. Reading a value from a file
 
 Any option or path that takes a single string can be given as `file://path`
 (read as text) or `fileb://path` (read as bytes), resolved before the command

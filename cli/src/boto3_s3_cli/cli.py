@@ -7,12 +7,13 @@ import contextlib
 import importlib
 import io
 import logging
+import os
 import re
 import sys
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import Generator, Iterable
+from contextlib import AbstractContextManager, contextmanager
 from difflib import get_close_matches
-from typing import NoReturn, cast
+from typing import NoReturn, TextIO, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -21,7 +22,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import configfiles, globalargs
+from boto3_s3_cli import alias, configfiles, globalargs
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -146,6 +147,15 @@ _UNKNOWN_TIMESTAMP_FORMAT = (
     'Unknown cli_timestamp_format value: {}, valid values are "wire" or "iso8601"'
 )
 
+# What an alias that expands to itself ends as, in aws's build's wording
+# (Python 3.12+ settled on this single form) - see the handler in `_dispatch`.
+_RECURSION_LIMIT_REPORT = "maximum recursion depth exceeded"
+
+# aws's codec override for the streams it reports errors on, and the
+# interpreter variable it still honors as a fallback (its compat.py).
+_OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
+_PYTHONUTF8_ENV_VAR = "PYTHONUTF8"
+
 
 def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     """aws's envelope code and message for an unresolvable credentials / region.
@@ -180,6 +190,42 @@ def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     if isinstance(cause, NoRegionError):
         return "NoRegion", f'{cause} You can also configure your region by running "aws configure".'
     return None
+
+
+def _set_preferred_output_encoding(stream: TextIO) -> None:
+    """Re-encode a report stream the way aws's error writers do.
+
+    aws builds a text writer for every error report it makes, and building one
+    re-encodes the stream it wraps (`compat.set_preferred_output_encoding`):
+    to `AWS_CLI_OUTPUT_ENCODING` when that names a codec, else to UTF-8 when
+    `PYTHONUTF8` is `1` - the fallback aws keeps for users of the interpreter
+    variable its frozen build stopped honoring. Reconfiguring an encoding
+    without an error handler resets the handler to `strict`, so a report the
+    codec cannot represent raises instead of being escaped; `main` reports
+    that raise the way aws's entry-point chain does.
+
+    aws builds both writers for every report and its handlers then write to
+    one: stderr for every report there is, stdout for the bare newline a
+    Ctrl-C prints. Each call site here re-encodes the stream it is about to
+    write, which is the same thing for everything observable - nothing else on
+    this surface writes after a report. Nothing outside a report re-encodes at
+    all: a successful run's result, progress and warning lines keep the
+    interpreter's own streams, aws included (measured on both tools).
+
+    An unknown codec is ignored rather than raised: `_dispatch`'s gate has
+    already rejected one, and aws swallows it here too so the report *about*
+    the codec can still be written. A stream with nothing to reconfigure (a
+    capture buffer) is left alone.
+    """
+    encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
+    if encoding is None:
+        if os.environ.get(_PYTHONUTF8_ENV_VAR) != "1":
+            return
+        encoding = "UTF-8"
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        with contextlib.suppress(LookupError):
+            reconfigure(encoding=encoding)
 
 
 def _write_error(message: object, *, rc: int | None = None, code: str | None = None) -> None:
@@ -221,6 +267,7 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
             report = _unresolved_config_report(message)
             if report is not None:
                 code, detail = report
+    _set_preferred_output_encoding(sys.stderr)
     # The degradation is the renderer's, so it costs any code its envelope
     # while leaving the message the handler built - aws's fallback writes the
     # extracted `Message`, hints included. Only the rc-252 family can be
@@ -230,11 +277,34 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     # `Configuration` gate reads the same undeclared profile and stands down
     # for the same reason.
     if code is not None and _enhanced_envelope:
-        detail = f"An error occurred ({code}): {detail}"
-    if not detail:
-        sys.stderr.write("boto3-s3: [ERROR]:\n")
-        return
-    sys.stderr.write(f"boto3-s3: [ERROR]: {detail.strip()}\n")
+        try:
+            _write_report(f"An error occurred ({code}): {detail}")
+            return
+        except Exception:
+            # The other way into the degraded form: aws's renderer wraps the
+            # whole enveloped write in a `try`, so a codec that cannot
+            # represent the report drops it there and the bare message is
+            # written instead - unenveloped, and only then allowed to fail
+            # (measured: the position the codec error names is the bare
+            # message's, and rc 252 becomes aws's 255 through that second
+            # failure).
+            pass
+    _write_report(detail)
+
+
+def _write_report(detail: str) -> None:
+    """aws's `errorformat.write_error`: the prefix, the message, the newline.
+
+    Three writes there, two here - aws leads with a blank line this CLI does
+    not print (a class-1 rule of the parity normalization, design/testing.md
+    section 9). Keeping the newline a write of its own still matters: under a
+    stateful codec (`utf_8_sig`, `punycode`) the chunk boundaries are what the
+    encoder acts on, and a report that fails to encode must leave the stream
+    exactly as aws leaves it.
+    """
+    prefix = "boto3-s3: [ERROR]:"
+    sys.stderr.write(prefix if not detail else f"{prefix} {detail.strip()}")
+    sys.stderr.write("\n")
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
@@ -448,7 +518,9 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_subcommand_error_parser() -> _ParamValidationArgumentParser:
+def _build_subcommand_error_parser(
+    alias_names: Iterable[str] = (),
+) -> _ParamValidationArgumentParser:
     """The parser that reports a subcommand name no table entry matches.
 
     aws checks the name with a positional whose choices are its command
@@ -457,10 +529,23 @@ def _build_subcommand_error_parser() -> _ParamValidationArgumentParser:
     the top-level usage block. Only that report is wanted here, so this parser
     carries the positional alone - the globals are long consumed by the
     top-level pass, and the help page is stage 1's job.
+
+    The table aws checks against is the one its alias injector has already
+    added to, so alias names join the choices and can be suggested as the near
+    miss of a typo (measured: with an ``lsx`` alias defined, ``lsxx`` is
+    answered with ``* lsx``).
     """
     parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
-    parser.add_argument("subcommand", choices=list(_COMMAND_TABLE))
+    extra = [name for name in alias_names if name not in _COMMAND_TABLE]
+    parser.add_argument("subcommand", choices=list(_COMMAND_TABLE) + extra)
     return parser
+
+
+def _silencer(suppress_usage_errors: bool) -> AbstractContextManager[object]:
+    """Discard a parser's own usage message when the on-partial trial asks for it."""
+    if suppress_usage_errors:
+        return contextlib.redirect_stderr(io.StringIO())
+    return contextlib.nullcontext()
 
 
 def _build_first_pass_parser() -> _ParamValidationArgumentParser:
@@ -719,8 +804,23 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return _main(argv, ctx)
     except KeyboardInterrupt:
         with contextlib.suppress(Exception):
+            # aws's `InterruptExceptionHandler` writes this newline through
+            # the stdout writer its chain built, so the codec applies to it -
+            # the one report on this surface that is not stderr's.
+            _set_preferred_output_encoding(sys.stdout)
             sys.stdout.write("\n")
         return 130
+    except UnicodeError as exc:
+        # aws's entry-point handler chain (its `AWSCLIEntryPoint.main`), whose
+        # one reachable case here is a report `AWS_CLI_OUTPUT_ENCODING` cannot
+        # represent: the codec is strict, so the write raises out of the
+        # handler that was making the report and the general handler reports
+        # *that* at rc 255 - which is what turns a 252 into a 255 when the
+        # message carries a character the codec lacks (measured). The second
+        # report is deliberately unguarded: when the codec cannot write it
+        # either, aws lets the error escape its entry point as well.
+        _write_error(exc, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
@@ -762,7 +862,17 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
             rc=_PARAM_VALIDATION_ERROR_RC,
         )
         return _PARAM_VALIDATION_ERROR_RC
-    mode = resolve.resolve_auto_prompt_mode(raw)
+    try:
+        mode = resolve.resolve_auto_prompt_mode(raw, _config_scan)
+    except AttributeError as exc:
+        # The resolution runs aws's own `config.lower()` over whatever the
+        # setting holds, so an indented block - a map after botocore's parse -
+        # raises there and aws's entry-point chain reports it at rc 255,
+        # ahead of the command it was about to run (measured). Reported here
+        # rather than left to `main`'s backstop, which only claims the codec
+        # failures of the report streams.
+        _write_error(exc, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
     if mode == "on":
         return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
@@ -861,11 +971,16 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # right after it included, which a bad --profile (bound further down) leaves
     # alone.
     _enhanced_envelope = _config_scan.declares(configfiles.env_profile())
-    silencer = (
-        contextlib.redirect_stderr(io.StringIO())
-        if suppress_usage_errors
-        else contextlib.nullcontext()
-    )
+    # aws reads `~/.aws/cli/alias` while it is still assembling its parser, so
+    # a file it cannot read aborts the run before the top-level parse - ahead
+    # of `--version`, the help token and a bad global alike (all measured),
+    # with only the preliminary scan and the config-file read above it.
+    try:
+        aliases = alias.load()
+    except Boto3S3Error as exc:
+        rc = exit_code_for(exc)
+        _write_error(exc, rc=rc)
+        return rc
 
     # aws-shaped top-level pass: aws parses the globals over the full argv
     # (MainArgParser.parse_known_args), REMOVES them, and resolves them - the
@@ -908,6 +1023,10 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             sys.stdout.write(pre_stdout.getvalue())
             return 0
         if not suppress_usage_errors:
+            # Replayed onto the real stream, so the codec `_write_error`
+            # applies to a live report has to be applied here too - the
+            # capture buffer it was written into could not take it.
+            _set_preferred_output_encoding(sys.stderr)
             sys.stderr.write(pre_stderr.getvalue())
         return _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
@@ -925,6 +1044,15 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
             _write_error(exc, rc=rc)
         return rc
+    except Exception as exc:
+        # The same backstop the command below gets: aws resolves these three
+        # inside its handler chain, so a raw exception they raise is its
+        # general report rather than a traceback (`--endpoint-url
+        # 'http://[::1:9000'` - urlsplit rejects the netloc with a bare
+        # ValueError - measured as rc 255 on both tools).
+        rc = _exit_code_for_unexpected(exc)
+        _write_error(exc, rc=rc)
+        return rc
     # aws's _handle_top_level_args binds --profile onto the session here, after
     # emitting the event the three resolutions above hang off. The ordering is
     # observable: a bad --profile leaves those errors and the top-level parse
@@ -933,6 +1061,26 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # --profile "" leaves the env chain in force, like `resolve_profile`.
     if head.profile:
         _enhanced_envelope = _config_scan.declares(head.profile)
+    # aws validates AWS_CLI_OUTPUT_ENCODING right here: after handling the
+    # top-level args and before `session-initialized` (clidriver.main calls
+    # compat.validate_preferred_output_encoding between the two), so an
+    # unknown codec beats both config gates below, the help token, an invalid
+    # subcommand and every leaf error, while the three resolutions above, an
+    # unparseable config file and a parse-time --version still win (all
+    # measured). The validation is separate from the application on purpose,
+    # aws's own split: `_set_preferred_output_encoding` swallows an unknown
+    # codec so a report can still be written, and this gate is what makes one
+    # impossible to reach with the codec still unknown.
+    output_encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
+    if output_encoding is not None:
+        try:
+            "".encode(output_encoding)
+        except LookupError:
+            _write_error(
+                f"Unknown codec `{output_encoding}` specified for {_OUTPUT_ENCODING_ENV_VAR}.",
+                rc=_GENERAL_ERROR_RC,
+            )
+            return _GENERAL_ERROR_RC
     # aws emits `session-initialized` right after binding --profile, and the
     # first handler on it validates `cli_timestamp_format` against the now-bound
     # profile's scoped config. So an unknown value settles the run here: after
@@ -950,6 +1098,71 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             code="Configuration",
         )
         return _CONFIGURATION_ERROR_RC
+    # aws's next `session-initialized` handler resolves `cli_binary_format`
+    # (its binary-format customization), so a bad value in the bound profile
+    # settles the run here - after the timestamp gate above (measured: with
+    # both broken, the timestamp report wins) and ahead of the help token and
+    # every command layer. An explicit --cli-binary-format never consults the
+    # config (argparse restricted it to the valid choices already), and the
+    # bad value renders as aws's bare KeyError - its repr through the general
+    # rc-255 handler, no envelope.
+    if head.cli_binary_format is None:
+        invalid_binary = _config_scan.invalid_binary_format(clientfactory.resolve_profile(head))
+        if invalid_binary is not None:
+            # An indented block parses to a map, which aws's table lookup
+            # rejects as an unhashable key - its official build's (Python
+            # 3.14) TypeError text, pinned across hosts like the argparse
+            # corners; a string renders as the KeyError's repr.
+            message = (
+                "cannot use 'dict' as a dict key (unhashable type: 'dict')"
+                if isinstance(invalid_binary, dict)
+                else f"{invalid_binary!r}"
+            )
+            _write_error(message, rc=_GENERAL_ERROR_RC)
+            return _GENERAL_ERROR_RC
+    try:
+        return _resolve_command(
+            tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        )
+    except Boto3S3Error as exc:
+        # The alias layer's own failures (an unparseable value, a global it
+        # refuses); a command's are reported inside `_run_command`.
+        rc = exit_code_for(exc)
+        if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
+            _write_error(exc, rc=rc)
+        return rc
+    except RecursionError:
+        # An alias that expands to itself re-enters until the interpreter's
+        # stack runs out; aws reaches the same wall (its alias command calls
+        # back into the command it was injected into) and reports it at rc 255.
+        # Caught here, where the stack has fully unwound, so the report itself
+        # cannot hit the wall again. The text is written rather than taken from
+        # the exception because Python worded this failure two ways before 3.12
+        # ("... while calling a Python object" when the limit is reached
+        # entering a C-level call); aws's official build carries the settled
+        # wording, and pinning it keeps every supported host on that answer -
+        # the same pin the argparse corners use (design/cli.md section 2).
+        _write_error(_RECURSION_LIMIT_REPORT, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
+
+
+def _resolve_command(
+    tokens: list[str],
+    head: argparse.Namespace,
+    ctx: Context,
+    aliases: alias.AliasTable,
+    *,
+    suppress_usage_errors: bool,
+) -> int:
+    """Pick the subcommand out of the globals-free token stream and run it.
+
+    aws's ``s3`` command does this: the help token first, then the first
+    positional-looking token as the subcommand name, looked up in a table its
+    alias injector has already added the ``[command s3]`` entries to - so an
+    alias name resolves here, and one that repeats a built-in name shadows it.
+    An internal alias re-enters this same resolution with its expansion ahead
+    of the user's arguments, which is what makes alias-to-alias chains work.
+    """
     if tokens == ["help"]:
         _build_stage1_parser().print_help()
         return 0
@@ -970,7 +1183,25 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             message = f"Unknown options: {','.join(leftovers)}" if leftovers else _TOO_FEW_ARGUMENTS
             _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
-    if tokens[index] not in _COMMAND_TABLE:
+    name = tokens[index]
+    # aws's subcommand extraction (SubCommandArgParser._remove_subcommand):
+    # only the matched token leaves the stream; an option-like token ahead of
+    # it - `s3 --expires-in=120 presign s3://b/k` parses, measured - and
+    # everything behind it flow to the leaf parser in their original order,
+    # where an unknown one is rejected with the leaf's own wording.
+    stage2_tokens = tokens[:index] + tokens[index + 1 :]
+    value = aliases.entries.get(name)
+    if value is not None:
+        return _run_alias(
+            name,
+            value,
+            stage2_tokens,
+            head,
+            ctx,
+            aliases,
+            suppress_usage_errors=suppress_usage_errors,
+        )
+    if name not in _COMMAND_TABLE:
         # Report the rejected name through the dedicated parser so argparse
         # words it exactly as aws's command-table positional does (it writes
         # the message itself; its exit 2 remaps per the charter). The parse
@@ -979,17 +1210,153 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # `--` of their own, they are data), and without the marker argparse
         # would read one back as an option and report a missing subcommand
         # instead of the name aws blames (`--region us-east-1 -- --bogus`).
-        with contextlib.suppress(SystemExit), silencer:
-            _build_subcommand_error_parser().parse_args(["--", tokens[index]])
+        with contextlib.suppress(SystemExit), _silencer(suppress_usage_errors):
+            _build_subcommand_error_parser(aliases.entries).parse_args(["--", name])
         return _PARAM_VALIDATION_ERROR_RC
+    return _run_command(
+        name,
+        stage2_tokens,
+        head,
+        ctx,
+        aliases,
+        lineage=alias.COMMAND_LINEAGE,
+        suppress_usage_errors=suppress_usage_errors,
+    )
 
-    name = tokens[index]
-    # aws's subcommand extraction (SubCommandArgParser._remove_subcommand):
-    # only the matched token leaves the stream; an option-like token ahead of
-    # it - `s3 --expires-in=120 presign s3://b/k` parses, measured - and
-    # everything behind it flow to the leaf parser in their original order,
-    # where an unknown one is rejected with the leaf's own wording.
-    stage2_tokens = tokens[:index] + tokens[index + 1 :]
+
+def _run_alias(
+    name: str,
+    value: str,
+    arguments: list[str],
+    head: argparse.Namespace,
+    ctx: Context,
+    aliases: alias.AliasTable,
+    *,
+    suppress_usage_errors: bool,
+) -> int:
+    """Run one ``[command s3]`` alias over the arguments that followed its name.
+
+    An external alias (``!``-led) is a shell command line and its status is the
+    run's. An internal one expands to CLI arguments, which aws hands to the
+    *main* parser first so any global option in the value is taken out and
+    applied - overriding what the user typed, since aws copies the alias's
+    values onto the already-parsed globals (measured: an alias's ``--region``
+    beats one on the command line). What the main parser leaves goes back
+    through the command resolution ahead of the user's own arguments.
+
+    An alias that repeats a built-in name proxies to that built-in instead of
+    re-resolving, and aws drops the expansion's first token when it does -
+    which is what makes `ls = ls --recursive` work, and what makes an
+    expansion that names something else (``ls = cp``) still run ``ls``.
+    """
+    if alias.is_external(value):
+        try:
+            return alias.run_external(value, arguments)
+        except AssertionError:
+            raise
+        except Exception as exc:
+            # Launching the shell can fail on the command line itself (an
+            # embedded NUL, an argument list past the OS limit). aws registers
+            # no handler for that either, so it travels to the entry point's
+            # general chain and is reported like any other unexpected failure -
+            # `str(exc)` at rc 255, never a traceback (measured).
+            rc = _exit_code_for_unexpected(exc)
+            _write_error(exc, rc=rc)
+            return rc
+    expanded = alias.split_value(name, value)
+    # Same capture-and-replay as the top-level pass: a global in the value can
+    # fail to parse (rc 252, silenced on the on-partial trial like any other
+    # usage error) or be a `--version` that prints and exits 0 (measured).
+    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
+    parser = _build_globals_parser()
+    try:
+        with (
+            contextlib.redirect_stdout(pre_stdout),
+            contextlib.redirect_stderr(pre_stderr),
+        ):
+            parsed, remainder = parser.parse_known_args(expanded)
+    except SystemExit as exc:
+        if not exc.code:
+            sys.stdout.write(pre_stdout.getvalue())
+            return 0
+        if not suppress_usage_errors:
+            _set_preferred_output_encoding(sys.stderr)
+            sys.stderr.write(pre_stderr.getvalue())
+        return _PARAM_VALIDATION_ERROR_RC
+    _apply_alias_globals(name, parser, parsed, head)
+    tokens = remainder + arguments
+    if name in _COMMAND_TABLE:
+        # The built-in runs as this alias's proxy, which is how aws detaches it
+        # from the command table - so the section it consults is the shadow
+        # one, `[command <name>]` (alias.py, `SHADOW_LINEAGE`).
+        return _run_command(
+            name,
+            tokens[1:],
+            head,
+            ctx,
+            aliases,
+            lineage=alias.SHADOW_LINEAGE,
+            suppress_usage_errors=suppress_usage_errors,
+        )
+    return _resolve_command(tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors)
+
+
+def _apply_alias_globals(
+    name: str,
+    parser: argparse.ArgumentParser,
+    parsed: argparse.Namespace,
+    head: argparse.Namespace,
+) -> None:
+    """Move the global options an alias value carried onto the run's globals.
+
+    aws decides what the value carried by comparing the alias's parse against
+    the parser's defaults, and refuses two of them outright (``--debug`` and
+    ``--profile``, whose effects are settled before an alias can be reached) -
+    checked in aws's own order, so a value carrying both blames ``--debug``.
+    The values it keeps then go through the same resolutions the top-level
+    pass runs, which is where a bad ``--endpoint-url`` or ``--query`` in an
+    alias is rejected, before they are copied over the user's.
+    """
+    from boto3_s3_cli import clientfactory
+
+    updates = [dest for dest, value in vars(parsed).items() if parser.get_default(dest) != value]
+    for unsupported in ("debug", "profile"):
+        if unsupported in updates:
+            raise InvalidConfigError(
+                f'Global parameter "--{unsupported}" detected in alias "{name}" '
+                "which is not supported in subcommand aliases."
+            )
+    globalargs.validate_query(parsed)
+    clientfactory.validate_endpoint_url(parsed)
+    clientfactory.resolve_cli_timeouts(parsed)
+    for dest in updates:
+        setattr(head, dest, getattr(parsed, dest))
+
+
+def _run_command(
+    name: str,
+    stage2_tokens: list[str],
+    head: argparse.Namespace,
+    ctx: Context,
+    aliases: alias.AliasTable,
+    *,
+    lineage: tuple[str, ...],
+    suppress_usage_errors: bool,
+) -> int:
+    """Stage 2: build the matched subcommand's parser, parse, and run it.
+
+    ``lineage`` is what this subcommand carries above its own name, which is
+    what decides the section it consults: `alias.COMMAND_LINEAGE` when it was
+    reached through the command table, `alias.SHADOW_LINEAGE` when an alias of
+    its own name proxied to it.
+    """
+    if aliases.for_command((*lineage, name)):
+        # A section of this subcommand's own is aws's crash, not a usable
+        # alias: injecting into a leaf's table breaks the parser it then
+        # builds, for every invocation of that subcommand including its help
+        # (measured, rc 255). It settles the run before the parse, as there.
+        _write_error(alias.LEAF_SECTION_REPORT, rc=_GENERAL_ERROR_RC)
+        return _GENERAL_ERROR_RC
     command = _load_command(name)()
     if stage2_tokens == ["help"]:
         # aws's help-token rule at the subcommand level (its ArgTableArgParser
@@ -1004,7 +1371,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # parse fills in the command's own arguments.
     head.command = name
     try:
-        with silencer:
+        with _silencer(suppress_usage_errors):
             args, extras = _build_command_parse_parser(name, command).parse_known_args(
                 stage2_tokens, namespace=head
             )
@@ -1027,8 +1394,6 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
             _write_error(exc, rc=rc)
         return rc
-    except BrokenPipeError:
-        return 0
     except AssertionError:
         # An AssertionError is an internal-invariant violation (a bug), not a
         # user-facing error condition - let it surface loudly rather than be

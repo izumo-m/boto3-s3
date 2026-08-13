@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 # Module-level imports are fine here: rm is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import (
     BatchError,
-    Boto3S3Error,
     OpOutcome,
     OpResult,
     ValidationError,
@@ -26,6 +26,8 @@ from boto3_s3_cli.commands.base import (
     parse_integer_option,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class _DeletePrinter:
     """Stream per-item ``OpResult``s as aws-style delete lines.
@@ -40,6 +42,11 @@ class _DeletePrinter:
     and dryrun lines alike; ``--only-show-errors`` silences successes but
     still prints dryrun lines (aws's ``OnlyShowErrorsResultPrinter`` does not
     override ``_print_dry_run``).
+
+    A line that cannot be written at all is dropped with a debug log and never
+    escapes, aws's ``ResultProcessor._process_result`` shape: the deletes have
+    already happened by then, so an unwritable stdout must leave the run's
+    outcome alone.
     """
 
     def __init__(self, *, bucket: str, quiet: bool, only_show_errors: bool) -> None:
@@ -50,6 +57,12 @@ class _DeletePrinter:
     def __call__(self, result: OpResult) -> None:
         if self._quiet:
             return
+        try:
+            self._write_line(result)
+        except Exception as exc:
+            logger.debug("Error printing result %s: %s", result, exc, exc_info=True)
+
+    def _write_line(self, result: OpResult) -> None:
         # The printed line needs the full object key; a delete record's
         # compare_key is the operation-relative form (design/opresult.md), and
         # the listed entry always rides on src_info.
@@ -104,13 +117,15 @@ class RmCommand(Command):
 
         Exit-code shape (differs from ``ls``): usage errors - a
         non-``s3://`` path, a rejected ARN form - exit 252 via ``main``, but
-        every classified (``Boto3S3Error``) failure after the operation
-        starts is rc 1 (an unclassified exception falls to the dispatcher's
-        handler chain instead - the taxonomy promises classification for the
-        known failures, design/exceptions.md): per-key failures
+        every failure after the operation starts is rc 1 whatever its type
+        (rm is an ``S3TransferCommand`` in aws too, so its execution span sits
+        inside the same result recorder cp / mv / sync's does -
+        ``transferargs.finish_transfer`` derives its code from the same rule):
+        per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
-        listing rejecting the bucket or the page size, botocore validation)
+        listing rejecting the bucket or the page size, botocore validation, a
+        listing entry the response left incomplete)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here. Ahead of all of
         that sit the client build and the ``[s3]`` runtime config, at aws's own
@@ -209,7 +224,22 @@ class RmCommand(Command):
             if not args.quiet:
                 sys.stderr.write("cancelled: ctrl-c received\n")
             return 1
-        except Boto3S3Error as exc:
+        except AssertionError:
+            # An internal-invariant violation (a bug) surfaces loudly, like the
+            # dispatcher's AssertionError re-raise (cli.py) and the cp/mv/sync
+            # span's - masking it as a fatal error would also blunt the test
+            # doubles' unexpected-call guards.
+            raise
+        except Exception as exc:
+            # Everything the operation raises is one `fatal error:` line at
+            # rc 1, by position rather than by type: aws's rm runs inside the
+            # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
+            # escapes the pipeline into an ErrorResult. So a listing entry the
+            # response left incomplete (KeyError) and a timestamp the local
+            # calendar cannot hold (OverflowError) report as `fatal error:
+            # 'LastModified'` / `fatal error: date value out of range` at rc 1,
+            # measured, rather than reaching the dispatcher's 255.
+            # `SystemExit` is a BaseException and still passes, like there.
             if not args.quiet:
                 sys.stderr.write(f"fatal error: {exc}\n")
             return 1

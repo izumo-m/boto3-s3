@@ -14,8 +14,9 @@ S3().cp("local.txt", "s3://bucket/key")
 
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
-   transfer_config=None, wait_on_interrupt=True,
-   crt_allow_absent_credentials=False, crt_region=CLIENT_REGION)
+   transfer_config=None, reusable_after_interrupt=True,
+   crt_allow_absent_credentials=False, crt_allow_lockless=False,
+   crt_region=CLIENT_REGION, crt_sign_requests=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -26,17 +27,27 @@ S3(session=None, *, endpoint_url=None, config=None,
   S3-compatible endpoint or a `botocore.config.Config`.
 - **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`.
   Any call can override it.
-- **`wait_on_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
+- **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
   has been reclaimed, so the next operation still works. `False` treats Ctrl-C
   as fatal to the process and lets the unwind abandon an in-flight listing page.
-  Either way the interrupt is re-raised, never swallowed, and only
+  Either way the interrupt is re-raised, never swallowed — with one
+  engine-imposed exception: pip s3transfer's CRT manager discards an interrupt
+  that lands in its transfer drain, so a CRT run cut short there raises
+  `BatchError` with the cancelled items counted as failures instead. Only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
 - **`crt_allow_absent_credentials`** — whether the CRT transfer engine may be
   used by a client that resolved no credentials. `False` (the default) drops
   to the classic engine and reports `Unable to locate credentials`; `True`
   attempts the transfer and lets it fail inside the CRT credentials delegate,
   which is what `aws s3` does. Only reproducing aws's output needs it.
+- **`crt_allow_lockless`** — what an explicit
+  `preferred_transfer_client="crt"` does when another process of this
+  application already holds the cross-process CRT slot. `False` (the default)
+  silently selects the classic engine, boto3's rule; `True` builds the CRT
+  client regardless, which is what `aws s3` does — so a construction-time
+  failure surfaces under contention too. `"auto"` respects the lock either
+  way. Only reproducing aws's behavior needs it.
 - **`crt_region`** — where the CRT transfer engine takes its region from.
   `CLIENT_REGION` (the default) reads it off the client that was built, which
   is what boto3 does. Passing your own already-resolved region uses that value
@@ -46,6 +57,14 @@ S3(session=None, *, endpoint_url=None, config=None,
   then refuses to build a client at all. Only reproducing that refusal needs
   it. Like the flag above it does nothing unless
   `TransferConfig.preferred_transfer_client` selects the CRT engine.
+- **`crt_sign_requests`** — whether the CRT transfer engine signs its
+  requests. `None` (the default) derives the answer from the built client,
+  boto3's rule. An explicit `False` builds the CRT client with no credentials
+  provider (nothing is resolved, every CRT request goes out anonymous);
+  `True` forces a provider. Only reproducing `aws s3` needs it — aws's CRT
+  factory decides from its own `sign_request` flag and never from the client,
+  which is how `--no-sign-request --sse aws:kms` transfers anonymously on
+  aws's CRT engine while its classic engine signs.
 
 ## 2. Which client a location uses
 

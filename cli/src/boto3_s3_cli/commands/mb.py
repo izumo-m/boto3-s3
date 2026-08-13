@@ -9,7 +9,7 @@ from typing import Any, ClassVar, cast
 
 # Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
-from boto3_s3 import Boto3S3Error, S3Storage, ValidationError
+from boto3_s3 import S3Storage, ValidationError
 from boto3_s3_cli import clientfactory, globalargs, output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
@@ -68,12 +68,11 @@ class MbCommand(Command):
 
         Exit-code shape (aws-cli MbCommand): usage errors - a non-``s3://``
         path, an S3 Express (``--x-s3``) bucket, a rejected ARN form - exit
-        252 via ``main``; every classified (``Boto3S3Error``) failure after the
-        operation starts is rc 1 with
+        252 via ``main``; every failure from the create onwards is rc 1 with
         one ``make_bucket failed:`` line (aws catches every create_bucket
-        exception locally, even request-time credential errors; an
-        unclassified exception here falls to the dispatcher's handler chain -
-        the taxonomy classifies the known failures, design/exceptions.md). The key part
+        exception locally, even request-time credential errors, and its catch
+        spans the success line too - an unwritable stdout is an mb failure, not
+        the dispatcher's 255). The key part
         of the path is silently dropped, exactly like aws. aws builds the client
         before validating the path (``S3Command._run_main``), so a
         client-construction failure (bad ``--profile`` / unresolved credentials /
@@ -120,10 +119,13 @@ class MbCommand(Command):
             # caught here where a naive partition on the first "/" would miss it.
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
+        # aws's MbCommand wraps the create *and* its success line in one local
+        # `except Exception`, so a stdout that cannot take the line is reported
+        # as an mb failure like any other rather than reaching the dispatcher.
         try:
             s3.mb(storage, tags=tags)
-        except Boto3S3Error as exc:
+            output.uni_write(sys.stdout, output.format_make_bucket(storage.bucket) + "\n")
+            return 0
+        except Exception as exc:
             sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
-        output.uni_write(sys.stdout, output.format_make_bucket(storage.bucket) + "\n")
-        return 0

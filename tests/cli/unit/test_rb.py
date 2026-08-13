@@ -12,6 +12,7 @@ escapes unwrapped, exactly as aws's does.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from typing import Any
 
 import pytest
@@ -139,6 +140,23 @@ class TestPostStartErrors:
         result = run_cli_in_process(["rb", "s3://b"], ctx=client_ctx(client))
         assert result.rc == 1
         assert "BucketNotEmpty" in result.stderr
+
+    def test_an_unwritable_success_line_is_rc_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's local catch spans the success line, so failing to write it is
+        # just another rb failure. Measured on the pinned aws with a closed
+        # stdout (`aws s3 rb s3://b 1>&-`, where sys.stdout is None): rc 1 and
+        # this exact line, where reaching the dispatcher would give 255.
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", None)
+        rc = cli.main(["rb", "s3://b"], ctx=client_ctx(client))
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "remove_bucket failed: s3://b 'NoneType' object has no attribute 'write'\n"
+        )
+        # The bucket is gone all the same - only the report was lost, like aws.
+        assert [c.operation for c in calls] == ["DeleteBucket"]
 
     def test_empty_uri_is_rc_1(self) -> None:
         # aws sends Bucket="" to DeleteBucket and fails client-side inside the

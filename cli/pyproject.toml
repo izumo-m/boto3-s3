@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3-cli"
-version = "0.7.0"
+version = "0.8.0"
 description = "An `aws s3` compatible CLI built on the boto3-s3 library."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,12 +27,15 @@ classifiers = [
 ]
 dependencies = [
     # Versioned independently; the range pins the library API this CLI is built against.
-    "boto3-s3>=0.9.0,<0.10.0",
+    "boto3-s3>=0.10.0,<0.11.0",
     # Imported directly (the Session in build_client and the [s3] config read,
     # the autoprompt completers); floor matches boto3-s3's pin.
     "boto3>=1.28",
     # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's botocore pin.
     "botocore>=1.31",
+    # Imported directly (the ls timestamp rendering uses dateutil's tzlocal,
+    # like aws-cli); floor matches botocore's own dateutil pin.
+    "python-dateutil>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +55,7 @@ Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/cli/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 
 [build-system]
-requires = ["uv_build>=0.11.14,<0.12.0"]
+requires = ["uv_build>=0.11.14,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]

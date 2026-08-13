@@ -67,7 +67,12 @@ class Boto3S3Error(Exception):
   engine every task exception must land in its item's record, so an
   unclassified one surfaces there wrapped in the base `Boto3S3Error` (the
   last-resort clause) instead. `KeyboardInterrupt` / `SystemExit` always pass
-  through.
+  through. That pass-through is exactly why a broken *contract* that would cost
+  data is not left to an `assert`: `sync`'s merge raises `ValidationError` when
+  a side descends by `compare_key`, so `ValidationError` also covers "a backend
+  or endpoint broke the ordering contract mid-stream" - a precondition detected
+  inside the pipeline rather than at argument time
+  ([`sync.md`](./sync.md) section 3).
 - **Intentional pass-through exception**: using
   `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent passes
   through the same `botocore.exceptions.MissingDependencyException` as boto3 does.

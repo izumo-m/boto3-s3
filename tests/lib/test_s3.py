@@ -176,6 +176,49 @@ class TestLsRouting:
             S3().ls("s3:///key", on_entry=lambda _info: None)
 
 
+class TestLsCommonPrefixes:
+    """``ls`` is the one operation that keeps a recursive listing's common prefixes.
+
+    A recursive listing sends no ``Delimiter``, so a conforming service returns
+    none; ``aws s3 ls --recursive`` nevertheless prints whatever it is handed.
+    The oracle is the pinned aws-cli against a service whose page carries the
+    prefix ``mixed/zdir/`` and the object ``mixed/a.txt``:
+
+        $ aws s3 ls s3://bkt/mixed/ --recursive
+                                   PRE zdir/
+        2026-08-12 00:00:00          1 mixed/a.txt
+
+    - one entry per prefix, ahead of the page's objects. A page holding prefixes
+    and no object counts as a match for the same reason (aws exits 0, not the 1
+    it reserves for a first page with neither).
+    """
+
+    def test_recursive_listing_delivers_prefixes_ahead_of_objects(self) -> None:
+        client = _FakeS3Client(
+            [
+                {
+                    "Contents": [{"Key": "mixed/a.txt", "Size": 1, "LastModified": _MTIME}],
+                    "CommonPrefixes": [{"Prefix": "mixed/zdir/"}],
+                }
+            ]
+        )
+        infos: list[Any] = []
+        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
+        assert [(info.kind, info.key) for info in infos] == [
+            (FileKind.DIRECTORY, "mixed/zdir/"),
+            (FileKind.FILE, "mixed/a.txt"),
+        ]
+        # Keeping them costs the listing nothing on the wire: still no Delimiter.
+        assert "Delimiter" not in client.calls[0]
+
+    def test_prefix_only_recursive_page_still_delivers_an_entry(self) -> None:
+        # What the CLI's "nothing matched" exit code 1 hangs on.
+        client = _FakeS3Client([{"CommonPrefixes": [{"Prefix": "mixed/only/"}]}])
+        infos: list[Any] = []
+        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
+        assert [(info.kind, info.key) for info in infos] == [(FileKind.DIRECTORY, "mixed/only/")]
+
+
 class TestUnknownTransferOption:
     """cp / mv / sync reject a typo'd ``**options`` key eagerly (pre-pipeline).
 
@@ -514,6 +557,41 @@ class TestCrtRegionPosture:
         assert _captured_transferrer_kwargs["crt_region"] is declared
 
 
+class TestCrtSignRequestsPosture:
+    """``crt_sign_requests`` reaches every route that builds a Transferrer.
+
+    The declaration is what keeps ``boto3-s3-cli``'s ``--no-sign-request``
+    anonymous on the CRT lane even where ``--sse aws:kms`` restores signing on
+    the client (design/crt.md section 4); a route that forgot to thread it
+    would sign that route's transfers where ``aws s3`` sends them
+    unsigned.
+    """
+
+    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
+        src = tmp_path / "x.txt"
+        src.write_text("hi")
+        if route == "cp":
+            s3.cp(str(src), "s3://bucket/key")
+        elif route == "stream":
+            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
+        else:
+            s3.sync(str(tmp_path), "s3://bucket/pfx")
+
+    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
+    @pytest.mark.parametrize("declared", [None, False, True], ids=["default", "unsigned", "signed"])
+    def test_posture_reaches_every_route(
+        self,
+        _captured_transferrer_kwargs: dict[str, Any],
+        tmp_path: Any,
+        route: str,
+        declared: bool | None,
+    ) -> None:
+        s3 = S3() if declared is None else S3(crt_sign_requests=declared)
+        with pytest.raises(_StopTransferError):
+            self._run(s3, tmp_path, route)
+        assert _captured_transferrer_kwargs["crt_sign_requests"] is declared
+
+
 class TestMaterializeCrtEngine:
     """`S3.materialize_crt_engine` hands the instance's postures to crtsupport.
 
@@ -539,7 +617,9 @@ class TestMaterializeCrtEngine:
             session=session,
             endpoint_url=endpoint,
             crt_allow_absent_credentials=True,
+            crt_allow_lockless=True,
             crt_region=None,
+            crt_sign_requests=False,
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
         assert seen == [
@@ -549,7 +629,9 @@ class TestMaterializeCrtEngine:
                 "endpoint": endpoint,
                 "session": session,
                 "allow_absent_credentials": True,
+                "allow_lockless": True,
                 "region": None,
+                "sign_requests": False,
             }
         ]
 

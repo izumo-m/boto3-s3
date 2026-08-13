@@ -23,7 +23,10 @@ with gzip.open("hello.txt.gz", "wb") as f:
 ```
 
 `StdioStorage()` is the shortcut for the process's own standard input and
-output, the equivalent of `aws s3 cp - …` and `aws s3 cp … -`.
+output, the equivalent of `aws s3 cp - …` and `aws s3 cp … -`. A download
+through it goes straight into `sys.stdout.buffer` and is not flushed when the
+transfer finishes, exactly as `aws` leaves it — whatever the stream still holds
+goes out on your own `flush()` or on the interpreter's at exit.
 
 ## 1. Text streams are encoded for you
 

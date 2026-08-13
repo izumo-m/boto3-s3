@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
+from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
@@ -39,6 +40,8 @@ from boto3_s3.transfer import (
 from boto3_s3.transferconfig import TransferConfig as LibraryTransferConfig
 from boto3_s3.types import (
     AnnotationCopyMode,
+    CancelMode,
+    CancelToken,
     CopyPropsMode,
     FileInfo,
     OpOutcome,
@@ -442,6 +445,72 @@ class TestCopy:
         ]
         assert source_calls == []
 
+    def test_explicit_metadata_directive_copy_keeps_the_caller_properties(self) -> None:
+        # With the chain disabled nothing sets MetadataDirective=REPLACE, which
+        # is upstream 0.19's condition for keeping the seven preserved fields on
+        # CreateMultipartUpload - it would otherwise strip the caller's own
+        # --content-type / --metadata and substitute the (never fetched) head
+        # response's. aws-cli's bundled s3transfer has no such table and passes
+        # them straight through; _submit_copy flips the multipart-bound
+        # directive to REPLACE (blocklisted from the create call, so no wire
+        # request changes) to match.
+        calls, source_calls, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(
+                metadata_directive="COPY",
+                content_type="text/plain",
+                cache_control="max-age=1",
+                metadata={"k": "v"},
+            ),
+        )
+        create = calls[0]
+        assert create.operation == "CreateMultipartUpload"
+        assert create.params["ContentType"] == "text/plain"
+        assert create.params["CacheControl"] == "max-age=1"
+        assert create.params["Metadata"] == {"k": "v"}
+        # The directive itself stays off the create call (both tables blacklist it).
+        assert "MetadataDirective" not in create.params
+        assert source_calls == []
+
+    def test_explicit_copy_directive_stays_on_a_single_part_copy(self) -> None:
+        # Below the threshold the directive is a real CopyObject parameter -
+        # S3 itself copies or replaces the metadata - so the multipart flip
+        # must not touch it: aws sends COPY verbatim.
+        calls, source_calls, _, _ = _run(
+            TransferType.COPY,
+            [self._item()],
+            [{}],
+            source_responses=[],
+            options=TransferOptions(metadata_directive="COPY", content_type="text/plain"),
+        )
+        assert ops(calls) == ["CopyObject"]
+        assert calls[0].params["MetadataDirective"] == "COPY"
+        assert calls[0].params["ContentType"] == "text/plain"
+        assert source_calls == []
+
+    def test_upstream_copy_tables_keep_their_defaults_for_third_parties(self) -> None:
+        # The alignment patches are process-shared, so they are bounded to
+        # changes that stay inert for a plain s3transfer caller in the same
+        # process: the annotation table only loses an argument aws never maps,
+        # and the preserved-metadata table - whose emptying would flip such a
+        # caller's default multipart-copy behavior - stays upstream's own (the
+        # explicit-COPY case is handled per request by _submit_copy instead).
+        _run(TransferType.COPY, [self._item()], [{}], source_responses=[])
+        preserved = getattr(CopySubmissionTask, "PRESERVED_METADATA_FIELDS", None)
+        if preserved is not None:  # absent on the s3transfer floor
+            assert "ContentType" in preserved
+        put_args = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
+        if put_args is not None:
+            assert "ChecksumAlgorithm" not in put_args
+
     def test_multipart_metadata_injected_from_cached_head(self) -> None:
         head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
         calls, source_calls, _, _ = _run(
@@ -580,6 +649,38 @@ class TestCopy:
             "VersionId": "dest-v1",
         }
         assert transferrer.succeeded == 1
+
+    def test_annotation_write_drops_the_copy_checksum_algorithm(self) -> None:
+        # --checksum-algorithm rides the copy calls, but aws writes
+        # annotations from its own subscriber and maps only RequestPayer onto
+        # PutObjectAnnotation - upstream's native path would forward the
+        # copy's ChecksumAlgorithm there (_align_annotation_put_args removes
+        # it from the table; this pins the wire).
+        responses: list[dict[str, Any] | Exception] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"', "VersionId": "dest-v1"},
+            {},  # PutObjectAnnotation
+        ]
+        source_responses: list[dict[str, Any] | Exception] = [
+            {},  # HeadObject
+            {"TagSet": []},
+            {"Annotations": [{"AnnotationName": "ann1", "LastModified": MTIME, "Size": 7}]},
+            {"AnnotationPayload": io.BytesIO(b"payload")},
+        ]
+        calls, _, _, _ = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL, checksum_algorithm="CRC32"),
+        )
+        assert calls[0].operation == "CreateMultipartUpload"
+        assert calls[0].params["ChecksumAlgorithm"] == "CRC32"
+        annotation_put = calls[-1]
+        assert annotation_put.operation == "PutObjectAnnotation"
+        assert "ChecksumAlgorithm" not in annotation_put.params
 
     def test_all_multipart_deferred_lists_every_annotation_page(self) -> None:
         # s3transfer's own post-complete read calls list_object_annotations
@@ -939,14 +1040,256 @@ class TestNonTransferOutcomes:
         assert all(p.bytes_total == 1000 for p in progress)
 
 
+class _CrtCancelError(Exception):
+    """awscrt's cancellation outcome: matched by ``name``, awscrt never imported."""
+
+    name = "AWS_ERROR_S3_CANCELED"
+
+
+class _FakeCrtMeta:
+    size = None
+    etag = None
+
+    def __init__(self) -> None:
+        self.user_context: dict[str, Any] = {}
+
+
+class _FakeCrtFuture:
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.meta = _FakeCrtMeta()
+
+    def done(self) -> bool:
+        return True
+
+    def result(self) -> None:
+        raise self._error
+
+    def cancel(self) -> None:
+        pass
+
+
+class _CrtDrainManager:
+    """The CRT manager's drain surface: every accepted transfer settles with
+    awscrt's cancellation outcome and no interrupt ever escapes - the shape
+    pip s3transfer's ``CRTTransferManager`` presents when a Ctrl-C lands in
+    its drain (its coordinator converts the interrupt into ``cancel()`` and
+    its ``_shutdown`` discards the replacement error too)."""
+
+    def __init__(self) -> None:
+        self._accepted: list[tuple[_FakeCrtFuture, list[Any]]] = []
+
+    def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+        future = _FakeCrtFuture(
+            _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+        )
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
+
+    def _drain(self) -> None:
+        for future, subscribers in self._accepted:
+            for subscriber in subscribers:
+                on_done = getattr(subscriber, "on_done", None)
+                if on_done is not None:
+                    on_done(future)
+
+    def shutdown(self) -> None:
+        self._drain()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._drain()
+
+
+class TestCrtCancelClassification:
+    """A CRT cancellation is a per-item failure unless this run's cancel token
+    ordered it (design/crt.md section 6) - aws-cli's measured classification:
+    a fatal or Ctrl-C folding its CRT manager prints a failed line per
+    in-flight transfer, and only the token, which aws-cli has no counterpart
+    for, revokes as CANCELLED.
+
+    Driven with a stand-in manager because the real CRT stack needs awscrt's
+    event loop; the stand-in reproduces exactly the seam under test - futures
+    settling with the ``AWS_ERROR_S3_CANCELED`` outcome during the drain.
+    """
+
+    def _submit_one(self, transferrer: Transferrer, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        transferrer.submit(
+            TransferItem(
+                compare_key="a.bin",
+                size=1,
+                src_path=str(src),
+                dest_bucket="b",
+                dest_key="a.bin",
+            )
+        )
+
+    def test_uninitiated_cancellations_are_failures(self, tmp_path: Path) -> None:
+        # Nobody here ordered a cancel, yet the drain settled the item
+        # cancelled: the trace of an interrupt the CRT manager swallowed.
+        # aws-cli classifies exactly this as a per-item failure (its
+        # DoneResultSubscriber, rc 1); a silent CANCELLED would report the
+        # interrupted run as success.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+            self._submit_one(transferrer, tmp_path)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_fatal_ordered_cancellations_are_failures(self, tmp_path: Path) -> None:
+        # The fatal path orders the cancel (Transferrer.__exit__ under the
+        # exception), and aws-cli still counts each folded in-flight transfer
+        # as a per-item failure (measured: a mid-listing fatal under the CRT
+        # engine prints "download failed: ... AWS_ERROR_S3_CANCELED" per item
+        # before the fatal error line).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(RuntimeError, match="fatal elsewhere"):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                raise RuntimeError("fatal elsewhere")
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_token_ordered_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
+        # The cancel-token escalation (`_cancel_futures`, as the drain-time
+        # watcher runs it) is the one CRT cancel aws-cli has no counterpart
+        # for: an ordered revocation, CANCELLED, outside the failure counts -
+        # the on_result contract (design/opresult.md).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+            self._submit_one(transferrer, tmp_path)
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+    def test_token_cancel_caught_mid_submission_stays_cancelled(self, tmp_path: Path) -> None:
+        # An immediate token cancel surfacing in the submission loop reaches
+        # __exit__ as the CancelledError that folds the manager
+        # (s3._raise_if_cancelled). That cancel is still the token's own
+        # order, so the in-flight item revokes CANCELLED exactly like the
+        # drain-time escalation above - not FAILED like a fatal's cancel.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(CancelledError):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise CancelledError("cp was cancelled", operation="cp")
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+    def test_interrupt_folded_cancellations_are_failures(self, tmp_path: Path) -> None:
+        # A Ctrl-C forcing the fold classifies its cancels FAILED like a
+        # fatal (aws-measured); the interrupt itself propagates.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                raise KeyboardInterrupt
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_interrupt_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
+        # The flag rises only under the token's *own* CancelledError: an
+        # interrupt that forces the fold - even with the token already
+        # cancelled - keeps the aws-measured FAILED classification. Which
+        # cancel "the token ordered" is decided by the exception that forced
+        # the fold, not by the token's state alone.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise KeyboardInterrupt
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+    def test_fatal_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
+        # The fatal variant of the same tiebreak: the token was cancelled, but
+        # the fatal forced the fold, so its cancels stay per-item failures.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+        )
+        with pytest.raises(RuntimeError, match="fatal elsewhere"):
+            with transferrer:
+                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                self._submit_one(transferrer, tmp_path)
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                raise RuntimeError("fatal elsewhere")
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+
+
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
     (aws's manager-context behavior, measured live: a mid-listing fatal
-    leaves every queued transfer unrun), and each revoked item reports one
-    CANCELLED record naming the fatal (design/opresult.md)."""
+    leaves every queued transfer unrun), and on the classic lane each revoked
+    item reports one CANCELLED record naming the fatal (design/opresult.md;
+    the CRT lane's fatal cancels classify FAILED instead -
+    TestCrtCancelClassification)."""
 
+    @pytest.mark.parametrize(
+        ("raise_exc", "raises", "match", "revoked_text"),
+        [
+            pytest.param(
+                lambda: NotFoundError("listing died mid-enumeration"),
+                NotFoundError,
+                "listing died",
+                "listing died mid-enumeration",
+                id="fatal",
+            ),
+            pytest.param(
+                # An interrupt escaping the submission loop folds the manager
+                # the same way: the classic manager revokes the queued work
+                # with CancelledError (str(KI) is empty, so s3transfer's repr
+                # fallback names it) and the interrupt propagates - CANCELLED
+                # records, unlike the CRT lane's FAILED for the same window.
+                KeyboardInterrupt,
+                KeyboardInterrupt,
+                None,
+                "KeyboardInterrupt()",
+                id="interrupt",
+            ),
+        ],
+    )
     def test_fatal_mid_enumeration_cancels_queued_transfers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        raise_exc: Any,
+        raises: type[BaseException],
+        match: str | None,
+        revoked_text: str,
     ) -> None:
         from s3transfer.manager import TransferCoordinatorController
 
@@ -1001,7 +1344,7 @@ class TestFatalCancellation:
             transfer_config=TransferConfig(max_concurrency=1),
             on_result=results.append,
         )
-        with pytest.raises(NotFoundError, match="listing died"):
+        with pytest.raises(raises, match=match):
             with transferrer:
                 for item in items:
                     transferrer.submit(item)
@@ -1010,7 +1353,7 @@ class TestFatalCancellation:
                 # without this the fatal can also beat the worker and revoke
                 # all three (a legal but different outcome).
                 assert first_started.wait(5.0)
-                raise NotFoundError("listing died mid-enumeration")
+                raise raise_exc()
 
         # Only the already-running first transfer reached the API; the queued
         # two were revoked before ever becoming requests (aws's transfer set:
@@ -1026,7 +1369,7 @@ class TestFatalCancellation:
             result = by_key[key]
             assert result.outcome is OpOutcome.CANCELLED
             assert isinstance(result.error, CancelledError)
-            assert "listing died mid-enumeration" in str(result.error)
+            assert revoked_text in str(result.error)
         assert (transferrer.succeeded, transferrer.failed, transferrer.cancelled) == (1, 0, 2)
         # first_error stays reserved for real failures (BatchError's sample).
         assert transferrer.first_error is None
@@ -1157,6 +1500,26 @@ class TestMove:
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
+
+    def test_case_conflict_key_is_released_after_the_source_delete(self, tmp_path: Path) -> None:
+        # aws-cli registers CaseConflictCleanupSubscriber after the DeleteSource
+        # family, so an admitted key counts as in flight for the whole of its
+        # download's teardown - the mtime stamp and, on mv, the DeleteObject.
+        # Releasing it earlier would let a name differing only by case slip past
+        # the gate while the first download is still tearing down.
+        # Driven without _run so the recorded call list is readable *while* the
+        # cleanup fires, which is what pins the ordering.
+        client, calls = make_recording_client([self._get_object_response(), {}])
+        seen_at_release: list[list[str]] = []
+        item = self._download_item(tmp_path)
+        item.case_conflict_cleanup = lambda: seen_at_release.append(ops(calls))
+        transferrer = Transferrer(TransferType.DOWNLOAD, client, is_move=True)
+        with transferrer:
+            transferrer.submit(item)
+        assert ops(calls) == ["GetObject", "DeleteObject"]
+        # The source delete had already been issued when the key was released.
+        assert seen_at_release == [["GetObject", "DeleteObject"]]
+        assert transferrer.succeeded == 1
 
     def test_copy_move_deletes_on_the_source_client(self) -> None:
         item = TransferItem(
@@ -1619,6 +1982,30 @@ class TestEngineSelection:
         manager = self._transferrer(TransferType.UPLOAD, None)._get_manager()
         assert isinstance(manager, TransferManager)
 
+    def test_omitted_config_carries_the_same_defaults_as_an_explicit_one(self) -> None:
+        # Regression: the omitted branch built s3transfer's bare TransferConfig,
+        # whose download IO queue depth is not the one boto3's class carries, so
+        # passing a default-constructed TransferConfig silently changed the
+        # transfer's buffering. Both branches must land on the same values.
+        omitted = self._transferrer(TransferType.DOWNLOAD, None)._get_manager().config
+        explicit = (
+            self._transferrer(TransferType.DOWNLOAD, LibraryTransferConfig())._get_manager().config
+        )
+        for field in (
+            "max_io_queue_size",
+            "max_request_concurrency",
+            "max_request_queue_size",
+            "multipart_threshold",
+            "multipart_chunksize",
+            "io_chunksize",
+            "num_download_attempts",
+            "max_in_memory_download_chunks",
+            "max_in_memory_upload_chunks",
+            "max_bandwidth",
+        ):
+            assert getattr(omitted, field) == getattr(explicit, field), field
+        assert omitted.max_io_queue_size == 1000
+
     def test_explicit_crt_delegates_to_crtsupport(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
 
@@ -1632,7 +2019,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -1657,7 +2046,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1695,7 +2086,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -1723,7 +2116,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(session)
             return object()
@@ -1757,7 +2152,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             seen.append(allow_absent_credentials)
             return object()
@@ -1774,6 +2171,45 @@ class TestEngineSelection:
         transferrer._get_manager()
         assert seen == [allow]
 
+    @pytest.mark.parametrize(
+        "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
+    )
+    def test_sign_requests_posture_is_threaded_to_crtsupport(
+        self, monkeypatch: pytest.MonkeyPatch, declaration: bool | None
+    ) -> None:
+        # None keeps boto3's rule (derive the mode from the client); a
+        # declaration is aws-cli's `sign_request`, which is what keeps
+        # `--no-sign-request --sse aws:kms` anonymous on the CRT lane.
+        from boto3_s3 import crtsupport
+
+        seen: list[bool | None] = []
+
+        def fake_create(
+            client: Any,
+            config: Any,
+            *,
+            endpoint: str | None = None,
+            session: Any | None = None,
+            allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
+            region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
+        ) -> Any:
+            seen.append(sign_requests)
+            return object()
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])
+        kwargs: dict[str, Any] = {} if declaration is None else {"crt_sign_requests": declaration}
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            **kwargs,
+        )
+        transferrer._get_manager()
+        assert seen == [declaration]
+
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
 
@@ -1786,7 +2222,9 @@ class TestEngineSelection:
             endpoint: str | None = None,
             session: Any | None = None,
             allow_absent_credentials: bool = False,
+            allow_lockless: bool = False,
             region: Any = crtsupport.CLIENT_REGION,
+            sign_requests: bool | None = None,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
@@ -2097,3 +2535,63 @@ class TestAnnotationsCopySupport:
                     {"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": "preload"},
                 ),
             )
+
+
+class TestAnnotationErrorWordingScope:
+    """`_align_annotation_copy_error` patches a process-shared s3transfer
+    method; its docstring promises the re-wording fires only for a copy that
+    carries this library's own `_SetAnnotations` subscriber. Both halves of
+    that promise are pinned here by driving the patched
+    `CopyCompleteMultipartUploadTask._apply_annotations` directly: a plain
+    s3transfer caller in the same process keeps upstream's own wording, and a
+    subscriber-carrying copy gets aws-cli's AnnotationCopyError text."""
+
+    class _Source:
+        def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
+            return {"Annotations": [{"AnnotationName": "ann-a"}]}
+
+        def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
+            return {"AnnotationPayload": io.BytesIO(b"payload")}
+
+    class _DenyingDest:
+        def put_object_annotation(self, **kwargs: Any) -> None:
+            raise client_error("AccessDenied", 403, "PutObjectAnnotation")
+
+    def _drive(self, subscribers: list[Any]) -> str:
+        from types import SimpleNamespace
+
+        from s3transfer.copies import CopyCompleteMultipartUploadTask
+
+        try:
+            from s3transfer.exceptions import S3CopyFailedError
+        except ImportError:
+            pytest.skip("the floor s3transfer predates the annotation write path")
+
+        transfer._align_annotation_copy_error()  # pyright: ignore[reportPrivateUsage]
+        call_args = SimpleNamespace(
+            extra_args={"AnnotationDirective": "COPY"},
+            copy_source={"Bucket": "srcb", "Key": "k"},
+            bucket="dstb",
+            key="k",
+            source_client=self._Source(),
+            subscribers=subscribers,
+        )
+        apply = CopyCompleteMultipartUploadTask._apply_annotations  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(S3CopyFailedError) as excinfo:
+            apply(object(), self._DenyingDest(), call_args, None, None, None)
+        return str(excinfo.value)
+
+    def test_a_plain_s3transfer_caller_keeps_upstreams_wording(self) -> None:
+        message = self._drive(subscribers=[])
+        assert "Succeeded: []" in message  # upstream's own repr wording
+        assert "The object was copied successfully" not in message
+
+    def test_a_subscriber_carrying_copy_gets_awss_wording(self) -> None:
+        subscriber = object.__new__(transfer._SetAnnotations)  # pyright: ignore[reportPrivateUsage]
+        message = self._drive(subscribers=[subscriber])
+        assert message == (
+            "Failed to copy all annotations to s3://dstb/k. The object was "
+            "copied successfully and was not deleted. Annotations written: "
+            "(none). Annotations that failed: ann-a: An error occurred "
+            "(AccessDenied) when calling the PutObjectAnnotation operation: stub."
+        )

@@ -15,6 +15,7 @@ import pytest
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
+from tests.cli.unit.test_output import local_zone, needs_tzset
 from tests.utils.fakemodel import model_meta
 from tests.utils.harness import built_client_ctx, unused_ctx
 
@@ -59,6 +60,11 @@ def _obj(key: str, size: int = 1) -> dict[str, Any]:
 
 def _bucket(name: str) -> dict[str, Any]:
     return {"Name": name, "CreationDate": _MTIME}
+
+
+def _at(date: str) -> dt.datetime:
+    """Noon UTC on ``date`` - an instant a fake S3 reported as a timestamp."""
+    return dt.datetime.fromisoformat(f"{date}T12:00:00").replace(tzinfo=dt.timezone.utc)
 
 
 class TestLs:
@@ -117,14 +123,16 @@ class TestLs:
 class TestLsAllBuckets:
     """``ls`` with no bucket in the target lists all buckets (aws-cli parity)."""
 
+    @needs_tzset
     def test_no_target_lists_all_buckets(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx, client = _fake_ctx([{"Buckets": [_bucket("alpha"), _bucket("beta")]}])
-        rc = cli.main(["ls"], ctx=ctx)
+        with local_zone("UTC"):
+            rc = cli.main(["ls"], ctx=ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert client.paginator_names == ["list_buckets"]
-        date = _MTIME.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        assert out.splitlines() == [f"{date} alpha", f"{date} beta"]  # no size column
+        # aws's bytes for this CreationDate under TZ=UTC: no size column.
+        assert out.splitlines() == ["2026-01-02 03:04:05 alpha", "2026-01-02 03:04:05 beta"]
 
     def test_bare_s3_uri_lists_buckets(self) -> None:
         ctx, client = _fake_ctx([{"Buckets": [_bucket("alpha")]}])
@@ -175,6 +183,93 @@ class TestLsAllBuckets:
         # aws-cli's 252 (exit-code charter, design/cli.md section 6).
         assert cli.main(["ls", "--color", "bogus", "s3://bucket/p/"]) == 252
         assert "--color" in capsys.readouterr().err
+
+
+class TestListingTimestampEndToEnd:
+    """The stamp aws prints, asserted through the whole ``ls`` path.
+
+    ``test_output`` pins the formatter; these pin that the value reaching it is
+    the response's own timestamp, for both listing kinds. Each expectation is a
+    line the pinned aws-cli printed for the same response and ``TZ`` (measured
+    against a fake S3, the only way to choose a ``LastModified``).
+    """
+
+    @needs_tzset
+    def test_object_line_in_a_zone_whose_rules_changed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Mexico abolished DST in 2022-10, so aws renders this 2022-07 object at
+        # today's -6 rather than the -5 in force back then.
+        page = {"Contents": [{"Key": "stamps/stamp", "Size": 1, "LastModified": _at("2022-07-01")}]}
+        ctx, _ = _fake_ctx([page])
+        with local_zone("America/Mexico_City"):
+            assert cli.main(["ls", "s3://bucket/stamps/"], ctx=ctx) == 0
+        assert capsys.readouterr().out == "2022-07-01 06:00:00          1 stamp\n"
+
+    @needs_tzset
+    def test_bucket_lines_pad_a_short_year(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # A CreationDate below year 1000 keeps the name column where a
+        # four-digit one puts it (aws left-justifies the stamp into 19 columns).
+        page = {
+            "Buckets": [
+                {"Name": "y0999", "CreationDate": _at("0999-06-15")},
+                {"Name": "y1000", "CreationDate": _at("1000-06-15")},
+            ]
+        }
+        ctx, _ = _fake_ctx([page])
+        with local_zone("UTC"):
+            assert cli.main(["ls"], ctx=ctx) == 0
+        assert capsys.readouterr().out.splitlines() == [
+            "999-06-15 12:00:00  y0999",
+            "1000-06-15 12:00:00 y1000",
+        ]
+
+
+class TestMalformedListing:
+    """A listing entry ``ls`` cannot read stops it where aws-cli stops.
+
+    aws-cli reads the elements it needs off each entry by subscript, so a
+    response omitting one raises ``KeyError`` at that entry - the lines ahead of
+    it are already on stdout, and the general handler reports the element name at
+    rc 255. Each expectation below is what the pinned aws printed for the same
+    response (a 127.0.0.1 fake serving the crafted XML), under the program-token
+    rewrite of design/testing.md section 9.
+    """
+
+    def test_objects_before_the_bad_entry_are_printed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        page = {
+            "Contents": [
+                _obj("p/a.txt"),
+                {"Key": "p/bad.txt", "Size": 1},  # no LastModified
+                _obj("p/z.txt"),
+            ]
+        }
+        ctx, _ = _fake_ctx([page])
+        assert cli.main(["ls", "--summarize", "s3://bucket/p/"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        # The summary aws prints after a clean listing is not reached.
+        assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
+        assert captured.err == "boto3-s3: [ERROR]: 'LastModified'\n"
+
+    def test_a_common_prefix_without_prefix_reports_it(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ctx, _ = _fake_ctx([{"CommonPrefixes": [{}], "Contents": [_obj("p/a.txt")]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        assert captured.out == ""  # common prefixes render ahead of the objects
+        assert captured.err == "boto3-s3: [ERROR]: 'Prefix'\n"
+
+    def test_buckets_before_the_bad_entry_are_printed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ctx, _ = _fake_ctx([{"Buckets": [_bucket("alpha"), {"Name": "zzz"}]}])
+        assert cli.main(["ls"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        assert [line.split()[-1] for line in captured.out.splitlines()] == ["alpha"]
+        assert captured.err == "boto3-s3: [ERROR]: 'CreationDate'\n"
 
 
 class TestGlobalOptionPosition:
@@ -351,7 +446,7 @@ class TestScanInterruptPolicy:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
-        # wait_on_interrupt=False once, and ls threads it into its listing
+        # reusable_after_interrupt=False once, and ls threads it into its listing
         # scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
@@ -360,7 +455,7 @@ class TestScanInterruptPolicy:
         class _Recording(boto3_s3.S3Storage):
             def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
                 assert options is not None
-                scan_waits.append(options.wait_on_interrupt)
+                scan_waits.append(options.reusable_after_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the command module's binding: ls.py imports S3Storage at top.
@@ -385,6 +480,7 @@ class TestTimestampFormat:
     the listing alone.
     """
 
+    @needs_tzset
     @pytest.mark.parametrize("value", ["wire", "iso8601", None], ids=["wire", "iso8601", "unset"])
     def test_the_accepted_values_render_the_same_line(
         self,
@@ -398,6 +494,6 @@ class TestTimestampFormat:
         config.write_text(f"[default]\n{setting}")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
         ctx, _ = _fake_ctx([{"Contents": [_obj("p/a.txt", 3)]}])
-        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
-        date = _MTIME.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        assert capsys.readouterr().out == f"{date}          3 a.txt\n"
+        with local_zone("UTC"):
+            assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        assert capsys.readouterr().out == "2026-01-02 03:04:05          3 a.txt\n"

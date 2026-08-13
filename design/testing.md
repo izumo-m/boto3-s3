@@ -11,7 +11,7 @@ is the operational definition every output comparison applies.
 |---|---|---|---|
 | `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (one moto-backed file, `test_capture_response.py` - the capture rides botocore's real event stream) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
-| `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection | always |
+| `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
 | `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against MinIO / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
 
@@ -19,7 +19,10 @@ Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
 except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
 quality gates and package builds on Linux, then runs this default suite on
-Linux and macOS at the Python 3.10 floor, plus Python 3.14 on Linux and Windows.
+Linux, macOS and Windows at both ends of the supported Python range (the 3.10
+floor and 3.14). A test silent for five minutes dumps every thread's stack
+(pytest's `faulthandler_timeout`), so a hang pins its location in the job log
+instead of ending as a silent timeout kill.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
 runs the library and CLI compatibility-seam tests whose expected request
 models are stable at that SDK generation. It needs no Docker because e2e self-skips without
@@ -533,6 +536,21 @@ an elevated shell) because several `tests/lib` scenarios create symlinks.
 Tests staged on chmod-revoked access skip themselves on Windows (the
 `skip_if_chmod_is_inert` mark in `tests/utils/host.py`).
 
+**Pin any expectation that rides the locale's default codec.** Windows hosts
+disagree on it - the CI runner reads cp1252, a Japanese host cp932 (both
+measured) - so a test that expects a `file://` paramfile to decode, or to fail
+decoding, must set `AWS_CLI_FILE_ENCODING` (aws's `compat_open` knob) rather
+than lean on the host. Left to the host, such a test passes on one Windows and
+fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
+same knob is how a test picks a codec deliberately. Subprocess runs are already
+pinned - the harness passes `PYTHONUTF8=1`, which fixes the child's stdio and
+its default codec at UTF-8. It does not pin the `aws` side: the official
+distribution is a frozen interpreter in isolated mode and ignores the `PYTHON*`
+family entirely (measured on the pinned Linux binary - `PYTHONIOENCODING` set
+to `latin-1` leaves its output UTF-8). Both sides of a parity pair still land
+on the same codec, because that build writes UTF-8 of its own accord; the
+variable buys the child's determinism, not aws's.
+
 **Goldens on Windows.** The cp/mv/sync goldens resolve to their
 `<name>.windows.json` variants (section 3, "Platform variants"); regenerating
 them needs this Windows setup plus the e2e stack below. Work from a fresh
@@ -630,6 +648,19 @@ the pinned aws's measured bytes. Four rules.
   `boto3-s3 <subcommand> help`, both under the hierarchy rule above
   ([`cli.md`](./cli.md) section 2).
 
+One consequence of the first rule, not a fifth rule: when a message quotes a
+character offset or a byte count measured over a line that itself carries the
+program token, the figure moves with the token's width - `boto3-s3` is five
+characters longer than `aws`, so it reads five higher here. The measured
+instance is the codec error a report `AWS_CLI_OUTPUT_ENCODING` cannot
+represent produces ([`cli.md`](./cli.md) section 6): under
+`AWS_CLI_OUTPUT_ENCODING=ascii`, `ls --café` ends `'ascii' codec can't encode
+character '\xe9' in position 36` on aws and `... position 41` here, rc 255 on
+both. The offset is counted over the whole report line, prefix included, so
+the shift *is* the program-token rewrite showing through: class 1, not a
+divergence. A figure counted over text that carries no program token is
+comparable as it stands.
+
 The list is **closed**. A comparison never invents a rule to absorb a
 difference it has just found; a new rule takes an explicit design decision and
 is written here.
@@ -672,6 +703,13 @@ so it stays under test. Ordering is absorbed by comparing the lines **sorted**,
 which leaves the record set and the line count fully compared. Either way the
 relaxation is narrow: the same records must still appear on both sides, and the
 exit codes must still be equal.
+
+One member of this class does take class 2's device, because what varies is a
+span rather than a whole record: the temporary file `s3transfer` downloads into
+before renaming it into place. Its name is the destination's basename plus
+`os.extsep` and eight randomly drawn hexadecimal characters, so two runs of the
+*same* tool spell it differently and the suffix can carry no byte requirement
+wherever a report names the path being written.
 
 ### Everything else is comparable surface
 

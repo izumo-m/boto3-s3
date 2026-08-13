@@ -5,8 +5,9 @@ exercised end-to-end for the paths that do not go through a library error
 (usage errors, unknown options) plus the ClientError path through a fake
 client, so the parse -> dispatch -> error -> exit-code wiring is covered. The
 catch-all backstop (`_exit_code_for_unexpected`: a non-Boto3S3Error escaping
-a command -> 252/253/254/255) and the `BrokenPipeError` -> 0 handler are
-covered end-to-end through `main` too.
+a command -> 252/253/254/255) is covered end-to-end through `main` too, at both
+of its sites: around the command, where a failing stdout write lands, and around
+the three global resolutions that run before any command layer.
 """
 
 from __future__ import annotations
@@ -318,25 +319,33 @@ class TestMainExitCodes:
         assert err == f"boto3-s3: [ERROR]: {expected_message}\n"
         assert "Traceback" not in err
 
-    def test_broken_pipe_from_a_command_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws-cli exits 0 when a downstream reader closes the pipe
-        # (design/cli.md section 6). The real seam is the stdout write: ls has a
-        # line to print and the pipe is gone, so ``uni_write(sys.stdout, ...)``
-        # raises BrokenPipeError. The library does not translate it
-        # (``s3_errors`` catches only ClientError / BotoCoreError), so it
-        # escapes the command and reaches _dispatch's dedicated handler.
+    def test_broken_pipe_from_a_command_is_reported_like_any_write_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws-cli has no BrokenPipeError case: the write failure reaches its
+        # general handler, which reports it and exits 255 (measured on the
+        # pinned aws-cli: `aws: [ERROR]: [Errno 32] Broken pipe`). In the common
+        # `ls | head` pipeline the interpreter's shutdown flush then fails on the
+        # closed pipe as well and the *process* exits 120 on both tools, so the
+        # rc a script sees does not depend on this at all - the report does.
+        # The real seam is the stdout write: ls has a line to print and the pipe
+        # is gone, so ``uni_write(sys.stdout, ...)`` raises. The library does not
+        # translate it (``s3_errors`` catches only ClientError / BotoCoreError),
+        # so it escapes the command and lands on _dispatch's general backstop.
         class _DeadPipe:
             encoding = "utf-8"
 
             def write(self, _text: str) -> int:
-                raise BrokenPipeError
+                raise BrokenPipeError(32, "Broken pipe")
 
             def flush(self) -> None:
-                raise BrokenPipeError
+                raise BrokenPipeError(32, "Broken pipe")
 
         ctx = Context(client_factory=lambda _args: _OnePageClient())  # pyright: ignore[reportArgumentType]
         monkeypatch.setattr(sys, "stdout", _DeadPipe())
-        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 0
+        rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
+        assert rc == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 32] Broken pipe\n"
 
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
         self, capsys: pytest.CaptureFixture[str]
@@ -402,6 +411,50 @@ class TestClientCreationExitCodes:
         err = capsys.readouterr().err
         assert rc == 252
         assert "scheme is missing" in err
+        assert "Traceback" not in err
+
+
+class TestPrePassResolutionFailures:
+    """The three resolutions the dispatch runs before any command layer
+    (``--query``, ``--endpoint-url``, the timeouts) report like aws's handler
+    chain even when they raise something other than a shaped usage error.
+
+    aws performs all three inside that chain, so a raw exception from one of them
+    is one `[ERROR]` line and one of aws's codes - never a traceback with rc 1,
+    which the exit-code charter forbids (design/overview.md section 3). Both
+    inputs below settle before any client is built, so nothing reaches the
+    network. The expected bytes are the pinned aws-cli's own under the
+    program-token map of the parity normalization (design/testing.md section 9).
+    """
+
+    def test_an_endpoint_url_urlsplit_rejects_exits_255(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The unbalanced bracket makes urlsplit raise a bare ValueError, which
+        # aws reports through its general handler: rc 255, `Invalid IPv6 URL`
+        # (measured; the same value in AWS_ENDPOINT_URL_S3 already agreed,
+        # because there botocore raises it below the command-level backstop).
+        rc = cli.main(["ls", "s3://bucket/p/", "--endpoint-url", "http://[::1:9000"])
+        err = capsys.readouterr().err
+        assert rc == 255
+        assert err == "boto3-s3: [ERROR]: Invalid IPv6 URL\n"
+
+    def test_a_query_too_deep_to_compile_is_the_param_validation_252(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's `_resolve_query` catches bare `Exception`, so an expression that
+        # exhausts the interpreter's stack is its ParamValidation report too,
+        # carrying the RecursionError's own text (measured: rc 252, `An error
+        # occurred (ParamValidation): Bad value for --query <value>: maximum
+        # recursion depth exceeded`).
+        query = "!" * 2000
+        rc = cli.main(["ls", "s3://bucket/p/", "--query", query])
+        err = capsys.readouterr().err
+        assert rc == 252
+        assert err.startswith(
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"Bad value for --query {query}: maximum recursion depth exceeded"
+        )
         assert "Traceback" not in err
 
 
@@ -1612,6 +1665,20 @@ class TestParseToValidationOrder:
         blob.write_bytes(b"\x00\x01")
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@=fileb://{blob}"])
         assert rc == 252
+
+    def test_metadata_shorthand_paramfile_load_failure_is_255(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The counterpart of the whole-value case below: inside the shorthand,
+        # aws calls get_paramfile itself, so a load failure reaches its general
+        # handler bare - rc 255 with no ParamValidation envelope and no option
+        # name, for either prefix. Measured on the pinned aws-cli.
+        for ref in ("file:///no/x", "fileb:///no/x"):
+            assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@={ref}"]) == 255
+            assert capsys.readouterr().err == (
+                f"boto3-s3: [ERROR]: Unable to load paramfile {ref}: "
+                "[Errno 2] No such file or directory: '/no/x'\n"
+            )
 
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
         # A whole-value --metadata fileb:// load failure is the paramfile 252.

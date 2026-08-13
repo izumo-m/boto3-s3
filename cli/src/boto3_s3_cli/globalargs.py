@@ -51,16 +51,22 @@ def validate_query(args: argparse.Namespace) -> None:
     ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
     a botocore dependency that is always importable, and it is loaded only when
     ``--query`` is actually present.
+
+    Every failure of the compile is that 252, not just the ``JMESPathError``
+    family: aws's ``_resolve_query`` catches bare ``Exception``, so an
+    expression deep enough to exhaust the interpreter's stack (2000 leading
+    ``!``) is its ParamValidation report too, carrying the ``RecursionError``'s
+    own text - measured. Narrowing this to ``JMESPathError`` would let that
+    escape as a traceback with rc 1, which the exit-code charter forbids.
     """
     value = getattr(args, "query", None)
     if value is None:
         return
     import jmespath
-    from jmespath.exceptions import JMESPathError
 
     try:
         jmespath.compile(value)
-    except JMESPathError as exc:
+    except Exception as exc:
         raise ValidationError(f"Bad value for --query {value}: {exc}") from exc
 
 

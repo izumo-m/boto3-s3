@@ -68,6 +68,32 @@ front only when the declaration is honest:
   pages and overlaps them with a background prefetch worker; `cancel_token`
   stops the prefetch producer before its next page pull.
 
+  **`ScanOptions(read_ahead=False)`** drops that overlap: each page is pulled on
+  the calling thread when the consumer reaches it, and `options.filter` and
+  `options.on_warning` then run there too. The cancel point is the same one (a
+  page pull), and the stream of entries is unchanged - only the timing and the
+  thread differ. Its reason is a consumer that mutates what it is enumerating:
+  `sync --delete` walking a **local destination** deletes the orphans the
+  merge-join hands it while the same walk is still running, so a page read ahead
+  could describe a file the run has since removed. Nothing else asks for it -
+  `sync` narrows the option for a `LocalStorage` destination of a deleting run
+  only - and a backend that must never list ahead of its own `delete` can seed
+  `read_ahead=False` in its `default_scan_options`, which the operations narrow
+  but never widen.
+
+  **A producer that fails part-way through a page** should yield what it has
+  already built and only then raise: `scan`'s prefetch re-raises a producer
+  error after the chunks it had queued are consumed, so the entries ahead of
+  the failure reach the consumer first - the entry-by-entry order aws-cli dies
+  in, where a page is the smallest chunk this interface can deliver. The
+  built-in S3 backend is what needs it: it reads the elements a listing entry
+  must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
+  `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
+  for a bucket), so an entry missing one raises `KeyError` naming the element
+  instead of being silently dropped - the object listing emitting the part of
+  the page it had converted, the bucket listing being streamed entry by entry
+  to begin with.
+
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
   cannot silently leak excluded entries into `--exclude`/`--include` or, on a
@@ -88,12 +114,12 @@ front only when the declaration is honest:
   `ScanOptions` subclass still carries them to `scan_pages`, but the caller
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
-  `prefix`; `LocalScanOptions` = `follow_symlinks` / `detect_symlink_loops` /
-  `enumerate_all_entries`, plus the internal `storage` back-reference the walk
-  stamps on each entry). A subclass keeps one backend's knobs from leaking
-  into another's; the built-ins reject a foreign options type, and a custom
-  backend reads its own knobs from its own subclass or from its instance
-  state, taking the common base otherwise.
+  `prefix` / `include_common_prefixes`; `LocalScanOptions` = `follow_symlinks` /
+  `detect_symlink_loops` / `enumerate_all_entries`, plus the internal `storage`
+  back-reference the walk stamps on each entry). A subclass keeps one backend's
+  knobs from leaking into another's; the built-ins reject a foreign options
+  type, and a custom backend reads its own knobs from its own subclass or from
+  its instance state, taking the common base otherwise.
 
   The local complete-entry setting (`enumerate_all_entries`) widens candidates
   before filtering: it includes the root, directories, symlinks, special
@@ -102,6 +128,18 @@ front only when the declaration is honest:
   transfer cannot consume, or accept the operation's normal failure, blocking,
   device-side-effect, and deletion behavior. The default `False` keeps aws-cli
   transfer enumeration.
+
+  The S3 side has one widening of the same kind, `include_common_prefixes`:
+  emit the `CommonPrefixes` of a **recursive** page as `DIRECTORY` entries
+  (a non-recursive page always emits them — its `Delimiter` is what asks for
+  them). Only `S3.ls` sets it, because aws-cli's display prints a page's common
+  prefixes whether or not `--recursive` was given, while its transfer-side
+  generator reads `Contents` only; a listing without a `Delimiter` gets no
+  prefixes from a conforming service, so the setting is visible only against
+  one that returns them anyway. The transfers keep the default `False`: a
+  directory record is not transferable, and a page's prefixes arrive ahead of
+  its objects, which would break the `compare_key` byte order `sync`'s
+  merge-join asserts on (section 3).
 
   `LocalStorage` also takes one **destination-side** constructor knob that is
   *not* a scan source-config: `fsync` (default off = aws parity), a library
@@ -135,7 +173,7 @@ A few more members come with working defaults a custom backend normally keeps:
   `frozen=True, kw_only=True` dataclass and give **every added field a
   default**: the high-level operations overlay only the run-level knobs — the
   operation-inherent ones plus the application's Ctrl-C posture
-  (`wait_on_interrupt`, from `S3(wait_on_interrupt=…)`) — via
+  (`reusable_after_interrupt`, from `S3(reusable_after_interrupt=…)`) — via
   `dataclasses.replace(storage.default_scan_options(), …)`, and the
   base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
@@ -150,7 +188,7 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`ScanOptions.wait_on_interrupt`** (not a `Storage` member) — the Ctrl-C
+- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the Ctrl-C
   exit policy of `scan()`'s background page worker. `True` (the default): the
   scan's teardown always waits for a page pull already in flight, so no worker
   survives the operation — required for an app that may catch
@@ -158,12 +196,18 @@ A few more members come with working defaults a custom backend normally keeps:
   abandons the daemon worker instead of waiting (an in-flight network pull can
   otherwise hold the exit for a full timeout) — only for an app that treats
   Ctrl-C as process-fatal. The application declares the posture once, on
-  `S3(wait_on_interrupt=…)`; every scan an operation starts receives it
+  `S3(reusable_after_interrupt=…)`; every scan an operation starts receives it
   through this field, and only a direct `Storage.scan` caller sets it here
   itself. The CLI's `S3` declares `False`, matching aws's immediate death on
   Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
   early break, `SystemExit` (`sys.exit()` requests an orderly termination),
-  an ordinary exception — always waits (`concurrency.prefetch`).
+  an ordinary exception — always waits (`concurrency.prefetch`). The interrupt
+  does not always unwind *through* the prefetch context (it can land in a
+  result callback or a submission wait, leaving the scan's teardown a plain
+  close), so the operations mark the unwind
+  (`concurrency.mark_interrupt_unwinding`, monotonic — the process is fatal by
+  declaration) and every posture-`False` teardown from then on abandons its
+  worker too.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
@@ -239,7 +283,12 @@ of deep inside the run:
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination.
+manufacture phantom pairs and, with `--delete`, corrupt the destination. The
+promise is checked as the merge consumes it rather than taken on trust: the
+first strict descent on either side raises `ValidationError` and ends the run
+(`comparator._byte_ordered`; the check is unconditional, so `python -O` keeps
+it), which is also what an S3-compatible endpoint returning an unsorted
+`ListObjectsV2` runs into.
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
@@ -373,4 +422,7 @@ The contract:
 
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the
-equivalent of `aws s3 cp - …` / `aws s3 cp … -`.
+equivalent of `aws s3 cp - …` / `aws s3 cp … -`. Its stdout writer hands each
+chunk straight to `sys.stdout.buffer` and never flushes it, aws's writer having
+neither `flush` nor `close`, so a finished download can still be sitting in the
+process stream's buffer until the interpreter's own flush at exit.

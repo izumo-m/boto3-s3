@@ -151,6 +151,73 @@ class TestDeletePrinterEncoding:
         assert stream.getvalue() == "delete: s3://b/??.txt\n"
 
 
+class TestDeletePrinterWriteFailures:
+    """A line that cannot be written at all is dropped, never raised.
+
+    aws prints its result lines from the ResultProcessor thread, whose
+    ``_process_result`` logs a raising handler at debug level and carries on, so
+    an unwritable stdout leaves the run's outcome untouched: measured on the
+    pinned aws, `aws s3 rm s3://b/k 1>&-` exits 0 in silence with the object
+    deleted.
+    """
+
+    @pytest.mark.parametrize("outcome", [OpOutcome.SUCCEEDED, OpOutcome.DRYRUN, OpOutcome.FAILED])
+    def test_every_line_kind_swallows_the_error(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: OpOutcome
+    ) -> None:
+        # None is the stdout a closed fd 1 leaves behind; the stderr side (the
+        # failure line) gets the same treatment in aws's result thread.
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer(OpResult(transfer_type=TransferType.DELETE, compare_key="k", outcome=outcome))
+
+    def test_an_unwritable_stdout_keeps_the_run_at_rc_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", None)
+        rc = cli.main(["rm", "s3://b/k"], ctx=client_ctx(client))
+        assert rc == 0
+        assert capsys.readouterr().err == ""
+        # The delete happened; only its line was lost (aws: rc 0, no report).
+        assert [c.operation for c in calls] == ["DeleteObject"]
+
+    def test_a_write_error_mid_run_does_not_stop_the_deletes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every key of a recursive run is still deleted with stdout unwritable -
+        # aws's result thread never touches the delete pipeline (measured: 200
+        # objects, --page-size 10, 0 remaining under a closed stdout).
+        class _Enospc(io.StringIO):
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(sys, "stdout", _Enospc())
+        responses: list[dict[str, Any] | Exception] = [
+            {
+                "Contents": [_obj("p/a"), _obj("p/b")],
+                "IsTruncated": True,
+                "NextContinuationToken": "n",
+            },
+            {"Contents": [_obj("p/c")]},
+            {},  # DeleteObjects (one batch, or the first of two)
+            {},
+        ]
+        client, calls = make_recording_client(responses)
+        rc = cli.main(
+            ["rm", "s3://b/p/", "--recursive", "--page-size", "2"], ctx=client_ctx(client)
+        )
+        assert rc == 0
+        deleted = [
+            obj["Key"]
+            for call in calls
+            if call.operation == "DeleteObjects"
+            for obj in call.params["Delete"]["Objects"]
+        ]
+        assert deleted == ["p/a", "p/b", "p/c"]
+
+
 class TestExitCodeShape:
     def test_local_path_is_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["rm", "/tmp/foo"], ctx=Context(client_factory=lambda _a: None))  # pyright: ignore[reportArgumentType]
@@ -181,11 +248,71 @@ class TestExitCodeShape:
         assert result.stderr.startswith("fatal error: ")
         assert "NoSuchBucket" in result.stderr
 
+    def test_an_incomplete_listing_entry_is_rc_1_fatal(self) -> None:
+        # An entry the response left without a LastModified: aws-cli reads the
+        # element unguarded while building the FileInfo, and the KeyError lands
+        # in the same result recorder every other run-killing error does -
+        # `fatal error: 'LastModified'` at rc 1, measured against the pinned
+        # aws through a 127.0.0.1 fake serving the crafted listing (the same
+        # response gives `ls` rc 255, which is why the code is not shared).
+        result, _ = run_recorded(
+            [{"Contents": [{"Key": "p/a.txt", "Size": 1}]}],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert result.stderr == "fatal error: 'LastModified'\n"
+
+    def test_an_unclassified_run_error_is_rc_1_fatal(self) -> None:
+        # rm's span reports by exception *position*, not by type: whatever the
+        # operation raises is one `fatal error:` line at rc 1, because aws runs
+        # rm inside the same result recorder cp/mv/sync use. The measured case
+        # is a listed timestamp the local calendar cannot hold, where aws-cli's
+        # conversion raises OverflowError('date value out of range') mid-listing
+        # (`fatal error: date value out of range`, rc 1 - the zone-dependent
+        # rejection itself is pinned in the library tier).
+        result, _ = run_recorded(
+            [OverflowError("date value out of range")],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert result.stderr == "fatal error: date value out of range\n"
+
+    def test_an_unclassified_run_error_is_silenced_by_quiet(self) -> None:
+        # The rc keeps its meaning under --quiet; only the line goes.
+        result, _ = run_recorded(
+            [{"Contents": [{"Key": "p/a.txt", "Size": 1}]}],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun", "--quiet"],
+        )
+        assert result.rc == 1
+        assert result.stderr == ""
+
+    def test_an_assertion_error_still_escapes(self) -> None:
+        # The one carve-out from the catch above (the dispatcher and the
+        # cp/mv/sync span make the same one): an internal-invariant violation
+        # surfaces instead of being masked as a fatal error - which is also
+        # what keeps the test doubles' "unexpected call" guards effective.
+        class _AssertingPaginatorClient:
+            def get_paginator(self, _name: Any) -> Any:
+                class _Paginator:
+                    def paginate(self, **_kwargs: Any) -> Any:
+                        raise AssertionError("unexpected call")
+
+                return _Paginator()
+
+        with pytest.raises(AssertionError, match="unexpected call"):
+            run_cli_in_process(
+                ["rm", "s3://b/p/", "--recursive"], ctx=client_ctx(_AssertingPaginatorClient())
+            )
+
     def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
         # aws's shared result machinery converts a Ctrl-C after the operation
         # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
         # received` line (measured mid-rm on the pinned 2.36.1), never the
         # dispatcher backstop's 130, which stays for the pre-pipeline spans.
+        # The rc is the match; the line is uniform here by design, where aws
+        # words it `fatal error: ` when - as in this interrupt on the first
+        # listing page - it has nothing in flight to cancel
+        # (docs/cli/aws-differences.md).
         class _InterruptPaginatorClient:
             def get_paginator(self, _name: Any) -> Any:
                 class _Paginator:
@@ -237,6 +364,10 @@ class TestExitCodeShape:
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3:///key ")
         assert "Invalid bucket name" in result.stderr
+        # botocore raised it, so the report is botocore's whole one - the
+        # one-line truncation belongs to the synthesized reports below
+        # (docs/cli/aws-differences.md section 2).
+        assert "Bucket name must match the regex" in result.stderr
 
     def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:
         # The dryrun never reaches the submit-time validation: aws prints the
@@ -256,8 +387,11 @@ class TestExitCodeShape:
         ):
             result = run_cli_in_process(argv, ctx=built_client_ctx())
             assert result.rc == 1, argv
-            assert result.stderr.startswith("fatal error: Parameter validation failed")
-            assert "Invalid bucket name" in result.stderr
+            # Synthesized, so it stops before botocore's regex tail - the one
+            # truncation this surface has (docs/cli/aws-differences.md).
+            assert result.stderr == (
+                'fatal error: Parameter validation failed:\nInvalid bucket name ""\n'
+            )
 
 
 class TestFilterWiring:
@@ -370,7 +504,7 @@ class TestScanInterruptPolicy:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
-        # wait_on_interrupt=False once, and rm threads it into its recursive
+        # reusable_after_interrupt=False once, and rm threads it into its recursive
         # listing scan's ScanOptions; the library default keeps waiting.
         import boto3_s3
 
@@ -379,7 +513,7 @@ class TestScanInterruptPolicy:
         class _Recording(boto3_s3.S3Storage):
             def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
                 assert options is not None
-                scan_waits.append(options.wait_on_interrupt)
+                scan_waits.append(options.reusable_after_interrupt)
                 return super().scan(options, cancel_token=cancel_token)
 
         # Patch the command module's binding: rm.py imports S3Storage at top.

@@ -87,7 +87,7 @@ method; the wrapper adds nothing to the contract but the `S3()` it builds.
 
 That `S3()` is constructed per call with no arguments: no `session`, no
 `endpoint_url`, no `config`, no default `transfer_config`, and
-`wait_on_interrupt=True`. Nothing is shared or memoized between calls, so each
+`reusable_after_interrupt=True`. Nothing is shared or memoized between calls, so each
 call builds its own clients. Configuring any of that means constructing an `S3`
 yourself and calling the method ([`../s3.md`](../s3.md)). Subclassing does not
 reach these functions either — they instantiate `S3` itself, not the subclass.

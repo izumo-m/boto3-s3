@@ -7,9 +7,14 @@ wiring can be asserted.
 
 from __future__ import annotations
 
+import contextlib
 import io
+import os
+import sys
 import threading
-from collections.abc import Collection
+import time
+from collections.abc import Collection, Generator, Iterator
+from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import Any
 
@@ -194,6 +199,108 @@ class TestScanRecursive:
         results = list(storage.scan(options))
         assert [r.key for r in results] == ["prefix/keep/a.txt"]
         assert results[0].compare_key == "keep/a.txt"
+
+
+class TestScanRecursiveCommonPrefixes:
+    """``S3ScanOptions.include_common_prefixes``: the listing view of a recursive scan.
+
+    A recursive listing sends no ``Delimiter``, so a conforming service returns
+    no ``CommonPrefixes`` at all; a service that returns them anyway is what
+    ``aws s3 ls --recursive`` still prints as ``PRE`` lines. The oracle for what
+    a page then yields, and in which order, is the pinned aws-cli listing such a
+    page (2026-08-12 stamps, ``PRE`` right-justified to column 30):
+
+        $ aws s3 ls s3://bkt/deep/ --recursive
+                                   PRE one/
+                                   PRE sub/
+                                   PRE /
+        2026-08-12 00:00:00          1 deep/a.txt
+        2026-08-12 00:00:00          2 deep/two/sub/b.txt
+
+    for a page carrying the prefixes ``deep/one/``, ``deep/two/sub/``, ``deep//``
+    and those two objects - every prefix of the page ahead of the page's
+    objects, in the response's own order, whatever their depth. A transfer must
+    not see those entries (they would enter its item stream and break ``sync``'s
+    ``compare_key`` byte order), so the default drops them.
+    """
+
+    def test_default_recursive_scan_drops_them(self) -> None:
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [r.key for r in results] == ["prefix/a.txt"]
+        assert "Delimiter" not in client.calls[0]
+
+    def test_storage_config_never_seeds_the_listing_view(self) -> None:
+        # The knob is operation-set (ls), not storage config: every scan a
+        # transfer builds from default_scan_options keeps the transfer view.
+        storage, _ = _storage([])
+        assert storage.default_scan_options().include_common_prefixes is False
+
+    def test_flag_emits_each_page_directories_ahead_of_its_objects(self) -> None:
+        pages = [
+            {"Contents": [_obj("prefix/a.txt")], "CommonPrefixes": [{"Prefix": "prefix/zdir/"}]},
+            {
+                "CommonPrefixes": [{"Prefix": "prefix/adir/"}, {"Prefix": "prefix/two/sub/"}],
+                "Contents": [_obj("prefix/z.txt")],
+            },
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True, include_common_prefixes=True)))
+        assert [(r.kind, r.key) for r in results] == [
+            (FileKind.DIRECTORY, "prefix/zdir/"),
+            (FileKind.FILE, "prefix/a.txt"),
+            (FileKind.DIRECTORY, "prefix/adir/"),
+            (FileKind.DIRECTORY, "prefix/two/sub/"),
+            (FileKind.FILE, "prefix/z.txt"),
+        ]
+        # Still a recursive listing: the flag widens what a page yields, it does
+        # not ask the service for prefixes.
+        assert "Delimiter" not in client.calls[0]
+
+    def test_widened_directory_entries_carry_the_scan_stamps(self) -> None:
+        pages = [{"CommonPrefixes": [{"Prefix": "prefix/two/sub/"}]}]
+        storage, _ = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(recursive=True, include_common_prefixes=True)))
+        assert results == [
+            S3FileInfo(
+                key="prefix/two/sub/",
+                kind=FileKind.DIRECTORY,
+                compare_key="two/sub/",
+                storage=storage,
+            )
+        ]
+
+    def test_filter_prunes_a_widened_entry(self) -> None:
+        # The caller that widens the enumeration owns the filtering, as on
+        # LocalScanOptions.enumerate_all_entries.
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, _ = _storage(pages)
+        options = S3ScanOptions(
+            recursive=True,
+            include_common_prefixes=True,
+            filter=lambda info: info.kind is not FileKind.DIRECTORY,
+        )
+        assert [r.key for r in storage.scan(options)] == ["prefix/a.txt"]
+
+    @pytest.mark.parametrize("include", [False, True])
+    def test_non_recursive_listing_emits_them_either_way(self, include: bool) -> None:
+        # The Delimiter a non-recursive listing sends is what asks for the
+        # prefixes, so that path ignores the flag entirely.
+        pages = [
+            {"CommonPrefixes": [{"Prefix": "prefix/sub/"}], "Contents": [_obj("prefix/a.txt")]}
+        ]
+        storage, client = _storage(pages)
+        results = list(storage.scan(S3ScanOptions(include_common_prefixes=include)))
+        assert [(r.kind, r.key) for r in results] == [
+            (FileKind.DIRECTORY, "prefix/sub/"),
+            (FileKind.FILE, "prefix/a.txt"),
+        ]
+        assert client.calls[0]["Delimiter"] == "/"
 
 
 class TestScanOptionForwarding:
@@ -565,6 +672,204 @@ class TestListBuckets:
         with pytest.raises(ConfigurationError):
             list(storage.list_buckets(name_prefix="al"))
         assert len(client.calls) == 1
+
+
+def _keys_until_raise(entries: Iterator[FileInfo], expected: type[Exception]) -> list[str]:
+    """Drain `entries` until it raises `expected`, returning the keys it got out first.
+
+    What was delivered before the failure is the parity-relevant half of these
+    cases: aws-cli emits every entry ahead of the one it chokes on, so a listing
+    that raises with nothing delivered - or one that delivers everything and
+    then raises - is a different observable run.
+    """
+    keys: list[str] = []
+    with pytest.raises(expected):
+        for info in entries:
+            keys.append(info.key)
+    return keys
+
+
+class TestMalformedListingEntries:
+    """An entry missing a required element stops the listing where aws-cli stops it.
+
+    aws-cli reads a ``Contents`` entry's ``Key`` / ``LastModified`` / ``Size``
+    (and a common prefix's ``Prefix``, a bucket's ``CreationDate`` / ``Name``) by
+    subscript, so a response that omits one raises ``KeyError`` naming the
+    element, right at that entry. Measured against the pinned aws through a
+    127.0.0.1 fake: ``ls`` prints the entries ahead of it and exits 255 with
+    ``[ERROR]: 'LastModified'``, a transfer prints its own and exits 1 with
+    ``fatal error: 'LastModified'``. Dropping the entry instead - what this used
+    to do - silently shortened the run at rc 0.
+    """
+
+    @pytest.mark.parametrize(
+        ("entry", "missing"),
+        [
+            ({"Size": 1, "LastModified": MTIME}, "Key"),
+            ({"Key": "prefix/bad.txt", "Size": 1}, "LastModified"),
+            ({"Key": "prefix/bad.txt", "LastModified": MTIME}, "Size"),
+            ({"ETag": '"x"'}, "Key"),
+        ],
+    )
+    def test_a_missing_element_raises_keyerror_naming_it(
+        self, entry: dict[str, Any], missing: str
+    ) -> None:
+        # The last row pins the read order too: aws-cli's BucketLister takes Key
+        # first, then LastModified, and its consumer Size afterwards, so an entry
+        # missing several is reported by the first of them.
+        storage, _ = _storage([{"Contents": [entry]}])
+        with pytest.raises(KeyError) as excinfo:
+            list(storage.scan(S3ScanOptions(recursive=True)))
+        assert excinfo.value.args[0] == missing
+
+    def test_entries_ahead_of_the_bad_one_are_still_yielded(self) -> None:
+        bad = {"Key": "prefix/bad.txt", "Size": 1}
+        pages = [{"Contents": [_obj("prefix/a.txt"), bad, _obj("prefix/z.txt")]}]
+        storage, _ = _storage(pages)
+        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        assert keys == ["prefix/a.txt"]
+
+    def test_an_earlier_page_survives_a_later_bad_entry(self) -> None:
+        pages = [
+            {"Contents": [_obj("prefix/a.txt")]},
+            {"Contents": [_obj("prefix/b.txt"), {"Key": "prefix/bad.txt", "Size": 1}]},
+        ]
+        storage, _ = _storage(pages)
+        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        assert keys == ["prefix/a.txt", "prefix/b.txt"]
+
+    def test_a_common_prefix_without_prefix_raises_before_the_objects(self) -> None:
+        # aws-cli renders a page's common prefixes ahead of its objects, so a bad
+        # one is reached before any object of that page is emitted.
+        pages = [
+            {
+                "CommonPrefixes": [{"Prefix": "prefix/good/"}, {}],
+                "Contents": [_obj("prefix/a.txt")],
+            }
+        ]
+        storage, _ = _storage(pages)
+        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=False)), KeyError)
+        assert keys == ["prefix/good/"]
+
+    @pytest.mark.parametrize(
+        ("entry", "missing"),
+        [({"Name": "zzz"}, "CreationDate"), ({"CreationDate": MTIME}, "Name")],
+    )
+    def test_a_bucket_missing_an_element_raises_after_the_earlier_buckets(
+        self, entry: dict[str, Any], missing: str
+    ) -> None:
+        # aws-cli's bucket listing renders the creation date and then appends the
+        # name, so the date is the one reported when both are gone.
+        storage, _ = _storage([{"Buckets": [_bucket_entry("aaa"), entry]}], url="s3://")
+        keys: list[str] = []
+        with pytest.raises(KeyError) as excinfo:
+            for info in storage.list_buckets():
+                keys.append(info.key)
+        assert keys == ["aaa"]
+        assert excinfo.value.args[0] == missing
+
+
+_FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+_FAR_PAST = datetime(1, 1, 1, tzinfo=timezone.utc)
+
+# Every case needs the process's local zone set, which needs tzset (POSIX).
+_needs_tzset = pytest.mark.skipif(
+    not hasattr(time, "tzset"), reason="setting TZ mid-process requires time.tzset (POSIX only)"
+)
+
+
+@contextlib.contextmanager
+def _local_zone(name: str) -> Generator[None, None, None]:
+    """Run the block with the process's local zone set to `name`.
+
+    Not `monkeypatch.setenv`: restoring `TZ` only takes effect once `tzset` has
+    re-read it, and a fixture's teardown runs before monkeypatch's undo.
+    """
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        # A zone the host has no tzdata entry for silently degrades to UTC,
+        # which would not exercise the offset this case turns on.
+        if name != "UTC" and time.tzname[0] in {"UTC", "GMT"}:
+            pytest.skip(f"host has no tzdata entry for {name}")
+        yield
+    finally:
+        if before is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+def _stamped(key: str, mtime: datetime) -> dict[str, Any]:
+    return {"Key": key, "Size": 1, "LastModified": mtime}
+
+
+@_needs_tzset
+class TestListingTimestampRepresentability:
+    """A stamp the local zone cannot hold kills the run, the way it does in aws-cli.
+
+    aws-cli puts every timestamp an S3 response carries through
+    ``parse(...).astimezone(tzlocal())`` as it reads the response, so a stamp
+    within the zone's offset of the end of ``datetime``'s range raises
+    ``date value out of range`` there rather than being listed or transferred -
+    measured against the pinned aws through a 127.0.0.1 fake: ``fatal error: date
+    value out of range`` at rc 1 for cp / sync, ``[ERROR]`` at rc 255 for ``ls``.
+    Which stamps qualify depends on the zone, so each case pins one; the value
+    kept on the entry stays UTC per the ``FileInfo.mtime`` contract.
+    """
+
+    def test_a_far_future_stamp_is_rejected_east_of_utc(self) -> None:
+        pages = [{"Contents": [_obj("prefix/a.txt"), _stamped("prefix/far.txt", _FAR_FUTURE)]}]
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage(pages)
+            keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), OverflowError)
+        assert keys == ["prefix/a.txt"]
+
+    def test_the_same_stamp_is_kept_where_the_zone_can_hold_it(self) -> None:
+        pages = [{"Contents": [_stamped("prefix/far.txt", _FAR_FUTURE)]}]
+        with _local_zone("UTC"):
+            storage, _ = _storage(pages)
+            results = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [r.mtime for r in results] == [_FAR_FUTURE]  # unchanged, and still UTC
+
+    def test_a_far_past_stamp_is_rejected_west_of_utc(self) -> None:
+        pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
+        with _local_zone("America/New_York"):
+            storage, _ = _storage(pages)
+            with pytest.raises(OverflowError, match="date value out of range"):
+                list(storage.scan(S3ScanOptions(recursive=True)))
+
+    def test_the_far_past_stamp_is_kept_east_of_utc(self) -> None:
+        pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage(pages)
+            results = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [r.mtime for r in results] == [_FAR_PAST]
+
+    def test_a_head_response_carries_the_same_rejection(self) -> None:
+        # aws-cli converts the single-object HeadObject stamp the same way
+        # (filegenerator's `_list_single_object`).
+        head = {"ContentLength": 5, "LastModified": _FAR_FUTURE}
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage([], head_response=head)
+            with pytest.raises(OverflowError, match="date value out of range"):
+                storage.get_fileinfo("a.txt")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no check-free range")
+    def test_an_ordinary_stamp_costs_no_local_zone_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # This runs once per listed object, so away from the ends of the range -
+        # where the zone cannot change the verdict - it must not touch dateutil.
+        def _forbidden() -> None:
+            raise AssertionError("the local zone was consulted for an ordinary stamp")
+
+        monkeypatch.setattr("dateutil.tz.tzlocal", _forbidden)
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage([{"Contents": [_obj("prefix/a.txt")]}])
+            assert [r.key for r in storage.scan(S3ScanOptions(recursive=True))] == ["prefix/a.txt"]
 
 
 class TestScanErrorMapping:

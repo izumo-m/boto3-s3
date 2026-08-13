@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -124,14 +125,19 @@ def _run_subprocess(
     input_bytes: bytes | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CliResult:
-    proc_env = None
-    if env is not None:
-        # Merge over the inherited environment (the e2e suite needs the host's
-        # credentials/endpoint intact); the overrides win (the CRT lane points
-        # AWS_CONFIG_FILE at a preferred_transfer_client=crt profile).
-        import os
-
-        proc_env = {**os.environ, **env}
+    # Merged over the inherited environment (the e2e suite needs the host's
+    # credentials/endpoint intact); the caller's overrides win (the CRT lane
+    # points AWS_CONFIG_FILE at a preferred_transfer_client=crt profile).
+    #
+    # PYTHONUTF8=1 fixes the child's stdio at UTF-8, the encoding the capture
+    # below decodes. Left alone, a Windows child writes the host's codepage
+    # (cp932 and cp1252 measured on two hosts) and its non-ASCII output would
+    # come back as U+FFFD. The pinned aws.exe honors the same variable
+    # (measured), so both sides of a parity pair move together -
+    # PYTHONIOENCODING would not, aws.exe ignores it. UTF-8 mode also pins the
+    # child's locale.getpreferredencoding(), so a subprocess test of the
+    # file:// paramfile encoding must set AWS_CLI_FILE_ENCODING itself.
+    proc_env = {**os.environ, "PYTHONUTF8": "1", **(env or {})}
     proc = subprocess.run(
         cmd,
         check=False,

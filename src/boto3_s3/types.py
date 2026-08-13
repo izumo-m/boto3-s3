@@ -201,7 +201,7 @@ class ScanOptions:
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
 
-    ``wait_on_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
+    ``reusable_after_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
     default): the scan's teardown always waits for a page pull already in
     flight, so no enumeration worker survives it - required for an app that
     may catch ``KeyboardInterrupt`` and keep using the process. ``False``: a
@@ -210,16 +210,32 @@ class ScanOptions:
     full timeout) - only for an app that treats Ctrl-C as process-fatal. It
     scopes to the interrupt alone: every other exit, ``SystemExit`` included
     (``sys.exit()`` requests an orderly termination), reclaims fully. The
-    high-level operations overlay it from ``S3(wait_on_interrupt=...)`` - the
+    high-level operations overlay it from ``S3(reusable_after_interrupt=...)`` - the
     application declares the posture once there - so it reaches every scan an
     operation starts; set it here only when calling ``Storage.scan`` directly.
+
+    ``read_ahead`` is whether ``scan`` may read pages ahead of the consumer.
+    ``True`` (the default) runs the page producer on a background worker, so the
+    next page's I/O overlaps the current page's consumption. ``False`` pulls each
+    page on the consuming thread at the moment the consumer reaches it - the mode
+    for a consumer that **mutates the container it is enumerating**, where a page
+    read early would describe state that consumer has since changed. ``sync
+    --delete`` sets it on the local destination walk for exactly that reason: the
+    walk must see the orphans it has already deleted as gone (aws lists its
+    destination lazily too, so a file reached through one path and deleted is
+    never listed again under another - a symlinked self-alias names one file
+    twice). It costs the enumeration's I/O overlap, so leave it on everywhere
+    else. A backend whose own listing must never run ahead of its consumer can
+    seed ``False`` in ``default_scan_options``; the high-level operations only
+    ever narrow it (they never turn a backend's own ``False`` back on).
     """
 
     recursive: bool = False
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
-    wait_on_interrupt: bool = True
+    reusable_after_interrupt: bool = True
+    read_ahead: bool = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -241,12 +257,28 @@ class S3ScanOptions(ScanOptions):
     the plan appends a trailing ``/``), so the *passed* storage instance is
     scanned rather than rebuilt from a URI - a custom ``S3Storage`` subclass (and
     its ``scan_pages`` override) survives. ``None`` uses the storage's key.
+
+    ``include_common_prefixes`` widens a *recursive* listing to also emit one
+    ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry the response carries
+    (ahead of that page's objects, the order the response lists them in). It has
+    no effect on a non-recursive listing, which always emits them - the
+    ``Delimiter`` it sends is what asks the service for them. ``False``
+    (default) is the transfer view: a recursive listing sends no ``Delimiter``,
+    so a conforming service returns no prefixes, and a service that returns
+    them anyway must not feed directory records to a transfer stream (``sync``
+    merge-joins on ``compare_key`` byte order, which a page's leading prefix
+    entry would break). ``True`` is the listing view, which ``S3.ls`` sets
+    because ``aws s3 ls`` prints every page's common prefixes as ``PRE`` lines
+    whether or not the listing is recursive. Like
+    ``LocalScanOptions.enumerate_all_entries``, the widened enumeration leaves
+    filtering to the caller that enabled it.
     """
 
     page_size: int | None = None
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
+    include_common_prefixes: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -318,9 +350,10 @@ class OpOutcome(enum.Enum):
     ``SKIPPED`` is an informational, non-warning skip and does not affect the
     exit code: a ``cp`` / ``mv`` that ``no_overwrite`` stopped from replacing
     an existing destination, or a glacier-blocked source passed over under
-    ``ignore_glacier_warnings``. ``sync`` emits none - a pair it finds up to
-    date produces no record at all, and its ``no_overwrite`` drops the whole
-    update lane instead of skipping pairs one by one.
+    ``ignore_glacier_warnings``. ``sync`` emits one only from that glacier
+    gate - a pair it finds up to date produces no record at all, and its
+    ``no_overwrite`` drops the whole update lane instead of skipping pairs
+    one by one.
     ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only

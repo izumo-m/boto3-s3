@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import crtsupport, producers, transferplan
+from boto3_s3 import concurrency, crtsupport, producers, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -184,6 +184,37 @@ def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> Non
         raise CancelledError(f"{operation} was cancelled", operation=operation)
 
 
+@contextmanager
+def _scan_teardown(entries: object, *, reusable_after_interrupt: bool) -> Generator[None]:
+    """Close a consumed scan on exit, honoring the process-fatal posture.
+
+    ``ls`` / ``rm`` consume a scan outside `prefetch`'s own pull, so a
+    ``KeyboardInterrupt`` landing in their loop bodies (``on_entry``, a
+    deleter submission wait) never unwinds through the prefetch context -
+    the scan's teardown arrives as a plain ``GeneratorExit``, which always
+    joins the page worker. Under ``reusable_after_interrupt=False`` that join is
+    exactly what the posture forbids, so the interrupt is marked
+    (`concurrency.mark_interrupt_unwinding`) *before* the close runs and the
+    teardown abandons the worker instead.
+
+    The caller must iterate a scan it bound to a local, never a bare
+    ``for info in storage.scan(...)`` temporary: an exception unwinding the
+    frame finalizes an unreferenced temporary while it clears the loop's
+    stack - before any handler runs - so the worker would be joined ahead of
+    the mark.
+    """
+    try:
+        yield
+    except KeyboardInterrupt:
+        if not reusable_after_interrupt:
+            concurrency.mark_interrupt_unwinding()
+        raise
+    finally:
+        close = getattr(entries, "close", None)
+        if close is not None:
+            close()
+
+
 def _is_folder_marker(info: FileInfo) -> bool:
     """A zero-byte ``/``-terminated key - the manual-folder convention."""
     return info.size == 0 and info.key.endswith("/")
@@ -315,9 +346,20 @@ def _run_sync_pairs(
     done: Queue[tuple[Callable[[], None], Future[bool]]] = Queue()
 
     def settle_pending(*, cancel: bool) -> None:
-        """Optionally cancel queued decisions, then await every accepted one."""
+        """Optionally cancel queued decisions, then await every accepted one.
+
+        Re-observes the token each pass: an upgrade to `IMMEDIATE` arriving
+        while a graceful settle is already waiting must still cancel the
+        queued decisions (`CancelToken`'s escalation contract) - a decision
+        that can only complete through `cancel()`, such as one queued on an
+        executor that will never run it, would otherwise pin this loop
+        forever. `cancel` never downgrades, matching the token's monotonicity.
+        """
         remaining = pending
         while remaining:
+            cancel = cancel or (
+                cancel_token is not None and cancel_token.mode is CancelMode.IMMEDIATE
+            )
             if cancel:
                 for future in remaining:
                     future.cancel()
@@ -687,7 +729,7 @@ class S3:
     ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
 
-    ``wait_on_interrupt`` declares the application's Ctrl-C posture, once, for
+    ``reusable_after_interrupt`` declares the application's Ctrl-C posture, once, for
     every operation this instance starts a scan for - ``ls``, ``rm``, the
     ``cp`` / ``mv`` transfers and ``sync``. The operations with no enumeration
     to reclaim (``mb`` / ``rb`` / ``presign`` / ``website``, and the streaming
@@ -698,11 +740,15 @@ class S3:
     Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
     prefetch worker instead of waiting out an in-flight listing page pull
     (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
-    interrupt itself is always re-raised, never converted or swallowed; and
-    the posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit`` and
-    every other exception always get the full reclamation (``sys.exit()``
+    interrupt itself is re-raised, never converted or swallowed - with one
+    engine-imposed exception: pip s3transfer's CRT manager discards an
+    interrupt that lands in its transfer drain, so a CRT-engine run cut short
+    there raises `BatchError` with the cancelled items counted as failures
+    instead (design/crt.md section 6); the classic engine re-raises even
+    there. The posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit``
+    and every other exception always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
-    ``ScanOptions.wait_on_interrupt``.
+    ``ScanOptions.reusable_after_interrupt``.
 
     ``crt_allow_absent_credentials`` is the second such posture declaration,
     for the CRT transfer engine. ``False`` (the default) is boto3's rule: a
@@ -713,7 +759,17 @@ class S3:
     from inside it instead. Only the CLI distribution, which owes ``aws s3``
     output parity, sets it (design/crt.md section 4).
 
-    ``crt_region`` is the third, and names where the CRT engine's region comes
+    ``crt_allow_lockless`` is the third, for cross-process lock contention
+    under an **explicit** ``'crt'`` preference. ``False`` (the default) is
+    boto3's rule: another process of this application holding the CRT slot
+    silently selects the classic engine. ``True`` is aws-cli's: its factory
+    acquires the lock best-effort and builds the CRT client regardless, so a
+    construction-time failure surfaces under contention exactly as it does
+    without it. An ``'auto'`` preference respects the lock either way -
+    aws-cli's own ``auto`` resolution. Only the CLI distribution sets it
+    (design/crt.md section 6).
+
+    ``crt_region`` is the fourth, and names where the CRT engine's region comes
     from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
     own ``meta.region_name``; an explicit value is the application's already
     resolved region and rides verbatim. The distinction only shows when nothing
@@ -723,6 +779,17 @@ class S3:
     str)``). Passing ``crt_region=None`` declares that absence and reproduces
     that refusal; again only the CLI distribution sets it (design/crt.md
     section 6).
+
+    ``crt_sign_requests`` is the fifth, and says whether the CRT engine signs
+    at all. ``None`` (the default) derives it from the built client, boto3's
+    rule: only a client configured with botocore's ``UNSIGNED`` signature
+    transfers anonymously. ``True`` / ``False`` is the application's own
+    answer, aws-cli's ``sign_request``: its CRT factory attaches a credentials
+    provider on ``--no-sign-request`` alone and never reads the client, so
+    ``--no-sign-request --sse aws:kms`` - where the per-client
+    ``signature_version`` restores signing for botocore - still transfers
+    anonymously on aws's CRT lane while its classic lane signs. Only the CLI
+    distribution sets it (design/crt.md section 4).
     """
 
     def __init__(
@@ -732,17 +799,21 @@ class S3:
         endpoint_url: str | None = None,
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
-        wait_on_interrupt: bool = True,
+        reusable_after_interrupt: bool = True,
         crt_allow_absent_credentials: bool = False,
+        crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
+        crt_sign_requests: bool | None = None,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = config
         self._transfer_config = transfer_config
-        self._wait_on_interrupt = wait_on_interrupt
+        self._reusable_after_interrupt = reusable_after_interrupt
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        self._crt_allow_lockless = crt_allow_lockless
         self._crt_region: crtsupport.CrtRegion = crt_region
+        self._crt_sign_requests = crt_sign_requests
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -754,9 +825,9 @@ class S3:
         return self._session
 
     @property
-    def wait_on_interrupt(self) -> bool:
+    def reusable_after_interrupt(self) -> bool:
         """The Ctrl-C posture declared at construction (see the class docstring)."""
-        return self._wait_on_interrupt
+        return self._reusable_after_interrupt
 
     def client(self) -> S3Client:
         """Build a boto3 S3 client from this instance's defaults (the factory seam).
@@ -826,7 +897,9 @@ class S3:
                 endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
                 session=self._session,
                 allow_absent_credentials=self._crt_allow_absent_credentials,
+                allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
+                sign_requests=self._crt_sign_requests,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' config validation, kept inside the taxonomy
@@ -907,6 +980,14 @@ class S3:
         raises ``ValidationError``. The target is validated eagerly. Entries are
         delivered in listing order to `on_entry` on the calling thread.
 
+        An object listing delivers one ``DIRECTORY``-kind entry per common
+        prefix, ahead of the objects of the page that carried it - ``recursive``
+        or not (`S3ScanOptions.include_common_prefixes`, which only ``ls``
+        sets). A recursive listing sends no ``Delimiter``, so a conforming
+        service returns no prefixes to keep; one that returns them anyway is
+        listed the way ``aws s3 ls`` prints such a page, rather than silently
+        dropping entries the service reported.
+
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
         page request already in progress, reclaims the prefetch worker (the
@@ -927,21 +1008,20 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    # The listing view: keep the common prefixes a recursive
+                    # listing is handed, which a transfer scan drops.
+                    include_common_prefixes=True,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 ),
                 cancel_token=cancel_token,
             )
-        try:
+        with _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
                 on_entry(info)
                 if cancel_token is not None and cancel_token.cancelled:
                     break
-        finally:
-            close = getattr(items, "close", None)
-            if close is not None:
-                close()
         _raise_if_cancelled(cancel_token, "ls")
 
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
@@ -1189,7 +1269,9 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         # After the Transferrer: the gate's destination membership scan warns
@@ -1202,7 +1284,7 @@ class S3:
             transferrer=transferrer,
             item_filter=item_filter,
             operation=operation,
-            wait_on_interrupt=self._wait_on_interrupt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
         with transferrer:
             if not dryrun:
@@ -1218,7 +1300,7 @@ class S3:
                     item_filter=item_filter,
                     operation=operation,
                     dryrun=dryrun,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             elif plan.paths_type == "s3open":
                 assert src_s3 is not None
@@ -1230,7 +1312,7 @@ class S3:
                     options=options,
                     operation=operation,
                     dryrun=dryrun,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             elif src_s3 is None:
                 items = producers.upload_items(
@@ -1238,7 +1320,7 @@ class S3:
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     item_filter=item_filter,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             else:
                 items = producers.s3_source_items(
@@ -1251,7 +1333,7 @@ class S3:
                     options=options,
                     case_gate=case_gate,
                     operation=operation,
-                    wait_on_interrupt=self._wait_on_interrupt,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             # Check cancellation *before* pulling the next item, not after:
             # pulling only while the run is live keeps a cancelled run from
@@ -1274,6 +1356,14 @@ class S3:
                         transferrer.submit(item)
             except KeyboardInterrupt:
                 interrupted = True
+                if not self._reusable_after_interrupt:
+                    # The interrupt may have landed outside the scan's own
+                    # pull (a submission wait, a result callback), so the
+                    # producer's eventual teardown - the interpreter
+                    # finalizes it once this frame's traceback is released -
+                    # arrives as a GeneratorExit. Marked, that teardown
+                    # abandons the page worker instead of joining it.
+                    concurrency.mark_interrupt_unwinding()
                 raise
             finally:
                 # Close the producer (joining its scan prefetch worker) before
@@ -1281,11 +1371,11 @@ class S3:
                 # handlers - the teardown mirror of prepare()'s
                 # register-before-enumeration ordering, so no listing traffic
                 # emits on the client during the deregistration. Under the
-                # process-fatal posture a Ctrl-C unwind skips it: closing
-                # would throw GeneratorExit into the producer, whose prefetch
-                # teardown always joins, and the unwind must not wait on an
-                # in-flight page pull (`S3` docstring, `wait_on_interrupt`).
-                if self._wait_on_interrupt or not interrupted:
+                # process-fatal posture a Ctrl-C unwind skips it: the unwind
+                # must not wait on an in-flight page pull (`S3` docstring,
+                # `reusable_after_interrupt`), and the mark above makes the deferred
+                # finalization abandon rather than join.
+                if self._reusable_after_interrupt or not interrupted:
                     items.close()
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
@@ -1408,7 +1498,9 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         with transferrer:
@@ -1756,7 +1848,9 @@ class S3:
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
             crt_allow_absent_credentials=self._crt_allow_absent_credentials,
+            crt_allow_lockless=self._crt_allow_lockless,
             crt_region=self._crt_region,
+            crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
         deletes = _SyncDeletes(
@@ -1780,7 +1874,7 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
-                wait_on_interrupt=self._wait_on_interrupt,
+                reusable_after_interrupt=self._reusable_after_interrupt,
             )
             dest_entries = producers.sync_entries(
                 dest_storage,
@@ -1788,7 +1882,11 @@ class S3:
                 item_filter=filter,
                 transferrer=transferrer,
                 options=options,
-                wait_on_interrupt=self._wait_on_interrupt,
+                reusable_after_interrupt=self._reusable_after_interrupt,
+                # The delete lane removes this side's orphans while this same
+                # listing is still running, so a walked destination must not be
+                # read ahead of it (see sync_entries).
+                deletes_orphans=delete_decide is not None,
             )
 
             def _close_scans(
@@ -1800,15 +1898,17 @@ class S3:
                 # workers) before the stack unwinds into Transferrer.__exit__'s
                 # capture deregistration - the teardown mirror of prepare()'s
                 # register-before-enumeration ordering. Under the process-fatal
-                # posture a Ctrl-C unwind skips it: closing would throw
-                # GeneratorExit into the producers, whose prefetch teardown
-                # always joins, and the unwind must not wait on an in-flight
-                # page pull (`S3` docstring, `wait_on_interrupt`).
-                if self._wait_on_interrupt or not (
-                    exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
-                ):
-                    dest_entries.close()
-                    src_entries.close()
+                # posture a Ctrl-C unwind skips it and marks the unwind
+                # instead, like `_run_transfer`'s guard: the unwind must not
+                # wait on an in-flight page pull (`S3` docstring,
+                # `reusable_after_interrupt`), and the mark makes the deferred
+                # finalization of both producers abandon rather than join.
+                if exc_type is not None and issubclass(exc_type, KeyboardInterrupt):
+                    if not self._reusable_after_interrupt:
+                        concurrency.mark_interrupt_unwinding()
+                        return
+                dest_entries.close()
+                src_entries.close()
 
             stack.push(_close_scans)
             src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
@@ -1960,16 +2060,18 @@ class S3:
             request_payer=request_payer,
             prefix=root,
             filter=self._rm_scan_filter(filter, sweep=not recursive),
-            wait_on_interrupt=self._wait_on_interrupt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
 
         if dryrun:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
-            for info in storage.scan(options, cancel_token=cancel_token):
-                _raise_if_cancelled(cancel_token, "rm")
-                _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
-                _raise_if_cancelled(cancel_token, "rm")
+            entries = storage.scan(options, cancel_token=cancel_token)
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+                for info in entries:
+                    _raise_if_cancelled(cancel_token, "rm")
+                    _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
+                    _raise_if_cancelled(cancel_token, "rm")
             _raise_if_cancelled(cancel_token, "rm")
             return
 
@@ -1983,9 +2085,11 @@ class S3:
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
-            for info in storage.scan(options, cancel_token=cancel_token):
-                _raise_if_cancelled(cancel_token, "rm")
-                deleter.submit(info)
+            entries = storage.scan(options, cancel_token=cancel_token)
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+                for info in entries:
+                    _raise_if_cancelled(cancel_token, "rm")
+                    deleter.submit(info)
             _raise_if_cancelled(cancel_token, "rm")
         _raise_if_cancelled(cancel_token, "rm")
         if deleter.failed:
@@ -2166,6 +2270,10 @@ class S3:
         signers a directory bucket (``v4-s3express``) or an MRAP ARN
         (``s3v4a``) resolve to, and an unsigned client, are left as botocore
         chose them.
+
+        The URL also names the client's **own** region, again matching
+        ``aws s3 presign`` and again against botocore's default - see
+        `_regional_presign`.
         """
         if method not in ("get_object", "put_object"):
             raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
@@ -2173,7 +2281,7 @@ class S3:
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
         with s3_errors(operation="presign", bucket=storage.bucket, key=storage.key):
-            with _sigv4_presign(client, operation):
+            with _sigv4_presign(client, operation), _regional_presign(client):
                 return client.generate_presigned_url(
                     method,
                     Params={"Bucket": storage.bucket, "Key": storage.key},
@@ -2254,6 +2362,52 @@ def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
         yield
     finally:
         events.unregister(event, _choose)
+
+
+@contextmanager
+def _regional_presign(client: Any) -> Generator[None, None, None]:
+    """Keep a presign on the client's own region for the duration of one call.
+
+    botocore marks presign requests with a ``use_global_endpoint`` context flag
+    and then resolves the endpoint with the region builtin replaced by
+    ``aws-global``, so a eu-west-1 client presigns
+    ``bucket.s3.amazonaws.com`` while every real request it sends goes to
+    ``bucket.s3.eu-west-1.amazonaws.com``. The URL still carries the true
+    region in its credential scope, so the host and the signature disagree.
+    aws-cli's bundled botocore has no such flag and always presigns the
+    resolved regional host; this restores that by clearing the flag before
+    botocore's own endpoint-builtins handler reads it (registered *first* on
+    ``before-endpoint-resolution.s3``, unregistered in a ``finally``).
+
+    Everything botocore already exempts from the flag is untouched, because
+    clearing it only reaches the cases where it was set: a non-``aws``
+    partition, dualstack, an explicit ``addressing_style``, and a us-east-1
+    client with the regional pin the CLI applies never set it in the first
+    place, and botocore's handler ignores it for an ARN bucket, a directory
+    bucket, and a DNS-incompatible name that forces path style. A custom
+    ``endpoint_url`` overrides the resolved host either way. The net change is
+    exactly the plain non-us-east-1 case (all measured against the pinned
+    aws-cli).
+
+    ``use_global_endpoint`` is a botocore-internal context key; if a botocore
+    version renames or drops it this override simply no-ops (the ``pop`` finds
+    nothing), and a client without botocore's event seam is left alone, like
+    `_sigv4_presign`.
+    """
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is None or not hasattr(events, "register_first"):
+        yield
+        return
+
+    def _drop_global_endpoint(context: dict[str, Any], **_kwargs: Any) -> None:
+        context.pop("use_global_endpoint", None)
+
+    event = "before-endpoint-resolution.s3"
+    events.register_first(event, _drop_global_endpoint)
+    try:
+        yield
+    finally:
+        events.unregister(event, _drop_global_endpoint)
 
 
 # -- module-level convenience -------------------------------------------------

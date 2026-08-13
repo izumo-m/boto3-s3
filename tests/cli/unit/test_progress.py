@@ -115,11 +115,14 @@ class TestResultLines:
 
     def test_cancelled_backfills_untransferred_remainder(self) -> None:
         # A queued-then-cancelled transfer closes its meter share like a
-        # failed one, so the byte progress still reaches the expected total.
+        # failed one, so the byte progress still reaches the expected total -
+        # through the failed-bytes counter, which the meter displays but the
+        # transfer speed leaves out (aws's split).
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_result(_result(OpOutcome.CANCELLED, key="a", error=RuntimeError("fatal")))
-        assert printer._done_bytes == printer._expected_bytes == 10
+        assert (printer._done_bytes, printer._failed_bytes) == (0, 10)
+        assert printer._expected_bytes == 10
         assert printer._inflight == {}
 
 
@@ -176,6 +179,152 @@ class TestCarriageReturnProtocol:
         assert statement.endswith("with 1 file(s) remaining")
         assert line.startswith("upload: s3://b/a to s3://b/c")
         assert line.endswith("\n")
+        assert len(line.rstrip("\n")) == len(statement)
+
+    def test_padding_holds_the_longest_statement_since_the_last_result(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws records the *padded* width (results.py: len(statement) - 1 of an
+        # already-padded statement), so once a statement shrinks - here
+        # "1000 Bytes" becoming "1.0 KiB" - the width stays at the longest one
+        # painted since the last result line, and the result line is padded to
+        # that width rather than to the shrunken statement's.
+        clock = iter([0.0, 1.0, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:  # construction reads no clock
+            printer.on_progress(_progress("a", 0, 4096))  # queued: anchors 0.0, no paint
+            printer.on_progress(_progress("a", 1000, 4096))  # t=1.0: 1000 Bytes @ 1000 Bytes/s
+            printer.on_progress(_progress("a", 1024, 4096))  # t=2.0: 1.0 KiB @ 512 Bytes/s
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        long_statement, short_statement, line = capsys.readouterr().out.split("\r")
+        assert (
+            long_statement == "Completed 1000 Bytes/4.0 KiB (1000 Bytes/s) with 1 file(s) remaining"
+        )
+        assert (
+            short_statement.rstrip()
+            == "Completed 1.0 KiB/4.0 KiB (512 Bytes/s) with 1 file(s) remaining"
+        )
+        # The shrunken statement is blotted out to the longer one's width...
+        assert len(short_statement) == len(long_statement)
+        # ...and so is the result line that follows it.
+        assert line.startswith("upload: s3://b/a")
+        assert len(line.rstrip("\n")) == len(long_statement)
+
+    def test_unknown_size_grows_the_expected_total_with_the_bytes(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no known total, aws grows the expected total with the bytes as
+        # they arrive (_update_ongoing_transfer_size_if_unknown), keeping the
+        # meter in byte form with done == expected. Unreachable from the CLI
+        # today (its only sizeless route is streaming, which paints nothing),
+        # but the library's on_progress contract allows bytes_total=None.
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, None))  # queued, size unknown
+            printer.on_progress(_progress("a", 10240, None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 10.0 KiB/10.0 KiB (10.0 KiB/s) with 1 file(s) remaining" in out
+
+    def test_size_known_mid_transfer_tops_up_the_expected_total(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws tops the expected total up by total - progressed once a size
+        # arrives mid-transfer, so the per-delta additions are not counted
+        # twice and the denominator lands on the true sum.
+        clock = iter([0.0, 1.0, 2.0, 4.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 8192))  # queued, known 8 KiB
+            printer.on_progress(_progress("b", 0, None))  # queued, size unknown
+            printer.on_progress(_progress("a", 8192, 8192))  # t=1.0
+            printer.on_progress(_progress("b", 2048, None))  # t=2.0: expected grows
+            printer.on_progress(_progress("b", 3072, 6144))  # t=4.0: total revealed
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="b", src="s3://b/b", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 8.0 KiB/8.0 KiB (8.0 KiB/s) with 2 file(s) remaining" in out
+        assert "Completed 10.0 KiB/10.0 KiB (5.0 KiB/s) with 2 file(s) remaining" in out
+        # 8192 + 6144 = 14336: the top-up lands the denominator on the sum.
+        assert "Completed 11.0 KiB/14.0 KiB (2.8 KiB/s) with 2 file(s) remaining" in out
+
+    def test_omitted_total_after_a_known_size_adds_nothing(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws gates the unknown-size additions on the *stored* size
+        # (_update_ongoing_transfer_size_if_unknown runs only while it is
+        # None), so a notification that omits an already-known total must not
+        # grow the expected total again.
+        clock = iter([0.0, 1.0, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 8192))  # queued, known 8 KiB
+            printer.on_progress(_progress("a", 4096, None))  # total omitted
+            printer.on_progress(_progress("a", 8192, None))  # and again
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        out = capsys.readouterr().out
+        assert "Completed 4.0 KiB/8.0 KiB" in out
+        assert "Completed 8.0 KiB/8.0 KiB" in out
+        assert "/12.0 KiB" not in out
+        assert "/16.0 KiB" not in out
+
+    def test_speed_is_not_computed_from_a_zero_elapsed_clock(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws recomputes the rate only on a strictly-later timestamp
+        # (ResultRecorder guards `result.timestamp > self.start_time`), so a
+        # coarse clock's first paint shows the initial 0 Bytes/s. Dividing by
+        # a clamped epsilon instead would paint a nonsense multi-GiB/s figure
+        # (reachable on Windows' ~15.6 ms monotonic granularity).
+        clock = iter([0.0, 0.0, 2.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 4096))  # queued: anchors 0.0
+            printer.on_progress(_progress("a", 1024, 4096))  # t=0.0: same reading
+            printer.on_progress(_progress("a", 2048, 4096))  # t=2.0: 1.0 KiB/s
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        first, second, _ = capsys.readouterr().out.split("\r")
+        assert "(0 Bytes/s)" in first
+        assert "(1.0 KiB/s)" in second
+
+    def test_dryrun_lines_keep_the_meter_width(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's _print_dry_run pads to the meter's width but does not reset it
+        # (only success / failure / warning printers do), so every dryrun line
+        # in a row blots the meter out. Latent today - a dryrun run paints no
+        # meter - but pinned at the printer so the widths cannot drift.
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 4096))  # queued
+            printer.on_progress(_progress("a", 2048, 4096))
+            printer.on_result(_result(OpOutcome.DRYRUN, key="b", src="s3://b/b", dest=None))
+            printer.on_result(_result(OpOutcome.DRYRUN, key="c", src="s3://b/c", dest=None))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        meter, rest = capsys.readouterr().out.split("\r", 1)
+        first, second, result_line = rest.split("\n")[:3]
+        assert first.startswith("(dryrun)") and len(first) == len(meter)
+        assert second.startswith("(dryrun)") and len(second) == len(meter)
+        # The result line still blots the meter width out (and resets it).
+        assert len(result_line) == len(meter)
+
+    def test_notice_prints_raw_and_leaves_the_meter_width(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws uni_prints the case-conflict advisories straight to stderr,
+        # bypassing its printer: they are neither padded to the meter's width
+        # nor allowed to reset it, so the next result line still blots the
+        # meter out.
+        with TransferPrinter() as printer:
+            printer.on_progress(_progress("a", 0, 2048))  # queued
+            printer.on_progress(_progress("a", 512, 2048))
+            printer.on_result(_result(OpOutcome.NOTICE, error=RuntimeError("warning: skipping x")))
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
+        captured = capsys.readouterr()
+        assert captured.err == "warning: skipping x\n"
+        statement, line = captured.out.split("\r", 1)
         assert len(line.rstrip("\n")) == len(statement)
 
     def test_queued_notification_does_not_paint(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -391,7 +540,8 @@ class TestProgressAccounting:
     ) -> None:
         # aws adds a failed file's untransferred remainder to the meter
         # (bytes_failed_to_transfer) so byte progress still reaches the expected
-        # total. a failed at 3/10 contributes its missing 7 bytes.
+        # total. a failed at 3/10 contributes its missing 7 bytes - kept in its
+        # own counter, since aws displays it but keeps it out of the speed.
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_progress(_progress("b", 0, 10))  # queued
@@ -400,5 +550,6 @@ class TestProgressAccounting:
             printer.on_result(_result(OpOutcome.FAILED, key="a", error=RuntimeError("boom")))
             printer.on_result(_result(OpOutcome.SUCCEEDED, key="b"))
         capsys.readouterr()
-        assert printer._done_bytes == printer._expected_bytes == 20
+        assert (printer._done_bytes, printer._failed_bytes) == (13, 7)
+        assert printer._done_bytes + printer._failed_bytes == printer._expected_bytes == 20
         assert printer._inflight == {}

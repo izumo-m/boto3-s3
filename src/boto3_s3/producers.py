@@ -29,7 +29,14 @@ from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
-from boto3_s3.s3storage import S3Storage, s3_errors
+from boto3_s3.s3storage import (
+    S3Storage,
+    # The one out-of-module caller: the local-zone band this encodes belongs
+    # with the backend that reads S3 timestamps, while aws-cli runs the same
+    # conversion on the single-object HEAD this module owns.
+    reject_unrepresentable_stamp,
+    s3_errors,
+)
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
@@ -43,7 +50,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from typing import BinaryIO
 
 
@@ -54,7 +61,8 @@ def walk_source_scan_options(
     sort: bool = False,
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
+    read_ahead: bool = True,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
 
@@ -64,8 +72,8 @@ def walk_source_scan_options(
     custom backend's own knobs, all configured on the constructor) - with only
     the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``) and the application's
-    Ctrl-C posture (``wait_on_interrupt``, declared once on
-    ``S3(wait_on_interrupt=...)``). So a ``LocalStorage`` subclass,
+    Ctrl-C posture (``reusable_after_interrupt``, declared once on
+    ``S3(reusable_after_interrupt=...)``). So a ``LocalStorage`` subclass,
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
@@ -78,14 +86,22 @@ def walk_source_scan_options(
     reach the operation and may fail, block, have device side effects, or be
     deleted by ``mv`` / ``sync --delete`` according to that operation's normal
     behavior. The default ``False`` preserves aws-cli transfer enumeration.
+
+    ``read_ahead`` is the one run-level knob that can only *narrow* the storage's
+    own setting: ``False`` (asked for by an enumeration whose consumer mutates
+    the tree - ``sync_entries`` for a deleting destination) turns the page-ahead
+    overlap off, while ``True`` leaves a backend that seeded ``read_ahead=False``
+    in its ``default_scan_options`` untouched.
     """
+    base = storage.default_scan_options()
     options = replace(
-        storage.default_scan_options(),
+        base,
         recursive=recursive,
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
-        wait_on_interrupt=wait_on_interrupt,
+        reusable_after_interrupt=reusable_after_interrupt,
+        read_ahead=base.read_ahead and read_ahead,
     )
     return options
 
@@ -286,7 +302,7 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
 
@@ -294,7 +310,8 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1, like aws-cli). The recursive listing
+    with [Errno 21] Is a directory, rc 1; aws fails it too, with wording that
+    differs on purpose - docs/cli/aws-differences.md section 2). The recursive listing
     stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
     scan (``scan_pages``' contract); the single source, having no scan filter, is
     filtered here.
@@ -309,7 +326,7 @@ def upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     else:
@@ -367,7 +384,7 @@ def s3_source_items(
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
     operation: str,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize download/copy items from an S3 source, gates applied."""
     src_bucket = src_storage.bucket
@@ -377,7 +394,7 @@ def s3_source_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
     elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`): aws lists the
@@ -394,7 +411,7 @@ def s3_source_items(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
         infos = (
             info
@@ -542,7 +559,7 @@ def scan_s3_source(
     key_prefix: str,
     item_filter: FileFilter | None,
     options: TransferOptions,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Iterator[FileInfo]:
     """A recursive object listing anchored at the '/'-normalized ``key_prefix``.
 
@@ -554,7 +571,7 @@ def scan_s3_source(
     config and a custom ``S3Storage`` subclass survive), with the run-level
     knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
     ``key_prefix``, ``request_payer`` from the transfer options, and the
-    application's Ctrl-C posture (``wait_on_interrupt``).
+    application's Ctrl-C posture (``reusable_after_interrupt``).
     """
 
     def scan_filter(info: FileInfo) -> bool:
@@ -572,9 +589,23 @@ def scan_s3_source(
         prefix=key_prefix,
         filter=scan_filter,
         request_payer=options.get("request_payer"),
-        wait_on_interrupt=wait_on_interrupt,
+        reusable_after_interrupt=reusable_after_interrupt,
     )
     return storage.scan(scan_options)
+
+
+def _retry_info(response: Mapping[str, Any]) -> str:
+    """The `` (reached max retries: N)`` fragment botocore puts in a message.
+
+    botocore's ``ClientError._get_retry_info``, reproduced so a rewritten
+    error message keeps what the original carried: botocore appends this to
+    the operation name whenever the retry handler exhausted its attempts, and
+    a message rebuilt from scratch would silently drop it.
+    """
+    metadata = response.get("ResponseMetadata", {})
+    if metadata.get("MaxAttemptsReached", False) and "RetryAttempts" in metadata:
+        return f" (reached max retries: {metadata['RetryAttempts']})"
+    return ""
 
 
 def head_single(
@@ -589,7 +620,9 @@ def head_single(
     Any 404 is rewritten to aws's ``Key "..." does not exist`` message; a
     copy source is headed with the copy-source SSE-C parameters. Like aws-cli's
     filegenerator, the HEAD carries ``ChecksumMode=ENABLED`` when the client
-    resolves checksum validation to ``when_supported`` (the botocore default).
+    resolves checksum validation to ``when_supported`` (the botocore default),
+    and the stamp the response carries is rejected here when the local calendar
+    cannot hold it, aws-cli's conversion at the same slot.
     """
     key = src_storage.key
     if transfer_type is TransferType.COPY:
@@ -622,14 +655,27 @@ def head_single(
         # replaces the s3_errors translation wholesale, and the section 2.1
         # reachability guarantee (exceptions.md) promises the ClientError on
         # the *direct* `__cause__` of an error raised for a failed S3 request.
+        # aws rewrites the response and lets botocore render it, so its retry
+        # info lands right after the operation name; this text is composed, so
+        # the fragment has to be placed there by hand.
         raise NotFoundError(
-            "An error occurred (404) when calling the HeadObject operation: "
+            "An error occurred (404) when calling the HeadObject operation"
+            f"{_retry_info(response)}: "
             f'Key "{key}" does not exist',
             operation=operation,
             bucket=src_storage.bucket,
             key=key,
         ) from (exc.__cause__ or exc)
     etag = head.get("ETag")
+    mtime = head.get("LastModified")
+    # aws-cli converts the HeadObject stamp to the local zone as the last thing
+    # `_list_single_object` does, so a stamp the local calendar cannot hold
+    # ends the run right here - before the transfer, and before a dryrun would
+    # have recorded it - instead of riding on. The listing routes run the same
+    # check inside the S3 backend; this route never passes through it, so it
+    # gets the check at aws's own slot. The value handed on stays UTC per the
+    # `FileInfo.mtime` contract - only the conversion's failure is wanted.
+    reject_unrepresentable_stamp(mtime)
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees
@@ -637,7 +683,7 @@ def head_single(
     yield S3FileInfo(
         key=key,
         size=head.get("ContentLength"),
-        mtime=head.get("LastModified"),
+        mtime=mtime,
         etag=etag.strip('"') if etag else None,
         storage_class=head.get("StorageClass"),
         head=head,
@@ -722,7 +768,7 @@ def open_upload_items(
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
@@ -752,7 +798,7 @@ def open_upload_items(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     else:
@@ -913,7 +959,7 @@ def open_download_items(
     options: TransferOptions,
     operation: str,
     dryrun: bool,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
@@ -934,7 +980,7 @@ def open_download_items(
             key_prefix=plan.src_root[len(src_bucket) + 1 :],
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
     elif not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket custom`): mirror the
@@ -951,7 +997,7 @@ def open_download_items(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         )
         infos = (
             info
@@ -1056,7 +1102,7 @@ def cp_case_gate(
     transferrer: Transferrer,
     item_filter: FileFilter | None,
     operation: str,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -1090,7 +1136,7 @@ def cp_case_gate(
                 recursive=True,
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
-                wait_on_interrupt=wait_on_interrupt,
+                reusable_after_interrupt=reusable_after_interrupt,
             )
         )
     }
@@ -1128,7 +1174,8 @@ def sync_entries(
     item_filter: FileFilter | None,
     transferrer: Transferrer,
     options: TransferOptions,
-    wait_on_interrupt: bool,
+    reusable_after_interrupt: bool,
+    deletes_orphans: bool = False,
 ) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
@@ -1143,6 +1190,21 @@ def sync_entries(
     path fetches no owner. Both sides'
     producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
     it and the pair key is taken from it.
+
+    ``deletes_orphans`` says this side is the destination whose orphans the run's
+    delete lane removes as the merge-join streams them - the caller passes it for
+    the destination side of a ``sync --delete``. For a *local* destination that
+    turns the walk's read-ahead off (``ScanOptions.read_ahead``), because the
+    delete lane mutates the very tree being walked: two paths can name one file
+    (a symlinked directory aliasing its target), and a walk running ahead of the
+    deletes would hand out the second path after the first delete already
+    unlinked the file - an ENOENT delete failure, or the walk's own "File does
+    not exist." warning, where aws (which walks lazily and interleaves its
+    deletes) simply never lists it. The other sides keep the overlap: a source
+    walk is not mutated by the run, an S3 destination's orphans go to the batched
+    deleter and its listing is a server-side snapshot either way, and a custom
+    backend owns its key space (one that must not run ahead of its own ``delete``
+    seeds ``read_ahead=False`` in its ``default_scan_options``).
     """
     if isinstance(storage, S3Storage):
         key_prefix = root[len(storage.bucket) + 1 :]
@@ -1151,7 +1213,7 @@ def sync_entries(
             key_prefix=key_prefix,
             item_filter=item_filter,
             options=options,
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
         ):
             yield _compare_key(info), info
         return
@@ -1162,7 +1224,8 @@ def sync_entries(
             sort=True,  # the merge-join needs both sides byte-ordered
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,  # each side's visibility filter, applied in the scan
-            wait_on_interrupt=wait_on_interrupt,
+            reusable_after_interrupt=reusable_after_interrupt,
+            read_ahead=not (deletes_orphans and isinstance(storage, LocalStorage)),
         )
     ):
         yield _compare_key(info), info

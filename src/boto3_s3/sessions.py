@@ -48,8 +48,15 @@ def fast_parse_timestamp(value: Any) -> datetime:
     as a basic-format date - the guard keeps such inputs on botocore's
     interpretation on every Python. For every input both paths accept the
     returned value is equal; only the tzinfo class differs
-    (`datetime.timezone.utc` instead of dateutil's ``tzutc``), which
-    compares, subtracts, and formats identically.
+    (`datetime.timezone` instead of dateutil's ``tzutc`` / ``tzoffset``), so
+    the two compare and subtract identically and render the same ``str()``
+    and ``isoformat()``. The one rendering they do *not* share is
+    ``strftime('%Z')``, which asks the tzinfo for its name: dateutil's offset
+    has none (an empty field) where `datetime.timezone` answers the literal
+    ``UTC-05:00`` - a form dateutil re-reads with POSIX's inverted sign.
+    Anything that stores a parsed timestamp for later reading therefore has
+    to choose an explicit format; the CLI's credential cache stores
+    ``isoformat()``, which is aws-cli's own on-disk form.
     """
     if isinstance(value, str) and "-" in value:
         text = value[:-1] + "+00:00" if value.endswith("Z") else value

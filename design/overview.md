@@ -85,7 +85,7 @@ maintaining high functional compatibility (parity).
   **must match** that of `aws s3 <subcommand>` under the same arguments and the
   same conditions, **whether on success or error**. This holds for any arguments
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
-  are only two exceptions.
+  are only three exceptions.
   1. Extension options that do not exist in `aws s3`. The CLI declares none:
      its option surface is exactly `aws s3`'s, so this exception is currently
      unused. `--version` is *not* one of them - aws accepts it under any
@@ -93,6 +93,16 @@ maintaining high functional compatibility (parity).
      rc 0) and the CLI matches that.
   2. When it depends on a feature that is hard to realize (e.g., the CLI's
      interactive UI)
+  3. Behavior differences rooted in the transfer engine underneath: aws-cli
+     bundles its own s3transfer fork while this project rides pip
+     `s3transfer`, and an observable difference (exit code, output, requests
+     sent, failure timing) that originates in a behavior difference between
+     those two engines is outside both parity charters. A difference noticed
+     is recorded as a known divergence in the design docs. Where the library
+     can easily compensate - a default value, a public class attribute, a
+     subscriber - it aims to behave like the bundled fork anyway; deciding
+     not to compensate is legitimate and is recorded together with its
+     reason.
 
   awscrt-dependent features (the CRT transfer engine, CRT-family checksums,
   SigV4a signing) are subject to this charter whenever the CRT stack is usable,
@@ -114,10 +124,12 @@ maintaining high functional compatibility (parity).
   not cover is comparable surface, where a difference **is** a divergence: a
   bug, or a deliberate deviation that has been written down. The three classes,
   each with the test that decides membership, are defined in
-  [`testing.md`](./testing.md) section 9. This charter has one exception,
-  matching the exit code charter's second: an **interactive UI**
+  [`testing.md`](./testing.md) section 9. This charter has two exceptions,
+  matching the exit code charter's second and third: an **interactive UI**
   (`--cli-auto-prompt`) is outside it, its console output and its completion
-  candidates alike.
+  candidates alike, and so is an observable difference rooted in the
+  bundled-vs-pip `s3transfer` engine difference, recorded as a known
+  divergence the same way.
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or

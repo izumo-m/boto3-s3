@@ -29,7 +29,8 @@ Engine choices (parity-driven):
   the same rule boto3 and aws-cli apply to s3->s3. The public
   ``transfer_config`` type is ``boto3_s3.transferconfig.TransferConfig``
   (boto3's subclass plus CRT tuning fields; defaults match aws-cli: 8 MiB
-  threshold/chunk, 10-way concurrency), and classic honors
+  threshold/chunk, 10-way concurrency, a 1000-deep download IO queue), and
+  classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
   (the CRT manager ignores the threading knobs, also like boto3).
 - Backpressure is s3transfer's own bounded executors: the submission queue
@@ -53,7 +54,9 @@ Engine choices (parity-driven):
   ``copy_props=ALL`` carries them - riding
   s3transfer >= 0.19's native write path on a multipart copy, the preload
   `AnnotationCopyMode`s staging the source payloads up front and ``DEFERRED``
-  letting s3transfer read them post-copy.
+  letting s3transfer read them post-copy. A write that fails part way keeps
+  the copied object and reports aws-cli's own wording
+  (`_align_annotation_copy_error`), not upstream's.
 """
 
 from __future__ import annotations
@@ -71,14 +74,14 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
+from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
-from s3transfer.manager import TransferConfig as S3TransferConfig
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
 
-from boto3_s3 import crtsupport, requestparams
+from boto3_s3 import crtsupport, mimetable, requestparams, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     BatchError,
@@ -112,6 +115,11 @@ if TYPE_CHECKING:
     from boto3.s3.transfer import TransferConfig
     from boto3.session import Session
     from mypy_boto3_s3 import S3Client
+
+    # Runtime imports of this name are local to the annotation-copy alignment:
+    # the floor s3transfer predates the class (and the write path that raises
+    # it), and the module must stay importable there.
+    from s3transfer.exceptions import S3CopyFailedError
 
     from boto3_s3.storage import Storage
 
@@ -216,19 +224,29 @@ def _is_precondition_failed(exc: BaseException) -> bool:
         return False
 
 
-def _is_cancellation(exc: BaseException) -> bool:
+def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
     """A future outcome meaning "revoked", not "failed".
 
     Classic s3transfer settles cancelled futures with its own
-    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass); the
-    CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead, so
-    that is matched by the error's ``name`` without importing awscrt. The
-    library's own `CancelledError` is included for symmetry (a subscriber
-    re-raising a translated cancellation).
+    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass), and
+    the library's own `CancelledError` is included for symmetry (a subscriber
+    re-raising a translated cancellation) - both always classify as revoked.
+    The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
+    matched by the error's ``name`` without importing awscrt - but only when
+    this run's cancel token ordered the cancel (``cancel_initiated``), the
+    one revocation aws-cli has no counterpart for. Every other CRT
+    cancellation classifies as a failure, aws-cli's own rule (measured live:
+    its ``DoneResultSubscriber`` treats every non-``CancelledError`` as a
+    per-item failure, so a fatal or Ctrl-C folding its CRT manager prints a
+    failed line per in-flight transfer). The same rule keeps an interrupted
+    CRT run from reporting success when pip s3transfer's CRT coordinator
+    converts a drain-time ``KeyboardInterrupt`` into ``cancel()`` and
+    discards the interrupt - the item classified FAILED is then the only
+    evidence the run was cut short (design/crt.md section 6).
     """
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         return True
-    return getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
+    return cancel_initiated and getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
 
 
 def _allow_if_none_match() -> None:
@@ -389,15 +407,51 @@ def _set_file_utime(path: str, timestamp: float) -> None:
         ) from exc
 
 
+_mime_db: mimetypes.MimeTypes | None = None
+
+
+def _mime_types() -> mimetypes.MimeTypes:
+    """The MIME datastore an upload's guessed ``Content-Type`` comes from.
+
+    Assembled the way ``mimetypes.init`` assembles the module-level one, with
+    one substitution: the built-in tables come from ``mimetable`` (frozen
+    CPython 3.14) rather than from the running interpreter, because the guess
+    has to be the one aws makes and aws's official distribution is frozen
+    against 3.14. The host-side overlays stay live and keep ``init``'s order -
+    the Windows registry first, then whichever ``knownfiles`` exist - so local
+    mime.types edits reach both tools alike. Built on first use, and only then:
+    an upload that sets ``content_type`` never needs it.
+    """
+    global _mime_db
+    if _mime_db is None:
+        db = mimetypes.MimeTypes()
+        db.encodings_map = dict(mimetable.ENCODINGS_MAP)
+        db.suffix_map = dict(mimetable.SUFFIX_MAP)
+        db.types_map = ({}, {})
+        db.types_map_inv = ({}, {})
+        for extension, mime_type in mimetable.TYPES_MAP.items():
+            db.add_type(mime_type, extension, strict=True)
+        for extension, mime_type in mimetable.COMMON_TYPES.items():
+            db.add_type(mime_type, extension, strict=False)
+        db.read_windows_registry()
+        for name in mimetable.KNOWNFILES:
+            if os.path.isfile(name):
+                db.read(name)
+        _mime_db = db
+    return _mime_db
+
+
 def _guess_content_type(path: str) -> str | None:
     """``mimetypes`` guess with aws-cli's Windows-registry guard.
 
-    ``guess_type`` can raise ``UnicodeDecodeError`` on Windows when a
-    registry MIME entry is in an undecodable encoding (bpo-9291); strict
-    (IANA-only) matching is kept deliberately, like aws.
+    The guess can raise ``UnicodeDecodeError`` on Windows when a registry MIME
+    entry is in an undecodable encoding (bpo-9291) - here from the registry read
+    the first call performs, where aws takes it from its own lazy
+    ``mimetypes.init``; strict (IANA-only) matching is kept deliberately, like
+    aws.
     """
     try:
-        return mimetypes.guess_type(path)[0]
+        return _mime_types().guess_type(path)[0]
     except UnicodeDecodeError:
         return None
 
@@ -669,7 +723,9 @@ class Transferrer:
         capture_response: bool = False,
         crt_endpoint: str | None = None,
         crt_allow_absent_credentials: bool = False,
+        crt_allow_lockless: bool = False,
         crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
+        crt_sign_requests: bool | None = None,
         session: Session | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
@@ -758,10 +814,19 @@ class Transferrer:
         # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
         # boto3's classic fallback, which every library caller keeps.
         self._crt_allow_absent_credentials = crt_allow_absent_credentials
+        # aws-cli's posture on cross-process lock contention under an explicit
+        # 'crt' preference: build the CRT client without the lock. False =
+        # boto3's classic fallback (crtsupport.create_crt_transfer_manager).
+        self._crt_allow_lockless = crt_allow_lockless
         # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
         # off the client, boto3's source); a declared None is what reaches
         # awscrt's own region assertion, as aws-cli's region chain does.
         self._crt_region: crtsupport.CrtRegion = crt_region
+        # The caller's CRT signing declaration, aws-cli's sign_request. None =
+        # derive it from the client, boto3's rule; a declared False is what
+        # keeps --no-sign-request anonymous on the CRT lane even when
+        # --sse aws:kms restores signing on the botocore client.
+        self._crt_sign_requests = crt_sign_requests
         # The caller's boto3 session (S3.session), threaded to the CRT engine
         # so its request serializer reuses the warm session instead of paying
         # a fresh one per process (crtsupport._botocore_session); None = the
@@ -773,6 +838,18 @@ class Transferrer:
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
         self._shutdown_done = threading.Event()
+        # True once this run's cancel token ordered accepted transfers
+        # cancelled - set by `__exit__` folding the manager under the token's
+        # own `CancelledError`, and by `_cancel_futures` when the drain-time
+        # watcher escalates. Read by the done callbacks to tell a
+        # token-ordered revocation (CANCELLED - the one cancel aws-cli has no
+        # counterpart for) from every other CRT cancellation - the fatal /
+        # interrupt shutdown's, or one nobody ordered (a swallowed
+        # interrupt's trace) - classified FAILED like aws-cli's
+        # (`_is_cancellation`). Monotonic False->True, always set before the
+        # cancel it describes is issued, so the callback that observes a
+        # cancel outcome observes the flag too.
+        self._cancel_initiated = False
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
@@ -816,10 +893,19 @@ class Transferrer:
         message as the exception *class*. ``__exit__`` exists on both engines;
         the classic one cancels with aws's exception shape
         (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
-        classic ``CANCELLED`` record names the fatal that revoked it, while
-        the CRT manager cancels without the message and its ``CANCELLED``
-        records carry awscrt's cancellation wording instead (still classified
-        via ``AWS_ERROR_S3_CANCELED``).
+        classic ``CANCELLED`` record names the fatal that revoked it. The CRT
+        manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
+        classifies as a per-item *failure* - aws-cli's measured behavior: a
+        fatal or Ctrl-C folding its CRT manager prints a failed line per
+        in-flight transfer and counts them failed; only a cancel ordered by
+        this run's cancel token, which aws-cli has no counterpart for,
+        classifies ``CANCELLED`` (`_is_cancellation`). A CRT cancellation
+        arriving on the clean drain - pip s3transfer's CRT manager converting
+        a drain-time ``KeyboardInterrupt`` into ``cancel()`` and discarding
+        the interrupt - is the same per-item failure, and the run raises
+        `BatchError` in place of the swallowed ``KeyboardInterrupt``
+        (design/crt.md section 6). The classic manager re-raises a drain-time
+        interrupt itself, so that lane never needs the distinction.
         """
         if self._manager is None:
             return
@@ -839,6 +925,18 @@ class Transferrer:
             watcher.start()
         try:
             if cancel:
+                # A CancelledError with this run's token cancelled is the
+                # token's own order surfacing through the submission loop
+                # (s3._raise_if_cancelled), so the manager cancel it forces is
+                # token-ordered: mark it before it is issued, and the revoked
+                # items classify CANCELLED like the drain-time escalation's.
+                # A fatal or interrupt leaves the flag down - FAILED.
+                if (
+                    isinstance(exc, CancelledError)
+                    and self._cancel_token is not None
+                    and self._cancel_token.cancelled
+                ):
+                    self._cancel_initiated = True
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
@@ -880,6 +978,7 @@ class Transferrer:
             self._futures.discard(future)
 
     def _cancel_futures(self) -> None:
+        self._cancel_initiated = True
         with self._futures_lock:
             futures = tuple(self._futures)
         for future in futures:
@@ -1024,17 +1123,23 @@ class Transferrer:
 
     def _submit_upload(self, item: TransferItem) -> Any | None:
         """Map one upload and attach close, move-delete, completion, and tracking hooks."""
+        # Mapped first, like aws-cli's _do_submit: the mapper is what rejects a
+        # malformed --grants, and aws raises that before it looks at the source
+        # at all, so a directory source paired with a bad option must still fail
+        # on the option.
+        extra_args = requestparams.map_put_object_params(self._options, self._operation)
         # A directory source is handed through to fail like aws-cli ([Errno 21]
-        # Is a directory, rc 1); botocore's default checksum wrapper would
-        # otherwise open it and mask the read failure as an opaque rewind error,
-        # so detect it and surface the OS error directly. A stream (src_fileobj)
-        # is never a directory.
+        # Is a directory, rc 1; aws words the failed line differently, its CRT
+        # lane's untranslated "Unknown Error Code" included - a recorded
+        # deliberate difference, docs/cli/aws-differences.md section 2);
+        # botocore's default checksum wrapper would otherwise open it and mask
+        # the read failure as an opaque rewind error, so detect it and surface
+        # the OS error directly. A stream (src_fileobj) is never a directory.
         if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
             self._record_failure(
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
             )
             return None
-        extra_args = requestparams.map_put_object_params(self._options, self._operation)
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
             if not name and item.src_info is not None:
@@ -1074,8 +1179,6 @@ class Transferrer:
             subscribers.append(_DirectoryCreator())
         if item.dest_fileobj is not None:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
-        if item.case_conflict_cleanup is not None:
-            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         # Before the mv source delete, like aws-cli registering
         # ProvideLastModifiedTimeSubscriber ahead of DeleteSourceObjectSubscriber:
         # a failed delete then still leaves the downloaded file carrying the
@@ -1093,6 +1196,13 @@ class Transferrer:
             ):
                 subscribers.append(_FsyncDest(item.dest_path))
             subscribers.append(self._delete_source_subscriber(item))
+        if item.case_conflict_cleanup is not None:
+            # After the source delete, aws-cli's slot for
+            # CaseConflictCleanupSubscriber: on_done subscribers run in
+            # registration order, so releasing the key earlier would shrink the
+            # window in which a same-name-different-case twin still counts as
+            # in flight - by an os.utime on cp, by a whole DeleteObject on mv.
+            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
         subscribers.append(self._completion(item))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
@@ -1116,6 +1226,23 @@ class Transferrer:
     def _submit_copy(self, item: TransferItem) -> Any:
         """Map one S3 copy, including copy-props and optional source deletion."""
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
+        if (
+            extra_args.get("MetadataDirective") == "COPY"
+            and item.size is not None
+            and item.size >= self._multipart_threshold
+        ):
+            # A multipart-bound explicit COPY flips to REPLACE in the request
+            # parameters only. Every supported s3transfer blocklists
+            # MetadataDirective from CreateMultipartUpload, so no wire request
+            # changes; the flip is what keeps upstream 0.19's
+            # PRESERVED_METADATA_FIELDS strip from dropping the caller's own
+            # properties (ContentType and friends) where aws-cli's fork -
+            # tableless - passes them through. The single-part CopyObject keeps
+            # the real COPY. The multipart prediction is upstream's own
+            # comparison (size >= threshold, like the annotation gate); a
+            # caller-less size (a custom scan) skips the flip and leaves the
+            # decision - and upstream's own preservation - to its probe.
+            extra_args["MetadataDirective"] = "REPLACE"
         subscribers = self._common_subscribers(item)
         source_client: Any = self._source_client
         if not self._options.get("metadata_directive"):
@@ -1283,9 +1410,10 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_absent_credentials`` and ``crt_region`` are the
-        caller-declared posture departures from boto3's rules available here,
-        and apply only when the caller asks for them.
+        ``crt_allow_absent_credentials``, ``crt_allow_lockless``,
+        ``crt_region`` and ``crt_sign_requests`` are the caller-declared
+        posture departures from boto3's rules available here, and apply only
+        when the caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1299,7 +1427,11 @@ class Transferrer:
         if not crtsupport.selects_crt(self._transfer_config):
             return None
         _allow_if_none_match()  # the CRT manager aliases the classic arg lists
-        _allow_inline_mpu_tagging()  # inert for CRT (no copy path) but keeps one table
+        # The copy tables are inert for CRT (it has no copy path) but keeping
+        # one alignment site means the classic fallback never sees them unpatched.
+        _allow_inline_mpu_tagging()
+        _align_annotation_put_args()
+        _align_annotation_copy_error()
         # The run's client is the route-selected one (an S3Storage may carry its
         # own), so the S3-level endpoint pin only applies to the client it built.
         endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
@@ -1313,7 +1445,9 @@ class Transferrer:
                 endpoint=endpoint,
                 session=self._session,
                 allow_absent_credentials=self._crt_allow_absent_credentials,
+                allow_lockless=self._crt_allow_lockless,
                 region=self._crt_region,
+                sign_requests=self._crt_sign_requests,
             )
         except InvalidCrtTransferConfigError as exc:
             # boto3's explicit-'crt' validation (classic-only TransferConfig
@@ -1327,9 +1461,15 @@ class Transferrer:
         """Build the classic s3transfer manager, honoring threaded execution config."""
         _allow_if_none_match()
         _allow_inline_mpu_tagging()
+        _align_annotation_put_args()
+        _align_annotation_copy_error()
         config: Any = self._transfer_config
         if config is None:
-            config = S3TransferConfig()
+            # The library's own defaults, not s3transfer's bare ones: an omitted
+            # config must land on exactly the values a default-constructed
+            # TransferConfig carries, or the two drift (they differ in the
+            # download IO queue depth).
+            config = transferconfig.TransferConfig()
         executor_cls = None
         if not getattr(config, "use_threads", True):
             executor_cls = NonThreadedExecutor
@@ -1462,14 +1602,18 @@ class Transferrer:
         # Failed / skipped / cancelled items surface no captured response, but
         # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
-        if _is_cancellation(exc):
-            # An accepted item revoked by the engine shutdown (a fatal
-            # elsewhere, an immediate cancel, Ctrl-C): CANCELLED, not FAILED -
+        if _is_cancellation(exc, cancel_initiated=self._cancel_initiated):
+            # An accepted item revoked as a cancellation: classic s3transfer's
+            # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
+            # CRT cancel this run's token ordered. CANCELLED, not FAILED -
             # nothing is wrong with the item itself, and the run's outcome is
             # the exception the operation raises. Deliberately richer than
             # aws-cli, which drops cancelled items from output and counts;
             # first_error stays reserved for real failures (BatchError's
-            # diagnostic sample).
+            # diagnostic sample). Every other CRT cancel - the fatal /
+            # interrupt shutdown's, or one nobody ordered (a swallowed
+            # interrupt's trace) - falls through to the failure branch below,
+            # aws-cli's own classification (`_is_cancellation`).
             error = CancelledError(
                 str(exc) or "canceled",
                 operation=self._operation,
@@ -1534,11 +1678,18 @@ class Transferrer:
         record with aws's wording - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
+
+        Whole seconds only: aws-cli stamps its source timestamp through
+        ``timetuple`` / ``time.mktime``, which drops the sub-second part, and an
+        endpoint whose listing carries milliseconds (MinIO and other
+        S3-compatible servers - real S3 lists whole seconds) would otherwise
+        leave a stamp that ``--exact-timestamps`` accepts here and rejects
+        there.
         """
         if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dest_path, item.mtime.timestamp())
+            _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
         except Exception as exc:
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
@@ -2171,6 +2322,39 @@ class _PaginatingAnnotationClient:
             return self._source_client.get_object_annotation(**kwargs)
 
 
+class _AnnotationWriteWatcher:
+    """Destination-client stand-in recording each PutObjectAnnotation outcome.
+
+    Upstream s3transfer writes the annotations inside its CompleteMultipartUpload
+    task and keeps the per-name outcomes only as formatted text inside the
+    ``S3CopyFailedError`` it raises, so aws-cli's wording cannot be rebuilt from
+    that exception. Standing in for the destination client for the duration of
+    that one call records the same two lists upstream builds - the names written,
+    in write order, and ``(name, message)`` for the ones that failed - without
+    changing anything it sends: the write is delegated untouched and a failure is
+    re-raised, leaving upstream's loop to decide that it continues and raises at
+    the end. Every other attribute is the real client's.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.written: list[str] = []
+        self.failed: list[tuple[str, str]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def put_object_annotation(self, **kwargs: Any) -> Any:
+        name = kwargs.get("AnnotationName", "")
+        try:
+            response = self._client.put_object_annotation(**kwargs)
+        except Exception as exc:
+            self.failed.append((name, str(exc)))
+            raise
+        self.written.append(name)
+        return response
+
+
 class _SetMetadataDirectiveProps:
     """Carry source metadata into a multipart copy (aws subscriber port).
 
@@ -2263,6 +2447,125 @@ def _allow_inline_mpu_tagging() -> None:
         CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST.remove("Tagging")
     except ValueError:
         pass
+
+
+def _align_annotation_put_args() -> None:
+    """Drop ``ChecksumAlgorithm`` from s3transfer's PutObjectAnnotation args.
+
+    ``copy_props=ALL`` rides upstream's native annotation write path (section 4
+    of design/transfer.md), which forwards ``PUT_OBJECT_ANNOTATION_ARGS`` from
+    the copy's ``extra_args``. aws-cli writes annotations from its own
+    subscriber and maps only ``RequestPayer`` there, so a run that also passes
+    ``--checksum-algorithm`` would put an extra checksum header on every
+    PutObjectAnnotation that aws does not send. Removed EAFP-style for the same
+    reason as `_allow_inline_mpu_tagging`: the table is process-shared.
+    (``ExpectedBucketOwner``, the other extra, has no ``aws s3`` option behind
+    it and never reaches the copy's ``extra_args``.)
+
+    Being process-shared also bounds what these patches may do: they stay
+    inert for a plain s3transfer caller in the same process unless it passes
+    the affected argument itself (here, ``ChecksumAlgorithm`` on an annotated
+    copy). A patch that would flip such a caller's *default* behavior is out -
+    which is why upstream's ``PRESERVED_METADATA_FIELDS`` is left untouched
+    and the explicit-COPY multipart case is handled per request instead
+    (`Transferrer._submit_copy`'s directive flip).
+    """
+    put_args: list[str] | None = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
+    if put_args is None:
+        return
+    try:
+        put_args.remove("ChecksumAlgorithm")
+    except ValueError:
+        pass
+
+
+def _annotation_copy_error(
+    bucket: str, key: str, written: list[str], failed: list[tuple[str, str]]
+) -> S3CopyFailedError:
+    """Word a partial annotation-write failure the way aws-cli does.
+
+    aws-cli raises its own ``AnnotationCopyError`` from the subscriber that
+    writes the annotations; riding upstream's native write path instead
+    (section 4 of design/transfer.md) surfaces s3transfer's own text, which
+    lists the names as Python reprs, carries each error as an exception repr,
+    and omits the sentence stating that the copied object was kept. Only the
+    text is rebuilt: the exception type upstream raises is reused, so the
+    taxonomy translation, the exit code, and the untouched destination are
+    exactly what they were.
+
+    The shape is measured against aws, not inferred: names written join with
+    ``", "`` and collapse to ``(none)`` when the first write already failed,
+    failures join with ``"; "`` as ``name: message``, and both keep the order
+    the source listing gave.
+    """
+    from s3transfer.exceptions import S3CopyFailedError
+
+    written_names = ", ".join(written) or "(none)"
+    failed_descriptions = "; ".join(f"{name}: {message}" for name, message in failed)
+    return S3CopyFailedError(
+        f"Failed to copy all annotations to s3://{bucket}/{key}. "
+        f"The object was copied successfully and was not deleted. "
+        f"Annotations written: {written_names}. "
+        f"Annotations that failed: {failed_descriptions}."
+    )
+
+
+def _align_annotation_copy_error() -> None:
+    """Give upstream's annotation write path aws-cli's failure wording.
+
+    The wording cannot be repaired downstream: s3transfer formats the succeeded
+    and failed names into its ``S3CopyFailedError`` message and keeps no
+    structured record of them, and the per-name errors survive only as reprs
+    inside that string. So the outcomes are recorded where they happen, by
+    wrapping the destination client the write loop uses
+    (`_AnnotationWriteWatcher`) for the length of one ``_apply_annotations``
+    call and re-raising with `_annotation_copy_error`'s text.
+
+    Like the other alignments this patches a process-shared object, so it stays
+    inert for a plain s3transfer caller: the wrapping and the re-wording happen
+    only when the copy carries this module's own annotation subscriber. Both
+    lookups are `getattr` guards - the write path is upstream-private, and an
+    s3transfer that reshapes or drops it degrades to upstream's own wording
+    rather than failing at manager build (a version without it cannot run
+    ``copy_props=ALL`` at all; `annotations_copy_unsupported_reason` refuses
+    the mode up front there).
+
+    Re-entrant by identity rather than a flag: our replacement is defined in
+    this module, so a second call recognizes it and stops. Two threads building
+    their first manager at once can both read the original and both install a
+    wrapper around it, but never a wrapper around a wrapper - the marker is the
+    installed function itself, which only becomes visible once it is in place.
+
+    The replaced exception is not chained: it is the same failure carrying a
+    worse message, and the per-annotation errors it was built from were already
+    swallowed by upstream's write loop, so there is nothing underneath to keep.
+    """
+    task_cls: Any = getattr(s3transfer_copies, "CopyCompleteMultipartUploadTask", None)
+    original = getattr(task_cls, "_apply_annotations", None)
+    if original is None or original.__module__ == __name__:
+        return
+    from s3transfer.exceptions import S3CopyFailedError
+
+    def _apply_annotations(
+        task: Any, client: Any, call_args: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        if not any(
+            isinstance(sub, _SetAnnotations)
+            for sub in getattr(call_args, "subscribers", None) or ()
+        ):
+            return original(task, client, call_args, *args, **kwargs)
+        watcher = _AnnotationWriteWatcher(client)
+        try:
+            return original(task, watcher, call_args, *args, **kwargs)
+        except S3CopyFailedError:
+            if not watcher.failed:
+                # Some other write failure upstream words itself; leave it be.
+                raise
+            raise _annotation_copy_error(
+                call_args.bucket, call_args.key, watcher.written, watcher.failed
+            ) from None
+
+    task_cls._apply_annotations = _apply_annotations
 
 
 def _mpu_inline_tagging_supported() -> bool:

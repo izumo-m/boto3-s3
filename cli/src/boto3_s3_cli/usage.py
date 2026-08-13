@@ -49,7 +49,13 @@ def invalid_bucket_name_message(name: str = "") -> str:
     botocore-version-fragile regex tail. That truncation is a **recorded
     deviation** from the output parity charter, not a free choice
     (design/aws-cli-option-handling.md section 6,
-    docs/cli/aws-differences.md section 2); the rc is unaffected
-    (mb / rb 1, website 252).
+    docs/cli/aws-differences.md section 2).
+
+    It reaches only the reports synthesized here - the URIs the commands refuse
+    before a request is built (``mb s3://`` / ``mb s3:///key`` / ``rb s3://`` /
+    ``rm s3://``, and a ``website`` URI carrying a key). A name that reaches
+    botocore's own check is never routed through this function, so both tools
+    print botocore's full report for it, tail included (measured). The rc is
+    unaffected either way: ``mb`` / ``rb`` / ``rm`` 1, ``website`` 252.
     """
     return f'Parameter validation failed:\nInvalid bucket name "{name}"'

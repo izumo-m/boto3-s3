@@ -143,9 +143,14 @@ also read as `'auto'`) with the same rules as boto3.
     `ca_bundle` config variable > `REQUESTS_CA_BUNDLE` > botocore's
     `get_cert_path(True)`), so both engines trust the same roots and every
     CLI client passes the verify half of the compatibility check below
-  - credentials = no provider if `signature_version is UNSIGNED`
-    (`--no-sign-request`), otherwise
-    `BotocoreCRTCredentialsWrapper(client._get_credentials())`
+  - credentials = decided by the `sign_requests` declaration when the caller
+    makes one (aws-cli's `sign_request` parameter: `False` = no provider,
+    `True` = `BotocoreCRTCredentialsWrapper(client._get_credentials())`);
+    undeclared (`None`, the default) derives boto3's rule from the client -
+    no provider if `signature_version is UNSIGNED`, otherwise the wrapper.
+    No new singleton field encodes the mode: `_CrtS3Client.cred_wrapper`'s
+    presence already does, so the compatibility pin rejects a later request
+    declaring the other mode (classic fallback, never a wrong-mode transfer)
   - serializer session = the caller's session (`S3(session=)` ->
     `Transferrer(session=)` -> `create_crt_transfer_manager(session=)`), falling
     back to boto3's default session when one exists, then to a fresh botocore
@@ -157,10 +162,12 @@ also read as `'auto'`) with the same rules as boto3.
     with the region and endpoint (the serializer merges
     `signature_version=UNSIGNED` on top). This keeps a `None` endpoint's
     per-request re-resolution under the caller's configuration rather than
-    stock botocore's defaults: us-east-1 stays on the regional endpoint like
-    the classic engine's `us_east_1_regional_endpoint` override (one Host
-    across engines), and addressing-style and accelerate/dualstack settings
-    carry over the same way
+    stock botocore's defaults: addressing-style and accelerate/dualstack
+    settings carry over that way, while us-east-1 stays on the regional
+    endpoint through the session instead - the serializer builds its own client
+    from the session it is handed, so the CLI's session-level
+    `us_east_1_regional_endpoint` pin (cli.md section 4 item 3) reaches it as it
+    reaches every other client (one Host across engines)
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
@@ -206,8 +213,8 @@ A port of aws-cli `TransferManagerFactory._compute_transfer_client_type`.
 |---|---|
 | `paths_type == 's3s3'` | `classic` (unconditional; CRT has no copy) |
 | `preferred == 'classic'` | `classic` |
-| `preferred == 'crt'` and awscrt present and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
-| `preferred == 'crt'` and awscrt **absent** | `ConfigurationError` (rc 253, section 6) |
+| `preferred == 'crt'` and awscrt present (>= 0.19.18) and s3transfer >= 0.8.0 | `crt` (acquires the lock but ignores the result = same shape as aws-cli) |
+| `preferred == 'crt'` and awscrt **absent or too old** | `ConfigurationError` (rc 253, section 6) |
 | `preferred == 'crt'` and s3transfer **< 0.8.0** (the supported floor predates it) | `ConfigurationError` (rc 253, the same clean degradation) |
 | `preferred == 'auto'` and `is_optimized_for_system()` and the lock is acquirable | `crt` (an s3transfer without the CRT surface silently resolves `classic`) |
 | otherwise (`auto` with non-optimized / lock contention) | `classic` |
@@ -220,7 +227,8 @@ also follows `preferred`).
 ### Building the `TransferConfig` (`build_transfer_config`)
 
 It passes **only the keys explicitly set** in `[s3]` to the `TransferConfig` ctor,
-plus the always-passed, already-resolved `preferred_transfer_client`
+plus the always-passed, already-resolved `preferred_transfer_client` - and,
+under CRT, one derived pin described below
 (an unset tuning key stays at boto3's `UNSET_DEFAULT` sentinel = "part_size
 only when `multipart_chunksize` is explicit" holds).
 
@@ -232,21 +240,41 @@ keys).
   in the boto3 ctor, it is attached afterward onto the `max_request_queue_size`
   attribute, and `max_in_memory_upload/download_chunks` is fixed at 6 (the value
   the aws-cli factory permanently installs for classic). `max_io_queue_size`
-  (the download disk-writer's buffered-chunk cap) is fixed at 1000: aws-cli's
-  bundled s3transfer defaults to 1000 and no `[s3]` key maps to it, while
-  boto3's `TransferConfig` overrides the same s3transfer default down to 100.
+  (the download disk-writer's buffered-chunk cap) needs no such attachment: the
+  library's `TransferConfig` already defaults to the 1000 aws runs at - its
+  bundled s3transfer's own default, which no `[s3]` key maps to - where boto3's
+  class alone would have dialed the same default down to 100.
 - **Resolved to crt**: only the keys the CRT client actually reads
   (`multipart_chunksize` / `target_bandwidth` / `should_stream` /
   `disk_throughput` / `direct_io` = those that aws-cli `_create_crt_client`
-  references). The classic-only keys (`io_chunksize` / `max_bandwidth` /
+  references), plus one derived pin: an explicit `multipart_chunksize` is also
+  passed as the ctor's `multipart_threshold`, raised to S3's 5 MiB minimum part
+  size. aws sends no per-request threshold on the CRT lane and aws-c-s3 falls
+  back to `max(part size, 5 MiB)`, so that value *is* aws's effective threshold
+  - while the installed s3transfer stamps the config's **resolved** threshold
+  onto every CRT put, which unpinned would stamp the 8 MiB default and
+  multipart a file aws single-puts. The floor is what keeps a chunksize below
+  5 MiB from doing the same in the other direction (a 1 MiB chunksize leaves
+  aws single-putting up to 5 MiB). With no explicit chunksize the stamped
+  default equals aws-c-s3's default part size (the same effective cutoff), so
+  no pin is needed. One nuance behind that equality: aws passes
+  `part_size=None` and lets aws-c-s3 resolve its *dynamic* default, whose
+  fallback constant is the same 8 MiB - measured 2026-08-04 (MinIO, explicit
+  `crt`, no chunksize): both tools single-put an exactly-8-MiB file and
+  multipart 9 MiB, so the cutoffs coincide here and aws-c-s3's comparison is
+  strictly-greater. A host whose dynamic default resolved differently would
+  part the two cutoffs; that residual is the bundled-vs-pip engine family
+  (charter exception 3), recorded rather than pinned. The `[s3]`
+  `multipart_threshold` key itself stays ignored either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
-  attributes (queue size, in-memory chunk cap, download IO queue depth) are
+  attributes (queue size, in-memory chunk cap) are
   **not passed**. This is to
   match aws-cli ignoring these on the CRT path, and to prevent the case where
   placing `io_chunksize` / `max_bandwidth` on a crt-preferred config gets rejected
   by boto3's `_validate_crt_transfer_config` and fails the run - the library
-  translates the rejection to a `ValidationError`, one `fatal error:` line,
-  rc 1 - where aws is rc 0 (avoiding a charter violation; e2e:
+  translates the rejection to a `ValidationError`, which the engine
+  materialization ahead of the run (below) surfaces at rc 252 - where aws is
+  rc 0 (avoiding a charter violation; e2e:
   `test_crt_ignores_classic_only_config`).
 
 cp / mv / sync **and rm** call `transferargs.resolve_transfer_config(ctx, s3,
@@ -295,7 +323,15 @@ credentials`.
 The split of section 1 decides where the difference is absorbed: **the library
 keeps boto3's rule and the CLI opts out of it**, through
 `S3(crt_allow_absent_credentials=True)` (`clientfactory.build_s3`), which
-threads to `create_crt_transfer_manager(allow_absent_credentials=...)`. Two
+threads to `create_crt_transfer_manager(allow_absent_credentials=...)`. The
+signing posture is declared the same way: aws-cli's CRT factory attaches a
+credentials provider on its `sign_request` parameter alone - the per-client
+`Config(signature_version='s3v4')` that `--sse aws:kms` adds reaches its
+botocore client only - so aws itself is inconsistent across engines for
+`--no-sign-request --sse aws:kms` (anonymous on CRT, signed on classic), and
+`build_s3` mirrors both halves by declaring
+`S3(crt_sign_requests=not args.no_sign_request)` while the classic-lane
+signature logic stays as clientfactory resolves it. Two
 properties make that opt-in narrow enough to live in the library:
 
 - it relaxes exactly one branch of the compatibility check - a client with no
@@ -313,7 +349,7 @@ contradict section 1, where the CLI resolves the engine and the library builds
 it. Carrying the flag on `TransferConfig` would reach the same code with no
 plumbing, but that class is transfer *tuning*, and a compatibility-posture
 boolean does not belong in it. `S3` already declares one such posture
-(`wait_on_interrupt`), so it is where the second one goes.
+(`reusable_after_interrupt`), so it is where the second one goes.
 
 Only uploads reach this surface - a local source or a stdin stream alike, both
 measured byte-for-byte. A download or a sync fails earlier, at the botocore
@@ -350,6 +386,26 @@ one call site where aws's behavior is known and measured -
 rendering: an empty detail prints `boto3-s3: [ERROR]:` with **no** trailing
 space, aws's `format_error_message` branch.
 
+### Building without the cross-process lock
+
+aws-cli's factory acquires the cross-process CRT lock best-effort: under an
+explicit `crt` preference it builds the CRT client whether or not the
+acquisition succeeded, so every construction-time failure (a bad `--ca-bundle`,
+the region assertion above) surfaces under contention exactly as it does
+without it. boto3 instead answers a held lock with the silent classic
+fallback - which would also swallow those failures and, on a dryrun, report
+success where aws exits 255 (measured 2026-08-01). Same split as the two
+postures above: the library keeps boto3's rule and the CLI opts out through
+`S3(crt_allow_lockless=True)` (`clientfactory.build_s3`), threaded to
+`create_crt_transfer_manager(allow_lockless=...)`. The opt-in is scoped to an
+explicit `'crt'` preference - `auto` resolves classic under contention on aws
+too - and to the lock alone: every identity pin of the compatibility check is
+unchanged. The scoping survives construction: a singleton built under the
+opt-in holds no lock, so a later lock-respecting request (an `auto`, or a
+default-posture explicit `'crt'`) re-attempts the acquisition and rides the
+singleton only once the lock is held - classic under live contention - rather
+than inheriting the opt-in through the process singleton.
+
 ## 5. Charter treatment
 
 The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
@@ -380,6 +436,15 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   from how credentials are handled. A user can observe it, so it is recorded
   in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
   (testing.md section 9's recording rule); the mechanism stays here.
+- **A plain-HTTP endpoint named only by the environment**: aws decides its CRT
+  client's `use_ssl` from `--endpoint-url` alone, so an `http://` endpoint
+  supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer
+  dies with `AWS_IO_SOCKET_CLOSED`, where `_derive_endpoint` reads the scheme
+  off the endpoint the client actually resolved and the same run transfers.
+  The user sees a different exit code and a different S3 state, so this one is
+  recorded in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
+  too (testing.md section 9's recording rule); the measurement and the
+  mechanism stay in section 3.
 - **CRT configured x no resolvable region**: aligned, no longer a divergence.
   aws's factory hands `create_s3_crt_client` whatever its region chain
   answered, unvalidated, so an unresolved region reaches
@@ -405,10 +470,41 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
     boto3 does (faithful). This is a deliberate exception to the backend-exception
     translation at the library boundary (exceptions.md section 1) - to reproduce boto3's
     behavior.
-- **Explicit crt x lock contention**: aws forces CRT; our library does boto3's
-  faithful silent classic fallback. The output and rc are identical for both
-  engines (proven), so no observable charter is broken - only throughput is
-  affected.
+- **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
+  and the library default - silently falls back to classic. When the
+  construction succeeds the two are indistinguishable in output and rc
+  (proven; only throughput differs), but a construction-time failure surfaces
+  only on aws's path - the fallback would run classic and, on a dryrun, exit 0
+  where aws exits 255 (measured 2026-08-01, a held lock plus a bad
+  `--ca-bundle`). The CLI therefore opts into aws's posture with
+  `S3(crt_allow_lockless=True)` (section 4, "Building without the
+  cross-process lock"); library callers keep boto3's fallback by default.
+- **Ctrl-C and fatals on the CRT lane**: pip s3transfer's CRT manager
+  discards a drain-time `KeyboardInterrupt` - its coordinator converts the
+  interrupt into `cancel()`, the cancellation error replaces it, and its
+  shutdown drops that too - where the classic manager re-raises it. aws is
+  built to survive that loss: its per-item subscribers classify every
+  non-`CancelledError` outcome as a failure, so a CRT run cut short - a
+  drain-time Ctrl-C, a Ctrl-C in the submission window, a fatal folding the
+  manager mid-run - prints `upload failed: ... AWS_ERROR_S3_CANCELED: Request
+  successfully cancelled` per in-flight item at rc 1 (all three measured
+  2026-08-01; aws's own classic lane prints `cancelled: ctrl-c received` or
+  one `fatal error:` line instead - the two aws lanes differ). This library
+  takes the same rule at the same place: every CRT cancellation classifies
+  `FAILED` unless this run's `CancelToken` ordered it
+  (`Transferrer._cancel_initiated` - the one revocation aws has no
+  counterpart for, kept `CANCELLED`; "ordered" means the token's own
+  `CancelledError` forced the fold or its escalation issued the cancel, so a
+  fatal or interrupt folding the manager stays `FAILED` even with the token
+  already cancelled - design/opresult.md), so the CLI streams aws's per-item
+  lines and the classic lane is untouched. Two residuals: a library caller on the
+  swallowed-interrupt window gets `BatchError`, not the `KeyboardInterrupt`
+  ([`opresult.md`](./opresult.md)); and a submission-window Ctrl-C ends with
+  the CLI's `cancelled: ctrl-c received` line where aws ends with an empty
+  `fatal error:` line (its recorder renders the `KeyboardInterrupt`, whose
+  `str()` is empty, as an error result) - the per-item lines and rc 1 match,
+  and the closing line stays ours deliberately (decided 2026-08-01; recorded
+  in docs/cli/aws-differences.md section 2).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
   `create_s3_crt_client`'s signature rather than a version, so the keys start
@@ -421,6 +517,24 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
   past 0.16.
+- **Empty / whitespace-only `verify`**: pip s3transfer >= 0.19.2 rejects an
+  empty or whitespace-only `verify` string outright with `InvalidConfigError`,
+  where aws's bundled fork reads the empty string as falsy and turns TLS
+  verification off, letting the transfer proceed - measured 2026-08-02, a dead
+  endpoint and `--ca-bundle ""`: aws 2.36.1 runs on to
+  `AWS_IO_SOCKET_CONNECTION_REFUSED: socket connection refused` at rc 1, and
+  so does this library once `_derive_verify` normalizes the empty string to
+  `False`, uniformly across pip s3transfer versions (the classic lane needs no
+  such normalization - botocore gives the empty string the same falsy read on
+  both sides). A whitespace-only value stays through and still fails, since
+  aws attempts it as a CA-bundle path too, but the shape now depends on the
+  installed s3transfer: on 0.19.0 this library's `[Errno 2] No such file or
+  directory: '   '` at rc 255 matches aws's own `[Errno 2] No such file or
+  directory: '   '` at rc 255 exactly; on 0.19.2 the upfront check fires first
+  and this library's `Invalid CA bundle: ...` at rc 255 diverges from aws's
+  `[Errno 2] No such file or directory: '   '` at rc 255 - an engine-rooted
+  divergence under `overview.md` section 3's third exception (measured
+  2026-08-02).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).

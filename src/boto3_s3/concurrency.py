@@ -14,7 +14,7 @@ Cleanup is cooperative -- the worker checks a stop flag between puts. The
 owner must exit the `prefetch` context when it stops consuming; context exit
 drops buffered pages and waits for a page pull already in progress before
 returning, so no worker survives the operation. The single opt-out is
-``wait_on_interrupt=False`` for apps that treat a Ctrl-C as process-fatal
+``reusable_after_interrupt=False`` for apps that treat a Ctrl-C as process-fatal
 (see `prefetch`).
 """
 
@@ -40,6 +40,32 @@ _END: object = object()
 # idle worker does not spin.
 _STOP_POLL_SECONDS = 0.1
 
+# Monotonic process-fatal marker. An operation running under
+# `reusable_after_interrupt=False` sets it (`mark_interrupt_unwinding`) the moment a
+# `KeyboardInterrupt` starts unwinding it, and every posture-False prefetch
+# teardown from then on abandons its worker instead of joining. Never cleared:
+# the posture's contract is that the interrupt terminates the process, and an
+# app that catches it and continues is already outside it (`prefetch`).
+_interrupt_unwinding = False
+
+
+def mark_interrupt_unwinding() -> None:
+    """Declare that a process-fatal ``KeyboardInterrupt`` unwind has begun.
+
+    Called by the high-level operations when a ``KeyboardInterrupt`` reaches
+    them under ``reusable_after_interrupt=False``. The point of a separate marker: a
+    `prefetch` context only *sees* the interrupt when it lands inside the
+    consumer's pull. When it lands anywhere else - a result callback, a
+    submission wait - the scan generator is merely closed (``GeneratorExit``),
+    either by the operation's ``finally`` or by the interpreter clearing the
+    unwound frame, and without the marker that teardown would join a page
+    pull the posture exists to abandon. Marking is a plain monotonic bool
+    write (thread-safe, and deliberately process-wide: a pooled scan
+    consumed on another thread must abandon on its own teardown too).
+    """
+    global _interrupt_unwinding
+    _interrupt_unwinding = True
+
 
 @contextmanager
 def prefetch(
@@ -47,7 +73,7 @@ def prefetch(
     *,
     queue_size: int = 4,
     cancel_token: CancelToken | None = None,
-    wait_on_interrupt: bool = True,
+    reusable_after_interrupt: bool = True,
 ) -> Generator[Iterator[T]]:
     """Run ``pages`` on a worker thread; yield a flattened iterator.
 
@@ -63,17 +89,21 @@ def prefetch(
     `cancel_token` stops the producer before its next page pull; a pull already
     in progress finishes, but its returned page is discarded.
 
-    ``wait_on_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
-    ``False`` and the context is unwinding on a ``KeyboardInterrupt``, the
-    final join is skipped and the daemon worker is abandoned to die with the
-    process - a page pull already in flight (which can block for a full
-    network timeout) no longer delays the exit, matching ``aws``'s immediate
-    death on Ctrl-C. Only safe when the interrupt terminates the process: an
-    app that catches it and continues would leave the worker pulling one more
-    page in the background. Every other exit - normal exhaustion, an early
-    break (``GeneratorExit``), ``SystemExit`` (``sys.exit()`` requests an
-    *orderly* termination, so it reclaims like any exception), any
-    ``Exception`` - always joins, keeping the no-surviving-worker contract.
+    ``reusable_after_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
+    ``False`` and the context is unwinding on a ``KeyboardInterrupt`` - seen
+    directly when the interrupt lands in the consumer's pull, or via
+    `mark_interrupt_unwinding` when it lands elsewhere and the teardown
+    arrives as a ``GeneratorExit`` - the final join is skipped and the daemon
+    worker is abandoned to die with the process: a page pull already in
+    flight (which can block for a full network timeout) no longer delays the
+    exit, matching ``aws``'s immediate death on Ctrl-C. Only safe when the
+    interrupt terminates the process: an app that catches it and continues
+    would leave the worker pulling one more page in the background (and,
+    marked, every later posture-False scan abandoning too). Every other exit
+    - normal exhaustion, an early break (``GeneratorExit``), ``SystemExit``
+    (``sys.exit()`` requests an *orderly* termination, so it reclaims like
+    any exception), any ``Exception`` - always joins, keeping the
+    no-surviving-worker contract.
 
     `queue_size` must be positive. `queue.Queue` treats non-positive values as
     unbounded, which would violate this helper's bounded-backpressure contract.
@@ -154,8 +184,10 @@ def prefetch(
         # finish rather than returning with a live worker. Botocore's request
         # timeouts bound a stuck S3 fetch; local/custom backends must likewise
         # make their page producer eventually return. The one exception is a
-        # terminal interrupt under wait_on_interrupt=False (see docstring).
-        if wait_on_interrupt or not interrupted:
+        # terminal interrupt under reusable_after_interrupt=False (see docstring) -
+        # whether it unwound through this context or was marked by the
+        # operation it landed in.
+        if reusable_after_interrupt or not (interrupted or _interrupt_unwinding):
             worker.join()
 
 

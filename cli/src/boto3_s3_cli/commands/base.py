@@ -94,9 +94,9 @@ class Context:
             def client(self) -> S3Client:
                 return client_factory(args)
 
-        # wait_on_interrupt=False like build_s3: the injected-client seam must
+        # reusable_after_interrupt=False like build_s3: the injected-client seam must
         # keep the CLI's process-fatal Ctrl-C posture.
-        return InjectedClientS3(wait_on_interrupt=False)
+        return InjectedClientS3(reusable_after_interrupt=False)
 
     def with_s3(self, s3: S3) -> Context:
         """A view of this context whose ``s3`` always returns *s3*.
@@ -187,7 +187,8 @@ def _expand_string_paramfile(
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
-    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    with paramfile.named_argument(name, operation=operation):
+        loaded = paramfile.get_paramfile(value, operation=operation)
     if loaded is None:
         return
     if isinstance(loaded, bytes):
@@ -227,7 +228,8 @@ def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation
     value = getattr(args, option, None)
     if isinstance(value, str):
         name = f"--{option.replace('_', '-')}"
-        loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            loaded = paramfile.get_paramfile(value, operation=operation)
         if loaded is not None:
             setattr(args, option, loaded)
 
@@ -247,7 +249,8 @@ def expand_positional_paramfile(
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
-    loaded = paramfile.get_paramfile(value, name=name, operation=operation)
+    with paramfile.named_argument(name, operation=operation):
+        loaded = paramfile.get_paramfile(value, operation=operation)
     if loaded is None:
         return
     if isinstance(loaded, bytes) and operation in {"mb", "rb", "presign"}:

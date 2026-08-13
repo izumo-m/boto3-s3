@@ -98,8 +98,9 @@ the same item's real outcome). Aggregate counts always agree with the records: t
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
 
-A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode,
-Ctrl-C) resolves the accepted transfer items like this:
+A cancellation (on the classic engine: a fatal elsewhere in the run,
+`CancelToken` immediate mode, a Ctrl-C; on the CRT engine: a `CancelToken`
+cancel only - see below) resolves the accepted transfer items like this:
 
 - accepted but not yet running - or abandoned mid-flight - reports
   `CANCELLED`, with `error` a `CancelledError` naming the cause;
@@ -108,6 +109,26 @@ Ctrl-C) resolves the accepted transfer items like this:
   landed, and s3transfer lets the completion win over the cancel mark;
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
+
+On the CRT engine, `CANCELLED` is reserved for the cancel this run's
+`CancelToken` ordered - the one revocation aws-cli has no counterpart for.
+Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
+`FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
+measured classification: a fatal or Ctrl-C folding its CRT manager counts
+every in-flight item failed (design/crt.md section 6). The tiebreak when both
+hold is the exception that forced the fold, not the token's state: a fatal or
+interrupt folding the manager keeps its cancels `FAILED` even if this run's
+token was already cancelled - only the token's own `CancelledError` surfacing
+through the submission loop, or its drain-time escalation issuing the cancel,
+marks the revocation ordered. That covers the
+revocation nobody ordered, too: pip s3transfer's CRT manager converts a
+Ctrl-C landing in its transfer drain into `cancel()` and discards the
+interrupt, so the items classified `FAILED` are the only evidence the run was
+cut short, and the run raises `BatchError` in place of the swallowed
+interrupt (on the other windows the run still ends with the fatal or the
+re-raised `KeyboardInterrupt` itself). The classic engine settles every
+revoked item with s3transfer's `CancelledError` shapes and re-raises a
+drain-time interrupt, so none of this arises there.
 
 A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
 items run to completion and report their real outcomes, so no `CANCELLED`

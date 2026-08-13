@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3"
-version = "0.9.0"
+version = "0.10.0"
 description = "A Python library providing `aws s3`-equivalent operations through its own Python API."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,9 @@ dependencies = [
     # section 2 (boto3 1.28 already requires it, so this is declarative).
     "botocore>=1.31",
     "s3transfer>=0.6.2",
+    # Imported directly (the local-mtime representability probe uses dateutil's
+    # tzlocal, like aws-cli); floor matches botocore's own dateutil pin.
+    "python-dateutil>=2.1",
     "typing-extensions>=4.6",
 ]
 
@@ -48,7 +51,7 @@ Changelog = "https://github.com/izumo-m/boto3-s3/blob/main/CHANGELOG.md"
 Issues = "https://github.com/izumo-m/boto3-s3/issues"
 
 [build-system]
-requires = ["uv_build>=0.11.14,<0.12.0"]
+requires = ["uv_build>=0.11.14,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -92,3 +95,8 @@ known-first-party = ["boto3_s3", "boto3_s3_cli", "tests", "benchmarks"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+# A test silent for 5 minutes dumps every thread's stack and keeps running: a
+# hang then pins its location in the CI log instead of a silent job kill. Far
+# above any legitimate test (the slowest bounded waits are ~180s subprocess
+# timeouts).
+faulthandler_timeout = 300

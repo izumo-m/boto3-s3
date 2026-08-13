@@ -8,6 +8,7 @@ the operation starts is rc 1 with one ``make_bucket failed:`` line, never 254
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.recorder import make_recording_client
 
 
 class _RaisingCreateClient:
@@ -171,6 +173,23 @@ class TestPostStartErrors:
             f'make_bucket failed: {path} Parameter validation failed:\nInvalid bucket name ""\n'
         )
 
+    def test_a_name_botocore_rejects_keeps_the_whole_report(self) -> None:
+        # The one-line report above is synthesized only for the empty-bucket
+        # form. A name that reaches botocore's own check carries botocore's
+        # whole report, regex tail included, byte for byte as aws prints it
+        # (measured; docs/cli/aws-differences.md section 2). A real client is
+        # needed for the client-side validation, and none of it hits the
+        # network.
+        import boto3
+
+        client = boto3.session.Session().client("s3", region_name="us-east-1")
+        result = run_cli_in_process(["mb", "s3://in!valid"], ctx=client_ctx(client))
+        assert result.rc == 1
+        assert result.stderr.startswith(
+            "make_bucket failed: s3://in!valid Parameter validation failed:\n"
+            'Invalid bucket name "in!valid": Bucket name must match the regex '
+        )
+
     def test_create_failure_is_rc_1_not_254(self) -> None:
         client = _RaisingCreateClient(client_error("BucketAlreadyOwnedByYou", 409, "CreateBucket"))
         result = run_cli_in_process(["mb", "s3://b"], ctx=client_ctx(client))
@@ -178,3 +197,20 @@ class TestPostStartErrors:
         assert result.stdout == ""
         assert result.stderr.startswith("make_bucket failed: s3://b ")
         assert "BucketAlreadyOwnedByYou" in result.stderr
+
+    def test_an_unwritable_success_line_is_rc_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's local catch spans the success line, so failing to write it is
+        # just another mb failure. Measured on the pinned aws with a closed
+        # stdout (`aws s3 mb s3://b 1>&-`, where sys.stdout is None): rc 1 and
+        # this exact line, where reaching the dispatcher would give 255.
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", None)
+        rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "make_bucket failed: s3://b 'NoneType' object has no attribute 'write'\n"
+        )
+        # The bucket exists all the same - only the report was lost, like aws.
+        assert [c.operation for c in calls] == ["CreateBucket"]

@@ -40,3 +40,21 @@ def test_readable_positional_fileb_keeps_command_specific_aws_bug(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert stderr_token in captured.err
+
+
+def test_website_empty_fileb_payload_dies_at_the_index(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # aws's bytes-as-list index dies at the index itself for an empty
+    # payload (`b""[0]` is IndexError), one step before the int that has no
+    # startswith (measured: rc 255, `index out of range`).
+    ref = tmp_path / "empty.bin"
+    ref.write_bytes(b"")
+
+    result = cli.main(["website", f"fileb://{ref}"], ctx=built_client_ctx())
+
+    assert result == 255
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[ERROR]: index out of range" in captured.err

@@ -46,6 +46,7 @@ from boto3_s3_cli.commands.base import (
     expand_option_paramfile,
     parse_integer_option,
 )
+from boto3_s3_cli.output import uni_write
 from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
@@ -367,7 +368,8 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     if isinstance(grants, list):
         items = cast("list[object]", grants)
         if len(items) == 1 and isinstance(items[0], str):
-            loaded = paramfile.get_paramfile(items[0], name="--grants", operation=operation)
+            with paramfile.named_argument("--grants", operation=operation):
+                loaded = paramfile.get_paramfile(items[0], operation=operation)
             if loaded is not None:
                 args.grants = loaded
 
@@ -393,15 +395,21 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
     shorthand machinery (measured: ``--metadata file:///no/x --page-size
     abc`` is the coercion's 255, while a direct option's bad paramfile wins
     with 252). A ``file://`` whole-value reference loads the map text (252 on
-    a missing file); a ``fileb://`` one loads bytes and then aws crashes
-    indexing them in its shorthand parser (measured: rc 255 with this exact
-    message, the ``int`` from a bytes index reaching ``in`` a string), so a
-    missing file is still the load 252 but an existing one is the 255.
+    a missing file); a ``fileb://`` one loads bytes and then aws crashes in
+    its shorthand parser (measured: rc 255 either way - a non-empty payload
+    indexes to an ``int`` that reaches ``in`` a string, an empty one fails a
+    step earlier with the bytes-vs-str ``TypeError``), so a missing file is
+    still the load 252 but an existing one is the 255.
     """
     if args.metadata is None:
         return
     if args.metadata.startswith("fileb://"):
-        paramfile.read_binary_paramfile(args.metadata, name="--metadata", operation=operation)
+        with paramfile.named_argument("--metadata", operation=operation):
+            payload = paramfile.read_binary_paramfile(args.metadata, operation=operation)
+        if not payload:
+            raise InvalidValueError(
+                "a bytes-like object is required, not 'str'", operation=operation
+            )
         raise InvalidValueError(
             "'in <string>' requires string as left operand, not int", operation=operation
         )
@@ -606,15 +614,19 @@ def resolve_case_conflict(
             operation=operation,
         )
     # aws emits this via ``uni_print`` with no trailing newline (measured: the
-    # message ends at ``...html.`` and the next stderr output concatenates).
-    sys.stderr.write(
+    # message ends at ``...html.`` and the next stderr output concatenates);
+    # uni_write is that port - same bytes plus the flush that keeps the
+    # newline-less warning from sitting in a block-buffered stderr (a
+    # redirected run) until process exit, behind output aws prints after it.
+    uni_write(
+        sys.stderr,
         "warning: Recursive copies/moves from an S3 Express directory "
         "bucket to a case-insensitive local filesystem may result in "
         "undefined behavior if there are S3 object key names that differ "
         "only by case. To disable this warning, set the `--case-conflict` "
         "parameter to `ignore`. For more information, see "
         "https://docs.aws.amazon.com/cli/latest/topic/"
-        "s3-case-insensitivity.html."
+        "s3-case-insensitivity.html.",
     )
     return CaseConflictMode.IGNORE
 
@@ -681,9 +693,11 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     the load 252.
     """
     if value.startswith("file://"):
-        return paramfile.read_text_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            return paramfile.read_text_paramfile(value, operation=operation)
     if value.startswith("fileb://"):
-        loaded = paramfile.read_binary_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            loaded = paramfile.read_binary_paramfile(value, operation=operation)
         raise ValidationError(
             "Parameter validation failed:\n"
             f"Invalid type for parameter input, value: {loaded!r}, "
@@ -703,7 +717,8 @@ def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
     key is *not* a usage error.
     """
     if value.startswith("fileb://"):
-        return paramfile.read_binary_paramfile(value, name=name, operation=operation)
+        with paramfile.named_argument(name, operation=operation):
+            return paramfile.read_binary_paramfile(value, operation=operation)
     return resolve_text_paramfile(value, name, operation=operation)
 
 
@@ -734,7 +749,7 @@ def resolve_locations(
         # build_s3_storage applies the strict aws-cli validation (rc 252
         # ahead of the pipeline) with the measured bucket-less carve-out. The
         # CLI's process-fatal Ctrl-C posture is not a storage concern:
-        # build_s3 declares it once (S3's wait_on_interrupt).
+        # build_s3 declares it once (S3's reusable_after_interrupt).
         return build_s3_storage(arg, client=client_for, page_size=page_size)
 
     def _local(path: str) -> LocalStorage:

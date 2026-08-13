@@ -152,7 +152,10 @@ options and have a `request_payer` parameter of their own
 gets a `ContentType` guessed from the source entry's filename. `False`
 suppresses the guess. It applies to the upload route only — a copy never
 guesses, and a stream upload has no filename to guess from, so it is
-unaffected either way.
+unaffected either way. The extension table is pinned to the one the official
+`aws` distribution carries, so the guess does not change with the interpreter
+boto3-s3 runs on; a local `mime.types` file is still read on top of it, as `aws`
+reads it.
 
 `force_glacier_transfer` and `ignore_glacier_warnings` both default to `False`
 and act on the archived-object gate that downloads and copies apply.
@@ -240,8 +243,15 @@ class TransferConfig(boto3.s3.transfer.TransferConfig):
 Each base parameter is forwarded to boto3 only when it is not `None`, so
 passing `None` is exactly equivalent to omitting the argument and lets the base
 class supply its own default across every supported boto3. The resulting
-defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, and a
-concurrency of 10. `use_threads=False` selects a non-threaded executor for the
+defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, a
+concurrency of 10, and a 1000-deep download IO queue. That last one is the sole
+default that leaves boto3's own value (100): it caps the read parts buffered
+for the disk writer, so boto3's figure would give a slow disk a tenth of
+`aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
+`boto3.s3.transfer.TransferConfig` keeps it, as it keeps all of boto3's
+defaults. (Not under an explicit `preferred_transfer_client="crt"`: an
+explicitly-set `max_io_queue` is a classic-only option there and fails
+boto3's own CRT validation; the default needs no override on that lane.) `use_threads=False` selects a non-threaded executor for the
 classic engine, as in boto3.
 
 The library never reads the `[s3]` section of `~/.aws/config` — tuning comes
@@ -309,7 +319,8 @@ class ScanOptions:
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
-    wait_on_interrupt: bool = True
+    reusable_after_interrupt: bool = True
+    read_ahead: bool = True
 ```
 
 It is frozen, so a modified copy is made with `dataclasses.replace`. That is
@@ -368,7 +379,7 @@ rollup, so those skips surface as warnings on the run instead of vanishing;
 `sync` walks both of its sides through one sink the two walks can invoke it
 concurrently — keep it thread-safe.
 
-`wait_on_interrupt` (default `True`) is the scan's Ctrl-C exit policy. `True`
+`reusable_after_interrupt` (default `True`) is the scan's Ctrl-C exit policy. `True`
 makes the scan's teardown wait for a page pull already in flight, so no
 enumeration worker survives the scan — what an application that may catch
 `KeyboardInterrupt` and keep using the process needs. `False` lets a
@@ -377,9 +388,24 @@ which matters when an in-flight network pull would otherwise hold the exit for
 a full timeout; it suits an application that treats Ctrl-C as process-fatal.
 The policy is scoped to `KeyboardInterrupt` alone — every other exit,
 `SystemExit` included, reclaims fully. The high-level operations overlay this
-field from `S3(wait_on_interrupt=...)`, where the application declares the
+field from `S3(reusable_after_interrupt=...)`, where the application declares the
 posture once ([`s3.md`](./s3.md)), so it reaches every scan they start; set it
 here only when calling `Storage.scan` directly.
+
+`read_ahead` (default `True`) is whether `scan` may read pages ahead of the
+consumer. `True` runs the page producer on a background worker, so the next
+page's I/O overlaps the current page's consumption. `False` pulls each page on
+the consuming thread at the moment the consumer reaches it — the mode for a
+consumer that **mutates what it is enumerating**, where a page read early would
+describe state that consumer has since changed. `sync` sets it on the
+destination walk when its `delete_filter` lane is on and that destination is a
+`LocalStorage`, so the walk sees the orphans the run has already removed —
+which is what makes a self-aliasing tree behave as `aws s3` does
+([`./operations/sync.md`](./operations/sync.md)). Nothing else asks for it, since
+the overlap is what keeps enumeration off the critical path. It is also the one
+knob the operations only ever *narrow*: a backend that seeds `read_ahead=False`
+in its `default_scan_options` — one whose listing must never run ahead of its
+own `delete` — keeps that setting through every operation.
 
 ## LocalScanOptions
 

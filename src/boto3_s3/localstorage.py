@@ -42,15 +42,18 @@ entry's type (``d_type``) so ``is_symlink`` costs no syscall, and caches one
 ``stat`` per entry that the vetting battery, the file/dir classification, and the
 ``LocalFileInfo`` build all read through
 ``entry_stat_result`` (one accessor, so overriding it -
-e.g. to lstat - re-points the whole walk at once). Where the platform supports it
+e.g. to lstat - re-points the whole scan at once; the yield-time re-stat is
+``restat_leaf``'s). Where the platform supports it
 (``LocalFileGenerator.have_dir_fd``, i.e. POSIX), the directory is opened
 once and scanned through its file descriptor, so every per-entry ``stat`` /
 readability probe is ``dir_fd``-relative (``fstatat`` - no kernel path re-walk);
 on Windows those APIs are absent, and the same code path falls back to a
 path-based scan whose ``FindNextFile`` data already supplies the attributes for
 free. The net effect is one ``stat`` per surviving entry (directories
-included - the kind is keyed on that same stat) plus aws-cli's one
-readability ``open`` per entry, versus the ~5
+included - the kind is keyed on that same stat), plus aws-cli's one
+readability ``open`` per entry and its one yield-time ``stat`` per leaf
+(``restat_leaf``, which reports the leaf as it is at the moment it is emitted),
+versus the ~5
 restats per entry a naive port makes. Every surviving ``LocalFileInfo`` carries
 the stat or lstat used to classify it as ``stat_result``
 and its ``d_type`` symlink flag as
@@ -69,8 +72,9 @@ The override seams, finest first - extend at the smallest layer that fits:
   mtime / loop key / ``stat_result``; override to lstat for a non-following /
   backup walk);
 - ``LocalFileGenerator.stat_info`` - one file entry's ``LocalFileInfo`` from
-  that stat (aws-cli ``_safely_get_file_stats``), and
-  ``LocalFileGenerator.dir_child`` its directory counterpart;
+  that stat, ``LocalFileGenerator.dir_child`` its directory counterpart, and
+  ``LocalFileGenerator.promoted_directory`` the directory record ``restat_leaf``
+  builds for a leaf that has become one;
 - ``LocalFileGenerator.classify_child`` - one ``os.DirEntry`` -> a
   ``WalkChild`` or a skip, the natural per-entry override point (owns the
   single stat: the no-follow / "does not exist" skips and the kind decision);
@@ -81,6 +85,11 @@ The override seams, finest first - extend at the smallest layer that fits:
 - ``LocalFileGenerator.scan_children`` - one directory enumerated, its children
   ``compare_key``-stamped, then ``finalize_children``\\ d (override to change *how*
   a directory is read, reusing ``classify_child`` / ``dir_child`` / the two above);
+- ``LocalFileGenerator.restat_leaf`` - the yield-time re-stat of one classified
+  leaf: gone -> warn-skip, a directory now -> descend, otherwise a refreshed
+  ``size`` / ``mtime`` (aws-cli's ``os.path.isdir`` +
+  ``_safely_get_file_stats``, which run in its descent loop; override to
+  ``return info`` in a walker whose children are not live filesystem paths);
 - ``LocalFileGenerator.walk_dir`` - the depth-first recursion yielding one
   page per directory file-run (override to prune a subtree or otherwise
   customize how the tree is descended);
@@ -100,6 +109,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, cast
@@ -122,12 +132,12 @@ if TYPE_CHECKING:
 # aws-cli EPOCH_TIME: the stamp used when a file's mtime cannot be represented.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# Boundary thresholds for the full-path leaf fallback (see
-# LocalFileGenerator.scan_children). The fast walk vets each entry through the
-# owning directory's fd (fstatat / openat), which re-anchors resolution and so
-# hides the ancestor symlink chain / long-path length that aws-cli's full-path
+# Boundary thresholds for the full-path fallback (see
+# LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
+# through the owning directory's fd (fstatat / openat), which re-anchors resolution
+# and so hides the ancestor symlink chain / long-path length that aws-cli's full-path
 # stat would trip on (ELOOP / ENAMETOOLONG). Near either OS limit a dir_fd-relative
-# probe can therefore admit a leaf the transfer then fails to open (rc 1) where
+# probe can therefore admit a child the transfer then fails to open (rc 1) where
 # aws warn-skips it (rc 2). These floors gate a full-path re-vetting so the two
 # agree; they sit well below the common OS limits (SYMLOOP_MAX ~32-40, PATH_MAX
 # 1024-4096) so a normal walk never crosses them, and correctness rests on the
@@ -210,15 +220,55 @@ def _is_readable_child(name: str, full: str, dir_fd: int | None, *, is_dir: bool
     return True
 
 
+def _local_zone_representable(ts: float) -> bool:
+    """Whether aws-cli's local-zone rendering of ``ts`` succeeds.
+
+    aws-cli derives a file's mtime as ``datetime.fromtimestamp(st_mtime,
+    tzlocal())`` and treats any failure as an invalid timestamp, so what counts
+    as representable is the *local* calendar's range - UTC's, shifted by the
+    zone's offset. dateutil's ``tzlocal`` is rebuilt per call the way aws-cli
+    does, so a process that changes ``TZ`` (and calls ``time.tzset``) follows;
+    the import is deferred because the whole dateutil package costs about as
+    much to import as boto3-s3 itself. dateutil ships with botocore, so it is
+    always installed.
+    """
+    from dateutil.tz import tzlocal
+
+    try:
+        datetime.fromtimestamp(ts, tzlocal())
+    except (ValueError, OSError, OverflowError):
+        return False
+    return True
+
+
+# datetime.min / datetime.max as epoch seconds, pulled in by two days - more
+# than any zone's UTC offset, so the local and UTC renderings of a timestamp
+# strictly between them either both succeed or both fail.
+_LOCAL_CHECK_FREE_LOW = -62135596800 + 172800
+_LOCAL_CHECK_FREE_HIGH = 253402300800 - 172800
+
+# Windows has no such quiet range: dateutil's DST probe goes through
+# time.localtime, which fails outright below the epoch there.
+_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
+
+
 def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
     """Size and tz-aware UTC mtime from a stat result (the shared derivation).
 
     An unrepresentable timestamp returns ``None`` for mtime - the caller's cue
-    for the epoch fallback. Represented in UTC per the ``FileInfo.mtime``
-    contract (aws-cli uses the local zone - same instant either way).
+    for the epoch fallback. Whether it is representable is decided the way
+    aws-cli decides it, in the host's local zone (``_local_zone_representable``);
+    the value itself is kept in UTC per the ``FileInfo.mtime`` contract. The two
+    zones only disagree near the ends of ``datetime``'s range, so outside those
+    bands the local rendering is skipped - this runs once per walked file.
     """
+    ts = st.st_mtime
     try:
-        mtime: datetime | None = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+        if (
+            _ALWAYS_CHECK_LOCAL_ZONE or not _LOCAL_CHECK_FREE_LOW <= ts <= _LOCAL_CHECK_FREE_HIGH
+        ) and not _local_zone_representable(ts):
+            return st.st_size, None
+        mtime: datetime | None = datetime.fromtimestamp(ts, tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         mtime = None
     return st.st_size, mtime
@@ -500,21 +550,52 @@ class LocalFileGenerator:
         ``compare_key`` is stamped in ``scan_children``; ``ScanOptions.filter``
         is ``list_file_pages``'s job on the yielded pages, not this method's.
 
+        Each leaf is re-stat'ed with ``restat_leaf`` just before its turn, the
+        aws-cli semantics of a name that changed since its parent's scan: gone is
+        warn-skipped, a directory by now is descended (with its own record ahead
+        of it in the complete view) instead of submitted as a file, and a leaf
+        that is still a leaf is emitted with the ``size`` / ``mtime`` it has at
+        that moment - all on the bare name the leaf sorted under.
+
         ``sym_depth`` is the number of followed symlinks on the path from the walk
         root down to ``dir_path`` (each descent into a symlinked directory adds
         one); it is threaded to ``scan_children`` so a leaf near the OS
         symlink-loop limit is re-vetted by full path (see there).
         """
         run: list[LocalFileInfo] = []
+        # One join per directory rather than per child: dir_path is an absolute
+        # directory path, so a child's path is this prefix plus its sort name.
+        prefix = dir_path if dir_path.endswith(os.sep) else dir_path + os.sep
         for sort_name, info, loop_key in self.scan_children(
             dir_path, strip=strip, options=options, notify=notify, sym_depth=sym_depth
         ):
+            # sort_name carries the trailing os.sep for a sub-directory (the sort
+            # suffix) and is the bare name for a leaf, so this path is spelled the
+            # way the child is addressed - which the loop warning and the warnings
+            # raised by the descent keep.
+            sub = prefix + sort_name
             if info.kind != FileKind.DIRECTORY:
-                run.append(info)
-                continue
-            # A sub-directory: sort_name carries the trailing os.sep (the sort
-            # suffix), so the child path and the loop warning read correctly.
-            sub = os.path.join(dir_path, sort_name)
+                fresh = self.restat_leaf(sub, info, options=options, notify=notify)
+                if fresh is None:
+                    # Gone (warned there), or an entry this view does not emit.
+                    continue
+                if fresh.kind != FileKind.DIRECTORY:
+                    run.append(fresh)
+                    continue
+                # The leaf became a directory between this parent's scan and its
+                # turn here, so the record came back promoted: descend it, by the
+                # bare name it sorted under (the separator was appended only to
+                # names that were directories at scan time) - the subtree lands
+                # where the leaf sorted, not where a directory of that name would
+                # have. Its identity for the cycle guard comes from the same
+                # yield-time stat, so the descent costs no further syscall.
+                info = fresh
+                promoted_stat = fresh.stat_result
+                loop_key = (
+                    (promoted_stat.st_dev, promoted_stat.st_ino)
+                    if promoted_stat is not None and promoted_stat.st_ino
+                    else None
+                )
             # The directory's own record in the complete view rides the page
             # flushed before its descent: it sorts
             # after the collected files and before anything under sub. Appended
@@ -561,6 +642,118 @@ class LocalFileGenerator:
                 )
         if run:
             yield run
+
+    def restat_leaf(
+        self,
+        path: str,
+        info: LocalFileInfo,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None:
+        """One classified leaf as it is at the moment it is emitted, or ``None`` to drop it.
+
+        The walk's single re-stat of an already classified child, and the whole
+        of what aws-cli does per name in its descent loop (``os.path.isdir``
+        then ``_safely_get_file_stats``): ``scan_children`` classified ``path``
+        as a leaf from the parent's ``os.scandir`` stat, and by the time
+        ``walk_dir`` reaches it - after every earlier sibling's whole subtree has
+        been read - the name may be gone, may have become a directory, or may
+        hold different bytes. One ``os.stat`` decides all three, so this costs
+        the syscall aws-cli spends here and no more:
+
+        - it fails (``ENOENT`` and the rest): the ``triggers_warning`` battery
+          runs on the path - normally ``File does not exist.``, rc 2 - and the
+          leaf is dropped, warned or not, like aws-cli's ``_safely_get_file_stats``
+          returning nothing. Without this the stale record was submitted and the
+          transfer failed to open it (rc 1);
+        - it says ``S_IFDIR``: the returned record is the promoted directory
+          (built from this same stat, which is the **followed** one
+          ``os.path.isdir`` takes), which ``walk_dir`` descends. Without this the
+          swapped name was submitted as a file (rc 1) and its children never
+          entered the stream, where aws-cli transfers them;
+        - otherwise: ``info`` itself, with ``size`` / ``mtime`` / ``stat_result``
+          refreshed from this stat, so what is transferred and what ``sync``
+          compares are the file as of its turn - aws-cli takes every leaf's size
+          and timestamp here, never at scan time. The unrepresentable-timestamp
+          fallback stamps ``EPOCH_TIME`` as ``stat_info`` does, and warns only
+          when the scan's stat was still representable, so one file draws
+          aws-cli's one warning rather than two.
+
+        ``is_symlink`` is left as classified: re-testing it would cost a second
+        syscall per leaf, and aws-cli carries no such flag.
+
+        A leaf whose classification stat is itself a symlink's (``S_IFLNK`` - the
+        complete no-follow view's ``symlink_child``, or an lstat-style
+        ``entry_stat_result`` override) is returned untouched: that walker keeps
+        a link as its own leaf and never descends or follows it, so a followed
+        re-stat would contradict its rule rather than report a change.
+
+        Override it to ``return info`` in a walker whose ``scan_children`` yields
+        entries that are not live filesystem paths (synthetic children, a virtual
+        source): the re-stat cannot apply there and the syscall is saved.
+
+        The reverse race - a directory that stopped being one - belongs to
+        ``scan_children``, where the failing ``os.open`` / ``os.scandir`` runs the
+        warning battery.
+        """
+        classified = info.stat_result
+        if classified is not None and stat_module.S_ISLNK(classified.st_mode):
+            return info
+        try:
+            st = os.stat(path)
+        except (OSError, ValueError):
+            # aws-cli runs its battery on the path the stat failed on and skips
+            # the leaf either way (a battery that finds nothing wrong - the race
+            # healed between the two calls - still yields no file stats).
+            self.triggers_warning(path, notify)
+            return None
+        if stat_module.S_ISDIR(st.st_mode):
+            is_link = os.path.islink(path)
+            if is_link and not options.follow_symlinks:
+                # Now a link to a directory, and this walk does not follow links:
+                # aws-cli descends (its isdir followed the link) and the
+                # recursion's own should_ignore_file then drops it with no
+                # warning, so the normal view emits nothing for the entry. The
+                # complete view keeps the leaf record it already has rather than
+                # lose the entry entirely.
+                return info if options.enumerate_all_entries else None
+            return self.promoted_directory(info, st, is_symlink=is_link)
+        size, mtime = _size_mtime(st)
+        if mtime is None:
+            if classified is None or _size_mtime(classified)[1] is not None:
+                # First unrepresentable now, so this is aws-cli's one warning for
+                # the file; if the scan's stat was unrepresentable too, stat_info
+                # already sent it.
+                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            mtime = self.EPOCH_TIME
+        info.size = size
+        info.mtime = mtime
+        info.stat_result = st
+        return info
+
+    def promoted_directory(
+        self, info: LocalFileInfo, st: os.stat_result, *, is_symlink: bool
+    ) -> LocalFileInfo:
+        """The ``DIRECTORY`` record for a leaf found to be a directory at its turn.
+
+        The yield-time counterpart of ``dir_child`` (the scan-time one), built by
+        ``restat_leaf`` from the same re-stat: ``st`` is the followed stat
+        aws-cli's ``os.path.isdir`` takes, and the key / ``compare_key`` are the
+        leaf's plus the separator the sort appends to a directory - so the
+        subtree lands where the leaf sorted rather than where a directory of that
+        name would have. ``info`` is the leaf record the scan built and
+        ``is_symlink`` whether the name is a link now (the walk knows only that
+        it was not one at scan time).
+        """
+        compare_key = info.compare_key
+        return LocalFileInfo(
+            key=info.key + "/",
+            kind=FileKind.DIRECTORY,
+            stat_result=st,
+            is_symlink=is_symlink,
+            compare_key=None if compare_key is None else compare_key + "/",
+        )
 
     def root_info(
         self,
@@ -644,16 +837,17 @@ class LocalFileGenerator:
         classification reads (``follow_symlinks`` / ``enumerate_all_entries``).
         A path contributes one child: a followed symlink describes its target;
         a no-follow symlink in the complete view describes the link itself. A
-        directory that cannot be opened or scanned
-        (a symlink cycle stopped by the kernel, an over-long path, or a race
-        after its parent vetted it readable) is skipped through the
-        ``triggers_warning`` battery - the aws-cli warning its full-path
-        vetting would emit - and yields an empty list; if the battery sees
-        nothing wrong, the ``OSError`` propagates instead. ``sym_depth`` (the
+        directory that cannot be opened or scanned - replaced, deleted or
+        chmod'd away since its parent vetted it - is skipped through the
+        ``triggers_warning`` battery on ``dir_path`` as passed, which is the
+        aws-cli warning its own re-test before descending would emit, and yields
+        an empty list (the walk goes on); if the battery sees nothing wrong, the
+        ``OSError`` propagates instead. ``sym_depth`` (the
         number of followed symlinks from the walk root down to ``dir_path``) lets
-        a file leaf near the symlink-loop / path-length limit be re-vetted by full
+        a child near the symlink-loop / path-length limit be re-vetted by full
         path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
-        rather than being admitted to fail at transfer-open.
+        rather than being admitted to fail at transfer-open or at its own
+        descent.
 
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe
@@ -681,22 +875,30 @@ class LocalFileGenerator:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
             scan = os.scandir(dir_fd if dir_fd is not None else dir_path)
         except OSError:
-            # The directory became unopenable even though its parent vetted it:
-            # deterministically (a symlink cycle the kernel stops with ``ELOOP``
-            # once a path accumulates SYMLOOP_MAX links - the per-entry vetting
-            # is dir-relative and resolves one link at a time, so it admits each
-            # level - or an over-long path), or by a race (deleted / chmod'd
-            # since). aws-cli vets children by *full path*, so its battery fails
-            # right here: run the same path battery for the same warning + rc 2
-            # (``ELOOP`` fails ``os.path.exists`` -> "File does not exist.").
-            # If the probes see nothing wrong (e.g. fd exhaustion resolved by the
-            # probe's close), re-raise like aws-cli's ``listdir`` would - never
-            # prune silently. Scoped to the open/scandir establishment only - a
-            # per-entry OSError (from a race mid-scan or an override's
-            # classify_child) propagates rather than dropping the directory.
+            # The directory stopped being an openable directory between its
+            # parent's scan and this descent - replaced by a file, deleted, or
+            # chmod'd away. aws-cli re-tests the child immediately before
+            # recursing into it, on the *separator-terminated* path its sort key
+            # carries: no longer a directory falls to ``_safely_get_file_stats``,
+            # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
+            # the battery, and still-a-directory-but-unreadable warns through the
+            # ``should_ignore_file`` at the top of the recursion. Establishing
+            # this scan *is* that re-test, so run the same battery on ``dir_path``
+            # as given - it keeps the separator every descended child was
+            # addressed with, and aws-cli's warning keeps it too - then keep
+            # walking (a warning, rc 2) instead of failing the run. If the probes
+            # see nothing wrong (e.g. fd exhaustion resolved by the probe's
+            # close), re-raise like aws-cli's ``listdir`` would - never prune
+            # silently. The deterministic full-path limits this fd-relative walk
+            # hides (``ELOOP`` / an over-long path) are caught one level up
+            # instead, at vetting time, by ``crosses_full_path_boundary``, so
+            # they carry aws-cli's vetting-time wording. Scoped to the
+            # open/scandir establishment only - a per-entry OSError (from a race
+            # mid-scan or an override's classify_child) propagates rather than
+            # dropping the directory.
             if dir_fd is not None:
                 os.close(dir_fd)
-            if not self.triggers_warning(dir_path.rstrip(os.sep), notify):
+            if not self.triggers_warning(dir_path, notify):
                 raise
             return []
         try:
@@ -726,27 +928,31 @@ class LocalFileGenerator:
         sym_depth: int,
         notify: Callable[[str], None],
     ) -> bool:
-        """Whether a vetted file leaf must be dropped as aws-cli's full-path stat would.
+        """Whether a vetted child must be dropped as aws-cli's full-path stat would.
 
         The fast walk vets each entry through the owning directory's fd
         (``fstatat`` / ``openat``), which re-anchors resolution: it resolves a
-        leaf's own symlink relative to the already-open directory, hiding the
+        child's own symlink relative to the already-open directory, hiding the
         ancestor symlink chain, and it addresses the entry by its short name,
         hiding the full-path length. aws-cli instead stats every entry by full
-        path, so a leaf whose full-path resolution crosses ``SYMLOOP_MAX`` (an
-        ancestor chain plus the leaf's own link) or ``PATH_MAX`` fails there -
+        path, so a child whose full-path resolution crosses ``SYMLOOP_MAX`` (an
+        ancestor chain plus the child's own link) or ``PATH_MAX`` fails there -
         ``os.path.exists`` is ``False``, its warn-skip counts toward rc 2 - while
         the fd-relative probe admits it and the transfer then fails to open it
-        (rc 1). Near either limit (``sym_depth`` for a symlink leaf, the full
-        path's byte length for any leaf - the floors sit well below the OS
+        (rc 1). Near either limit (``sym_depth`` for a symlink child, the full
+        path's byte length for any child - the floors sit well below the OS
         limits, so a normal walk never reaches this probe) re-run the full-path
         warning battery
-        (``triggers_warning``); a leaf it warns away is dropped here so the two
-        agree. Directories are already covered - a boundary-crossing descent fails
-        its own ``os.open`` in ``scan_children`` and warn-skips there.
+        (``triggers_warning``); a child it warns away is dropped here so the two
+        agree.
+
+        Directories take the same probe as file leaves, and by the same path:
+        aws-cli's vetting names a child by its bare full path, while the descent
+        addresses it with the trailing separator - so a boundary-crossing
+        directory left to fail its own ``os.open`` in ``scan_children`` would be
+        warned there, where the battery reproduces aws-cli's *descent* wording
+        (separator included) rather than its vetting wording.
         """
-        if info.kind is FileKind.DIRECTORY:
-            return False
         # PATH_MAX is a byte limit, so the length floor is measured in bytes
         # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
         # characters); the character pre-check (UTF-8 spends at most 4 bytes
@@ -777,6 +983,11 @@ class LocalFileGenerator:
         link, so pair this with a ``should_ignore_entry`` override to also admit
         broken links.) ``None`` (an ``OSError``) makes the caller treat the entry
         as gone (the "does not exist" skip).
+
+        This is the scan's accessor. A leaf is re-stat'ed once more when its turn
+        comes (``restat_leaf``, aws-cli's per-leaf stat), which leaves an
+        ``S_IFLNK`` record alone and so keeps an lstat-based walk's rule; override
+        that one too for a walk whose every stat must come from one place.
         """
         try:
             return entry.stat(follow_symlinks=True)
@@ -999,14 +1210,20 @@ class LocalFileGenerator:
     def stat_info(
         self, entry: os.DirEntry[str], full: str, st: os.stat_result, notify: Callable[[str], None]
     ) -> LocalFileInfo:
-        """One file entry's ``LocalFileInfo`` from its stat (aws-cli's
-        ``_safely_get_file_stats``).
+        """One file entry's ``LocalFileInfo`` from its stat, at scan time.
 
         ``st`` is the valid stat ``classify_child`` took (the race / ``None``
         case is handled there), so this never fails: an unrepresentable mtime
         keeps the file, stamped with ``EPOCH_TIME`` (aws-cli's
         ``skip_file=False``). The info carries ``st`` and the entry's
         ``is_symlink`` flag.
+
+        A leaf's ``size`` / ``mtime`` / ``stat_result`` are then refreshed by
+        ``restat_leaf`` when its turn comes (where aws-cli's
+        ``_safely_get_file_stats`` takes them), so an override that rewrites
+        those three - rather than adding to the record - pairs with that seam;
+        everything else this stamps survives to the stream. The record built
+        here is what a link leaf and a non-recursive scan keep as is.
         """
         size, mtime = _size_mtime(st)
         if mtime is None:
@@ -1204,7 +1421,7 @@ class LocalStorage(Storage):
         ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
         own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``, plus
-        the application's ``wait_on_interrupt`` posture) onto this.
+        the application's ``reusable_after_interrupt`` posture) onto this.
         The single-path ``get_fileinfo`` does not build these options - it reads
         ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """
@@ -1322,8 +1539,13 @@ class LocalStorage(Storage):
             if root_record.kind is not FileKind.DIRECTORY:
                 return
             strip = len(root_anchor.replace(os.sep, "/"))
+            # The anchor, not the bare root: it names each child the same way
+            # (os.path.join collapses the doubled separator) and it is the path a
+            # failed scan warns about, so this one-level scan and the recursive
+            # walk - which descends from that same anchor - name the scanned
+            # directory identically.
             for _sort_name, info, _loop_key in self._walker.scan_children(
-                root, strip=strip, options=options, notify=notify
+                root_anchor, strip=strip, options=options, notify=notify
             ):
                 info.storage = options.storage
                 if item_filter is None or item_filter(info):
@@ -1355,10 +1577,11 @@ class LocalStorage(Storage):
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized prefix length of the directory being enumerated
         # (root_anchor = root + a sep, the prefix of every child key). One level
-        # down this equals the name.
+        # down this equals the name. The anchor is also what is scanned, so a
+        # failed scan names the scanned directory as the recursive walk would.
         strip = len(root_anchor.replace(os.sep, "/"))
         for _sort_name, info, _loop_key in self._walker.scan_children(
-            root, strip=strip, options=options, notify=notify
+            root_anchor, strip=strip, options=options, notify=notify
         ):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
@@ -1443,8 +1666,8 @@ class LocalStorage(Storage):
         to confine - ``..`` should navigate the parent rather than be rejected.
         The one genuinely untrusted path - a *remote* S3 key steering a recursive
         download's local target - is guarded separately, where the key arrives
-        from the bucket (``s3.py``'s ``_warn_parent_reference`` port, warn-and-skip
-        for ``aws s3`` parity).
+        from the bucket (``producers.py``'s ``_warn_parent_reference`` port,
+        warn-and-skip for ``aws s3`` parity).
         """
         # Anchor on the construction-time absolutized path like scan /
         # get_fileinfo, so a later chdir cannot move where a relative
