@@ -867,6 +867,64 @@ class TestCopyRoute:
         ]
         assert dest_calls == []
 
+    @pytest.mark.parametrize(
+        "annotation_copy_mode",
+        [AnnotationCopyMode.PRELOAD_MEMORY, AnnotationCopyMode.DEFERRED],
+    )
+    def test_annotation_write_failure_reports_what_was_written(
+        self, annotation_copy_mode: AnnotationCopyMode
+    ) -> None:
+        # The write runs inside s3transfer's CompleteMultipartUpload task, which
+        # words its own failure with Python reprs; the engine records the
+        # per-name outcomes and re-raises with aws-cli's AnnotationCopyError
+        # text instead. Both staging modes hand s3transfer a different source
+        # client, and neither is what the wording is keyed on.
+        denied = client_error("AccessDenied", 403, "PutObjectAnnotation")
+        src_client, _ = make_recording_client(
+            [
+                head_response(ContentLength=9 * 1024 * 1024),
+                {"TagSet": []},
+                {"Annotations": [{"AnnotationName": "ann1"}, {"AnnotationName": "ann2"}]},
+                {"AnnotationPayload": io.BytesIO(b"payload-1")},
+                {"AnnotationPayload": io.BytesIO(b"payload-2")},
+            ]
+        )
+        dest_client, dest_calls = make_recording_client(
+            [
+                {"UploadId": "upload-id"},
+                {"CopyPartResult": {"ETag": '"part-1"'}},
+                {"CopyPartResult": {"ETag": '"part-2"'}},
+                {"ETag": '"dest-etag"', "VersionId": "dest-version-id"},
+                {},  # PutObjectAnnotation ann1 succeeds
+                denied,
+                {},  # s3transfer's best-effort abort of the completed upload
+            ]
+        )
+        results: list[OpResult] = []
+
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://src-b/d/a.txt", client=src_client),
+                S3Storage("s3://dest-b/cp/", client=dest_client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+                **TransferOptions(
+                    copy_props=CopyPropsMode.ALL,
+                    annotation_copy_mode=annotation_copy_mode,
+                ),
+            )
+
+        # The copied object stays: a failed annotation is not rolled back the
+        # way a failed tagging write is.
+        assert "DeleteObject" not in ops(dest_calls)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert str(results[0].error) == (
+            "Failed to copy all annotations to s3://dest-b/cp/a.txt. "
+            "The object was copied successfully and was not deleted. "
+            "Annotations written: ann1. "
+            f"Annotations that failed: ann2: {denied}."
+        )
+
 
 class TestStreamRoutes:
     def test_stream_upload_uses_the_key_verbatim(self) -> None:

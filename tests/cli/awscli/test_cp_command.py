@@ -182,6 +182,14 @@ def _client_error(code: str, status: int, operation: str) -> Exception:
     return ClientError(response, operation)
 
 
+# What `_client_error("AccessDenied", 403, "PutObjectAnnotation")` renders as -
+# aws-cli quotes each failed annotation's error with str(), so the wording pins
+# below carry it verbatim.
+_ANNOTATION_PUT_DENIED = (
+    "An error occurred (AccessDenied) when calling the PutObjectAnnotation operation: stub"
+)
+
+
 def head_object_response(**override_kwargs: Any) -> dict[str, Any]:
     response: dict[str, Any] = {
         "ContentLength": 100,
@@ -1650,12 +1658,67 @@ class TestCopyPropsAllCpCommand:
             {},
         ]
         result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
-        # The destination object is not deleted on partial annotation failure
-        # (aws-cli's AnnotationCopyError semantics; s3transfer raises
-        # S3CopyFailedError naming the succeeded and failed annotations).
+        # The destination object is not deleted on partial annotation failure,
+        # and the line is worded as aws-cli's AnnotationCopyError: the names
+        # written, then each failure as "name: message". Upstream s3transfer
+        # words the same failure with Python reprs, so the engine records the
+        # per-name outcomes and re-raises with this text.
         assert "DeleteObject" not in _operations(calls)
-        assert "ann1" in result.stderr
-        assert "ann2" in result.stderr
+        assert (
+            f"copy failed: s3://{SOURCE_BUCKET}/{SOURCE_KEY} "
+            f"to s3://{TARGET_BUCKET}/{TARGET_KEY} "
+            f"Failed to copy all annotations to s3://{TARGET_BUCKET}/{TARGET_KEY}. "
+            f"The object was copied successfully and was not deleted. "
+            f"Annotations written: ann1. "
+            f"Annotations that failed: ann2: {_ANNOTATION_PUT_DENIED}.\n"
+        ) in result.stderr
+
+    def test_mp_copy_object_every_annotation_write_fails(self, tmp_path: Path) -> None:
+        # aws prints "(none)" for an empty written list and joins the failures
+        # with "; " - neither shape is reachable through the single-failure
+        # case above.
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response({}),
+            list_object_annotations_response(["ann1", "ann2"]),
+            get_object_annotation_response(self.PAYLOAD),
+            get_object_annotation_response(self.PAYLOAD),
+            *self.mp_copy_responses_with_dest_identity(),
+            _client_error("AccessDenied", 403, "PutObjectAnnotation"),
+            _client_error("AccessDenied", 403, "PutObjectAnnotation"),
+            {},  # the best-effort AbortMultipartUpload (see above)
+        ]
+        result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
+        assert "DeleteObject" not in _operations(calls)
+        assert (
+            f"Failed to copy all annotations to s3://{TARGET_BUCKET}/{TARGET_KEY}. "
+            f"The object was copied successfully and was not deleted. "
+            f"Annotations written: (none). "
+            f"Annotations that failed: ann1: {_ANNOTATION_PUT_DENIED}; "
+            f"ann2: {_ANNOTATION_PUT_DENIED}.\n"
+        ) in result.stderr
+
+    def test_mp_copy_object_annotation_failure_after_several_writes(self, tmp_path: Path) -> None:
+        # Two written names join with ", ", in the order the source listing
+        # gave them.
+        responses = [
+            head_object_response(ContentLength=MULTIPART_THRESHOLD),
+            get_object_tagging_response({}),
+            list_object_annotations_response(["ann1", "ann2", "ann3"]),
+            get_object_annotation_response(self.PAYLOAD),
+            get_object_annotation_response(self.PAYLOAD),
+            get_object_annotation_response(self.PAYLOAD),
+            *self.mp_copy_responses_with_dest_identity(),
+            {},  # PutObjectAnnotation ann1 succeeds
+            {},  # PutObjectAnnotation ann2 succeeds
+            _client_error("AccessDenied", 403, "PutObjectAnnotation"),
+            {},  # the best-effort AbortMultipartUpload (see above)
+        ]
+        result, _ = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
+        assert (
+            f"Annotations written: ann1, ann2. "
+            f"Annotations that failed: ann3: {_ANNOTATION_PUT_DENIED}.\n"
+        ) in result.stderr
 
     def test_mp_copy_object_copies_annotations_with_source_version_id(self, tmp_path: Path) -> None:
         # The memory preload pins the source VersionId from the single-source

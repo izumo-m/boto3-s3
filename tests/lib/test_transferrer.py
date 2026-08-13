@@ -2490,3 +2490,59 @@ class TestAnnotationsCopySupport:
                     {"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": "preload"},
                 ),
             )
+
+
+class TestAnnotationErrorWordingScope:
+    """`_align_annotation_copy_error` patches a process-shared s3transfer
+    method; its docstring promises the re-wording fires only for a copy that
+    carries this library's own `_SetAnnotations` subscriber. Both halves of
+    that promise are pinned here by driving the patched
+    `CopyCompleteMultipartUploadTask._apply_annotations` directly: a plain
+    s3transfer caller in the same process keeps upstream's own wording, and a
+    subscriber-carrying copy gets aws-cli's AnnotationCopyError text."""
+
+    class _Source:
+        def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
+            return {"Annotations": [{"AnnotationName": "ann-a"}]}
+
+        def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
+            return {"AnnotationPayload": io.BytesIO(b"payload")}
+
+    class _DenyingDest:
+        def put_object_annotation(self, **kwargs: Any) -> None:
+            raise client_error("AccessDenied", 403, "PutObjectAnnotation")
+
+    def _drive(self, subscribers: list[Any]) -> str:
+        from types import SimpleNamespace
+
+        from s3transfer.copies import CopyCompleteMultipartUploadTask
+        from s3transfer.exceptions import S3CopyFailedError
+
+        transfer._align_annotation_copy_error()  # pyright: ignore[reportPrivateUsage]
+        call_args = SimpleNamespace(
+            extra_args={"AnnotationDirective": "COPY"},
+            copy_source={"Bucket": "srcb", "Key": "k"},
+            bucket="dstb",
+            key="k",
+            source_client=self._Source(),
+            subscribers=subscribers,
+        )
+        apply = CopyCompleteMultipartUploadTask._apply_annotations  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(S3CopyFailedError) as excinfo:
+            apply(object(), self._DenyingDest(), call_args, None, None, None)
+        return str(excinfo.value)
+
+    def test_a_plain_s3transfer_caller_keeps_upstreams_wording(self) -> None:
+        message = self._drive(subscribers=[])
+        assert "Succeeded: []" in message  # upstream's own repr wording
+        assert "The object was copied successfully" not in message
+
+    def test_a_subscriber_carrying_copy_gets_awss_wording(self) -> None:
+        subscriber = object.__new__(transfer._SetAnnotations)  # pyright: ignore[reportPrivateUsage]
+        message = self._drive(subscribers=[subscriber])
+        assert message == (
+            "Failed to copy all annotations to s3://dstb/k. The object was "
+            "copied successfully and was not deleted. Annotations written: "
+            "(none). Annotations that failed: ann-a: An error occurred "
+            "(AccessDenied) when calling the PutObjectAnnotation operation: stub."
+        )
