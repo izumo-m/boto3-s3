@@ -248,6 +248,62 @@ class TestExitCodeShape:
         assert result.stderr.startswith("fatal error: ")
         assert "NoSuchBucket" in result.stderr
 
+    def test_an_incomplete_listing_entry_is_rc_1_fatal(self) -> None:
+        # An entry the response left without a LastModified: aws-cli reads the
+        # element unguarded while building the FileInfo, and the KeyError lands
+        # in the same result recorder every other run-killing error does -
+        # `fatal error: 'LastModified'` at rc 1, measured against the pinned
+        # aws through a 127.0.0.1 fake serving the crafted listing (the same
+        # response gives `ls` rc 255, which is why the code is not shared).
+        result, _ = run_recorded(
+            [{"Contents": [{"Key": "p/a.txt", "Size": 1}]}],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert result.stderr == "fatal error: 'LastModified'\n"
+
+    def test_an_unclassified_run_error_is_rc_1_fatal(self) -> None:
+        # rm's span reports by exception *position*, not by type: whatever the
+        # operation raises is one `fatal error:` line at rc 1, because aws runs
+        # rm inside the same result recorder cp/mv/sync use. The measured case
+        # is a listed timestamp the local calendar cannot hold, where aws-cli's
+        # conversion raises OverflowError('date value out of range') mid-listing
+        # (`fatal error: date value out of range`, rc 1 - the zone-dependent
+        # rejection itself is pinned in the library tier).
+        result, _ = run_recorded(
+            [OverflowError("date value out of range")],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert result.stderr == "fatal error: date value out of range\n"
+
+    def test_an_unclassified_run_error_is_silenced_by_quiet(self) -> None:
+        # The rc keeps its meaning under --quiet; only the line goes.
+        result, _ = run_recorded(
+            [{"Contents": [{"Key": "p/a.txt", "Size": 1}]}],
+            ["rm", "s3://b/p/", "--recursive", "--dryrun", "--quiet"],
+        )
+        assert result.rc == 1
+        assert result.stderr == ""
+
+    def test_an_assertion_error_still_escapes(self) -> None:
+        # The one carve-out from the catch above (the dispatcher and the
+        # cp/mv/sync span make the same one): an internal-invariant violation
+        # surfaces instead of being masked as a fatal error - which is also
+        # what keeps the test doubles' "unexpected call" guards effective.
+        class _AssertingPaginatorClient:
+            def get_paginator(self, _name: Any) -> Any:
+                class _Paginator:
+                    def paginate(self, **_kwargs: Any) -> Any:
+                        raise AssertionError("unexpected call")
+
+                return _Paginator()
+
+        with pytest.raises(AssertionError, match="unexpected call"):
+            run_cli_in_process(
+                ["rm", "s3://b/p/", "--recursive"], ctx=client_ctx(_AssertingPaginatorClient())
+            )
+
     def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
         # aws's shared result machinery converts a Ctrl-C after the operation
         # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c

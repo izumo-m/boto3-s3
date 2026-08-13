@@ -225,6 +225,53 @@ class TestListingTimestampEndToEnd:
         ]
 
 
+class TestMalformedListing:
+    """A listing entry ``ls`` cannot read stops it where aws-cli stops.
+
+    aws-cli reads the elements it needs off each entry by subscript, so a
+    response omitting one raises ``KeyError`` at that entry - the lines ahead of
+    it are already on stdout, and the general handler reports the element name at
+    rc 255. Each expectation below is what the pinned aws printed for the same
+    response (a 127.0.0.1 fake serving the crafted XML), under the program-token
+    rewrite of design/testing.md section 9.
+    """
+
+    def test_objects_before_the_bad_entry_are_printed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        page = {
+            "Contents": [
+                _obj("p/a.txt"),
+                {"Key": "p/bad.txt", "Size": 1},  # no LastModified
+                _obj("p/z.txt"),
+            ]
+        }
+        ctx, _ = _fake_ctx([page])
+        assert cli.main(["ls", "--summarize", "s3://bucket/p/"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        # The summary aws prints after a clean listing is not reached.
+        assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
+        assert captured.err == "boto3-s3: [ERROR]: 'LastModified'\n"
+
+    def test_a_common_prefix_without_prefix_reports_it(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ctx, _ = _fake_ctx([{"CommonPrefixes": [{}], "Contents": [_obj("p/a.txt")]}])
+        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        assert captured.out == ""  # common prefixes render ahead of the objects
+        assert captured.err == "boto3-s3: [ERROR]: 'Prefix'\n"
+
+    def test_buckets_before_the_bad_entry_are_printed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ctx, _ = _fake_ctx([{"Buckets": [_bucket("alpha"), {"Name": "zzz"}]}])
+        assert cli.main(["ls"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        assert [line.split()[-1] for line in captured.out.splitlines()] == ["alpha"]
+        assert captured.err == "boto3-s3: [ERROR]: 'CreationDate'\n"
+
+
 class TestGlobalOptionPosition:
     """Globals must parse whether they precede or follow the subcommand."""
 
