@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-13
+
 - Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.
 - S3 listings and single-object heads now fail on an entry missing a required element the way aws fails, instead of silently dropping it.
 - A local entry that changes underneath a recursive walk — a directory replaced or removed, a file that became a directory, one that vanished or was rewritten — is now handled the way `aws s3` handles it (warned and skipped, descended, or transferred as it now is) instead of failing the scan.
@@ -79,7 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...HEAD
+[0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...boto3-s3-v0.9.0
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...boto3-s3-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.6.0...boto3-s3-v0.7.0
