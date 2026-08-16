@@ -556,6 +556,32 @@ class TestSetStreamLogger:
         assert SESSION_TOKEN not in out
         assert "X-Amz-Security-Token=***" in out
 
+    def test_foreign_handler_receives_pristine_record(self) -> None:
+        # The masking filter rewrites its record in place, and Python logging
+        # hands every handler the same record object. The handler
+        # set_stream_logger attaches processes a private copy, so a handler
+        # other code attached to the same logger - here, ordered after ours -
+        # still sees the raw msg/args (design/masking.md section 3.3: it owns
+        # its own output).
+        records: list[logging.LogRecord] = []
+
+        class _Recorder(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        with _stream_logger("test.boto3_s3.foreign") as (logger, buf):
+            recorder = _Recorder()
+            logger.addHandler(recorder)
+            try:
+                logger.debug("signing X-Amz-Signature=%s done", SIGNATURE)
+            finally:
+                logger.removeHandler(recorder)
+        out = buf.getvalue()
+        assert SIGNATURE not in out and "X-Amz-Signature=***" in out
+        (record,) = records
+        assert record.msg == "signing X-Amz-Signature=%s done"
+        assert record.args == (SIGNATURE,)
+
     def test_default_name_and_format(self) -> None:
         with _stream_logger("boto3_s3") as (logger, buf):
             # Default name is "boto3_s3"; default format carries name and level.

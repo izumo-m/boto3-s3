@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `set_stream_logger`'s masking no longer alters the log records other handlers on the same loggers receive.
+
 ## [0.10.0] - 2026-08-13
 
 - Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.

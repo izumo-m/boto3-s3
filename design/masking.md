@@ -109,8 +109,11 @@ handler on the `boto3` / `botocore` / `s3transfer` loggers, so every
 credential-bearing record it emits is masked.
 
 It is **not** a process-wide guarantee that no handler will ever format a raw
-record. Python logging delivers each record to every handler on the logger chain
-independently, and a handler-side filter only rewrites its own handler's copy. So
+record. Python logging delivers one **shared** `LogRecord` object to every handler
+on the logger chain, so the handler boto3-s3 attaches processes a private shallow
+copy (`_RecordCopyingStreamHandler`) - the filter's in-place rewrite (interpolated
+`msg`, cleared `args`, masked `exc_text`) stays confined to that handler instead
+of bleeding into handlers that process the record after it. So
 a handler that *other code* attached to those loggers formats the record on its
 own, unmasked - a filter on our handler cannot reach it, and (section 3.2) a
 filter on the logger cannot reach a record that propagated up from a child logger

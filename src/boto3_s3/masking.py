@@ -29,10 +29,18 @@ are preserved.
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from collections.abc import Iterable
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    # StreamHandler is generic only in the stubs; subscripting it at runtime
+    # needs Python >= 3.11, above the 3.10 floor.
+    _StreamHandlerBase = logging.StreamHandler[TextIO]
+else:
+    _StreamHandlerBase = logging.StreamHandler
 
 # Marker substituted for a masked value (matches `mask_proxy_url`).
 MASK = "***"
@@ -319,6 +327,12 @@ class SecretMaskingFilter(logging.Filter):
     handler-level filter is the one that sees them. Always admits the record
     (masking is its only job; visibility is decided by level and handlers) and
     never raises if a record fails to format.
+
+    The rewrite is in place, and Python logging hands every handler on the
+    chain the *same* record object - so the attaching handler must feed this
+    filter a private copy (``set_stream_logger`` does, via
+    `_RecordCopyingStreamHandler`), or the mutation bleeds into every handler
+    that processes the record afterwards.
     """
 
     def __init__(self, *, extra_secrets: Iterable[str] = ()) -> None:
@@ -341,6 +355,21 @@ class SecretMaskingFilter(logging.Filter):
         if record.exc_text:
             record.exc_text = mask_text(record.exc_text, extra_secrets=self._extra_secrets)
         return True
+
+
+class _RecordCopyingStreamHandler(_StreamHandlerBase):
+    """``StreamHandler`` that filters and formats a shallow copy of each record.
+
+    Python logging delivers one shared ``LogRecord`` object to every handler on
+    the logger chain, so ``SecretMaskingFilter``'s in-place rewrite would
+    otherwise reach handlers other code attached to the same loggers (their
+    records arriving interpolated, masked, with ``args`` cleared). Copying
+    first confines the mutation - and the masking - to this handler, the scope
+    design/masking.md section 3.3 promises.
+    """
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        return super().handle(copy.copy(record))
 
 
 def set_stream_logger(
@@ -374,9 +403,10 @@ def set_stream_logger(
     Scope (design/masking.md section 3.3): masking is a property of the handler
     this attaches - it redacts that handler's output and nothing else. It is
     not a process-wide guarantee: a handler that other code attached to the
-    same logger formats each record independently and is not reached (Python
-    logging delivers a record to every handler on the chain separately, and a
-    handler-side filter is scoped to its own handler). Obtaining masked debug
+    same logger formats the record on its own and is not reached (Python
+    logging hands every handler the same record object, so the handler this
+    attaches filters a private copy, keeping the filter's rewrite - and the
+    masking - to itself). Obtaining masked debug
     output is done through this entry point (or the CLI's ``--debug``);
     handlers installed by other code own their own output.
     """
@@ -384,11 +414,17 @@ def set_stream_logger(
         format_string = "%(asctime)s %(name)s [%(levelname)s] %(message)s"
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    handler = logging.StreamHandler(stream)
+    handler: logging.Handler
+    if mask_secrets:
+        # The copying handler keeps the filter's in-place rewrite from reaching
+        # other handlers on the chain (root handlers included) via the shared
+        # record object.
+        handler = _RecordCopyingStreamHandler(stream)
+        handler.addFilter(SecretMaskingFilter(extra_secrets=extra_secrets))
+    else:
+        handler = logging.StreamHandler(stream)
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter(format_string))
-    if mask_secrets:
-        handler.addFilter(SecretMaskingFilter(extra_secrets=extra_secrets))
     logger.addHandler(handler)
 
 
