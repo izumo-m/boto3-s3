@@ -69,9 +69,11 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 For XML-compatible keys, success and failure are reconstructed from the
 `Quiet=True` response: failures come from `Errors[]`, and successes are
 synthesized as "the submitted keys minus the keys in `Errors[]`" (to reduce the
-response payload). XML-incompatible keys use `DeleteObject`, whose request
-success or translated exception directly determines the per-key result. Results
-from both routes are emitted in original submission order.
+response payload) - unless an entry cannot be attributed to a submitted key at
+all, which voids that synthesis for its batch (below). XML-incompatible keys
+use `DeleteObject`, whose request success or translated exception directly
+determines the per-key result. Results from both routes are emitted in original
+submission order.
 
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key
@@ -104,10 +106,26 @@ versioned bucket) cannot be mapped back to submission order.
   suffix when retries are exhausted). It carries `operation` / `bucket` / `key`
   attributes.
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
-  does not match the submitted key): logs a WARNING and skips it. Owing to how
-  the `Quiet=True` synthesis works, the key in question may still be recorded
-  as a success - a known limitation of the synthesis; the WARNING exists so
-  that flip at least leaves a trace.
+  does not match the submitted key): logs a WARNING (the trace stays) and
+  **fails the rest of that batch closed**. Such an entry means the response no
+  longer says which submitted keys really went away, so the synthesis above
+  must not run: under `Quiet=True` it would report the very key the entry was
+  about as a success, and a caller that treats a delete success as license to
+  drop its own record of the object would discard the record of an object that
+  may still exist. Every key of the batch that does not already carry an
+  attributable error is therefore recorded as failed, with a plain
+  `Boto3S3Error` carrying `operation` / `bucket` / `key` and the message
+  `The DeleteObjects response carried an unattributable error entry
+  (key=<key> <Code> (<Message>); ...), so this key's deletion cannot be
+  confirmed` - one `key=... Code (Message)` detail per unattributable entry, so
+  the CLI's `delete failed:` line says why. Keys with an attributable error keep
+  it - it is the more informative one - and under `capture_response=True` a key
+  listed in `Deleted[]` stays a success with its slot, since `Quiet=False` makes
+  that entry positive per-key evidence. These failures count in `failed` and can
+  be `first_error` like any other. Nothing here can fire against real S3, which
+  answers only for the keys the request carried (and aws-cli never issues
+  `DeleteObjects` at all, section 4), so this is a fail-closed defense rather
+  than an observable behavior.
 - **request-level failure** (the `delete_objects` call itself failing): records
   the `Boto3S3Error` raised by `s3storage.s3_errors` (which translates via
   `translate_boto_error`) as a failure for **every key** in that batch, and

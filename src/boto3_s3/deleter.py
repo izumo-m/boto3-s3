@@ -360,11 +360,13 @@ class S3Deleter:
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, exc)
             failures = {info.key: exc for _, info in batch}
         else:
-            failures = self._translate_errors(
+            failures, unattributable = self._translate_errors(
                 response.get("Errors", []), [info for _, info in batch]
             )
             if self._capture_response:
                 deleted = self._delete_slots(response)
+            if unattributable:
+                self._fail_unconfirmed(batch, failures, deleted, unattributable)
         for index, info in batch:
             errors[index] = failures.get(info.key)
             deletes[index] = deleted.get(info.key)
@@ -423,19 +425,23 @@ class S3Deleter:
 
     def _translate_errors(
         self, entries: list[ErrorTypeDef], batch: list[FileInfo]
-    ) -> dict[str, Boto3S3Error]:
+    ) -> tuple[dict[str, Boto3S3Error], list[str]]:
         """Map the response ``Errors[]`` onto the submitted keys (worker thread).
 
         Quiet=True: the response lists failures only, so a submitted key absent
-        from the mapping is recorded as a success. An entry that cannot be
-        attributed to a submitted key (no ``Key``, or a key spelled differently
-        than we sent it) is logged as a warning rather than silently inverting
-        into a success with no trace.
+        from the mapping is provisionally a success. Returns those per-key
+        failures plus one detail string per entry that cannot be attributed to
+        a submitted key (no ``Key``, or a key spelled differently than we sent
+        it); such an entry is logged as a warning and hands the caller the
+        material for `_fail_unconfirmed`, which fails the rest of the batch
+        closed rather than letting the absence-means-success synthesis invent
+        a success for the key the entry was about.
         """
         if not entries:
-            return {}
+            return {}, []
         submitted = {info.key for info in batch}
         failures: dict[str, Boto3S3Error] = {}
+        unattributable: list[str] = []
         for err in entries:
             key = err.get("Key")
             # "Unknown" fallbacks mirror botocore's ClientError rendering, so a
@@ -450,10 +456,43 @@ class S3Deleter:
                     code,
                     message,
                 )
+                unattributable.append(f"key={key!r} {code} ({message})")
                 continue
             logger.debug("delete failed for s3://%s/%s: %s (%s)", self._bucket, key, code, message)
             failures[key] = self._translate_key_error(code, message, key)
-        return failures
+        return failures, unattributable
+
+    def _fail_unconfirmed(
+        self,
+        batch: list[tuple[int, FileInfo]],
+        failures: dict[str, Boto3S3Error],
+        deleted: dict[str, dict[str, Any]],
+        unattributable: list[str],
+    ) -> None:
+        """Fail every key an unattributable ``Errors[]`` entry left unconfirmed.
+
+        An entry nobody can attribute means the response no longer says which
+        submitted keys really went away, and under ``Quiet=True`` there is no
+        positive per-key evidence at all - "everything not in ``Errors[]``
+        succeeded" would report the very key that entry was about as deleted,
+        licensing a caller to discard its own record of an object that may
+        still exist. Fail closed instead: a key keeps its own attributable
+        error (more informative), a ``Deleted[]`` entry (present only under
+        ``capture_response``) is positive proof the key went away and stays a
+        success, and every other key of the batch gets this synthesized
+        failure. It carries the unattributable details so the failure line
+        says why.
+        """
+        text = (
+            "The DeleteObjects response carried an unattributable error entry "
+            f"({'; '.join(unattributable)}), so this key's deletion cannot be confirmed"
+        )
+        for _, info in batch:
+            if info.key in failures or info.key in deleted:
+                continue
+            failures[info.key] = Boto3S3Error(
+                text, operation=self._operation, bucket=self._bucket, key=info.key
+            )
 
     def _translate_key_error(self, code: str, message: str, key: str) -> Boto3S3Error:
         """Translate one per-key ``Errors[]`` entry into the exception taxonomy.

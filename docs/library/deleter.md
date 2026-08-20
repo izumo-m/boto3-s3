@@ -82,6 +82,18 @@ If the batch request itself fails, **every key in that batch** is recorded as
 failed and the deleter continues with the following batches. So a wrong bucket
 name fails everything, and the counts show it.
 
+Success on the batch route is normally read as "not in the response's error
+list". If the response carries an error the deleter cannot pin on any key it
+sent — an entry with no key, or one naming a key it never submitted — that
+reading is no longer safe, so **every key of that batch that the response did
+not account for is recorded as failed**, with a message saying the deletion
+could not be confirmed and quoting the offending entry. A key with an error of
+its own keeps that error, and with `capture_response=True` a key the response
+lists as deleted stays a success. Failing closed matters if a delete success
+licenses you to drop your own record of the object: the object may still be
+there. S3 answers only for the keys you sent, so in practice this never fires;
+it is a guard, and it logs a warning as well.
+
 Anything outside that — a genuine programming error — is not turned into per-key
 results. It is re-raised to you on the next non-empty `flush()` or `close()`.
 

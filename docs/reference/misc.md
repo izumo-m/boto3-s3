@@ -616,11 +616,20 @@ botocore's `ClientError` string — `An error occurred ({Code}) when calling the
 DeleteObjects operation: {Message}` — and the exception carries `operation`,
 `bucket` and `key`.
 
-An `Errors[]` entry that cannot be attributed to a submitted key, because it
-has no `Key` or a key spelled differently from the one sent, is logged as a
-warning and skipped. Successes on the batch route are synthesized as the
-submitted keys minus the keys in `Errors[]`, so such a key may still be
-recorded as a success; the warning is the trace that this happened.
+Successes on the batch route are synthesized as the submitted keys minus the
+keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
+because it has no `Key` or a key spelled differently from the one sent, is
+logged as a warning and **voids that synthesis for its batch**: every key of
+the batch that the response did not account for is instead recorded as failed,
+carrying a plain [`Boto3S3Error`](./exceptions.md#boto3s3error) with
+`operation` / `bucket` / `key` and a message quoting the offending entry and
+stating that the key's deletion cannot be confirmed. Otherwise the key that
+entry was about would be reported deleted on no evidence. A key that has an
+attributable error of its own keeps it, and with `capture_response=True` a key
+listed in `Deleted[]` stays a success with its slot, because `Quiet=False`
+makes that entry positive per-key evidence. These synthesized failures count in
+`failed` and can become `first_error`. S3 answers only for the keys the request
+carried, so this is a guard rather than a behavior a real run reaches.
 
 A request-level failure — the `delete_objects` call itself failing — is
 recorded as the failure of **every** key that call carried, with the same
