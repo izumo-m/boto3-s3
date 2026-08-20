@@ -7,7 +7,8 @@ goldens pin the ``auto()`` bit layout, the reading lattice
 (``SORTABLE_SCAN`` -> ``SCAN`` -> ``GET_FILEINFO``), the fail-closed default, and
 each built-in's honest declaration - notably that ``S3Storage`` declares
 ``OPEN_READ`` (``open("rb")`` is a ``GetObject`` read) but not ``OPEN_WRITE``
-(``open("wb")`` is unimplemented; S3 writes ride ``s3transfer``).
+(``open("wb")`` is unimplemented; S3 writes on the transfer lanes ride
+``s3transfer``).
 """
 
 from __future__ import annotations
@@ -215,7 +216,9 @@ class TestAutoBitLayout:
 class TestBuiltinDeclarations:
     def test_s3_declares_open_read_only(self) -> None:
         # open("rb") is a GetObject read convenience; open("wb") is unimplemented
-        # (S3 writes ride s3transfer), so honesty requires OPEN_READ without OPEN_WRITE.
+        # (S3 writes on the transfer lanes ride s3transfer, and put_file writes a
+        # whole file rather than a stream), so honesty requires OPEN_READ without
+        # OPEN_WRITE.
         assert S3Storage.capabilities == (
             C.GET_FILEINFO | C.SCAN | C.SORTABLE_SCAN | C.OPEN_READ | C.DELETE
         )

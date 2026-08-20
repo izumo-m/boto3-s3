@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `EtagComparison.content_differs`, which compares a single local file or stream against a known S3 ETag without a `sync`.
 - A batched delete whose response carries an error naming no submitted key now fails the keys it cannot confirm instead of reporting them deleted.
 - Added `S3Deleter(dryrun=True)`, which reports what it would delete without sending anything.
+- Added `S3Storage.get_file` / `put_file`, which move one local file in a single S3 request (no transfer engine, atomic local write).
 
 ## [0.10.0] - 2026-08-13
 

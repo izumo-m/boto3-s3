@@ -27,7 +27,8 @@ S3**. Its bytes move through `open()` while the S3 side keeps riding
 
 So a custom backend takes part only in `cp` / `mv` / `sync`, and never in a
 custom↔custom pair. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
-`website` — require an actual `S3Storage` and are not part of this seam. (The
+`website` — require an actual `S3Storage` and are not part of this seam, and
+neither is the single-request object transfer on `S3Storage` (section 6). (The
 built-in `IOStorage` / `StdioStorage` stream wrappers use the very same seam: a
 stream is a degenerate single-entry backend.)
 
@@ -61,7 +62,9 @@ front only when the declaration is honest:
   writes (standard file semantics). `size` is an optional total-length hint for writes.
   `S3Storage` implements `"rb"` only (a `GetObject` read convenience, addressed by
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
-  stays unimplemented, since every S3 write rides `s3transfer`.
+  stays unimplemented, since every S3 write on the *transfer lanes* rides
+  `s3transfer` and the one write outside them (`put_file`, section 6) is a
+  whole-file call rather than a stream.
 - **`scan_pages(options) -> Iterator[Sequence[FileInfo]]`** — enumerate the
   container one page of `FileInfo` at a time. Callers consume it through the
   concrete `scan(options, *, cancel_token=None)` wrapper, which flattens the
@@ -426,3 +429,89 @@ equivalent of `aws s3 cp - …` / `aws s3 cp … -`. Its stdout writer hands eac
 chunk straight to `sys.stdout.buffer` and never flushes it, aws's writer having
 neither `flush` nor `close`, so a finished download can still be sitting in the
 process stream's buffer until the interpreter's own flush at exit.
+
+## 6. Single-request object transfer: `S3Storage.get_file` / `put_file`
+
+`S3Storage.get_file(path, *, key="")` and `S3Storage.put_file(path, *, key="")`
+move one whole local file with **exactly one S3 request** — a `GetObject` or a
+`PutObject`, issued on the calling thread with no transfer engine underneath.
+They are a deliberate **third lane**, beside the two above: the s3transfer
+routes (`cp` / `mv` / `sync`, built-in pairs) and the open route (section 1).
+
+**Why a lane at all.** The engine's mechanism is not free. A transfer builds
+s3transfer's futures machinery and runs on its thread pool, and a *download*
+resolves its source with a `HeadObject` first — the transfer route's own
+single-source probe (aws-cli's shape, [`transfer.md`](./transfer.md)), and the
+one s3transfer issues itself when no size is supplied — so one small object
+fetched through `S3.cp` costs two requests plus the engine, against this lane's
+one. For the objects an
+application round-trips constantly — a state file, a config, a manifest, each
+comfortably under the multipart threshold — that machinery, not the bytes, is
+the cost. The evidence is an external consumer (s3bak) that already bypassed
+`cp` for sub-threshold objects with direct client `GetObject` / `PutObject`
+calls, and then had to re-implement s3transfer's local-write safety by hand —
+sibling temp file, `os.replace`, preserving an existing destination's permission
+bits, removing the temp file on failure. That safety is library work, so it
+lives here.
+
+Keep this apart from bulk throughput: the answer for **many** small files in one
+`cp` / `sync` run is the CRT engine ([`crt.md`](./crt.md)). This lane is about a
+**single** round-trip's mechanism cost, and it does nothing for a run of
+thousands of items.
+
+**The local write is atomic** (`get_file`, the shape s3bak proved). The sibling
+temp file and the `os.replace` mirror the safety property s3transfer's own
+download lane has; preserving the destination's mode is this lane's addition on
+top, which s3transfer does not make — it leaves the replacement at whatever bits
+its temp file was created with. In full:
+
+- the body streams into a **sibling temp file** in the destination's own
+  directory (so the commit stays inside one filesystem), created `O_EXCL` with
+  a random name and mode `0o666` — the umask decides a *new* destination's bits,
+  exactly as a plain `open(…, "wb")` would;
+- an existing **regular** destination's permission bits are copied onto the temp
+  file first: the atomic swap lands a new inode, so without that the file's mode
+  would silently become the temp file's;
+- `os.replace` commits, so a concurrent reader sees the whole old file or the
+  whole new one, a **symlink** at the final path component is replaced rather
+  than followed into its target, and a failed or truncated download leaves the
+  previous destination byte-for-byte intact;
+- the temp file is removed on the way out of **any** failure, `BaseException`
+  included, so an interrupted download litters no more than a failed one;
+- missing parent directories are created (`makedirs(exist_ok=True)`).
+
+Every failure surfaces in the library taxonomy ([`exceptions.md`](./exceptions.md))
+with the two families attributed correctly: the request and the reads of its
+streamed body through the botocore translation (carrying `bucket` / `key`), the
+local filesystem failures through `localstorage.translate_os_error` (carrying the
+local path in `key`, no `bucket`). The split is load-bearing, not stylistic:
+botocore's `ReadTimeoutError` *is* an `OSError`, so a single `except OSError`
+spanning both would file a broken stream as a local failure.
+
+**The boundary.** One request, and nothing more:
+
+- no multipart, and the multipart threshold is never consulted. `put_file` sends
+  one `PutObject` whatever the size, and an object too large for a single PUT
+  fails with S3's own error; `get_file` streams the whole object in one
+  `GetObject`. Multipart, parallelism and resumption remain `S3.cp`'s.
+- no `HeadObject`, and no `ContentType` / MIME guessing on upload — guessing an
+  upload's type from its name is the transfer lanes' aws-cli parity behavior
+  (`guess_mime_type`), not this lane's.
+- no local mtime stamping after a download, and no `reject_unrepresentable_stamp`
+  guard: both exist for the transfer lanes' aws parity, and here the caller holds
+  the returned `S3FileInfo` and decides.
+- **`cp` / `mv` / `sync` do not use them**, so aws-cli parity is untouched: the
+  transfer engine, its gates (glacier, `--no-overwrite`, case-conflict) and the
+  CLI behave exactly as before.
+- not part of the `Storage` SPI. These are `S3Storage`-specific building blocks
+  like the S3-only operations, so `StorageCapability` and the `Storage` ABC gain
+  nothing and a custom backend implements nothing new.
+
+Both address the object through the same `""`-is-this-location /
+join-under-the-prefix rule as `get_fileinfo`, and both return an `S3FileInfo`
+filled as `get_fileinfo`'s is: full `key`, dequoted `etag`, basename
+`compare_key`, `storage`. The `head` slot is where they differ — these two store
+the response with its transport metadata stripped (`strip_response_metadata`,
+the convention for every response slot the API surfaces; `get_file` drops the
+streaming body with it), where `get_fileinfo` stores the `HeadObject` response
+as it arrived.

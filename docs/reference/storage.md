@@ -630,9 +630,14 @@ class S3Storage(Storage):
 
 `capabilities` omits `OPEN_WRITE`: S3 resolves a single object with
 `HeadObject`, enumerates with `ListObjectsV2`, reads with `GetObject` and
-deletes with `DeleteObject`, but every S3 *write* rides `s3transfer` rather
-than a writable stream. `scan_pages_filters` is `True` because `scan_pages`
-sieves each page itself.
+deletes with `DeleteObject`, but every S3 *write* on the transfer lanes rides
+`s3transfer` rather than a writable stream. `scan_pages_filters` is `True`
+because `scan_pages` sieves each page itself.
+
+Beside the `Storage` interface, this class carries the S3-only building blocks:
+`list_buckets` for the service root, and `get_file` / `put_file`, which move one
+whole local file in a single request without the transfer engine. They are not
+part of the `Storage` contract and no capability flag describes them.
 
 **`uri` is the identification contract.** The constructor stores the argument
 text, prepending `s3://` when it is absent, and that stored string is what the
@@ -877,9 +882,11 @@ S3, chiefly a content-based `sync` filter that must read an object's bytes
 `request_payer` and an SSE-C key are not on the generic `open` signature, so a
 requester-pays or SSE-C object must be read through the client directly.
 
-`"wb"` raises `NotImplementedError`. Every S3 write rides `s3transfer` — the
-built-in routes, the S3 side of an open-route transfer, and the stream path
-alike — so the multipart upload a writable stream would need has no caller.
+`"wb"` raises `NotImplementedError`. Every S3 write on the transfer lanes rides
+`s3transfer` — the built-in routes, the S3 side of an open-route transfer, and
+the stream path alike — so the multipart upload a writable stream would need has
+no caller. `put_file` writes outside those lanes, but as a whole-file
+single-request `PutObject`, not a stream, so it is no caller for this either.
 
 Raises: errors from the `GetObject` itself (a missing key, denied access) are
 translated into the library taxonomy. An error raised *later* while reading the
@@ -920,6 +927,92 @@ determined. A `LastModified` the host's local zone cannot represent raises
 test `scan_pages` applies and at the point the AWS CLI applies it to its own
 single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
 HEAD lives in the transfer engine, which applies the test at the same point.
+
+### get_file(path, \*, key="")
+
+Downloads one object onto the local file `path` with a single `GetObject`, and
+returns its `S3FileInfo`.
+
+This is the single-request lane, outside the transfer engine: one S3 call, on
+the calling thread, with no s3transfer futures or thread pool and **no
+pre-transfer `HeadObject`** — the probe that makes one download through `S3.cp`
+cost two requests. It is the round-trip building block for the small objects an
+application reads and rewrites constantly, not a fast path inside `cp`, which is
+unchanged. The multipart threshold is never consulted: one `GetObject` streams
+the object whatever its size, so multipart, parallelism and resumption remain
+`S3.cp`'s ([`../library/transfer-options.md`](../library/transfer-options.md)).
+
+`key` addresses the object exactly as `get_fileinfo`'s does: `""` is the
+storage's own key, and a non-empty `key` joins beneath it with a `/` boundary
+inserted only when the prefix does not already end in one.
+
+The local write is **atomic**. The body streams into a sibling temp file in the
+destination's own directory and `os.replace` commits it — the safety property
+s3transfer's own download lane has — so:
+
+- a failed or truncated download leaves the previous destination byte-for-byte
+  intact, and no temp file behind — an interruption included;
+- a concurrent reader sees either the whole old file or the whole new one;
+- a **symlink** at the final path component is replaced, never followed into its
+  target;
+- an existing **regular** destination's permission bits are carried onto the
+  replacement, since the swap lands a new inode — this lane's own addition, not
+  something s3transfer does; a destination that did not exist gets the bits a
+  plain `open(…, "wb")` would give it (the umask decides, and the temp file's
+  own restrictive mode never leaks through);
+- missing parent directories are created.
+
+Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
+parity behavior, and here the caller holds the returned info and decides. The
+returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
+`ContentLength` as `size`, `LastModified` as `mtime`, the dequoted ETag, the
+storage class, the key's basename as `compare_key` — and carries the whole
+`GetObject` response minus its transport metadata and its body under `head`.
+
+Raises: everything in the library taxonomy
+([`./exceptions.md`](./exceptions.md)), with each family attributed to its own
+side. The `GetObject` and the reads of its streamed body translate as botocore
+errors and carry `bucket` / `key`: a missing object is `NotFoundError` (unlike
+`get_fileinfo`, a download of an absent object is a failure, not a `None`),
+denied access `AccessDeniedError`, and a stream that breaks mid-body — a reset
+connection, a read timeout — `TransportError`. A body that merely ends short of
+its `Content-Length` is the exception: botocore reports that as an incomplete
+read, which is none of its transport errors, so it arrives as the base
+`Boto3S3Error`. The local filesystem failures — the temp file, the writes, the
+replace — translate as local errors, naming the local path in `key` with
+`bucket` unset.
+
+### put_file(path, \*, key="")
+
+Uploads the local file `path` to one object with a single `PutObject`, and
+returns its `S3FileInfo`.
+
+The upload half of the same lane: one S3 call, no transfer engine. The opened
+file is handed to botocore as the request `Body`, which streams it — and, being
+seekable, can re-send it from the start on a retry — so the object never passes
+through memory as one buffer. The multipart threshold is not consulted: one
+`PutObject` carries the file whatever its size, and a file too large for a
+single PUT fails with S3's own error rather than being split. Use `S3.cp` for
+multipart, parallelism or resumption.
+
+No `ContentType` is sent and no MIME guessing happens: guessing an upload's type
+from its name is the transfer lanes' AWS CLI parity behavior (`guess_mime_type`),
+not this lane's. Shape the object through `S3.cp`'s transfer options, or call
+`put_object` on the client directly.
+
+`key` addresses the object exactly as `get_fileinfo`'s does. The returned
+`S3FileInfo` carries the full key, the local file's size (taken from the open
+handle, so it describes what was actually sent), the response's dequoted ETag,
+the key's basename as `compare_key`, and the whole `PutObject` response minus
+its transport metadata under `head`; `mtime` stays unset, the response carrying
+none.
+
+Raises: opening or stat'ing the local file translates as a local error — a
+missing file is `NotFoundError`, an unreadable one `AccessDeniedError`, naming
+the local path in `key` with `bucket` unset — and no request is made. The
+`PutObject` itself translates as a botocore error carrying `bucket` / `key`,
+including a failure botocore hits while reading the body mid-request, which it
+reports as one of its own.
 
 ## IOStorage
 

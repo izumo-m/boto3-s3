@@ -212,3 +212,67 @@ A missing key returns that default; a value that will not convert raises
 
 If you want `aws s3`'s own interpretation of `[s3]` — its defaults, its
 validation, its engine choice — use the `boto3-s3` command.
+
+## 7. One small file, one request
+
+`cp` runs the transfer engine: s3transfer's futures and thread pool, and for a
+download a `HeadObject` probe before the transfer — so fetching one small object
+costs two requests plus the machinery. For the files an application round-trips
+constantly — a state file, a config, a manifest — `S3Storage` has a pair of
+methods that skip all of it and make **exactly one** S3 call:
+
+```python
+from boto3_s3 import S3Storage
+
+state = S3Storage("s3://my-bucket/app/state.json")
+
+info = state.get_file("state.json")     # one GetObject, straight to the file
+print(info.size, info.etag, info.mtime)
+
+# ... your program rewrites state.json ...
+
+info = state.put_file("state.json")     # one PutObject, straight from the file
+print(info.etag)
+```
+
+`key` addresses an entry beneath the location, exactly as `get_fileinfo`'s does,
+so one `S3Storage` can serve a whole prefix:
+
+```python
+app = S3Storage("s3://my-bucket/app/")
+app.get_file("./cache/manifest.json", key="manifest.json")
+app.put_file("./cache/manifest.json", key="manifest.json")
+```
+
+Both return an `S3FileInfo` for the object — the full key, the size, the
+dequoted ETag, and the whole response under `head` — so a download needs no
+follow-up `HeadObject` for the object's mtime or storage class either. (An
+upload's info describes what `PutObject` answered, which carries no timestamp.)
+
+**The download is atomic.** The body streams into a temp file next to the
+destination and is then renamed onto it, the same safety `cp`'s download lane
+has: a failure or a broken connection leaves the previous file byte-for-byte
+intact with no leftovers, readers never see a half-written file, a symlink at
+the destination is replaced rather than written through, and missing parent
+directories are created. One thing goes further than `cp`'s lane: an existing
+file's permission bits survive the replacement, rather than the replaced file
+coming back with whatever bits a fresh one gets.
+
+What this pair deliberately does not do:
+
+- **no multipart**, in either direction, and no threshold to cross. A file too
+  large for a single `PutObject` fails with S3's own error.
+- **no `Content-Type` guessing** on upload, and no other object shaping —
+  `put_file` sends the bytes and nothing else.
+- **no mtime stamping** on a download, and none of `cp`'s `aws s3` parity gates
+  (glacier, `--no-overwrite`, case conflicts).
+
+So reach for `cp` / `sync` for large objects, for whole trees, and whenever you
+want the `aws s3` behavior; reach for these two when one small object is the
+whole job. They are `S3Storage` methods, not `S3` operations: a custom backend
+has nothing to implement for them.
+
+Being `S3Storage` methods also means the location owns the client. The examples
+above let it build a default one on first use — release it with `close()`, or
+pass the client you want (`S3Storage(uri, client=s3.client())` reuses this `S3`
+object's configuration).
