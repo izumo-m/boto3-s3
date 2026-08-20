@@ -11,8 +11,11 @@ batch. The caller can therefore keep iterating `S3Storage.scan()` while deletion
 proceeds in the background (a pipeline of one in-flight buffer plus one buffer
 under construction).
 
-dryrun is the responsibility of the orchestrator layer (`S3.rm` and friends); it
-never reaches the deleter.
+`dryrun=True` turns the deleter into a rehearsal for a direct consumer:
+`submit` validates its entry as usual and then emits one DRYRUN record inline,
+buffering nothing and sending nothing to S3. The orchestrators (`S3.rm`,
+`S3.sync(delete_filter=...)`) do not use it - they keep their own dryrun
+branches upstream (section 5).
 
 ## 1. API
 
@@ -30,12 +33,13 @@ that are not objects).
 
 | Argument / method | Description |
 |---|---|
-| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it addresses requests with **only the client and bucket** (the key/prefix part is ignored for addressing; the `storage` itself is kept and rides each `OpResult.src_storage`). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes). `batch_size` is 1-1000 (out of range raises `ValidationError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). |
+| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False, dryrun=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it addresses requests with **only the client and bucket** (the key/prefix part is ignored for addressing; the `storage` itself is kept and rides each `OpResult.src_storage`). The client is resolved eagerly at construction time so that failures surface on the caller's thread. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes). `batch_size` is 1-1000 (out of range raises `ValidationError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). `dryrun` makes the whole deleter a rehearsal: no worker is created, nothing is buffered or sent, and each `submit` reports its entry immediately (below). |
 | `submit(info)` | Accumulates one listing entry (`FileInfo`) into the buffer; its `key` is the **full object key** to delete, and the rest of the entry (e.g. an `S3FileInfo.etag`) rides through to its `OpResult` untouched. Auto-flushes when `batch_size` is reached. An empty `info.key` raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the entry has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
 | `flush()` | Splits the buffer into batches of `batch_size` and hands them to the worker (a complete no-op when empty). **Each dispatch first waits for the previous batch to complete** - this is the backpressure point, and the point where an unexpected worker exception is re-raised on the caller's thread (keys not yet dispatched remain intact in the buffer). After a re-raise it re-splits even if the buffer exceeds `batch_size`, so a single call never exceeds 1000 keys. |
 | `close(*, flush=True)` | flush (with `flush=False` the remaining buffer is discarded) -> wait for in-flight -> stop the worker. Idempotent. Subsequent `submit` / `flush` raise `ValidationError`. A worker exception is re-raised here too, but it closes fully regardless. Keys left in the buffer by a re-raise or by `flush=False` are discarded **without an OpResult**. |
 | context manager | `__exit__` is `close(flush=exc_type is None)` - on a body exception it discards the unsent buffer while still waiting for in-flight (the body exception is preserved via the `__context__` chain). |
-| `succeeded` / `failed` / `first_error` | Aggregate counts and the first failure exception. Approximate while running; finalized after `close()`. |
+| `succeeded` / `failed` / `first_error` | Aggregate counts and the first failure exception. Approximate while running; finalized after `close()`. A DRYRUN record is not a success, so a dryrun leaves all three at their initial values. |
+| `dryrun=True` | `submit` runs the same up-front validation (closed check, empty-key `ValidationError`) and then emits **one `OpOutcome.DRYRUN` record inline on the calling thread**, with the same fields a real delete's record carries (`transfer_type=DELETE`, `compare_key` falling back to the key, `src`, `src_info`, `src_storage`; no `error`, no `extra_info`). Nothing is buffered, no request is issued, and no worker executor is created at all. A cancelled token suppresses the record, as a real `flush()` stops dispatching once cancelled. `flush()` is a no-op and `close()` only marks the deleter closed. |
 
 `BatchError` is raised not by the deleter but by the caller (`S3.rm` and the
 like). It is assembled from the counts, with `first_error` used as the sample
@@ -55,6 +59,12 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
   `close()`.
+- A `dryrun=True` deleter has **no worker at all**: its DRYRUN records are
+  emitted inline on the calling thread, which is the library-wide rule for
+  non-submitting records ([`opresult.md`](./opresult.md)). An `on_result`
+  exception there is the caller's own - it propagates straight out of
+  `submit`, and is deliberately not turned into the worker path's deferred
+  re-raise.
 - The worker is non-daemon. If you fail to close it, interpreter shutdown blocks
   until the in-flight batch completes, so using the context manager is
   recommended.
@@ -183,8 +193,16 @@ Each of the following lives outside this component:
 - **A `Deleter` ABC / `Storage.deleter()` factory** - considered but not
   adopted: sync uses `S3Deleter` directly, and the `Storage` ABC keeps deletion
   as the plain per-key `delete`.
-- **dryrun** - the orchestrator layer's responsibility; `S3.rm` handles it
-  before anything reaches the deleter.
+- **The orchestrators' dryrun** - `S3.rm` and sync's `_SyncDeletes` keep their
+  own dryrun branches and never build a `dryrun=True` deleter. Each already
+  emits its DRYRUN record at a point the deleter cannot reach: `rm`'s blind
+  single-key path builds its `FileInfo` without any deleter at all, and a
+  local or custom (`s3open`) sync destination has no deleter either, so
+  routing only the S3-destination case through this flag would leave two
+  emission points instead of one. The CLI parity tests pin those records'
+  ordering against real aws, so the flag is offered to direct consumers (who
+  otherwise hand-roll the same record shape) and the orchestrators are left
+  alone.
 - **The `CancelToken` machinery** - shared infrastructure
   ([`exceptions.md`](./exceptions.md) section 3); how the deleter reacts to a
   token is described in sections 1 and 2 above.

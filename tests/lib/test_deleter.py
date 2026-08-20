@@ -917,3 +917,98 @@ class TestLifecycle:
                 raise ValueError("body boom")
         assert _keys(fake.calls) == [["a", "b"]]  # "c" was never sent
         assert [r.compare_key for r in results] == ["a", "b"]  # the in-flight batch was awaited
+
+
+class TestDryRun:
+    def test_dryrun_reports_inline_and_sends_nothing(self) -> None:
+        # The rehearsal record must be the shape a real delete emits, produced
+        # on the calling thread (design/opresult.md: non-submitting records are
+        # inline) with no request and no worker behind it.
+        fake = _FakeS3Client()
+        storage = S3Storage("s3://bucket/prefix/", client=fake)
+        results: list[OpResult] = []
+        threads: list[int] = []
+
+        def collect(result: OpResult) -> None:
+            results.append(result)
+            threads.append(threading.get_ident())
+
+        # batch_size=1 would auto-flush on every submit if anything buffered.
+        deleter = S3Deleter(storage, on_result=collect, batch_size=1, dryrun=True)
+        stamped = S3FileInfo(key="prefix/a.txt", compare_key="a.txt")
+        deleter.submit(stamped)
+        deleter.submit(_info("prefix/b.txt"))  # no compare_key stamped
+        assert deleter._executor is None  # no worker pool exists to spawn one
+        assert not _deleter_worker_alive()
+        deleter.close()
+
+        assert fake.calls == [] and fake.single_calls == []
+        assert threads == [threading.get_ident()] * 2
+        first, second = results
+        assert first.outcome is OpOutcome.DRYRUN
+        assert first.transfer_type is TransferType.DELETE
+        assert first.compare_key == "a.txt"
+        assert first.src == "s3://bucket/prefix/a.txt"
+        assert first.src_info is stamped
+        assert first.src_storage is storage
+        assert first.bytes_transferred == 0
+        assert first.error is None
+        assert first.extra_info is None
+        assert (first.dest, first.dest_info, first.dest_storage) == (None, None, None)
+        assert second.compare_key == "prefix/b.txt"  # falls back to the full key
+        # A rehearsal deletes nothing, so it counts nothing.
+        assert (deleter.succeeded, deleter.failed) == (0, 0)
+        assert deleter.first_error is None
+
+    def test_dryrun_validates_like_a_real_run(self) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, dryrun=True)
+        with pytest.raises(ValidationError, match="empty"):
+            deleter.submit(_info(""))
+        assert results == []  # rejected before any record is emitted
+        deleter.flush()  # no-op: nothing was ever buffered
+        deleter.close()
+        assert fake.calls == []
+        with pytest.raises(ValidationError, match="deleter is closed"):
+            deleter.submit(_info("a"))
+        with pytest.raises(ValidationError, match="deleter is closed"):
+            deleter.flush()
+
+    def test_dryrun_cancelled_token_suppresses_the_record(self) -> None:
+        # Mirrors a real flush(), which stops dispatching once cancelled: the
+        # entry produces no record at all.
+        fake = _FakeS3Client()
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, cancel_token=token, dryrun=True)
+        deleter.submit(_info("a"))
+        token.cancel()
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.compare_key for r in results] == ["a"]
+        assert fake.calls == []
+
+    def test_dryrun_on_result_exception_propagates_to_the_caller(self) -> None:
+        # No worker to defer it to: the callback ran on this thread, so its
+        # exception surfaces from submit() instead of at flush() / close().
+        def explosive(_result: OpResult) -> None:
+            raise RuntimeError("callback boom")
+
+        deleter = _deleter(_FakeS3Client(), on_result=explosive, dryrun=True)
+        with pytest.raises(RuntimeError, match="callback boom"):
+            deleter.submit(_info("a"))
+        deleter.close()  # the deferred re-raise path has nothing to report
+
+    def test_dryrun_context_manager_needs_no_worker(self) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        with S3Deleter(
+            S3Storage("s3://bucket/", client=fake), on_result=results.append, dryrun=True
+        ) as deleter:
+            deleter.submit(_info("a"))
+        assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
+        assert fake.calls == []
+        assert not _deleter_worker_alive()
+        with pytest.raises(ValidationError):
+            deleter.submit(_info("b"))

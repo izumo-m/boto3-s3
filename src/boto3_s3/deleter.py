@@ -24,7 +24,9 @@ thread (single producer). ``on_result`` is invoked from the worker thread and
 must be fast and must not raise (if it does, the exception surfaces at the
 next non-empty ``flush()`` or at ``close()``). At most one batch is in flight:
 a dispatch first waits for the previous batch - the backpressure point, and
-where an unexpected worker exception re-raises on the caller thread.
+where an unexpected worker exception re-raises on the caller thread. A
+``dryrun=True`` deleter has no worker at all and reports each submission
+inline on the caller thread.
 """
 
 from __future__ import annotations
@@ -114,6 +116,14 @@ class S3Deleter:
     itself - the caller builds one from the rollup (``first_error`` is the
     ``__cause__`` sample).
 
+    ``dryrun=True`` turns the whole deleter into a rehearsal for a direct
+    consumer: ``submit`` validates its entry exactly as a real run does and
+    then emits one ``OpOutcome.DRYRUN`` record inline on the calling thread,
+    buffering nothing and sending nothing to S3 (no worker is created at all,
+    ``flush`` is a no-op, and the rollup counters stay 0 - a rehearsal has no
+    successes). ``S3.rm`` and ``sync`` do not use it: they keep their own
+    dryrun handling upstream (design/deleter.md section 5).
+
     The worker thread inherits daemon-ness from its creator (Python's
     ``ThreadPoolExecutor``), so from a normal non-daemon thread an unclosed
     deleter keeps the interpreter alive until the in-flight batch finishes -
@@ -135,6 +145,7 @@ class S3Deleter:
         batch_size: int = S3_DELETE_BATCH,
         operation: str = "delete",
         capture_response: bool = False,
+        dryrun: bool = False,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -165,6 +176,7 @@ class S3Deleter:
         self._batch_size = batch_size
         self._operation = operation
         self._capture_response = capture_response
+        self._dryrun = dryrun
 
         self._buffer: list[FileInfo] = []
         self._pending: Future[None] | None = None  # at most one in-flight batch
@@ -177,8 +189,14 @@ class S3Deleter:
         self._first_error: Boto3S3Error | None = None
 
         # Spawns its worker thread lazily on the first dispatch. Created last
-        # so a constructor failure leaves nothing behind.
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boto3-s3-deleter")
+        # so a constructor failure leaves nothing behind. A dryrun dispatches
+        # nothing, so it builds no executor at all (None is also what narrows
+        # the dispatch path off).
+        self._executor: ThreadPoolExecutor | None = (
+            None
+            if dryrun
+            else ThreadPoolExecutor(max_workers=1, thread_name_prefix="boto3-s3-deleter")
+        )
 
     # -- rollup state ------------------------------------------------------
 
@@ -223,7 +241,8 @@ class S3Deleter:
         one raised by ``on_result``) re-raises here; the deleter still ends up
         closed and the worker shut down either way, and any entries left in the
         buffer by that re-raise, by ``flush=False``, or by a cancelled token
-        are abandoned without results.
+        are abandoned without results. Under ``dryrun`` there is nothing
+        buffered and no worker, so it only marks the deleter closed.
         """
         if self._closed:
             return
@@ -234,7 +253,8 @@ class S3Deleter:
         finally:
             self._closed = True
             self._buffer = []  # non-empty only when flush=False or flush() raised
-            self._executor.shutdown(wait=True)
+            if self._executor is not None:
+                self._executor.shutdown(wait=True)
 
     # -- submission --------------------------------------------------------
 
@@ -246,12 +266,24 @@ class S3Deleter:
         batch. The entry stays buffered even when the auto-flush re-raises a
         previous batch's worker error - do not submit it again after catching
         that error.
+
+        Under ``dryrun`` the same validation runs and the entry is then
+        reported straight away: one ``OpOutcome.DRYRUN`` record on this
+        thread, nothing buffered, nothing sent. A cancelled token suppresses
+        that record (as a real ``flush`` stops dispatching once cancelled),
+        and because the callback runs here rather than on the worker, an
+        exception it raises propagates out of this call instead of being
+        deferred to ``flush`` / ``close``.
         """
         self._ensure_open()
         if not info.key:
             raise ValidationError(
                 "object key must not be empty", operation=self._operation, bucket=self._bucket
             )
+        if self._dryrun:
+            if not self._cancelled():
+                self._emit(info, OpOutcome.DRYRUN)
+            return
         self._buffer.append(info)
         if len(self._buffer) >= self._batch_size:
             self.flush()
@@ -259,14 +291,18 @@ class S3Deleter:
     def flush(self) -> None:
         """Hand the buffered entries to the worker, one batch per ``batch_size``.
 
-        No-op when the buffer is empty. Each dispatch first waits for the
-        previous batch - the backpressure point, and where an unexpected
-        worker exception re-raises on the caller thread (the entries not yet
-        dispatched then stay buffered; nothing is lost). The buffer only
-        exceeds ``batch_size`` after such a re-raise; the loop re-chunks it so
-        a single call never carries more than ``batch_size`` entries.
+        No-op when the buffer is empty, and always a no-op under ``dryrun``
+        (which buffers nothing and has no worker). Each dispatch first waits
+        for the previous batch - the backpressure point, and where an
+        unexpected worker exception re-raises on the caller thread (the
+        entries not yet dispatched then stay buffered; nothing is lost). The
+        buffer only exceeds ``batch_size`` after such a re-raise; the loop
+        re-chunks it so a single call never carries more than ``batch_size``
+        entries.
         """
         self._ensure_open()
+        if self._executor is None:  # dryrun: submit() already reported inline
+            return
         while self._buffer:
             if self._cancelled():
                 return
@@ -526,6 +562,24 @@ class S3Deleter:
             if self._first_error is None:
                 self._first_error = error
             outcome = OpOutcome.FAILED
+        self._emit(info, outcome, error=error, delete=delete)
+
+    def _emit(
+        self,
+        info: FileInfo,
+        outcome: OpOutcome,
+        *,
+        error: Boto3S3Error | None = None,
+        delete: dict[str, Any] | None = None,
+    ) -> None:
+        """Hand one ``OpResult`` to ``on_result``, without touching the rollup.
+
+        Shared by the worker's completion records and by ``submit``'s inline
+        DRYRUN record, so a rehearsal produces exactly the record shape a real
+        delete would (design/opresult.md). It runs on whichever thread calls
+        it, which is what makes the dryrun path's callback exception the
+        caller's own.
+        """
         if self._on_result is not None:
             self._on_result(
                 OpResult(
