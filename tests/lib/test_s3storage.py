@@ -1277,7 +1277,7 @@ class TestGetFile:
         assert calls == [ApiCall("GetObject", {"Bucket": "bucket", "Key": "prefix/manifest.json"})]
         assert dest.read_bytes() == b"payload-bytes"
         # The temp file the download finished into is gone, not left beside it.
-        assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json"]
         assert isinstance(info, S3FileInfo)
         assert info.key == "prefix/manifest.json"
         assert info.compare_key == "manifest.json"  # basename, as get_fileinfo stamps
@@ -1365,7 +1365,7 @@ class TestGetFile:
         assert exc_info.value.key == "state.json"
         assert isinstance(exc_info.value.__cause__, ResponseStreamingError)
         assert dest.read_bytes() == b"previous-contents"  # byte-for-byte
-        assert [p.name for p in tmp_path.iterdir()] == ["state.json"]  # no temp-file litter
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]  # no temp-file litter
         assert body.closes == 1  # the connection is released either way
 
     def test_a_local_write_failure_is_attributed_locally_and_cleans_up(
@@ -1382,7 +1382,7 @@ class TestGetFile:
         assert exc_info.value.key == str(dest)
         assert exc_info.value.bucket is None
         assert isinstance(exc_info.value.__cause__, OSError)
-        assert [p.name for p in tmp_path.iterdir()] == ["occupied"]  # temp file removed
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["occupied"]  # temp file removed
 
     @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges")
     def test_a_symlink_destination_is_replaced_not_followed(self, tmp_path: Path) -> None:
@@ -1551,4 +1551,4 @@ class TestSingleRequestTransferRoundTrip:
         assert downloaded.size == len(payload)
         assert downloaded.etag == uploaded.etag
         assert downloaded.mtime is not None
-        assert [p.name for p in tmp_path.iterdir()] == ["downloaded.json", "state.json"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["downloaded.json", "state.json"]
