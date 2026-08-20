@@ -311,6 +311,10 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   pair carrying the *same* opaque value (e.g. a replicated object) reads as
   equal - use the default `update_filter=None` against such buckets instead. The upload / download hash runs on sync's
   calling thread unless the strategy is wrapped in `ParallelFilter` (section 10).
+- **Single object.** `EtagComparison.content_differs(path_or_stream, etag=...)`
+  makes the same judgment outside a sync - one local source against an ETag the
+  caller already holds - so verifying one object needs no hand-built `SyncPair`
+  (same `True` = differs or indeterminate lean, same part-size and SSE caveats).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 

@@ -320,6 +320,15 @@ class EtagComparison:
     ) -> None: ...
 
     def __call__(self, pair: SyncPair) -> bool: ...
+
+    def content_differs(
+        self,
+        source: str | os.PathLike[str] | BinaryIO,
+        *,
+        etag: str | None,
+        size: int | None = None,
+        s3_size: int | None = None,
+    ) -> bool: ...
 ```
 
 `s3` is consulted for one thing only: the multipart part size. It is read as
@@ -403,6 +412,49 @@ custom backend raises propagates unchanged. Either way the exception aborts the
 The object holds no mutable state, so it is safe to wrap in
 [`ParallelFilter`](#parallelfilter), which is how the per-pair reads are
 overlapped; unwrapped, each read runs on `sync`'s calling thread.
+
+### content_differs(source, \*, etag, size=None, s3_size=None)
+
+The same judgment over a **single** source, with no `SyncPair` and no `sync`
+around it: `True` when the source's content differs from `etag`, or when the
+comparison is indeterminate. It reaches S3 not at all — the ETag is one the
+caller already holds, from a listing entry, a `HeadObject`, or a `PutObject`
+response — which is what makes it a post-upload check, an artifact check, or an
+inventory reconciliation.
+
+`source` is a filesystem path (`str` or `os.PathLike`) or an already-open binary
+stream. A path is opened `"rb"` here and closed again. A stream is read from its
+current position to the end and is **never** closed: it stays the caller's, and
+so does its failure mode (see Raises).
+
+`etag` is required and keyword-only: the object's ETag **dequoted**, the form
+[`S3FileInfo.etag`](./results.md#s3fileinfo) carries. `None` or an empty string
+is indeterminate and returns `True` with nothing opened or read. An ETag bearing
+a `-<n>` suffix is reconstructed as `MD5(concatenated part MD5s) + "-<n>"`, any
+other as the hex MD5 of the whole stream — the same two forms, at the same
+per-file effective part size, and with the same reconstructible-ETag limits as
+the pair path above.
+
+`size` is the source's byte size. It is consulted only to reconstruct the part
+split of a multipart `etag` and for the `check_size` guard below. For a path,
+it is read with `os.path.getsize` when the comparison needs it and it was not
+given; for a stream, which is not sized here, a multipart `etag` with no `size`
+is indeterminate and returns `True`. A supplied value is trusted rather than
+verified against the bytes, so a wrong one can split the parts wrongly.
+
+`s3_size` is the object's size, when the caller has it. With `check_size` on
+(the default), a size known on both sides that disagrees returns `True` before
+any byte is read — the same safeguard the pair path applies. With
+`check_size=False`, `s3_size` is ignored entirely.
+
+Raises: for a **path** source, an `OSError` from the open, the read, or the
+`os.path.getsize` is translated into the library taxonomy exactly as on the pair
+path — [`NotFoundError`](./exceptions.md#notfounderror),
+[`AccessDeniedError`](./exceptions.md#accessdeniederror) or
+[`TransportError`](./exceptions.md#transporterror) — carrying
+`operation="compare"` and the path, as given (through `os.fspath`), for the key.
+For a **stream** source nothing is translated: whatever the stream raises
+propagates unchanged.
 
 ## ChecksumComparison
 
