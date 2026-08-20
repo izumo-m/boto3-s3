@@ -24,6 +24,10 @@ copy or delete. This module is layer two's material:
   ``pair.src`` / ``pair.dest`` directly; the new (``SrcOnlyPair``) lane is
   governed by ``create_filter`` and the delete (``DestOnlyPair``) lane by
   ``delete_filter``, each a ``FileFilter`` over the one side it has.
+- A ``MergedPairFilter`` is the same judgment for *all three* shapes at once -
+  what ``S3.sync(pair_filter=...)`` takes in place of the three lane filters,
+  so an application needing one view of every decision (a journal, a
+  confirmation flow, statistics) writes one function rather than wiring three.
 - ``compare_size_time`` is that size+time default (aws-cli's stock
   judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
   re-exported building block (kept out of ``__all__``); it is the judgment
@@ -129,6 +133,13 @@ MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair
 
 # The update judgment: a predicate over the both-sides pair, `True` = copy.
 PairFilter = Callable[[SyncPair], bool]
+
+# One judgment for every merged pair, whatever its shape: `True` = take that
+# pair's default action (copy a new or an updated entry, delete an orphan).
+# What `S3.sync(pair_filter=...)` takes - one callable in place of the three
+# lane filters, so a caller that must see the whole decision stream (a journal,
+# a confirmation flow, statistics) writes one function instead of wiring three.
+MergedPairFilter = Callable[[MergedPair], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,6 +450,7 @@ __all__ = [
     "Comparator",
     "DestOnlyPair",
     "MergedPair",
+    "MergedPairFilter",
     "PairFilter",
     "ParallelFilter",
     "SrcOnlyPair",

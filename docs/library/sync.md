@@ -103,7 +103,56 @@ visible, so it is **never deleted** — exactly as `aws s3 sync` behaves. `filte
 decides *who takes part*; `create_filter`, `update_filter` and `delete_filter`
 decide *what to do* with those who did.
 
-## 4. Refusing to overwrite
+## 4. One callback for every decision
+
+When the interesting thing is the *whole* decision stream — an audit log, an
+interactive confirmation, a running count, anything that has to remember what it
+saw across lanes — `pair_filter=` takes the place of all three arguments above.
+It is called once per entry, whichever side the entry is on, and `True` means do
+the usual thing with it: create, overwrite, or delete.
+
+```python
+from boto3_s3 import DestOnlyPair, MergedPair, SrcOnlyPair
+
+log = open("sync.log", "a")
+deleted = 0
+
+def decide(pair: MergedPair) -> bool:
+    global deleted
+    if isinstance(pair, DestOnlyPair):
+        if deleted >= 100:              # a safety stop, recorded in the same log
+            log.write(f"delete-limit-reached {pair.compare_key}\n")
+            return False
+        deleted += 1
+        log.write(f"delete {pair.compare_key}\n")
+        return True
+    verb = "create" if isinstance(pair, SrcOnlyPair) else "update"
+    log.write(f"{verb} {pair.compare_key} {pair.src.size}\n")
+    return True
+
+s3.sync("./site", "s3://my-bucket/site/", pair_filter=decide)
+```
+
+Two things make this work as a journal. The calls are **serial, on your thread,
+in ascending key order** across all three kinds of entry, so the log is written
+in one deterministic sequence and the callback needs no locking. And every entry
+reaches it, including the ones nothing will be done to — so returning `False`
+everywhere is a real "report what a sync would decide" mode that touches
+nothing:
+
+```python
+s3.sync("./site", "s3://my-bucket/site/", pair_filter=lambda pair: False)
+```
+
+`pair_filter` replaces the three lanes rather than layering onto them, so
+passing it together with `create_filter`, `update_filter`, `delete_filter` or
+`no_overwrite=True` is an error rather than a silent winner. The default
+overwrite rule is not applied underneath it either — call
+`AwsCliComparison()(pair)` yourself if you want it for the both-sides entries.
+`filter=` still applies first, as always: an entry it hides never reaches the
+callback.
+
+## 5. Refusing to overwrite
 
 `no_overwrite=True` is a write guard applied before `update_filter`: an entry
 that already exists at the destination is never overwritten, whatever the
@@ -113,7 +162,7 @@ Unlike `cp` and `mv`, `sync` keeps this decision-only — it does not send a
 conditional-write header, so it works against older SDKs where `cp` would be
 refused. See [`compatibility.md`](../compatibility.md).
 
-## 5. Before anything is transferred
+## 6. Before anything is transferred
 
 - **Downloading** creates the destination directory before scanning, so it
   exists even if the sync transfers nothing. If a *file* already exists at that
@@ -127,7 +176,7 @@ refused. See [`compatibility.md`](../compatibility.md).
   listings are not ordered the way `sync` needs to pair them. Use a recursive
   `cp` instead.
 
-## 6. Results and failure
+## 7. Results and failure
 
 `sync` streams an `OpResult` per item to `on_result` and raises `BatchError` at
 the end if anything failed — see [`results.md`](./results.md) and
@@ -137,7 +186,7 @@ destination side of a download, are reported as warnings on the run.
 Deletions of orphans are reported with `transfer_type` `delete`, and their
 ordering relative to transfers is not deterministic.
 
-## 7. Where it differs from `aws s3 sync`
+## 8. Where it differs from `aws s3 sync`
 
 - **Deletes are batched.** Orphans on an S3 destination are removed with S3's
   batch delete API rather than one call per key, so the deletions surface

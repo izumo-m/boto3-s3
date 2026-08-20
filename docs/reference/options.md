@@ -398,8 +398,9 @@ page's I/O overlaps the current page's consumption. `False` pulls each page on
 the consuming thread at the moment the consumer reaches it — the mode for a
 consumer that **mutates what it is enumerating**, where a page read early would
 describe state that consumer has since changed. `sync` sets it on the
-destination walk when its `delete_filter` lane is on and that destination is a
-`LocalStorage`, so the walk sees the orphans the run has already removed —
+destination walk when its delete lane is on — a truthy `delete_filter`, or a
+`pair_filter`, whose answers for the orphans are not known in advance — and that
+destination is a `LocalStorage`, so the walk sees the orphans it has removed —
 which is what makes a self-aliasing tree behave as `aws s3` does
 ([`./operations/sync.md`](./operations/sync.md)). Nothing else asks for it, since
 the overlap is what keeps enumeration off the critical path. It is also the one

@@ -92,6 +92,7 @@ that wraps it is documented on the same page.
 - [`ls`](./operations/ls.md#s3ls)
 - [`mb`](./operations/mb.md#s3mb)
 - [`MergedPair`](./comparator.md#mergedpair)
+- [`MergedPairFilter`](./comparator.md#mergedpairfilter)
 - [`mv`](./operations/mv.md#s3mv)
 - [`NotFoundError`](./exceptions.md#notfounderror)
 - [`OpOutcome`](./results.md#opoutcome)

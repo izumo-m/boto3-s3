@@ -42,6 +42,7 @@ from boto3_s3.comparator import (
     Comparator,
     DestOnlyPair,
     MergedPair,
+    MergedPairFilter,
     PairFilter,
     ParallelFilter,
     SrcOnlyPair,
@@ -274,6 +275,59 @@ def _resolve_side_lane(
         pooled = cast("ParallelFilter[FileInfo]", flt)  # isinstance loses the type arg; pin it
         return wrap(pooled.decide), pooled.executor
     return wrap(flt), None
+
+
+def _reject_pair_filter_conflicts(
+    pair_filter: object,
+    *,
+    create_filter: object,
+    update_filter: object,
+    delete_filter: object,
+    no_overwrite: bool,
+) -> None:
+    """Refuse a ``S3.sync`` ``pair_filter`` paired with an option it cannot honor.
+
+    ``pair_filter`` *replaces* the three lane filters, so a non-default
+    ``create_filter`` / ``update_filter`` / ``delete_filter`` beside it has no
+    lane left to govern; silently letting one win would hide which decision
+    actually ran, so the combination is rejected instead (design/overview.md
+    section 3, unsatisfiable option combinations). ``no_overwrite=True`` drops
+    the update lane wholesale, which contradicts the hook's contract that every
+    merged pair reaches the callback, so it is rejected on the same ground. A
+    ``ParallelFilter`` is refused eagerly rather than left to fail as a
+    ``TypeError`` mid-run: it is a value container, not a callable, and a
+    serial decision in compare-key order is the whole point of this hook.
+
+    Takes its arguments as ``object`` because this is the shape check itself -
+    an unchecked caller reaches it with whatever it passed.
+    """
+    if isinstance(pair_filter, ParallelFilter):
+        raise ValidationError(
+            "sync: pair_filter cannot be a ParallelFilter - every merged pair is decided "
+            "serially on the calling thread; wrap a lane filter instead",
+            operation="sync",
+        )
+    conflicts = [
+        name
+        for name, value, default in (
+            ("create_filter", create_filter, True),
+            ("update_filter", update_filter, None),
+            ("delete_filter", delete_filter, False),
+        )
+        if value is not default
+    ]
+    if conflicts:
+        raise ValidationError(
+            "sync: pair_filter replaces the lane filters, so it cannot be combined with "
+            f"{', '.join(conflicts)}",
+            operation="sync",
+        )
+    if no_overwrite:
+        raise ValidationError(
+            "sync: pair_filter cannot be combined with no_overwrite=True - no_overwrite drops "
+            "the update lane, so not every merged pair would reach pair_filter",
+            operation="sync",
+        )
 
 
 def _pool_window(executor: Executor) -> int:
@@ -1647,6 +1701,7 @@ class S3:
         create_filter: bool | FileFilter | ParallelFilter[FileInfo] = True,
         update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None = None,
         delete_filter: bool | FileFilter | ParallelFilter[FileInfo] = False,
+        pair_filter: MergedPairFilter | None = None,
         dryrun: bool = False,
         on_progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
@@ -1716,6 +1771,25 @@ class S3:
           wrapped filter must be thread-safe). Parallelizing ``create_filter``
           makes the ``--case-conflict`` "first key wins" order non-deterministic.
 
+          ``pair_filter`` **replaces** all three lanes with one
+          `MergedPairFilter`: every merged pair - `SrcOnlyPair`, `SyncPair` and
+          `DestOnlyPair` alike - is passed to it serially, on this calling
+          thread, in ascending compare-key order, and ``True`` means "take this
+          pair's default action" (copy a new entry, copy an update, delete an
+          orphan). It is for an application that needs one view of everything
+          the run decides - an audit journal, a confirmation flow, statistics,
+          or any decision sharing state across lanes - instead of wiring one
+          object's methods into three filters. Returning ``False`` for every
+          `DestOnlyPair` is the supported observe-only mode: the delete lane is
+          live (so a walked local destination is listed without read-ahead, and
+          an open-route destination must declare ``DELETE``), and nothing is
+          removed. Passing it together with a non-default ``create_filter`` /
+          ``update_filter`` / ``delete_filter``, with ``no_overwrite=True``
+          (which would drop the update lane and hide those pairs), or as a
+          `ParallelFilter` (the serial order is the contract) raises
+          ``ValidationError``. ``filter`` still composes ahead of it: a key
+          pruned by visibility never reaches ``pair_filter``.
+
           ``no_overwrite`` is an orthogonal write-guard on the update lane: an
           existing destination is never overwritten (new entries still copy),
           and sync keeps it decision-only - no ``IfNoneMatch`` on the wire.
@@ -1749,6 +1823,16 @@ class S3:
         requests best-effort future cancellation.
         """
         _validate_transfer_options(options, operation="sync")
+        if pair_filter is not None:
+            # A shape check over the arguments alone: refuse before any
+            # resolution or side effect (the destination pre-create below).
+            _reject_pair_filter_conflicts(
+                pair_filter,
+                create_filter=create_filter,
+                update_filter=update_filter,
+                delete_filter=delete_filter,
+                no_overwrite=bool(options.get("no_overwrite", False)),
+            )
         if transfer_config is None:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
@@ -1793,7 +1877,11 @@ class S3:
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the
         # I/O the route uses; reject up front before any listing (gate below).
-        producers.require_open_sync_capabilities(plan, delete=bool(delete_filter), operation="sync")
+        # A pair_filter judges the orphans too, so it asks for the delete lane's
+        # capabilities even though it may decide to delete nothing.
+        producers.require_open_sync_capabilities(
+            plan, delete=bool(delete_filter) or pair_filter is not None, operation="sync"
+        )
 
         # no_overwrite is an orthogonal write-guard (an option, so callers can
         # write ``sync(no_overwrite=True)``): strip it from the engine options
@@ -1831,6 +1919,16 @@ class S3:
             if delete_filter is False
             else _resolve_side_lane(delete_filter, _delete_via_filter)
         )
+        if pair_filter is not None:
+            # One callable in place of the three lanes: each lane's decide IS
+            # that callable, since each hands it its own MergedPair shape, and
+            # no lane gets a pool (the hook decides serially, in compare-key
+            # order, on this thread). The delete lane is live either way - the
+            # callback may delete - so the machinery below is prepared exactly
+            # as for a callable delete_filter, including the destination walk's
+            # dropped read-ahead (delete_decide is not None).
+            create_decide = update_decide = delete_decide = pair_filter
+            create_pool = update_pool = delete_pool = None
         case_gate = producers.sync_case_gate(transfer_type, dest_storage, options=options)
 
         transferrer = Transferrer(

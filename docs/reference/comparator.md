@@ -3,9 +3,10 @@
 `sync` prunes each side's listing independently, merge-joins what survives by
 compare key, and then decides per pair. This page specifies the types that
 second stage is built from: the merge-join, the three pair shapes it emits, the
-predicate type the update lane takes, the three strategies that implement that
-predicate, the wrapper that moves a lane's decisions onto a thread pool, and
-the two predicate combinators.
+predicate type the update lane takes, the predicate type that judges all three
+shapes at once, the three strategies that implement the update predicate, the
+wrapper that moves a lane's decisions onto a thread pool, and the two predicate
+combinators.
 
 The narrative — which lane does what, and how the defaults reproduce
 `aws s3 sync` — is in [`../library/sync.md`](../library/sync.md) and
@@ -15,11 +16,12 @@ operation's own parameters, including which lane each filter argument feeds,
 are in [`./operations/sync.md`](./operations/sync.md).
 
 Every symbol below is exported from the `boto3_s3` root. `Comparator`, the
-three pair shapes, `MergedPair`, `PairFilter`, `ParallelFilter`, `all_of` and
-`any_of` are additionally exported from `boto3_s3.comparator`; each of the
-three update strategies from its own module — `AwsCliComparison` from
-`boto3_s3.awsclicompare`, `EtagComparison` from `boto3_s3.etagcompare`,
-`ChecksumComparison` from `boto3_s3.checksumcompare`.
+three pair shapes, `MergedPair`, `PairFilter`, `MergedPairFilter`,
+`ParallelFilter`, `all_of` and `any_of` are additionally exported from
+`boto3_s3.comparator`; each of the three update strategies from its own
+module — `AwsCliComparison` from `boto3_s3.awsclicompare`, `EtagComparison`
+from `boto3_s3.etagcompare`, `ChecksumComparison` from
+`boto3_s3.checksumcompare`.
 
 ## Comparator
 
@@ -254,6 +256,42 @@ predicate if both of its entries survived it.
 
 The create and delete lanes take a `FileFilter` instead — a predicate over the
 one `FileInfo` their shape has ([`./filters.md`](./filters.md)).
+
+## MergedPairFilter
+
+One judgment for every merged pair, whatever its shape — what
+`S3.sync(pair_filter=...)` accepts in place of the three lane filters.
+
+```python
+MergedPairFilter = Callable[[MergedPair], bool]
+```
+
+A type alias for the callable shape, like `PairFilter`; any function, lambda, or
+object with a matching `__call__` is one. Its argument is a `MergedPair`, so a
+callback that needs a side must discriminate first — `pair.src` exists on
+`SrcOnlyPair` and `SyncPair`, `pair.dest` on `DestOnlyPair` and `SyncPair`,
+while `compare_key` and `transfer_type` are on all three.
+
+`True` means take that pair's default action, which is the lane's: copy for a
+`SrcOnlyPair` (create), copy for a `SyncPair` (update), delete for a
+`DestOnlyPair`. `False` means do nothing for the pair, and produces no
+`on_result` record. The `aws s3 sync` default is not consulted for any shape, so
+a callback that wants it for the update pairs must call
+[`AwsCliComparison`](#awsclicomparison) itself.
+
+Contract of a call: it is invoked once per pair the `Comparator` emits,
+serially, on `sync`'s calling thread, in ascending `compare_key` order — across
+all three shapes, one interleaved stream. Callers may rely on that order; it is
+what lets one callback keep a streaming cursor or journal over the whole pair
+stream. Raising aborts the run rather than being recorded as a per-item failure.
+The visibility `filter` still runs first on both sides, so a pruned key never
+arrives.
+
+Because it is one serial stream by contract, a `MergedPairFilter` cannot be
+wrapped in [`ParallelFilter`](#parallelfilter), and `pair_filter` is exclusive
+with the three lane filters and with `no_overwrite=True`; each combination
+raises `ValidationError`. See
+[`./operations/sync.md`](./operations/sync.md#s3sync) for the parameter itself.
 
 ## AwsCliComparison
 
@@ -580,7 +618,10 @@ class ParallelFilter(Generic[_T]):
 **It is a value container, not a callable.** It has no `__call__` and is never
 invoked as a filter. `S3.sync` recognizes the type in any of `create_filter`,
 `update_filter` and `delete_filter`, reads `decide` and `executor`, and drives
-the pool itself; nothing else in the library consumes one.
+the pool itself; nothing else in the library consumes one. Passing one as
+`pair_filter` raises `ValidationError` rather than being unwrapped: that hook's
+serial, `compare_key`-ordered stream is its contract
+([`MergedPairFilter`](#mergedpairfilter)).
 
 `decide` is the wrapped predicate — exactly what would have been passed
 unwrapped. `_T` follows the lane: `SyncPair` for `update_filter` (a

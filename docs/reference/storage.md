@@ -130,8 +130,9 @@ What each declaration buys, per route:
   nothing here — the source it deletes is the S3 side.
 - **Custom source, `sync`**: `SORTABLE_SCAN` and `OPEN_READ`.
 - **Custom destination, `sync`**: `SORTABLE_SCAN` and `OPEN_WRITE`, plus
-  `DELETE` when the run enables deletes — a truthy `delete_filter`
-  ([`./operations/sync.md`](./operations/sync.md)).
+  `DELETE` when the run enables deletes — a truthy `delete_filter`, or a
+  `pair_filter`, which judges the orphans too and so asks for the flag even
+  when it deletes none ([`./operations/sync.md`](./operations/sync.md)).
 
 Omitting a flag the route needs raises `ValidationError`
 ([`./exceptions.md`](./exceptions.md)) before any bytes move, with the missing

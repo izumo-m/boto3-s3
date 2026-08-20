@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `sync(pair_filter=...)`, one callback deciding every paired entry — create, update and delete alike — in place of the three lane filters.
 - `set_stream_logger`'s masking no longer alters the log records other handlers on the same loggers receive.
 - Added `EtagComparison.content_differs`, which compares a single local file or stream against a known S3 ETag without a `sync`.
 - A batched delete whose response carries an error naming no submitted key now fails the keys it cannot confirm instead of reporting them deleted.

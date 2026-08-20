@@ -31,7 +31,8 @@ comes out as exactly one pair shape, which selects the lane that judges it —
 `create_filter` for a key held only by the source, `update_filter` for a key
 held by both sides, `delete_filter` for a key held only by the destination.
 The pair shapes, the `Comparator` that produces them, and `ParallelFilter` are
-specified in [`../comparator.md`](../comparator.md).
+specified in [`../comparator.md`](../comparator.md). A caller that would rather
+judge every pair with one callable passes `pair_filter` instead of the three.
 
 Throughout, the *compare key* is the key both the pairing and the filters
 operate on: for a local side, the path relative to the directory being
@@ -51,6 +52,7 @@ def sync(
     create_filter: bool | FileFilter | ParallelFilter[FileInfo] = True,
     update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None = None,
     delete_filter: bool | FileFilter | ParallelFilter[FileInfo] = False,
+    pair_filter: MergedPairFilter | None = None,
     dryrun: bool = False,
     on_progress: ProgressCallback | None = None,
     on_result: ResultCallback | None = None,
@@ -135,6 +137,36 @@ the no-read-ahead walk above removes — the self-aliasing local tree behaves as
 `aws s3` does on the default, inline lane. The wrapper's contract, including
 pool ownership, is in [`../comparator.md`](../comparator.md).
 
+`pair_filter` replaces all three lanes with a single
+[`MergedPairFilter`](../comparator.md#mergedpairfilter): every pair the
+merge-join produces — `SrcOnlyPair`, `SyncPair` and `DestOnlyPair` alike — is
+passed to this one callable, and `True` means take that pair's default action,
+which is the lane's own: create, overwrite, delete. `False` does nothing for the
+pair and emits no record. It is for an application that needs one view of
+everything the run decides — an audit journal, a confirmation flow, statistics,
+or any decision that shares state across the lanes — rather than one object's
+methods wired into three filters. The `aws s3` update judgment is not applied
+underneath it; a callback that wants it for the both-sides pairs calls
+[`AwsCliComparison()`](../comparator.md#awsclicomparison) itself.
+
+The delete machinery is live whenever `pair_filter` is set, exactly as for a
+callable `delete_filter`: a local destination is walked without read-ahead, and
+an open-route destination must declare `DELETE`. Returning `False` for every
+`DestOnlyPair` is therefore a supported observe-only mode — the whole stream is
+seen and nothing is removed. Everything downstream of the decision is unchanged
+as well: the glacier gate, the case-conflict gate on the keys held only by the
+source, `dryrun`, cancellation, and the `BatchError` rollup all behave as they
+do for the lane filters.
+
+Because it replaces the lanes, `pair_filter` is exclusive with them: passing it
+together with a non-default `create_filter`, `update_filter` or `delete_filter`
+raises `ValidationError`, and so does passing it with `no_overwrite=True`, which
+would drop the update lane and hide those pairs from a callback promised all of
+them. It also cannot be a `ParallelFilter` — the serial, compare-key-ordered
+stream promised below is the contract — and that too raises `ValidationError`,
+before anything is listed. The visibility `filter` composes as usual: a key it
+prunes never reaches `pair_filter`.
+
 `dryrun` reports every transfer and deletion that would have happened as a
 `DRYRUN` record and issues no mutating API call. Both sides are still
 enumerated, a missing local destination directory is still created as it is on
@@ -166,10 +198,34 @@ since an exact-key update is not a conflict. `force_glacier_transfer` and
 the listing, which carries no restore status, a restored archived object is
 still gated.
 
+### When the decisions are made
+
+A lane filter that is **not** wrapped in `ParallelFilter` is called on `sync`'s
+calling thread, one entry at a time, in ascending compare-key order. With none
+of them wrapped, the lanes that are on interleave their calls into a single
+ascending stream over the pairs they judge — a lane switched off, as
+`delete_filter` is by default, is offered nothing at all. `pair_filter`, which
+cannot be wrapped and replaces the lanes, always sees that stream over every
+pair. Callers may rely on this: it is what lets one callback carry a streaming
+cursor or journal across the whole run, and what keeps the case-conflict gate's
+first-key-wins resolution deterministic.
+
+Wrapping a lane filter in `ParallelFilter` gives that guarantee up for that lane
+alone — its decisions run on the pool and are consumed in completion order, as
+described above. The visibility `filter` is outside this contract in the other
+direction: it runs during enumeration, on the scan's own thread, before any
+pairing.
+
+The action a surviving decision selects is always submitted from the calling
+thread, in the order the decisions were consumed; what happens after that submit
+— an s3transfer transfer, a batched `DeleteObjects` — is reordered by the engine
+that performs it.
+
 ### Order of validation and effects
 
 The observable order before any transfer: unrecognized `**options` keys are
-rejected; `src` and `dest` are resolved and validated; an already-cancelled
+rejected; a `pair_filter` that conflicts with another argument is rejected;
+`src` and `dest` are resolved and validated; an already-cancelled
 `cancel_token` raises; the route is classified, which for an upload checks
 that the local source path exists; a missing local destination directory is
 created; an S3 Express directory bucket on either side is rejected; a client
@@ -240,17 +296,20 @@ order rather than in compare-key order.
 ### Raises
 
 - [`ValidationError`](../exceptions.md#validationerror) — an unrecognized key
-  in `**options`; a local-to-local pair, a custom backend paired with anything
-  but S3, or a stream endpoint; an S3 Express directory bucket on either side,
-  whose listings are not ordered the way the merge-join requires; a
-  custom (open-route) side that does not declare the capabilities the route
-  needs (sorted scanning, the route's read or write, and deletion when the
-  delete lane is on for a custom destination); an unrecognized `copy_props` or
-  `annotation_copy_mode` value on the S3-to-S3 route; an unrecognized
-  `case_conflict` value, on any route and not only the download the gate
-  covers; and a `TransferConfig` carrying classic-only settings with
-  `preferred_transfer_client="crt"`,
-  rejected when the transfer engine is built and therefore not under `dryrun`.
+  in `**options`; a `pair_filter` passed together with a non-default
+  `create_filter` / `update_filter` / `delete_filter`, with `no_overwrite=True`,
+  or wrapped in a `ParallelFilter`, each rejected before anything is resolved;
+  a local-to-local pair, a custom backend paired with anything but S3, or a
+  stream endpoint; an S3 Express directory bucket on either side, whose
+  listings are not ordered the way the merge-join requires; a custom
+  (open-route) side that does not declare the capabilities the route needs
+  (sorted scanning, the route's read or write, and deletion when the delete
+  lane is on for a custom destination — which `pair_filter` switches on too);
+  an unrecognized `copy_props` or `annotation_copy_mode` value on the S3-to-S3
+  route; an unrecognized `case_conflict` value, on any route and not only the
+  download the gate covers; and a `TransferConfig` carrying classic-only
+  settings with `preferred_transfer_client="crt"`, rejected when the transfer
+  engine is built and therefore not under `dryrun`.
 - [`NotFoundError`](../exceptions.md#notfounderror) — the local source path of
   an upload does not exist.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
@@ -276,9 +335,9 @@ order rather than in compare-key order.
 
 A failure before item processing — a listing rejected outright, for instance —
 propagates as its category exception rather than as a `BatchError`. An
-exception raised by a lane's own predicate is not translated: it propagates
-and aborts the run, after decisions that have not started are cancelled and
-running ones are awaited.
+exception raised by a lane's own predicate — or by `pair_filter` — is not
+translated: it propagates and aborts the run, after decisions that have not
+started are cancelled and running ones are awaited.
 
 ## boto3_s3.sync
 
