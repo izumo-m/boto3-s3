@@ -55,7 +55,7 @@ dest listing -- filter (visibility) --+        |
 
 | module | role |
 |---|---|
-| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types and `PairFilter`, `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types, `PairFilter` (the update judgment) and `MergedPairFilter` (one judgment for all three shapes, section 11), `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
@@ -74,6 +74,7 @@ S3().sync(src, dest, *,
     create_filter: bool | FileFilter | ParallelFilter[FileInfo] = True,          # new (source-only) lane: True=all / False=none / predicate=scope / ParallelFilter=pooled
     update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None = None,  # update lane: None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelFilter=pooled
     delete_filter: bool | FileFilter | ParallelFilter[FileInfo] = False,      # orphan lane: False=none / True=all / predicate=scope / ParallelFilter=pooled
+    pair_filter: MergedPairFilter | None = None,   # one callable REPLACING the three lanes (section 11)
     dryrun=False,                                  # follow_symlinks / page_size are storage config now (storage.md)
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     capture_response=False,             # surface S3 responses on extra_info (opresult.md)
@@ -148,6 +149,11 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   deletes only the orphans it keeps - matched against the orphan's `FileInfo` /
   compare key, the same shape as `rm`'s `filter` (the delete lane is rm over the
   orphans).
+- `pair_filter` is the one-hook alternative to the three lanes above (section
+  11): one `MergedPairFilter` judging every merged pair, whatever its shape, in
+  one serial compare-key-ordered stream. It **replaces** the lanes, so it is
+  exclusive with a non-default `create_filter` / `update_filter` /
+  `delete_filter`, with `no_overwrite=True`, and with `ParallelFilter`.
 
 Example (content-based sync + delete only old generations):
 
@@ -311,6 +317,10 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   pair carrying the *same* opaque value (e.g. a replicated object) reads as
   equal - use the default `update_filter=None` against such buckets instead. The upload / download hash runs on sync's
   calling thread unless the strategy is wrapped in `ParallelFilter` (section 10).
+- **Single object.** `EtagComparison.content_differs(path_or_stream, etag=...)`
+  makes the same judgment outside a sync - one local source against an ETag the
+  caller already holds - so verifying one object needs no hand-built `SyncPair`
+  (same `True` = differs or indeterminate lean, same part-size and SSE caveats).
 
 ## 9. Native-checksum content comparison (`ChecksumComparison`, opt-in)
 
@@ -455,3 +465,76 @@ botocore client is safe to share for concurrent calls).
 
 `ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
 parallel filter, so the CLI never sets it and parity is not at stake.
+
+## 11. One hook over every pair (`pair_filter`, opt-in)
+
+The three lanes split the decision by pair shape, which is right when the
+decisions are independent. An application whose decision is *not* split that way
+- an audit journal, a confirmation flow, statistics, anything carrying state
+across the lanes - had to wire one object's three methods into `create_filter` /
+`update_filter` / `delete_filter`, and to merely *observe* the orphans it had to
+pass `delete_filter=lambda info: False`: `delete_filter=False` switches the lane
+off, so the destination-only pairs are never offered to anything. A consumer
+outside this repository (s3bak's push journal) ended up with exactly that -
+three wired methods, a keep-everything delete callable, and the same
+cursor-advance code duplicated between the create and update methods. What it
+actually wanted is one callback over every merged pair, in compare-key order,
+serially.
+
+`pair_filter` is that callback: a `MergedPairFilter =
+Callable[[MergedPair], bool]` that **replaces** all three lanes.
+
+```python
+def decide(pair: MergedPair) -> bool:
+    journal.record(pair)                       # every shape, one ascending stream
+    return not isinstance(pair, DestOnlyPair)  # e.g. never delete
+
+s3.sync(src, dest, pair_filter=decide)
+```
+
+`True` means take that pair's default action - the lane's own: copy a
+`SrcOnlyPair` (create), copy a `SyncPair` (update), delete a `DestOnlyPair`.
+`False` does nothing for the pair. The size + time default is not applied
+underneath (a callback wanting it calls `AwsCliComparison()` itself), so the
+`aws sync` equivalent is expressible as one predicate: not a `DestOnlyPair`, and
+either not a `SyncPair` or `AwsCliComparison()(pair)`.
+
+- **It rides the three lanes internally.** Each `_Lane`'s `decide` is literally
+  the `pair_filter` callable - the pair loop already hands each lane its own
+  `MergedPair` shape, and the shapes are exactly this callable's argument - and
+  no lane gets an executor. Nothing downstream is aware of the hook: routing,
+  the glacier and case-conflict gates, dryrun, `cancel_token` and the
+  `BatchError` rollup are the same code, and with `pair_filter=None` the path is
+  the one that was there before. A fourth path through the merge would have
+  duplicated the routing and every gate for no behavioral gain.
+- **The delete machinery is live whenever the hook is set**, since the callback
+  may delete: the open-route capability gate is checked with `delete=True`
+  (section 6), and a walked local destination is listed without read-ahead
+  (section 5) - the same reasoning as an ordinary delete lane's, applied to a
+  lane whose answers are not known in advance. Returning `False` for every
+  `DestOnlyPair` is then the supported observe-only mode, and the workaround
+  above is gone.
+- **`ParallelFilter` is refused.** Pooled decisions are consumed in completion
+  order (section 10), which destroys the single ascending stream that is the
+  reason to take one hook at all; a journal or a cursor over the pair stream
+  depends on that order. The refusal is eager rather than a `TypeError` when the
+  value container is called: `ParallelFilter` is data, not a predicate. An
+  application that wants pooled decisions keeps the three lanes.
+- **`no_overwrite=True` is refused.** Its contract is to drop the update lane
+  wholesale, so the both-sides pairs would silently never reach a callback
+  promised every pair. It rides the shared `TransferOptions`, so the
+  combination cannot be designed away; under the unsatisfiable-combination
+  policy ([`overview.md`](./overview.md) section 3) the ambiguous pair raises
+  `ValidationError`. A non-default `create_filter` / `update_filter` /
+  `delete_filter` is refused on the same ground - the hook replaces them, and
+  letting one side win silently would hide which decision ran. All of these are
+  argument-shape checks, so they land before any resolution or side effect.
+- **The ordering is now a promise, not an implementation note.** That an
+  unwrapped lane decides inline on the calling thread in compare-key order was
+  recorded here (section 10); with this hook it is what makes a streaming
+  journal possible, so it is stated as a user-facing contract in
+  `docs/reference/operations/sync.md`.
+
+Library-only, like `ParallelFilter`: `aws s3` has no counterpart, so the CLI
+never sets it and no parity is at stake (the library may be a permissive
+superset, [`overview.md`](./overview.md) section 3).

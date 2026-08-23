@@ -5,6 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-23
+
+- Added `sync(pair_filter=...)`, one callback deciding every paired entry — create, update and delete alike — in place of the three lane filters.
+- `set_stream_logger`'s masking no longer alters the log records other handlers on the same loggers receive.
+- Added `EtagComparison.content_differs`, which compares a single local file or stream against a known S3 ETag without a `sync`.
+- A batched delete whose response carries an error naming no submitted key now fails the keys it cannot confirm instead of reporting them deleted.
+- Added `S3Deleter(dryrun=True)`, which reports what it would delete without sending anything.
+- Added `S3Storage.get_file` / `put_file`, which move one local file in a single S3 request (no transfer engine, atomic local write).
+
 ## [0.10.0] - 2026-08-13
 
 - Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.
@@ -81,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...HEAD
+[0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...boto3-s3-v0.9.0
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...boto3-s3-v0.8.0

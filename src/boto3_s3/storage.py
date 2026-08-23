@@ -111,8 +111,8 @@ class StorageCapability(Flag):
 
     The members mirror the methods one-to-one, because support genuinely differs
     per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
-    ``open("wb")`` - S3 writes ride ``s3transfer``; a single-URL backend reads one
-    object but cannot enumerate):
+    ``open("wb")`` - S3 writes on the transfer lanes ride ``s3transfer``; a
+    single-URL backend reads one object but cannot enumerate):
 
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
     - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
@@ -372,8 +372,10 @@ class Storage(abc.ABC):
         ``StdioStorage``) implement both modes. ``S3Storage`` implements ``"rb"``
         only - a ``GetObject`` read convenience (chiefly for a content-based
         ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
-        unimplemented, since every S3 write rides ``s3transfer`` rather than
-        ``open``.
+        unimplemented, since every S3 write on the *transfer lanes* rides
+        ``s3transfer`` rather than ``open``, and the one write outside them
+        (``S3Storage.put_file``, a single-request whole-file ``PutObject``) is no
+        stream either.
 
         The base implementation raises ``NotImplementedError``: implement the
         mode(s) the declared ``OPEN_READ`` / ``OPEN_WRITE`` capabilities

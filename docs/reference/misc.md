@@ -437,6 +437,7 @@ S3Deleter(
     batch_size: int = S3_DELETE_BATCH,
     operation: str = "delete",
     capture_response: bool = False,
+    dryrun: bool = False,
 )
 ```
 
@@ -464,7 +465,8 @@ per-call limit.
 `operation` is the operation tag stamped on the exceptions the deleter raises
 and on the per-key failures it reports; `rm` and `sync` put their own name
 there. `capture_response` attaches the per-key response to each successful
-result — see [Captured responses](#captured-responses).
+result — see [Captured responses](#captured-responses). `dryrun` makes the
+deleter a rehearsal — see [Dry runs](#dry-runs).
 
 Construction raises [`ValidationError`](./exceptions.md#validationerror) for a
 `storage` that is not an `S3Storage` and for a `batch_size` outside 1..1000. If
@@ -564,7 +566,9 @@ producer). The work runs on one worker thread (thread name prefix
 `on_result` is invoked from that worker thread. It must be fast and must not
 raise. If it does raise, its own record has already been counted in the rollup,
 the remaining entries of that batch get no result, and the exception surfaces
-on the caller's thread at the next non-empty `flush()` or at `close()`.
+on the caller's thread at the next non-empty `flush()` or at `close()`. A
+[`dryrun`](#dry-runs) deleter has no worker thread and calls `on_result`
+inline, where an exception it raises propagates out of `submit` directly.
 
 ### Results
 
@@ -575,9 +579,10 @@ stays `0`. `compare_key` is the entry's own `compare_key` when it has one and
 its `key` otherwise. `src` is `s3://<bucket>/<key>`, `src_info` is the
 submitted entry and `src_storage` is the constructor's `storage`; `dest`,
 `dest_info` and `dest_storage` stay `None`. `outcome` is
-[`OpOutcome.SUCCEEDED`](./results.md#opoutcome) or `OpOutcome.FAILED`, and a
-failure carries its exception in `error`. Entries that are never dispatched
-produce no record at all.
+[`OpOutcome.SUCCEEDED`](./results.md#opoutcome) or `OpOutcome.FAILED` — or
+`OpOutcome.DRYRUN` under [`dryrun`](#dry-runs) — and a failure carries its
+exception in `error`. Entries that are never dispatched produce no record at
+all.
 
 The library prints nothing. Beyond the results, the deleter logs to the
 `boto3_s3.deleter` logger: batch dispatches, the per-key fallback, and
@@ -602,6 +607,29 @@ One limitation: `DeleteObjects` reports per key spelling, so when the same key
 was submitted more than once in one batch, all of that key's results share a
 single slot — the response's last entry for that key wins.
 
+### Dry runs
+
+With `dryrun=True` the deleter deletes nothing. `submit` runs the same up-front
+validation — the closed check and the empty-key
+[`ValidationError`](./exceptions.md#validationerror) — and then emits **one
+record with `outcome` [`OpOutcome.DRYRUN`](./results.md#opoutcome), inline on
+the calling thread**, carrying the same fields a real deletion's record does
+(`transfer_type` `DELETE`, the `compare_key` fallback, `src`, `src_info`,
+`src_storage`; `error` and `extra_info` stay `None`). Nothing is buffered,
+nothing is sent, and no worker executor is created at all, so `flush()` is a
+no-op, `close()` only marks the deleter closed, and `succeeded` / `failed` /
+`first_error` keep their initial values — a rehearsal has no successes.
+
+Two consequences of emitting inline: an exception from `on_result` propagates
+straight out of `submit` instead of being deferred to `flush()` / `close()`,
+and a cancelled `cancel_token` makes `submit` return without emitting anything
+(matching a real `flush()`, which stops dispatching once cancelled).
+
+[`rm(dryrun=True)`](./operations/rm.md) and
+[`sync(dryrun=True)`](./operations/sync.md) do their own dry-run reporting and
+never build a `dryrun` deleter; this flag is for code driving `S3Deleter`
+directly.
+
 ### Errors
 
 A per-key failure from the response's `Errors[]` is translated by S3 error
@@ -616,11 +644,20 @@ botocore's `ClientError` string — `An error occurred ({Code}) when calling the
 DeleteObjects operation: {Message}` — and the exception carries `operation`,
 `bucket` and `key`.
 
-An `Errors[]` entry that cannot be attributed to a submitted key, because it
-has no `Key` or a key spelled differently from the one sent, is logged as a
-warning and skipped. Successes on the batch route are synthesized as the
-submitted keys minus the keys in `Errors[]`, so such a key may still be
-recorded as a success; the warning is the trace that this happened.
+Successes on the batch route are synthesized as the submitted keys minus the
+keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
+because it has no `Key` or a key spelled differently from the one sent, is
+logged as a warning and **voids that synthesis for its batch**: every key of
+the batch that the response did not account for is instead recorded as failed,
+carrying a plain [`Boto3S3Error`](./exceptions.md#boto3s3error) with
+`operation` / `bucket` / `key` and a message quoting the offending entry and
+stating that the key's deletion cannot be confirmed. Otherwise the key that
+entry was about would be reported deleted on no evidence. A key that has an
+attributable error of its own keeps it, and with `capture_response=True` a key
+listed in `Deleted[]` stays a success with its slot, because `Quiet=False`
+makes that entry positive per-key evidence. These synthesized failures count in
+`failed` and can become `first_error`. S3 answers only for the keys the request
+carried, so this is a guard rather than a behavior a real run reaches.
 
 A request-level failure — the `delete_objects` call itself failing — is
 recorded as the failure of **every** key that call carried, with the same

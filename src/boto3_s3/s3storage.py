@@ -12,18 +12,28 @@ exposes
 blind ``DeleteObject``); ``open`` implements ``"rb"`` only - a ``GetObject`` read
 convenience (chiefly for a content-based ``sync`` filter reading an object's
 bytes), addressed by the object's full key. Its ``"wb"`` stays unimplemented:
-every S3 *write* rides ``s3transfer`` (built-in pairs and the S3 side of an
-open-route custom-backend transfer alike), so a writable stream has no caller
-(see ``S3Storage.open``).
+every S3 write on the *transfer lanes* rides ``s3transfer`` (built-in pairs and
+the S3 side of an open-route custom-backend transfer alike), so a writable
+stream has no caller (see ``S3Storage.open``).
+
+``get_file`` / ``put_file`` are the third lane, beside the s3transfer routes and
+the ``open`` route: one whole local file moved by exactly one ``GetObject`` /
+``PutObject``, with no transfer engine underneath and no pre-transfer
+``HeadObject``. They are a building block for the small objects an application
+round-trips constantly, not a fast path inside ``cp`` - the transfer engine is
+untouched by them (design/storage.md section 6).
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+import secrets
+import stat as stat_module
 import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, suppress
 from datetime import datetime
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -55,8 +65,16 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
+from boto3_s3.localstorage import translate_os_error
 from boto3_s3.storage import Storage, StorageCapability, sieve_pages
-from boto3_s3.types import FileInfo, FileKind, S3FileInfo, S3ScanOptions, ScanOptions
+from boto3_s3.types import (
+    FileInfo,
+    FileKind,
+    S3FileInfo,
+    S3ScanOptions,
+    ScanOptions,
+    strip_response_metadata,
+)
 
 if TYPE_CHECKING:
     from typing import BinaryIO
@@ -66,16 +84,19 @@ if TYPE_CHECKING:
 
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays
-# unimplemented: every S3 *write* rides s3transfer instead - the Transferrer drives
-# it off get_client/bucket/key for built-in pairs and the S3 side of an open-route
-# custom transfer, and streaming hands a fileobj to s3transfer (s3.py _cp_stream) -
-# so the multipart upload a writable stream would need has no caller (the custom
-# side of an open-route transfer uses its own open, never this).
+# unimplemented: every S3 write on the transfer lanes rides s3transfer instead -
+# the Transferrer drives it off get_client/bucket/key for built-in pairs and the
+# S3 side of an open-route custom transfer, and streaming hands a fileobj to
+# s3transfer (s3.py _cp_stream) - so the multipart upload a writable stream would
+# need has no caller (the custom side of an open-route transfer uses its own open,
+# never this). put_file writes outside the engine, but it is a whole-file
+# single-request call, not a stream: it has nothing a writable stream would want.
 _OPEN_WRITE_NOT_IMPLEMENTED = (
-    "S3Storage.open(mode='wb') is not implemented. S3 writes go through s3transfer "
-    "(driven from get_client/bucket/key), including the S3 side of an open-route "
-    "custom-backend transfer, so a writable stream has no caller. Use S3.cp / the "
-    "transfer engine to write to S3; open(mode='rb') is supported for reads."
+    "S3Storage.open(mode='wb') is not implemented. S3 writes on the transfer lanes go "
+    "through s3transfer (driven from get_client/bucket/key), including the S3 side of "
+    "an open-route custom-backend transfer, so a writable stream has no caller. Use "
+    "S3.cp / the transfer engine to write to S3, or S3Storage.put_file for a "
+    "single-request PutObject of one local file; open(mode='rb') is supported for reads."
 )
 
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
@@ -448,6 +469,79 @@ def _bucket_filters_unsupported_reason(
     return None
 
 
+# The ``operation`` the single-request lane stamps on the errors it raises
+# (design/exceptions.md: a storage-level method the caller invokes itself names
+# its own errors, since no subcommand is in scope).
+_GET_FILE_OPERATION = "get_file"
+_PUT_FILE_OPERATION = "put_file"
+
+# What one download hands the filesystem per write: s3transfer's own
+# ``io_chunksize`` default (256 KB), the size its download lanes write in.
+_DOWNLOAD_CHUNK_SIZE = 256 * 1024
+
+# The download's sibling temp file, named like s3transfer's own
+# (``OSUtils.get_temp_filename``): the destination's name plus a random
+# extension, in the destination's directory - so the ``os.replace`` that commits
+# the download stays inside one filesystem and is therefore atomic. The length
+# cap is the 255-character limit common filesystems impose, and it eats the
+# destination's name rather than the random part.
+_TEMP_NAME_MAX = 255
+_TEMP_SUFFIX_BYTES = 4
+# Enough attempts that only something other than chance - a directory being
+# filled with these names - can exhaust them.
+_TEMP_NAME_ATTEMPTS = 100
+# A file that must not exist yet, in binary mode where the platform has a text
+# mode to distinguish (Windows), as tempfile's own opener does. The 0o666 the
+# create takes is what a plain ``open(..., "wb")`` passes, so the process umask
+# decides the bits of a *new* destination; an existing regular destination's
+# bits are copied over them instead (``_preserve_destination_mode``).
+_TEMP_OPEN_FLAGS: int = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+_TEMP_OPEN_MODE = 0o666
+
+
+def _create_download_temp(path: str) -> tuple[int, str]:
+    """Create the sibling temp file a download finishes into; return ``(fd, temp_path)``.
+
+    The name is a fresh random one that no other process holds (``O_EXCL``), so
+    two concurrent downloads of the same destination cannot share a temp file
+    and one cannot truncate the other's. Raises the ``OSError`` for the caller
+    to translate - an unwritable or missing directory surfaces here rather than
+    part-way through the body.
+    """
+    directory = os.path.dirname(path) or os.curdir
+    base = os.path.basename(path)
+    for _ in range(_TEMP_NAME_ATTEMPTS):
+        suffix = f".{secrets.token_hex(_TEMP_SUFFIX_BYTES)}"
+        candidate = os.path.join(directory, base[: _TEMP_NAME_MAX - len(suffix)] + suffix)
+        try:
+            return os.open(candidate, _TEMP_OPEN_FLAGS, _TEMP_OPEN_MODE), candidate
+        except FileExistsError:
+            continue
+    raise FileExistsError(
+        errno.EEXIST, "no unused temporary name beside the download destination", path
+    )
+
+
+def _preserve_destination_mode(path: str, temp_path: str) -> None:
+    """Give the temp file the permission bits of an existing regular ``path``.
+
+    An atomic replacement lands a *new inode* on the destination path, so
+    without this a download would silently re-mode the file it replaced to the
+    bits the temp file happened to be created with. Only a regular file's bits
+    are copied, and the destination is read with ``lstat``: a symlink (replaced,
+    never followed) and a directory contribute nothing, and a destination that
+    does not exist yet keeps the umask-derived bits of a fresh file. A
+    destination that cannot be stat'ed at all is left alone - there is nothing
+    to preserve, and whatever blocks the stat is the ``os.replace``'s to fail on.
+    """
+    try:
+        existing = os.lstat(path)
+    except OSError:
+        return
+    if stat_module.S_ISREG(existing.st_mode):
+        os.chmod(temp_path, stat_module.S_IMODE(existing.st_mode))
+
+
 class S3Storage(Storage):
     """An S3 bucket/prefix as one side of a transfer.
 
@@ -482,13 +576,22 @@ class S3Storage(Storage):
     elsewhere). For concurrent use, build the client at a safe time on the caller
     side and pass it in rather than relying on the lazy default.
 
+    Beside the ``Storage`` interface it carries the S3-only building blocks:
+    ``list_buckets`` (the service root) and the single-request object transfer
+    ``get_file`` / ``put_file`` - one whole local file moved by exactly one
+    ``GetObject`` / ``PutObject``, outside the transfer engine and outside the
+    ``Storage`` SPI (they are not part of the cross-backend contract, and the
+    capability flags say nothing about them).
+
     Class attributes: ``capabilities`` - S3 resolves a single object (HEAD),
     enumerates in native UTF-8 byte order (``ListObjectsV2``, the recursive
     form; the non-recursive form re-groups each page's sub-"directories"
     ahead of its objects, and S3 Express directory buckets return no order
     at all), reads an object
     (``GetObject``, so ``OPEN_READ``), and deletes; it has no ``OPEN_WRITE``
-    because every S3 write rides ``s3transfer`` (see ``open``).
+    because every S3 write on the transfer lanes rides ``s3transfer`` (see
+    ``open``; ``put_file`` writes outside those lanes, but it is a whole-file
+    call, not a stream).
     ``scan_options_type`` is ``S3ScanOptions`` (arg-less
     ``scan()`` builds it, and ``scan_pages`` requires it). ``scan_pages_filters``
     is ``True`` - ``scan_pages`` sieves each page, so ``scan`` does not re-apply
@@ -956,11 +1059,14 @@ class S3Storage(Storage):
         signature, so a requester-pays or SSE-C object must be read through the
         client directly.
 
-        ``"wb"`` stays unimplemented: every S3 *write* rides ``s3transfer``
+        ``"wb"`` stays unimplemented: every S3 write on the *transfer lanes*
+        rides ``s3transfer``
         (built-in transfers off ``get_client`` / ``bucket`` / ``key``, the S3 side
         of an open-route transfer, a stream handed to ``s3transfer``), so the
         multipart upload a writable stream would need has no caller. It raises
-        rather than silently misbehaving.
+        rather than silently misbehaving. ``put_file`` does write outside those
+        lanes, but as a whole-file single-request ``PutObject`` - not a stream,
+        so it is no caller for this either.
         """
         if mode != "rb":
             raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
@@ -987,6 +1093,23 @@ class S3Storage(Storage):
         with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
             return self.get_client().delete_object(**kwargs)
 
+    def _resolve_key(self, key: str) -> str:
+        """This location's own key, or ``key`` joined beneath it.
+
+        The address rule the single-key methods share (``get_fileinfo`` /
+        ``get_file`` / ``put_file``): ``""`` is the storage's own location, and a
+        non-empty ``key`` is an entry beneath it. The ``/`` boundary is inserted
+        unless the prefix already ends in one (or is empty), so a keyless or
+        trailing-``/`` prefix needs none and a bare ``prefix`` still yields
+        ``prefix/key`` - ``os.path.join`` semantics in S3 key space, mirroring
+        ``LocalStorage``'s join.
+        """
+        if not key:
+            return self._key
+        if self._key and not self._key.endswith("/"):
+            return f"{self._key}/{key}"
+        return self._key + key
+
     @override
     def get_fileinfo(
         self,
@@ -998,22 +1121,15 @@ class S3Storage(Storage):
 
         ``key`` is relative to this storage's location: ``""`` heads
         ``key``, a non-empty ``key`` an entry beneath it - joined under the
-        prefix with a ``/`` boundary (mirroring ``LocalStorage``'s
-        ``os.path.join``), so a keyless or trailing-``/`` prefix needs none and a
+        prefix with a ``/`` boundary (``_resolve_key``), so a keyless or
+        trailing-``/`` prefix needs none and a
         bare ``prefix`` still yields ``prefix/key``. A ``404`` returns ``None``
         (definitively absent); any other error (``403``, transport, 5xx) is
         raised - existence could not be determined. ``on_warning`` does not apply
         to S3 and is ignored. This is the generic
         HEAD; the SSE-C-aware single-source HEAD lives in the transfer engine.
         """
-        target_key = self._key
-        if key:
-            # Insert the "/" boundary unless the prefix already ends in one (or
-            # is empty), so "<prefix>/<key>" is an entry beneath the location -
-            # os.path.join semantics in S3 key space.
-            if target_key and not target_key.endswith("/"):
-                target_key += "/"
-            target_key += key
+        target_key = self._resolve_key(key)
         try:
             with s3_errors(operation="head", bucket=self._bucket, key=target_key):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
@@ -1035,6 +1151,216 @@ class S3Storage(Storage):
             compare_key=target_key.rsplit("/", 1)[-1],
             storage=self,
         )
+
+    # -- single-request object transfer (outside the transfer engine) --------
+
+    def get_file(self, path: str | os.PathLike[str], *, key: str = "") -> S3FileInfo:
+        """Download one object onto the local file ``path`` with a single ``GetObject``.
+
+        The single-request lane, beside the s3transfer routes and the ``open``
+        route: **exactly one** S3 call, with no transfer engine underneath (no
+        futures, no thread pool) and no pre-transfer ``HeadObject`` - the probe
+        that makes one download through ``S3.cp`` cost two requests. That
+        mechanism cost is the whole point: it is the round-trip building block
+        for the small objects an application reads and rewrites constantly - a
+        state file, a config, a manifest - and it is *not* a fast path inside
+        ``cp``, which is unchanged and remains the answer for anything wanting
+        parallelism, multipart, resumption, or the aws-cli-parity behaviors
+        (the mtime stamp, the glacier gate, ``--no-overwrite``). The multipart
+        threshold is never consulted here: one plain ``GetObject`` streams the
+        object whatever its size.
+
+        ``key`` addresses the object exactly as ``get_fileinfo``'s does
+        (``_resolve_key``): ``""`` is this storage's own location, a non-empty
+        ``key`` an entry joined beneath it with the ``/`` boundary.
+
+        The local write is **atomic**: the body streams into a sibling temp file
+        in the destination's own directory and ``os.replace`` commits it - the
+        safety property s3transfer's own download lane has. So a failed or
+        truncated download leaves the previous destination byte-for-byte intact
+        and no temp file behind, a concurrent reader sees either the whole old
+        file or the whole new one, and a symlink at the final path component is
+        replaced rather than followed into its target. On top of that pair, and
+        unlike s3transfer, an existing regular destination's permission bits are
+        carried onto the replacement (the swap lands a new inode, so without
+        that the mode would silently become the temp file's). Missing parent
+        directories are created.
+
+        Nothing stamps the local file's mtime - that is the transfer lanes' aws
+        parity behavior; here the caller holds the returned ``S3FileInfo`` and
+        decides. That info describes the object as ``get_fileinfo``'s does: the
+        full key, ``ContentLength`` as ``size``, ``LastModified`` as ``mtime``,
+        the dequoted ETag, the storage class, the key's basename as
+        ``compare_key``. Its ``head`` differs from ``get_fileinfo``'s raw one:
+        the response minus its transport metadata and its body.
+
+        Every failure reaches the caller in the library taxonomy, each family
+        attributed to its own side: the ``GetObject`` and the reads of its
+        streamed body through the botocore translation (a missing key is
+        ``NotFoundError``, denied access ``AccessDeniedError``, a stream
+        breaking mid-body ``TransportError``, and one ending short of its
+        ``Content-Length`` the base ``Boto3S3Error`` - botocore files that as an
+        incomplete read, which is none of its transport errors - all carrying
+        ``bucket`` / ``key``), and the local filesystem failures - the temp
+        file, the writes, the replace - through the local one, which names the
+        local path in ``key`` and leaves ``bucket`` unset
+        (design/exceptions.md).
+        """
+        target_key = self._resolve_key(key)
+        dest = os.fspath(path)
+        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key):
+            response = self.get_client().get_object(Bucket=self._bucket, Key=target_key)
+        # closing(): the body holds its HTTP connection until it is released,
+        # whether the download finished or a local failure abandoned it.
+        with closing(cast("BinaryIO", response["Body"])) as body:
+            self._write_body_atomically(body, dest, key=target_key)
+        etag = response.get("ETag")
+        return S3FileInfo(
+            key=target_key,
+            size=response.get("ContentLength"),
+            mtime=response.get("LastModified"),
+            etag=etag.strip('"') if etag else None,
+            storage_class=response.get("StorageClass"),
+            head=strip_response_metadata(response, drop_body=True),
+            compare_key=target_key.rsplit("/", 1)[-1],
+            storage=self,
+        )
+
+    def put_file(self, path: str | os.PathLike[str], *, key: str = "") -> S3FileInfo:
+        """Upload the local file ``path`` to one object with a single ``PutObject``.
+
+        The upload half of the single-request lane (see ``get_file``): **exactly
+        one** S3 call, with no transfer engine underneath. The open file is
+        handed to botocore as the request ``Body``, which streams it - and, being
+        seekable, can re-send it from the start on a retry - so the object never
+        passes through memory as one buffer.
+
+        The multipart threshold is not consulted: one ``PutObject`` carries the
+        file whatever its size, and a file too large for a single PUT fails with
+        S3's own error rather than being split. Use ``S3.cp`` for anything that
+        wants multipart, parallelism, or resumption.
+
+        No ``ContentType`` is sent and no MIME guessing happens: guessing an
+        upload's type from its name is the transfer lanes' aws-cli parity
+        behavior (``guess_mime_type``), not this lane's. Pass the object
+        properties you want through ``S3.cp``'s transfer options, or call
+        ``put_object`` on the client directly.
+
+        ``key`` addresses the object exactly as ``get_fileinfo``'s does
+        (``_resolve_key``). The returned ``S3FileInfo`` carries the full key, the
+        local file's size as ``size``, the response's dequoted ETag, the key's
+        basename as ``compare_key``, and the whole ``PutObject`` response under
+        ``head``; ``mtime`` stays unset, the response carrying none.
+
+        Errors keep the two families apart as ``get_file`` does: opening or
+        stat'ing the local file translates through the local taxonomy (a missing
+        file is ``NotFoundError``, an unreadable one ``AccessDeniedError``,
+        naming the local path in ``key``), while the ``PutObject`` - including a
+        failure botocore hits reading the body mid-request, which it reports as
+        one of its own - translates through the botocore one.
+        """
+        target_key = self._resolve_key(key)
+        source = os.fspath(path)
+        try:
+            stream = open(source, "rb")
+        except OSError as exc:
+            raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
+        with stream:
+            try:
+                # The size of what is actually being sent, taken from the open
+                # handle rather than the path: no second lookup to disagree with
+                # the upload, and none of the races a re-stat would open.
+                size = os.fstat(stream.fileno()).st_size
+            except OSError as exc:
+                raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
+            with s3_errors(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
+                response = self.get_client().put_object(
+                    Bucket=self._bucket, Key=target_key, Body=stream
+                )
+        etag = response.get("ETag")
+        return S3FileInfo(
+            key=target_key,
+            size=size,
+            etag=etag.strip('"') if etag else None,
+            head=strip_response_metadata(response),
+            compare_key=target_key.rsplit("/", 1)[-1],
+            storage=self,
+        )
+
+    def _write_body_atomically(self, body: BinaryIO, dest: str, *, key: str) -> None:
+        """Write ``body`` onto ``dest`` through a sibling temp file and ``os.replace``.
+
+        The temp-file-then-``os.replace`` dance s3transfer's download lane
+        performs, done here for one streamed ``GetObject`` (the mode copy below
+        is this lane's own addition, not part of what s3transfer does):
+        nothing ever writes ``dest`` in place, so the
+        previous file survives every failure whole, and the temp file is removed
+        on the way out of any of them - a ``BaseException`` included, so a
+        ``KeyboardInterrupt`` mid-download litters no more than a failure does.
+
+        The ``except OSError`` reached here is the *local* family only: the
+        copy translates both families itself, so what is left for it is the mode
+        copy, the ``os.fdopen``, the buffered close's flush, and the replace.
+        That split matters because botocore's ``ReadTimeoutError`` is itself an
+        ``OSError`` - a single ``except OSError`` spanning the reads would file a
+        transport failure as a local one.
+        """
+        try:
+            parent = os.path.dirname(dest)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            fd, temp_path = _create_download_temp(dest)
+        except OSError as exc:
+            raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
+        # The stream takes the descriptor over on a successful fdopen and closes
+        # it from then on (the `with` below, on every path out); until then the
+        # descriptor is this frame's to close. Tracked rather than closed twice:
+        # a stale close can hit an unrelated descriptor the number was reused for.
+        stream_owns_fd = False
+
+        def discard_temp() -> None:
+            if not stream_owns_fd:
+                with suppress(OSError):
+                    os.close(fd)
+            with suppress(OSError):
+                os.unlink(temp_path)
+
+        try:
+            _preserve_destination_mode(dest, temp_path)
+            stream = os.fdopen(fd, "wb")
+            stream_owns_fd = True
+            with stream:
+                self._copy_body(body, stream, dest=dest, key=key)
+            os.replace(temp_path, dest)
+        except OSError as exc:
+            discard_temp()
+            raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
+        except BaseException:
+            discard_temp()
+            raise
+
+    def _copy_body(self, body: BinaryIO, stream: BinaryIO, *, dest: str, key: str) -> None:
+        """Copy the streamed response body into the open temp file, chunk by chunk.
+
+        The two error families are kept apart without splitting the loop: the
+        whole of it runs under the botocore translation, and a write's
+        ``OSError`` is translated locally on the spot instead of reaching that
+        translation as a raw one. ``s3_errors`` catches only ``ClientError`` /
+        ``BotoCoreError``, so the already-translated local error passes straight
+        out through it. Pre-translating there is what the split rests on -
+        botocore's ``ReadTimeoutError`` is itself an ``OSError``, so a single
+        ``except OSError`` reaching around the reads would file a broken stream
+        as a local failure (see ``_write_body_atomically``).
+        """
+        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=key):
+            while True:
+                chunk = body.read(_DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    return
+                try:
+                    stream.write(chunk)
+                except OSError as exc:
+                    raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
 
 
 __all__ = ["S3Storage", "s3_errors", "translate_boto_error"]

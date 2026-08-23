@@ -536,33 +536,138 @@ class TestResults:
         deleter.close()
         assert isinstance(results[0].error, TransportError)
 
-    def test_unattributable_error_entries_warn_instead_of_crashing(
+    def test_error_entry_without_key_fails_the_unconfirmed_keys(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        # An Errors[] entry without Key, or whose key was never submitted,
-        # cannot be attributed; the affected key reads as a success (the
-        # Quiet=True synthesis limit), so the deleter warns loudly instead of
-        # crashing the batch or staying silent. (Synthetic by design: real
-        # DeleteObjects answers only requested keys - this pins the defense.)
+        # An Errors[] entry without a Key cannot be attributed, so under
+        # Quiet=True nothing positively says which submitted keys went away:
+        # the "absent from Errors[] means deleted" synthesis would report the
+        # key that entry was about as a success. Fail the batch closed instead
+        # (the warning still fires). (Synthetic by design: real DeleteObjects
+        # answers only requested keys - this pins the defense.)
+        fake = _FakeS3Client(script=[{"Errors": [{"Code": "InternalError", "Message": "no key"}]}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, operation="rm")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        with caplog.at_level(logging.WARNING, logger="boto3_s3.deleter"):
+            deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is Boto3S3Error  # no service code to classify by
+        assert (error.operation, error.bucket, error.key) == ("rm", "bucket", "a")
+        # The message names the entry that spoiled the batch, so the CLI's
+        # "delete failed:" line says why the deletion is unconfirmed.
+        assert "key=None InternalError (no key)" in str(error)
+        assert "cannot be confirmed" in str(error)
+        second = results[1].error
+        assert isinstance(second, Boto3S3Error) and second.key == "b"
+        assert (deleter.succeeded, deleter.failed) == (0, 2)
+        assert deleter.first_error is error
+        assert caplog.text.count("unattributable DeleteObjects error") == 1
+
+    def test_error_entry_with_unknown_key_fails_only_the_unaccounted_keys(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A key spelled differently from the one submitted is unattributable
+        # too. Keys that do carry an attributable error keep it (it is the more
+        # informative one); the rest of the batch fails unconfirmed.
         fake = _FakeS3Client(
             script=[
                 {
                     "Errors": [
-                        {"Code": "InternalError", "Message": "no key"},
                         {"Key": "never-submitted", "Code": "AccessDenied", "Message": "m"},
+                        {"Key": "b", "Code": "NoSuchKey", "Message": "gone"},
                     ]
                 }
             ]
         )
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
-        deleter.submit(_info("a"))
-        deleter.submit(_info("b"))
+        for key in ("a", "b", "c"):
+            deleter.submit(_info(key))
         with caplog.at_level(logging.WARNING, logger="boto3_s3.deleter"):
             deleter.close()
-        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
-        assert (deleter.succeeded, deleter.failed) == (2, 0)
-        assert caplog.text.count("unattributable DeleteObjects error") == 2
+        assert [r.outcome for r in results] == [OpOutcome.FAILED] * 3
+        assert type(results[1].error) is NotFoundError  # its own entry survives
+        assert str(results[1].error) == (
+            "An error occurred (NoSuchKey) when calling the DeleteObjects operation: gone"
+        )
+        for index in (0, 2):
+            error = results[index].error
+            assert type(error) is Boto3S3Error
+            assert "key='never-submitted' AccessDenied (m)" in str(error)
+        assert (deleter.succeeded, deleter.failed) == (0, 3)
+        assert caplog.text.count("unattributable DeleteObjects error") == 1
+
+    def test_capture_response_keeps_the_keys_the_response_confirmed(self) -> None:
+        # Quiet=False lists Deleted[], which is positive per-key evidence: a
+        # confirmed key stays SUCCEEDED (slot included) even when another entry
+        # is unattributable, and only the unaccounted key fails.
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Deleted": [{"Key": "a", "VersionId": "v1"}],
+                    "Errors": [{"Code": "InternalError", "Message": "no key"}],
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, capture_response=True)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert fake.calls[0]["Delete"]["Quiet"] is False
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.FAILED]
+        assert results[0].extra_info == {"delete": {"VersionId": "v1"}}
+        error = results[1].error
+        assert type(error) is Boto3S3Error and error.key == "b"
+        assert results[1].extra_info is None
+        assert (deleter.succeeded, deleter.failed) == (1, 1)
+
+    def test_attributable_errors_alone_keep_the_synthesized_successes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Regression guard for the fail-closed path above: when every entry is
+        # attributable, the response still says the other keys were deleted,
+        # so nothing changes for the ordinary case.
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "denied"}]}]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        for key in ("a", "b", "c"):
+            deleter.submit(_info(key))
+        with caplog.at_level(logging.WARNING, logger="boto3_s3.deleter"):
+            deleter.close()
+        assert [r.outcome for r in results] == [
+            OpOutcome.SUCCEEDED,
+            OpOutcome.FAILED,
+            OpOutcome.SUCCEEDED,
+        ]
+        assert type(results[1].error) is AccessDeniedError
+        assert (deleter.succeeded, deleter.failed) == (2, 1)
+        assert "unattributable" not in caplog.text
+
+    def test_unattributable_entry_spares_the_per_key_route(self) -> None:
+        # The fail-closed sweep belongs to the DeleteObjects request that
+        # carried the bad entry. A key XML 1.0 cannot carry went out on its own
+        # DeleteObject and got a definitive answer, so it keeps it even though
+        # it rode the same submitted batch.
+        fake = _FakeS3Client(script=[{"Errors": [{"Code": "InternalError", "Message": "no key"}]}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        for key in ("a", "control-\x01", "c"):
+            deleter.submit(_info(key))
+        deleter.close()
+        assert _keys(fake.calls) == [["a", "c"]]
+        assert [call["Key"] for call in fake.single_calls] == ["control-\x01"]
+        assert [r.outcome for r in results] == [
+            OpOutcome.FAILED,
+            OpOutcome.SUCCEEDED,
+            OpOutcome.FAILED,
+        ]
+        assert (deleter.succeeded, deleter.failed) == (1, 2)
 
     def test_credentials_error_maps_to_configuration_error(self) -> None:
         fake = _FakeS3Client(script=[NoCredentialsError()])
@@ -812,3 +917,98 @@ class TestLifecycle:
                 raise ValueError("body boom")
         assert _keys(fake.calls) == [["a", "b"]]  # "c" was never sent
         assert [r.compare_key for r in results] == ["a", "b"]  # the in-flight batch was awaited
+
+
+class TestDryRun:
+    def test_dryrun_reports_inline_and_sends_nothing(self) -> None:
+        # The rehearsal record must be the shape a real delete emits, produced
+        # on the calling thread (design/opresult.md: non-submitting records are
+        # inline) with no request and no worker behind it.
+        fake = _FakeS3Client()
+        storage = S3Storage("s3://bucket/prefix/", client=fake)
+        results: list[OpResult] = []
+        threads: list[int] = []
+
+        def collect(result: OpResult) -> None:
+            results.append(result)
+            threads.append(threading.get_ident())
+
+        # batch_size=1 would auto-flush on every submit if anything buffered.
+        deleter = S3Deleter(storage, on_result=collect, batch_size=1, dryrun=True)
+        stamped = S3FileInfo(key="prefix/a.txt", compare_key="a.txt")
+        deleter.submit(stamped)
+        deleter.submit(_info("prefix/b.txt"))  # no compare_key stamped
+        assert deleter._executor is None  # no worker pool exists to spawn one
+        assert not _deleter_worker_alive()
+        deleter.close()
+
+        assert fake.calls == [] and fake.single_calls == []
+        assert threads == [threading.get_ident()] * 2
+        first, second = results
+        assert first.outcome is OpOutcome.DRYRUN
+        assert first.transfer_type is TransferType.DELETE
+        assert first.compare_key == "a.txt"
+        assert first.src == "s3://bucket/prefix/a.txt"
+        assert first.src_info is stamped
+        assert first.src_storage is storage
+        assert first.bytes_transferred == 0
+        assert first.error is None
+        assert first.extra_info is None
+        assert (first.dest, first.dest_info, first.dest_storage) == (None, None, None)
+        assert second.compare_key == "prefix/b.txt"  # falls back to the full key
+        # A rehearsal deletes nothing, so it counts nothing.
+        assert (deleter.succeeded, deleter.failed) == (0, 0)
+        assert deleter.first_error is None
+
+    def test_dryrun_validates_like_a_real_run(self) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, dryrun=True)
+        with pytest.raises(ValidationError, match="empty"):
+            deleter.submit(_info(""))
+        assert results == []  # rejected before any record is emitted
+        deleter.flush()  # no-op: nothing was ever buffered
+        deleter.close()
+        assert fake.calls == []
+        with pytest.raises(ValidationError, match="deleter is closed"):
+            deleter.submit(_info("a"))
+        with pytest.raises(ValidationError, match="deleter is closed"):
+            deleter.flush()
+
+    def test_dryrun_cancelled_token_suppresses_the_record(self) -> None:
+        # Mirrors a real flush(), which stops dispatching once cancelled: the
+        # entry produces no record at all.
+        fake = _FakeS3Client()
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, cancel_token=token, dryrun=True)
+        deleter.submit(_info("a"))
+        token.cancel()
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.compare_key for r in results] == ["a"]
+        assert fake.calls == []
+
+    def test_dryrun_on_result_exception_propagates_to_the_caller(self) -> None:
+        # No worker to defer it to: the callback ran on this thread, so its
+        # exception surfaces from submit() instead of at flush() / close().
+        def explosive(_result: OpResult) -> None:
+            raise RuntimeError("callback boom")
+
+        deleter = _deleter(_FakeS3Client(), on_result=explosive, dryrun=True)
+        with pytest.raises(RuntimeError, match="callback boom"):
+            deleter.submit(_info("a"))
+        deleter.close()  # the deferred re-raise path has nothing to report
+
+    def test_dryrun_context_manager_needs_no_worker(self) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        with S3Deleter(
+            S3Storage("s3://bucket/", client=fake), on_result=results.append, dryrun=True
+        ) as deleter:
+            deleter.submit(_info("a"))
+        assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
+        assert fake.calls == []
+        assert not _deleter_worker_alive()
+        with pytest.raises(ValidationError):
+            deleter.submit(_info("b"))

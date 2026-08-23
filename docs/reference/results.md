@@ -38,7 +38,7 @@ Every item the operation acts on produces exactly one terminal record —
 `SUCCEEDED`, `FAILED`, `SKIPPED`, `DRYRUN`, or `CANCELLED`. An item that never
 reaches the operation produces nothing: one a filter excluded during
 enumeration, one a `sync` decision declined to act on (`create_filter`,
-`update_filter`, or `delete_filter`,
+`update_filter`, `delete_filter`, or the `pair_filter` that replaces all three,
 [`operations/sync.md`](./operations/sync.md)), or one never enumerated because
 the run ended first. Two carve-outs exist, both of them items consumed before
 submission or discarded after acceptance:

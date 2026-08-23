@@ -1,25 +1,33 @@
-"""Unit tests for boto3_s3.s3storage.S3Storage.scan (ListObjectsV2 + error mapping).
+"""Unit tests for ``boto3_s3.s3storage.S3Storage``: listing, the path grammar,
+the single-key methods, and the single-request object transfer.
 
-Uses a hand-rolled fake S3 client/paginator (no moto dependency); the fake
-records the kwargs passed to ``paginate`` so delimiter / page-size / request-payer
-wiring can be asserted.
+Mostly hand-rolled fake clients (a fake paginator recording the kwargs passed to
+``paginate``, so delimiter / page-size / request-payer wiring can be asserted)
+plus the canned-response recording client. One round-trip case runs against moto
+instead, where what botocore itself does with the arguments is the point
+(``TestSingleRequestTransferRoundTrip``).
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import os
+import stat
 import sys
 import threading
 import time
 from collections.abc import Collection, Generator, Iterator
 from datetime import datetime, timezone
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
-from botocore.exceptions import ClientError, ProfileNotFound
+from botocore.exceptions import ClientError, ProfileNotFound, ResponseStreamingError
+from moto import mock_aws
 
 from boto3_s3 import (
     S3,
@@ -42,7 +50,7 @@ from boto3_s3 import (
 from boto3_s3.storage import sieve_pages
 from tests.utils.fakemodel import model_meta
 from tests.utils.fakes3 import MTIME, client_error
-from tests.utils.recorder import ApiCall, make_recording_client
+from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 
 class _FakePaginator:
@@ -1171,7 +1179,8 @@ class TestResolveRouting:
 
 class TestOpen:
     """``S3Storage.open`` - a ``GetObject`` read convenience (``"rb"`` only);
-    ``"wb"`` stays unimplemented (S3 writes ride s3transfer)."""
+    ``"wb"`` stays unimplemented (S3 writes on the transfer lanes ride
+    s3transfer, and ``put_file`` writes a whole file rather than a stream)."""
 
     def test_rb_reads_object_bytes_by_full_key(self) -> None:
         # The key is the object's *full* bucket key, used verbatim as the S3 Key
@@ -1212,3 +1221,334 @@ class TestOpen:
         storage = S3Storage("s3://bucket/data")
         assert storage.supports(StorageCapability.OPEN_READ)
         assert not storage.supports(StorageCapability.OPEN_WRITE)
+
+
+def _get_response(body: bytes, **extra: Any) -> dict[str, Any]:
+    """A canned GetObject response streaming `body`; `extra` overlays it."""
+    return {
+        "Body": io.BytesIO(body),
+        "ContentLength": len(body),
+        "LastModified": MTIME,
+        "ETag": '"abc"',
+        **extra,
+    }
+
+
+class _FailingBody:
+    """A GetObject body that yields one chunk and then breaks mid-stream.
+
+    ``ResponseStreamingError`` is what botocore raises when the response stream
+    dies part-way through (its ``StreamingBody.read`` wraps urllib3's protocol
+    error), so it is the shape a truncated download really arrives in.
+    """
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk = chunk
+        self.closes = 0
+
+    def read(self, amt: int | None = None) -> bytes:
+        if self._chunk:
+            chunk, self._chunk = self._chunk, b""
+            return chunk
+        raise ResponseStreamingError(error="connection reset")
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+class TestGetFile:
+    """``S3Storage.get_file`` - one ``GetObject`` streamed onto a local path.
+
+    The single-request lane: no ``HeadObject`` probe, no transfer engine, and an
+    atomic local write (sibling temp file + ``os.replace``), the safety property
+    s3transfer's download lane has.
+    """
+
+    def test_downloads_the_object_and_returns_its_fileinfo(self, tmp_path: Path) -> None:
+        response = _get_response(b"payload-bytes", StorageClass="STANDARD_IA")
+        client, calls = make_recording_client([dict(response)])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        dest = tmp_path / "manifest.json"
+
+        info = storage.get_file(dest, key="manifest.json")
+
+        # Exactly one request, and it is the GetObject: no pre-transfer
+        # HeadObject, which is what makes a cp download cost two.
+        assert calls == [ApiCall("GetObject", {"Bucket": "bucket", "Key": "prefix/manifest.json"})]
+        assert dest.read_bytes() == b"payload-bytes"
+        # The temp file the download finished into is gone, not left beside it.
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json"]
+        assert isinstance(info, S3FileInfo)
+        assert info.key == "prefix/manifest.json"
+        assert info.compare_key == "manifest.json"  # basename, as get_fileinfo stamps
+        assert info.size == 13
+        assert info.mtime == MTIME
+        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.storage_class == "STANDARD_IA"
+        assert info.storage is storage
+        # head is the parsed response minus the transport metadata and the body.
+        assert info.head == {
+            "ContentLength": 13,
+            "LastModified": MTIME,
+            "ETag": '"abc"',
+            "StorageClass": "STANDARD_IA",
+        }
+
+    @pytest.mark.parametrize(
+        ("url", "key", "expected"),
+        [
+            # "" is the storage's own location, exactly as in get_fileinfo.
+            ("s3://bucket/prefix/obj.txt", "", "prefix/obj.txt"),
+            ("s3://bucket/prefix/", "sub/f.txt", "prefix/sub/f.txt"),
+            # The "/" boundary is inserted even when the prefix lacks one.
+            ("s3://bucket/prefix", "sub/f.txt", "prefix/sub/f.txt"),
+            # ... and never invented under a keyless location.
+            ("s3://bucket", "a.txt", "a.txt"),
+        ],
+    )
+    def test_key_joins_like_get_fileinfo(
+        self, tmp_path: Path, url: str, key: str, expected: str
+    ) -> None:
+        client, calls = make_recording_client([_get_response(b"x")])
+        storage = S3Storage(url, client=client)
+        info = storage.get_file(tmp_path / "out.bin", key=key)
+        assert calls == [ApiCall("GetObject", {"Bucket": "bucket", "Key": expected})]
+        assert info.key == expected
+
+    def test_missing_object_raises_not_found(self, tmp_path: Path) -> None:
+        # Unlike get_fileinfo's existence check, a download of an absent object
+        # is a failure: the 404 surfaces as the taxonomy's NotFoundError.
+        client, _calls = make_recording_client([client_error("NoSuchKey", 404, "GetObject")])
+        storage = S3Storage("s3://bucket/data", client=client)
+        dest = tmp_path / "gone.txt"
+        with pytest.raises(NotFoundError) as exc_info:
+            storage.get_file(dest, key="gone.txt")
+        assert exc_info.value.bucket == "bucket"
+        assert exc_info.value.key == "data/gone.txt"
+        assert not dest.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_an_existing_destination_keeps_its_permission_bits(self, tmp_path: Path) -> None:
+        # The atomic replace lands a NEW inode, so without the mode copy the
+        # download would silently re-mode the file it replaced.
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"old")
+        dest.chmod(0o640)
+        client, _calls = make_recording_client([_get_response(b"new")])
+        S3Storage("s3://bucket/state.json", client=client).get_file(dest)
+        assert dest.read_bytes() == b"new"
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_a_new_destination_takes_the_bits_a_plain_write_would(self, tmp_path: Path) -> None:
+        # Nothing to preserve, so the umask decides - the temp file's own 0600
+        # must not leak into the destination as a side effect of the mechanism.
+        reference = tmp_path / "reference.bin"
+        reference.write_bytes(b"")
+        client, _calls = make_recording_client([_get_response(b"new")])
+        dest = tmp_path / "fresh.bin"
+        S3Storage("s3://bucket/fresh.bin", client=client).get_file(dest)
+        assert stat.S_IMODE(dest.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    def test_a_body_failing_mid_read_leaves_the_destination_intact(self, tmp_path: Path) -> None:
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"previous-contents")
+        body = _FailingBody(b"partial")
+        client, _calls = make_recording_client([{"Body": body, "ContentLength": 99}])
+        storage = S3Storage("s3://bucket/state.json", client=client)
+
+        with pytest.raises(TransportError) as exc_info:
+            storage.get_file(dest)
+
+        # The transport failure is attributed to the S3 side, not the local one.
+        assert exc_info.value.bucket == "bucket"
+        assert exc_info.value.key == "state.json"
+        assert isinstance(exc_info.value.__cause__, ResponseStreamingError)
+        assert dest.read_bytes() == b"previous-contents"  # byte-for-byte
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]  # no temp-file litter
+        assert body.closes == 1  # the connection is released either way
+
+    def test_a_local_write_failure_is_attributed_locally_and_cleans_up(
+        self, tmp_path: Path
+    ) -> None:
+        # A directory at the destination path: the temp file is written, and the
+        # replace onto it fails. The local family names the local path in `key`
+        # and leaves `bucket` unset (design/exceptions.md).
+        dest = tmp_path / "occupied"
+        dest.mkdir()
+        client, _calls = make_recording_client([_get_response(b"payload")])
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3Storage("s3://bucket/occupied", client=client).get_file(dest)
+        assert exc_info.value.key == str(dest)
+        assert exc_info.value.bucket is None
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["occupied"]  # temp file removed
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges")
+    def test_a_symlink_destination_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        reference = tmp_path / "reference.bin"
+        reference.write_bytes(b"")
+        target = tmp_path / "target.txt"
+        target.write_bytes(b"target-contents")
+        target.chmod(0o600)  # distinctive, so following the link would show up
+        link = tmp_path / "link.txt"
+        link.symlink_to(target)
+        client, _calls = make_recording_client([_get_response(b"downloaded")])
+
+        S3Storage("s3://bucket/obj", client=client).get_file(link)
+
+        assert not link.is_symlink()  # the link itself was replaced
+        assert link.read_bytes() == b"downloaded"
+        assert target.read_bytes() == b"target-contents"  # its target is untouched
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        # The mode is not followed either: the destination is stat'ed without
+        # dereferencing, so a symlink has no bits to preserve and the
+        # replacement takes the umask's, not the link target's 0o600.
+        assert stat.S_IMODE(link.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    def test_parent_directories_are_created(self, tmp_path: Path) -> None:
+        client, _calls = make_recording_client([_get_response(b"deep")])
+        dest = tmp_path / "a" / "b" / "c.bin"
+        S3Storage("s3://bucket/obj", client=client).get_file(dest)
+        assert dest.read_bytes() == b"deep"
+
+    def test_an_empty_object_lands_as_an_empty_file(self, tmp_path: Path) -> None:
+        client, calls = make_recording_client([_get_response(b"")])
+        dest = tmp_path / "empty.bin"
+        info = S3Storage("s3://bucket/empty.bin", client=client).get_file(dest)
+        assert dest.read_bytes() == b""
+        assert info.size == 0
+        assert ops(calls) == ["GetObject"]
+
+
+class _PutRecordingClient:
+    """A client that records each ``PutObject`` and drains the body handed to it.
+
+    The body is read *during* the call, which is the only moment it is open:
+    ``put_file`` owns the handle and closes it as it returns.
+    """
+
+    def __init__(
+        self, response: dict[str, Any] | None = None, error: Exception | None = None
+    ) -> None:
+        self._response = {"ETag": '"abc"'} if response is None else response
+        self._error = error
+        self.calls: list[dict[str, Any]] = []
+        self.bodies: list[bytes] = []
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        body = kwargs.pop("Body")
+        self.calls.append(kwargs)
+        self.bodies.append(body.read())
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class TestPutFile:
+    """``S3Storage.put_file`` - one ``PutObject`` carrying a local file."""
+
+    def test_uploads_the_file_bytes_in_one_call(self, tmp_path: Path) -> None:
+        source = tmp_path / "manifest.json"
+        source.write_bytes(b"payload-bytes")
+        client = _PutRecordingClient()
+        storage = S3Storage("s3://bucket/prefix/", client=client)  # type: ignore[arg-type]
+
+        info = storage.put_file(source, key="manifest.json")
+
+        # One request, and nothing shapes the object: no ContentType, so no MIME
+        # guessing (that is the transfer lanes' aws parity behavior, not this one's).
+        assert client.calls == [{"Bucket": "bucket", "Key": "prefix/manifest.json"}]
+        assert client.bodies == [b"payload-bytes"]
+        assert isinstance(info, S3FileInfo)
+        assert info.key == "prefix/manifest.json"
+        assert info.compare_key == "manifest.json"
+        assert info.size == 13  # the local file's size
+        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.storage is storage
+        assert info.head == {"ETag": '"abc"'}
+
+    def test_response_metadata_is_stripped_from_head(self, tmp_path: Path) -> None:
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        client = _PutRecordingClient(
+            {"ETag": '"e"', "VersionId": "v1", "ResponseMetadata": {"HTTPStatusCode": 200}}
+        )
+        info = S3Storage("s3://bucket/a.bin", client=client).put_file(source)  # type: ignore[arg-type]
+        assert info.head == {"ETag": '"e"', "VersionId": "v1"}
+
+    def test_key_joins_like_get_fileinfo(self, tmp_path: Path) -> None:
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        client = _PutRecordingClient()
+        # The "/" boundary is inserted under a slashless prefix, and "" stays
+        # the storage's own key.
+        S3Storage("s3://bucket/prefix", client=client).put_file(source, key="sub/f.txt")  # type: ignore[arg-type]
+        S3Storage("s3://bucket/prefix/obj.txt", client=client).put_file(source)  # type: ignore[arg-type]
+        assert [call["Key"] for call in client.calls] == ["prefix/sub/f.txt", "prefix/obj.txt"]
+
+    def test_an_empty_file_uploads_as_an_empty_object(self, tmp_path: Path) -> None:
+        source = tmp_path / "empty.bin"
+        source.write_bytes(b"")
+        client = _PutRecordingClient()
+        info = S3Storage("s3://bucket/empty.bin", client=client).put_file(source)  # type: ignore[arg-type]
+        assert client.bodies == [b""]
+        assert info.size == 0
+
+    def test_a_missing_source_raises_not_found_without_a_request(self, tmp_path: Path) -> None:
+        client = _PutRecordingClient()
+        source = tmp_path / "gone.bin"
+        storage = S3Storage("s3://bucket/gone.bin", client=client)  # type: ignore[arg-type]
+        with pytest.raises(NotFoundError) as exc_info:
+            storage.put_file(source)
+        # A locally-originating error names the local path in `key`, with no bucket.
+        assert exc_info.value.key == str(source)
+        assert exc_info.value.bucket is None
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+        assert client.calls == []
+
+    def test_a_put_failure_translates_to_the_taxonomy(self, tmp_path: Path) -> None:
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        client = _PutRecordingClient(error=client_error("AccessDenied", 403, "PutObject"))
+        storage = S3Storage("s3://bucket/a.bin", client=client)  # type: ignore[arg-type]
+        with pytest.raises(AccessDeniedError) as exc_info:
+            storage.put_file(source)
+        assert exc_info.value.bucket == "bucket"
+        assert exc_info.value.key == "a.bin"
+        assert isinstance(exc_info.value.__cause__, ClientError)
+
+
+class TestSingleRequestTransferRoundTrip:
+    """``put_file`` then ``get_file`` through the real SDK stack (moto).
+
+    The fakes above stub ``_make_api_call``, so nothing there exercises what
+    botocore does with the arguments: that a file handle passed as ``Body`` is
+    streamed (and length-computed) rather than rejected, and that the download
+    loop reads botocore's real ``StreamingBody``. This runs both against a moto
+    backend, over enough bytes to need several read chunks.
+    """
+
+    def test_a_file_survives_the_round_trip(self, tmp_path: Path) -> None:
+        payload = b'{"seen": 42}\n' * 50_000  # ~650 KB: several 256 KB chunks
+        source = tmp_path / "state.json"
+        source.write_bytes(payload)
+        with mock_aws():
+            client = boto3.session.Session().client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="round-trip")
+            storage = S3Storage("s3://round-trip/app/", client=client)
+
+            uploaded = storage.put_file(source, key="state.json")
+            assert uploaded.key == "app/state.json"
+            assert uploaded.size == len(payload)
+            # A single-part object's ETag is the MD5 of its bytes, undecorated.
+            assert uploaded.etag == hashlib.md5(payload, usedforsecurity=False).hexdigest()
+
+            back = tmp_path / "downloaded.json"
+            downloaded = storage.get_file(back, key="state.json")
+
+        assert back.read_bytes() == payload
+        assert downloaded.size == len(payload)
+        assert downloaded.etag == uploaded.etag
+        assert downloaded.mtime is not None
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["downloaded.json", "state.json"]

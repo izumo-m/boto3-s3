@@ -61,6 +61,9 @@ against such buckets.
 An indeterminate comparison always copies. The strategy never skips on a value
 it could not verify.
 
+The same judgment is available for a single file, with no sync involved —
+section 5.
+
 ## 3. `ChecksumComparison`
 
 ```python
@@ -139,3 +142,41 @@ If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.
 Outstanding decisions are always awaited before `sync` returns, and your
 executor is never shut down.
+
+## 5. Checking a single object
+
+`EtagComparison` answers the same question for one file, outside any sync —
+verifying an upload that just finished, a build artifact, an inventory row —
+through `content_differs`. Pass the ETag you already have; nothing is fetched
+from S3:
+
+```python
+comparison = EtagComparison(s3)
+head = s3.client().head_object(Bucket="my-bucket", Key="dist/app.tar.gz")
+
+if comparison.content_differs(
+    "dist/app.tar.gz",
+    etag=head["ETag"].strip('"'),      # dequoted, as a listing entry carries it
+    s3_size=head["ContentLength"],
+):
+    ...  # the object does not hold these bytes
+```
+
+`True` means differing **or** indeterminate, exactly as in a sync — a missing
+ETag is never read as a match.
+
+The source is a path or an already-open binary stream. A path is opened and
+closed here, and a failure to open or read it raises the same library error a
+sync would (`NotFoundError` for a file that is gone). A stream is read from
+where it stands, is never closed, and its own errors reach you unchanged.
+
+`size` is the source's own byte size, and it does two jobs: it fixes the part
+split of a multipart ETag, and it is one half of the `check_size` guard. For a
+path it is read off the filesystem when a decision needs it; for a stream you
+have to pass it, and a multipart ETag without it is indeterminate. `s3_size` is
+optional — with `check_size` on, sizes known on **both** sides that disagree
+settle the comparison without reading the file at all, which for a stream source
+means passing `size` as well.
+
+Everything section 2 says about `part_size` and encrypted objects holds here
+too.

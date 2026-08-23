@@ -19,7 +19,8 @@ which are not objects; submitting them would try to delete prefixes.
 
 ```python
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
-          batch_size=1000, operation="delete", capture_response=False)
+          batch_size=1000, operation="delete", capture_response=False,
+          dryrun=False)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -48,6 +49,33 @@ flight.
 use the context manager, interpreter shutdown blocks until the in-flight batch
 finishes.
 
+### Rehearsing with `dryrun`
+
+`dryrun=True` makes the deleter report what it would delete and delete nothing.
+`submit` validates the entry as usual, then hands `on_result` one record with
+outcome `DRYRUN` — the same fields a real deletion's record carries — and
+returns. Nothing is buffered, no request is sent, and no worker thread is
+created, so the counters stay at zero and `flush()` and `close()` have nothing
+to do:
+
+```python
+from boto3_s3 import S3Deleter, S3ScanOptions
+
+with S3Deleter(storage, on_result=cb, dryrun=rehearse) as deleter:
+    for info in storage.scan(S3ScanOptions(recursive=True)):
+        deleter.submit(info)   # rehearsing: cb sees DRYRUN, S3 sees nothing
+```
+
+In your own code the flag is the only difference between rehearsing and
+deleting, so a `--dryrun`-style option costs one argument rather than a second
+code path. At run time a rehearsal behaves differently in two ways: the record
+is emitted on **your** thread, so an exception from `on_result` comes straight
+back out of `submit`, and a cancelled `cancel_token` makes `submit` return
+without a record.
+
+`S3.rm(dryrun=True)` and `sync(dryrun=True, delete_filter=...)` do their own
+rehearsing; this flag is for code driving the deleter directly.
+
 ## 2. Results
 
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
@@ -57,7 +85,9 @@ discarded without being sent produce no record.
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
 batch are not delivered, and the exception is re-raised to you on the next
-non-empty `flush()` or on `close()`.
+non-empty `flush()` or on `close()`. (A `dryrun` deleter has no worker and
+calls it on your own thread — see [Rehearsing with
+`dryrun`](#rehearsing-with-dryrun) above.)
 
 `submit` / `flush` / `close` are meant to be called from **one** thread.
 
@@ -81,6 +111,18 @@ can be printed as-is.
 If the batch request itself fails, **every key in that batch** is recorded as
 failed and the deleter continues with the following batches. So a wrong bucket
 name fails everything, and the counts show it.
+
+Success on the batch route is normally read as "not in the response's error
+list". If the response carries an error the deleter cannot pin on any key it
+sent — an entry with no key, or one naming a key it never submitted — that
+reading is no longer safe, so **every key of that batch that the response did
+not account for is recorded as failed**, with a message saying the deletion
+could not be confirmed and quoting the offending entry. A key with an error of
+its own keeps that error, and with `capture_response=True` a key the response
+lists as deleted stays a success. Failing closed matters if a delete success
+licenses you to drop your own record of the object: the object may still be
+there. S3 answers only for the keys you sent, so in practice this never fires;
+it is a guard, and it logs a warning as well.
 
 Anything outside that — a genuine programming error — is not turned into per-key
 results. It is re-raised to you on the next non-empty `flush()` or `close()`.

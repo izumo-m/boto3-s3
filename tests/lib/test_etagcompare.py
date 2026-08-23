@@ -3,8 +3,10 @@
 Pins ``EtagComparison``'s construction (the ``s3`` / ``part_size`` / ``check_size``
 knobs), the s3->s3 direct-ETag comparison and its size collision-guard, the
 upload / download single- and multipart reconstruction at ``part_size``, the
-missing / non-MD5 -> differ rule, and the documented caveats (part-size
-fragility, SSE opaque etag, the empty-object "-0" avoidance).
+missing / non-MD5 -> differ rule, the documented caveats (part-size fragility,
+SSE opaque etag, the empty-object "-0" avoidance), and the single-object
+``content_differs`` entry point (path and stream sources, its size resolution,
+and which failures it translates).
 
 Canned shapes are deliberately miniature: multipart "-N" ETags on objects far
 below S3's 5 MiB part floor. The reconstruction is arithmetic over sizes and
@@ -21,6 +23,8 @@ their bytes (e.g. ``printf '0123456789' | md5sum``).
 from __future__ import annotations
 
 import hashlib
+import io
+import os
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +40,7 @@ from boto3_s3.etagcompare import (
     _file_md5_hex,  # pyright: ignore[reportPrivateUsage]
     _multipart_etag_at,  # pyright: ignore[reportPrivateUsage]
 )
-from boto3_s3.exceptions import Boto3S3Error
+from boto3_s3.exceptions import Boto3S3Error, NotFoundError
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
@@ -106,6 +110,20 @@ class _FakeS3:
 def _etag(s3: Any = None, **kw: Any) -> EtagComparison:
     """Construct the comparison; centralizes the attribute-check tests' build."""
     return EtagComparison(s3, **kw)
+
+
+class _NoReadStream(io.BytesIO):
+    """A stream that fails the test if read - proof a decision reached no bytes."""
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        raise AssertionError("the source must not be read")
+
+
+class _FailingStream(io.BytesIO):
+    """A stream whose read fails with a raw ``OSError`` (a caller-owned backend's fault)."""
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        raise OSError("stream is broken")
 
 
 class TestConstruction:
@@ -406,6 +424,152 @@ class TestSizeCheckToggle:
             dest=_s3(etag=_TEN_SINGLE, size=10),
         )
         assert EtagComparison(check_size=True)(pair) is False
+
+
+class TestContentDiffers:
+    """The single-object entry point: one local source against a caller-held ETag."""
+
+    def test_path_match_skips(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag=_TEN_SINGLE) is False
+
+    def test_path_mismatch_differs(self, tmp_path: Path) -> None:
+        assert EtagComparison().content_differs(write_file(tmp_path, _TEN), etag="0" * 32) is True
+
+    def test_str_path_accepted(self, tmp_path: Path) -> None:
+        # str and PathLike sources are the same source.
+        p = str(write_file(tmp_path, _TEN))
+        assert EtagComparison().content_differs(p, etag=_TEN_SINGLE) is False
+
+    def test_stream_match_leaves_the_stream_open(self) -> None:
+        stream = io.BytesIO(_TEN)
+        assert EtagComparison().content_differs(stream, etag=_TEN_SINGLE) is False
+        assert stream.closed is False  # the stream stays the caller's
+
+    def test_stream_mismatch_differs(self) -> None:
+        assert EtagComparison().content_differs(io.BytesIO(_TEN), etag="0" * 32) is True
+
+    def test_stream_is_read_from_its_current_position(self) -> None:
+        stream = io.BytesIO(_TEN)
+        _ = stream.read(5)
+        expected = _independent_single(_TEN[5:])
+        assert EtagComparison().content_differs(stream, etag=expected) is False
+
+    def test_multipart_path_match_skips(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, _CONTENT_6MIB)
+        comparison = EtagComparison(part_size=5 * _MIB)
+        assert comparison.content_differs(p, etag=_CONTENT_6MIB_MP5) is False
+
+    def test_multipart_path_wrong_count_differs(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, _CONTENT_6MIB)
+        wrong = _CONTENT_6MIB_MP5.split("-")[0] + "-3"
+        comparison = EtagComparison(part_size=5 * _MIB)
+        assert comparison.content_differs(p, etag=wrong) is True
+
+    def test_multipart_stream_match_needs_the_size(self) -> None:
+        # A stream cannot be sized here, so the caller supplies it.
+        stream = io.BytesIO(_CONTENT_6MIB)
+        comparison = EtagComparison(part_size=5 * _MIB)
+        size = len(_CONTENT_6MIB)
+        assert comparison.content_differs(stream, etag=_CONTENT_6MIB_MP5, size=size) is False
+
+    def test_multipart_stream_without_size_differs_unread(self) -> None:
+        # Indeterminate: the part split cannot be reconstructed, and no byte is read.
+        stream = _NoReadStream(_CONTENT_6MIB)
+        assert EtagComparison().content_differs(stream, etag=_CONTENT_6MIB_MP5) is True
+
+    def test_multipart_single_part_via_clamp(self, tmp_path: Path) -> None:
+        # The 10-byte file is one part at any effective part size (>= 5 MiB), so a
+        # "-1" etag matches - the same tiny-file exercise of the multipart branch
+        # the pair path gets.
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag=_TEN_MP10) is False
+
+    def test_part_size_below_the_floor_is_clamped(self, tmp_path: Path) -> None:
+        # ChunksizeAdjuster's 5 MiB floor applies here too: a 4-byte request
+        # compares as one part, not as the three parts a literal 4-byte split
+        # would make.
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison(part_size=4).content_differs(p, etag=_TEN_MP10) is False
+        assert EtagComparison(part_size=4).content_differs(p, etag=_TEN_MP4) is True
+
+    def test_etag_none_differs_without_touching_the_source(self, tmp_path: Path) -> None:
+        # Nothing to compare against -> indeterminate -> differs, with no stat,
+        # no open and no read.
+        assert EtagComparison().content_differs(tmp_path / "nope", etag=None) is True
+        assert EtagComparison().content_differs(_NoReadStream(_TEN), etag=None) is True
+
+    def test_etag_empty_differs(self) -> None:
+        # An empty etag is as indeterminate as a missing one (the pair path's rule).
+        assert EtagComparison().content_differs(_NoReadStream(_TEN), etag="") is True
+
+    def test_size_mismatch_short_circuits_before_read(self) -> None:
+        # check_size on: the two known sizes disagree, so the source is never read.
+        stream = _NoReadStream(_TEN)
+        differs = EtagComparison().content_differs(stream, etag=_TEN_SINGLE, size=10, s3_size=20)
+        assert differs is True
+
+    def test_size_mismatch_uses_the_paths_own_size(self, tmp_path: Path) -> None:
+        # No size given: the path is stat'd for the guard, so a matching etag
+        # still differs when the object's size disagrees with the file on disk.
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag=_TEN_SINGLE, s3_size=99) is True
+
+    def test_check_size_off_ignores_s3_size(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, _TEN)
+        comparison = EtagComparison(check_size=False)
+        assert comparison.content_differs(p, etag=_TEN_SINGLE, s3_size=99) is False
+        stream = io.BytesIO(_TEN)
+        assert comparison.content_differs(stream, etag=_TEN_SINGLE, size=10, s3_size=99) is False
+
+    def test_matching_sizes_still_hash(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag="0" * 32, s3_size=len(_TEN)) is True
+
+    def test_unknown_s3_size_does_not_short_circuit(self) -> None:
+        assert EtagComparison().content_differs(io.BytesIO(_TEN), etag=_TEN_SINGLE) is False
+
+    def test_missing_path_raises_the_taxonomy_error(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nope"
+        with pytest.raises(NotFoundError) as excinfo:
+            EtagComparison().content_differs(missing, etag=_TEN_SINGLE)
+        assert excinfo.value.operation == "compare"
+        assert excinfo.value.key == str(missing)
+
+    def test_missing_path_raises_from_the_multipart_size_read(self, tmp_path: Path) -> None:
+        # The multipart branch stats the path first; that miss translates too.
+        missing = tmp_path / "nope"
+        with pytest.raises(NotFoundError) as excinfo:
+            EtagComparison().content_differs(missing, etag=_TEN_MP10)
+        assert excinfo.value.operation == "compare"
+        assert excinfo.value.key == str(missing)
+
+    def test_error_key_is_the_fspath_of_a_pathlike(self, tmp_path: Path) -> None:
+        # The key names the path, not the object: a bare PathLike is normalized
+        # with os.fspath, as everywhere else in the library - on the open miss
+        # and on the multipart branch's stat alike.
+        missing = tmp_path / "nope"
+
+        class _P(os.PathLike):  # type: ignore[type-arg]
+            def __fspath__(self) -> str:
+                return str(missing)
+
+        for etag in (_TEN_SINGLE, _TEN_MP10):
+            with pytest.raises(NotFoundError) as excinfo:
+                EtagComparison().content_differs(_P(), etag=etag)
+            assert excinfo.value.key == str(missing)
+
+    def test_stream_failure_propagates_untranslated(self) -> None:
+        # A stream is the caller's backend: its own error is not mapped into the
+        # taxonomy (a translated one would not be an OSError at all).
+        with pytest.raises(OSError, match="stream is broken") as excinfo:
+            EtagComparison().content_differs(_FailingStream(_TEN), etag=_TEN_SINGLE)
+        assert not isinstance(excinfo.value, Boto3S3Error)
+
+    def test_empty_file_matches_the_empty_md5(self, tmp_path: Path) -> None:
+        p = write_file(tmp_path, b"")
+        assert EtagComparison().content_differs(p, etag=_EMPTY_SINGLE) is False
+        assert EtagComparison().content_differs(p, etag=_TEN_SINGLE) is True
 
 
 class TestHelperUnits:

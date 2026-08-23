@@ -40,7 +40,8 @@ the API, and where to look.
 - [`library/errors.md`](./library/errors.md) — the exception hierarchy, what is
   safe to depend on, and partial failure.
 - [`library/sync.md`](./library/sync.md) — the three decisions `sync` makes, the
-  default rule and its asymmetry, and what happens before the scan.
+  single callback that can take all three, the default rule and its asymmetry,
+  and what happens before the scan.
 - [`library/sync-content.md`](./library/sync-content.md) — deciding updates by
   content instead of timestamps, and running those decisions in parallel.
 - [`library/filters.md`](./library/filters.md) — `filter=`, glob patterns, and

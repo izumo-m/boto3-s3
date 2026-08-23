@@ -4,9 +4,10 @@
 callback of `cp` / `mv` / `rm` / `sync`. One record is emitted per item - from
 a worker thread on the asynchronous paths (s3transfer's for submitted
 transfers, `S3Deleter`'s for batched deletes), and inline on the operation's
-own thread for the synchronous ones (dry-run, the single-key `rm`, local /
-custom-destination deletes, `use_threads=False`) - so `on_result` must be fast
-and must not raise either way.
+own thread for the synchronous ones (dry-run - the orchestrators' own branches
+and a `dryrun=True` `S3Deleter`, which dispatches nothing, alike - the
+single-key `rm`, local / custom-destination deletes, `use_threads=False`) - so
+`on_result` must be fast and must not raise either way.
 
 It is a **single type discriminated by `transfer_type` and `outcome`**, not a
 per-subcommand hierarchy. aws-cli uses one result kind per event
