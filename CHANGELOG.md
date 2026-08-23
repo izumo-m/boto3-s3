@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-23
+
 - Added `sync(pair_filter=...)`, one callback deciding every paired entry — create, update and delete alike — in place of the three lane filters.
 - `set_stream_logger`'s masking no longer alters the log records other handlers on the same loggers receive.
 - Added `EtagComparison.content_differs`, which compares a single local file or stream against a known S3 ETag without a `sync`.
@@ -88,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...HEAD
+[0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...boto3-s3-v0.9.0
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.7.0...boto3-s3-v0.8.0
