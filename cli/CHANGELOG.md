@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An empty or whitespace-only CA bundle value (`--ca-bundle`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, a blank `ca_bundle` profile key) now fails the run like `aws` instead of silently turning TLS verification off, on every supported `boto3`.
+
 ## [0.8.0] - 2026-08-13
 
 - `~/.aws/cli/alias` is now read like aws: `[command s3]` entries run as subcommands, internal and external (`!`) alike.

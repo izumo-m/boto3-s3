@@ -697,10 +697,12 @@ def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession)
     ``ca_bundle`` key, read off the *same* session the client is built from, so
     the resolved profile is honored) and the ``REQUESTS_CA_BUNDLE`` env var
     (botocore's ``EndpointCreator._get_verify_value``, present-wins so an empty
-    value keeps its "verification off" meaning). Nothing set lands on the
-    bundle botocore would have used at request time - certifi's, or botocore's
-    own ``cacert.pem`` where certifi is absent, which is why this asks
-    ``get_cert_path`` rather than importing certifi.
+    value stops the chain as itself rather than falling through). An empty or
+    whitespace-only value that reaches the client is then rejected at build time
+    like aws v2 (`_reject_empty_ca_bundle`), not read as "verification off".
+    Nothing set lands on the bundle botocore would have used at request time -
+    certifi's, or botocore's own ``cacert.pem`` where certifi is absent, which
+    is why this asks ``get_cert_path`` rather than importing certifi.
 
     Resolving here rather than passing ``None`` is what gives the CRT engine a
     CA file: ``create_s3_crt_client(verify=None)`` means the *platform* trust
@@ -1090,7 +1092,45 @@ def _create_client(
         raise
     retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
     _reject_unsupported_retry_mode(retries.get("mode"))
+    _reject_empty_ca_bundle(kwargs.get("verify"))
     return client
+
+
+def _reject_empty_ca_bundle(verify: Any) -> None:
+    """Reject an empty or whitespace-only CA bundle, like aws v2 (>= 2.36.2).
+
+    aws refuses an empty or whitespace-only ``ca_bundle`` / ``AWS_CA_BUNDLE`` /
+    ``REQUESTS_CA_BUNDLE`` / ``--ca-bundle`` value outright at client
+    construction (its bundled botocore's ``EndpointCreator._validate_verify_value``)
+    rather than silently turning TLS verification off. The installed botocore
+    adopted the same check in 1.43.54, but the supported floor is older
+    (docs/compatibility.md), so a host botocore below it would still disable
+    verification. Re-raising botocore's own ``InvalidConfigError`` here, with
+    its exact wording, holds the rejection across the whole support range: on a
+    botocore that already rejects, ``session.client`` raised the identical
+    exception first and this is unreached; on an older one, this supplies it.
+
+    ``build_client`` / ``build_service_client`` catch it in their
+    ``except BotoCoreError`` clause and refine it to the library
+    ``InvalidConfigError`` (rc 255), exactly as they would botocore's own. It
+    runs after ``session.client`` has resolved the profile and the endpoint -
+    where aws runs it - so a bad ``--profile`` (255) or an empty ``--region``
+    (``Invalid endpoint``, 255) still reports first, and a rejected retry mode
+    (checked just above) still beats it, matching aws's config-resolution vs
+    endpoint-creation order (all measured against the pinned aws-cli). ``False``
+    (``--no-verify-ssl``) and a real path pass through untouched.
+    """
+    from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+    if isinstance(verify, str) and not verify.strip():
+        raise BotocoreInvalidConfigError(
+            error_msg=(
+                "Invalid CA bundle: the configured value (ca_bundle, "
+                "AWS_CA_BUNDLE, REQUESTS_CA_BUNDLE, or verify) resolved to an "
+                "empty or whitespace-only string. Provide a valid path to a "
+                "CA bundle file."
+            )
+        )
 
 
 def _reject_unsupported_retry_mode(mode: Any) -> None:

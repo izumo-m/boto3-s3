@@ -36,6 +36,13 @@ through botocore exactly as they do for `aws` — `AWS_ACCESS_KEY_ID`,
 an HTTPS proxy is opened with the same `CONNECT` request `aws` sends, on
 whichever Python this command runs.
 
+A CA bundle that resolves to an empty or whitespace-only value — `--ca-bundle
+''`, `AWS_CA_BUNDLE=`, `REQUESTS_CA_BUNDLE=`, or a profile `ca_bundle` key left
+blank — is a configuration error, exit code 255, and not a quiet request to
+skip verification. `aws` refuses it the same way, on whichever `boto3` you have
+installed. Pass `--no-verify-ssl` when turning verification off is what you
+mean.
+
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
 `AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`,

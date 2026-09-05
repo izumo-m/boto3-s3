@@ -404,7 +404,16 @@ These implement the policy in
   walked at request time - which the CRT engine never sees, since
   `create_s3_crt_client(verify=None)` means the platform trust store
   ([`crt.md`](./crt.md)). Leaving it unresolved had the two engines trusting
-  different roots.
+  different roots. An empty or whitespace-only answer is **refused** rather
+  than used: `_reject_empty_ca_bundle` raises botocore's own
+  `InvalidConfigError` (rc 255, its exact wording), which is what aws v2 does
+  from 2.36.2 on and what the installed botocore does from 1.43.54 - the
+  supported floor is older, so the CLI supplies the check itself and the
+  rejection holds across the whole range. It runs where aws runs it, after
+  `session.client` has resolved the profile and the endpoint, so an undeclared
+  `--profile` and an empty `--region` (`Invalid endpoint`) still report first,
+  and a rejected retry mode still beats it (all measured). `--no-verify-ssl`
+  resolves to `False` ahead of the chain and is unaffected.
 - **The alignment with aws v2**: `build_client` and the botocore session every
   client is opened on absorb ten differences between the installed botocore on
   a host interpreter and the botocore aws v2 ships frozen. Where a correction

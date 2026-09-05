@@ -1985,6 +1985,13 @@ class TestMalformedS3Section:
             clientfactory.build_client(_parse([]))
 
 
+_EMPTY_CA_BUNDLE_REPORT = (
+    "Invalid CA bundle: the configured value (ca_bundle, AWS_CA_BUNDLE, "
+    "REQUESTS_CA_BUNDLE, or verify) resolved to an empty or whitespace-only "
+    "string. Provide a valid path to a CA bundle file."
+)
+
+
 class TestVerifyResolution:
     """The TLS trust source, resolved explicitly for every CLI-built client.
 
@@ -2013,27 +2020,55 @@ class TestVerifyResolution:
         argv = ["--no-verify-ssl", "--ca-bundle", str(bundle)]
         assert _client_verify(clientfactory.build_client(_parse(argv))) is False
 
-    def test_empty_ca_bundle_flag_disables_verification(self) -> None:
+    def test_empty_ca_bundle_flag_is_rejected(self) -> None:
         # `--ca-bundle=` is present-empty, not unset: it stops the chain
-        # (measured: aws adopts it the same way, and botocore reads the empty
-        # string as verification-off on both tools) instead of falling through
-        # to the env or the certifi default. A truthy-`or` rewrite of the
-        # chain - the b935265 / 51e7831 empty-string family - resolves the
-        # default CA here instead.
-        assert _client_verify(clientfactory.build_client(_parse(["--ca-bundle", ""]))) == ""
+        # instead of falling through to the env or the certifi default (a
+        # truthy-`or` rewrite of the chain - the b935265 / 51e7831
+        # empty-string family - would resolve the default CA here). The empty
+        # value it lands on is then refused at client build, with botocore's
+        # own wording, rather than read as "verification off" - measured on
+        # the pinned aws-cli, which reports exactly this at rc 255.
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_client(_parse(["--ca-bundle", ""]))
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+        assert exit_code_for(excinfo.value) == 255
 
-    def test_empty_aws_ca_bundle_env_stops_the_chain(
+    def test_whitespace_only_ca_bundle_flag_is_rejected(self) -> None:
+        # aws refuses a whitespace-only value on the same check rather than
+        # attempting it as a path (measured); the report is the same one.
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            clientfactory.build_client(_parse(["--ca-bundle", "  "]))
+
+    def test_empty_aws_ca_bundle_env_is_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("AWS_CA_BUNDLE", "")
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "req.pem"))
-        assert _client_verify(clientfactory.build_client(_parse([]))) == ""
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            clientfactory.build_client(_parse([]))
 
-    def test_empty_requests_ca_bundle_env_stops_the_chain(
+    def test_empty_requests_ca_bundle_env_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
-        assert _client_verify(clientfactory.build_client(_parse([]))) == ""
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            clientfactory.build_client(_parse([]))
+
+    def test_no_verify_ssl_beats_an_empty_ca_bundle(self) -> None:
+        # The rejection reads the *resolved* value, and `--no-verify-ssl`
+        # resolves to False before the chain ever reads the flag - so the pair
+        # disables verification instead of failing (measured).
+        argv = ["--no-verify-ssl", "--ca-bundle", ""]
+        assert _client_verify(clientfactory.build_client(_parse(argv))) is False
+
+    def test_an_undeclared_profile_is_reported_before_an_empty_ca_bundle(self) -> None:
+        # The rejection sits where aws's does - after the client build has
+        # resolved the profile - so an undeclared profile is still what gets
+        # reported (measured: aws names the profile, not the CA bundle).
+        # Pinned on the base class plus the message: what this fixes is which
+        # failure wins, not the class the profile error is filed under.
+        with pytest.raises(Boto3S3Error, match="config profile"):
+            clientfactory.build_client(_parse(["--profile", "nope", "--ca-bundle", ""]))
 
     def test_ca_bundle_flag_beats_the_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
