@@ -38,11 +38,12 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   (the NonThreadedExecutor, exactly what boto3 selects for that flag) so
   multipart call order is deterministic against the positional canned list;
   thresholds stay at the aws default 8 MiB.
-- The aws-cli's expected ``ChecksumAlgorithm: 'CRC64NVME'`` becomes
-  ``'CRC32'`` on upload-path operations (PutObject / CreateMultipartUpload /
-  UploadPart): both engines inject a default integrity checksum - aws via its
-  bundled botocore, ours via pip s3transfer - they just pick different
-  algorithms. ``ChecksumMode: 'ENABLED'`` on the single-source HeadObject is
+- The aws-cli's expected ``ChecksumAlgorithm: 'CRC64NVME'`` on upload-path
+  operations (PutObject / CreateMultipartUpload / UploadPart) is spelled
+  ``DEFAULT_CHECKSUM``: aws gets it from its bundled botocore's default, the
+  CLI names the same value (``checksumdefault``) where the installed botocore
+  can compute it, and falls back to pip botocore's ``CRC32`` where it cannot
+  (no awscrt). ``ChecksumMode: 'ENABLED'`` on the single-source HeadObject is
   kept verbatim: like aws's filegenerator we setdefault it when the client
   resolves ``response_checksum_validation`` to ``when_supported`` (the botocore
   default), so the recorded HEAD matches aws.
@@ -126,8 +127,12 @@ from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
-from tests.utils.harness import CliResult, run_cli_in_process
+from tests.utils.harness import CliResult, default_checksum_algorithm, run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
+
+# What an upload names when --checksum-algorithm is absent: aws's CRC64NVME
+# where botocore can compute it (see the adaptation rules above).
+DEFAULT_CHECKSUM = default_checksum_algorithm()
 
 MB = 1024**2
 _TIME_UTC = dt.datetime(2014, 1, 9, 20, 45, 49, tzinfo=dt.timezone.utc)
@@ -372,7 +377,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "GrantRead": "id=foo",
             "GrantFullControl": "id=bar",
             "GrantReadACP": "id=biz",
@@ -643,7 +648,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "ContentType": "text/plain",
             "Body": mock.ANY,
             "ServerSideEncryption": "AES256",
@@ -660,7 +665,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "ContentType": "text/plain",
             "Body": mock.ANY,
             "SSECustomerAlgorithm": "AES256",
@@ -692,7 +697,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "ContentType": "text/plain",
             "Body": mock.ANY,
             "SSECustomerAlgorithm": "AES256",
@@ -711,7 +716,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "ContentType": "text/plain",
             "Body": mock.ANY,
             "SSEKMSKeyId": "foo",
@@ -742,7 +747,7 @@ class TestCPCommand:
         assert calls[0].params == {
             "Key": "key.txt",
             "Bucket": "bucket",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "ContentType": "text/plain",
             "SSEKMSKeyId": "foo",
             "ServerSideEncryption": "aws:kms",
@@ -788,7 +793,7 @@ class TestCpCommandWithRequesterPayer:
                 {
                     "Bucket": "mybucket",
                     "Key": "mykey",
-                    "ChecksumAlgorithm": "CRC32",
+                    "ChecksumAlgorithm": DEFAULT_CHECKSUM,
                     "RequestPayer": "requester",
                     "Body": mock.ANY,
                 },
@@ -808,7 +813,7 @@ class TestCpCommandWithRequesterPayer:
                 {
                     "Bucket": "mybucket",
                     "Key": "mykey",
-                    "ChecksumAlgorithm": "CRC32",
+                    "ChecksumAlgorithm": DEFAULT_CHECKSUM,
                     "RequestPayer": "requester",
                 },
             ),
@@ -817,7 +822,7 @@ class TestCpCommandWithRequesterPayer:
                 {
                     "Bucket": "mybucket",
                     "Key": "mykey",
-                    "ChecksumAlgorithm": "CRC32",
+                    "ChecksumAlgorithm": DEFAULT_CHECKSUM,
                     "RequestPayer": "requester",
                     "UploadId": "myid",
                     "PartNumber": mock.ANY,
@@ -829,7 +834,7 @@ class TestCpCommandWithRequesterPayer:
                 {
                     "Bucket": "mybucket",
                     "Key": "mykey",
-                    "ChecksumAlgorithm": "CRC32",
+                    "ChecksumAlgorithm": DEFAULT_CHECKSUM,
                     "RequestPayer": "requester",
                     "UploadId": "myid",
                     "PartNumber": mock.ANY,
@@ -864,7 +869,7 @@ class TestCpCommandWithRequesterPayer:
                 {
                     "Bucket": "mybucket",
                     "Key": "myfile",
-                    "ChecksumAlgorithm": "CRC32",
+                    "ChecksumAlgorithm": DEFAULT_CHECKSUM,
                     "RequestPayer": "requester",
                     "Body": mock.ANY,
                 },
@@ -1956,7 +1961,7 @@ class TestStreamingCPCommand:
         assert calls[0].params == {
             "Bucket": "bucket",
             "Key": "streaming.txt",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "Body": mock.ANY,
         }
 
@@ -1971,7 +1976,7 @@ class TestStreamingCPCommand:
         assert calls[0].params == {
             "Bucket": "bucket",
             "Key": "streaming.txt",
-            "ChecksumAlgorithm": "CRC32",
+            "ChecksumAlgorithm": DEFAULT_CHECKSUM,
             "Body": mock.ANY,
         }
 

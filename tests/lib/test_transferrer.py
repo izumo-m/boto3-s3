@@ -22,7 +22,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 from s3transfer.copies import CopySubmissionTask
 
-from boto3_s3 import crtsupport, transfer
+from boto3_s3 import transfer
 from boto3_s3.exceptions import (
     AccessDeniedError,
     CancelledError,
@@ -207,7 +207,6 @@ class TestUpload:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        default: str | None = "CRC64NVME",
         options: TransferOptions | None = None,
     ) -> dict[str, Any]:
         """Submit one upload through a stand-in CRT manager; its extra_args."""
@@ -218,39 +217,32 @@ class TestUpload:
         )
         manager = _CrtCapturingManager()
         monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
-        monkeypatch.setattr(crtsupport, "default_upload_checksum_algorithm", lambda: default)
         client, _ = make_recording_client([])
         with Transferrer(TransferType.UPLOAD, client, options=options) as transferrer:
             transferrer.submit(item)
         return manager.uploads[0]["extra_args"]
 
-    def test_crt_lane_defaults_the_upload_checksum_to_aws_clis(
+    def test_the_library_names_no_checksum_of_its_own_on_the_crt_lane(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws-cli's CRT lane stamps CRC64NVME on an upload that names no
-        # checksum (its bundled s3transfer's default); pip s3transfer would
-        # stamp CRC32, which aws-checksums computes in software - a measured
-        # 10% of a 1 GB upload against real S3 (benchmarks/RESULTS.md).
+        # boto3-faithful: the default is s3transfer's (CRC32 in its CRT module).
+        # aws's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
+        # design/crt.md section 1) - and it matters there, since aws-checksums
+        # computes CRC32 in software (benchmarks/RESULTS.md 2026-09-06).
         extra_args = self._upload_on_crt(tmp_path, monkeypatch)
-        assert extra_args["ChecksumAlgorithm"] == "CRC64NVME"
+        assert "ChecksumAlgorithm" not in extra_args
 
-    def test_an_explicit_checksum_is_kept_on_the_crt_lane(
+    def test_an_explicit_checksum_reaches_the_crt_lane(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         extra_args = self._upload_on_crt(
-            tmp_path, monkeypatch, options=TransferOptions(checksum_algorithm="SHA256")
+            tmp_path, monkeypatch, options=TransferOptions(checksum_algorithm="CRC64NVME")
         )
-        assert extra_args["ChecksumAlgorithm"] == "SHA256"
+        assert extra_args["ChecksumAlgorithm"] == "CRC64NVME"
 
-    def test_an_old_crt_stack_leaves_the_checksum_to_s3transfer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        extra_args = self._upload_on_crt(tmp_path, monkeypatch, default=None)
-        assert "ChecksumAlgorithm" not in extra_args
-
-    def test_classic_lane_keeps_s3transfers_crc32(self, tmp_path: Path) -> None:
-        # pip s3transfer's own default applies there (design/transfer.md
-        # section 10): the CRT-lane default must not leak into classic.
+    def test_classic_lane_keeps_s3transfers_default(self, tmp_path: Path) -> None:
+        # pip s3transfer stamps botocore's default (CRC32) on a classic upload
+        # that names none; the library leaves it (design/transfer.md section 10).
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(

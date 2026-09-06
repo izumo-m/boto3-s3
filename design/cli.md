@@ -306,6 +306,7 @@ solidified design is added here.
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
 | `alias.py` | The SDK-free read of `~/.aws/cli/alias` and the two things an entry can be: a shell command line or CLI arguments (section 9). `cli.py` owns where they resolve; this module owns the file, the splitting and the shell quoting |
 | `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
+| `checksumdefault.py` | aws's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 4, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own. Only where botocore can compute CRC64NVME and the client resolves `request_checksum_calculation` to `when_supported`. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
@@ -1122,6 +1123,22 @@ become an in-pipeline failure (rc 1) and diverge from aws (v2 bundles awscrt),
 but this is allowed because the charter stipulates that awscrt-dependent features
 are subject to it only when awscrt is present (overview.md section 3, transfer.md section 9).
 Signing stays pure-Python via the pin of section 4.
+
+Without `--checksum-algorithm`, aws's default is its bundled botocore's
+`DEFAULT_CHECKSUM_ALGORITHM`, `CRC64NVME`, stamped on every request whose
+operation names a `ChecksumAlgorithm` member; pip botocore's is `CRC32`. The
+CLI names aws's value (`checksumdefault.py`) in the two places botocore would
+have stamped its own: an upload run's `TransferOptions` (`locals3` only - aws
+sends no algorithm on a copy's requests, measured - so both transfer engines
+see it; the CRT engine reads its trailing checksum from that argument alone),
+and a `provide-client-params.s3.*` handler `build_client` attaches for every
+other request (`rm`'s DeleteObjects, `website` / `mb --tags`, the annotation
+writes). Only where the installed botocore can compute CRC64NVME (awscrt) and
+only for a client whose `request_checksum_calculation` resolves to
+`when_supported` - a `when_required` client sends no checksum on either tool.
+The library keeps botocore's default (crt.md section 1); the measured stake
+is the CRT engine's 1 GB upload, where CRC32's software implementation cost
+10% (benchmarks/RESULTS.md, 2026-09-06).
 
 The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws-cli):

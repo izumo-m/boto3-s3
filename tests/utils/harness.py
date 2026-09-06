@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 
 _SUBPROCESS_TIMEOUT = 60.0
 
+
+def default_checksum_algorithm() -> str:
+    """The ``ChecksumAlgorithm`` a CLI upload names when ``--checksum-algorithm``
+    is absent: aws's CRC64NVME where the installed botocore can compute it
+    (``boto3_s3_cli.checksumdefault``), else pip botocore's own default, which
+    s3transfer stamps on a classic upload. Tests that record upload requests
+    compare against this rather than a literal so they hold on both stacks."""
+    from botocore import httpchecksum
+
+    from boto3_s3_cli import checksumdefault
+
+    supported = getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ())
+    if checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM.lower() in supported:
+        return checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM
+    return str(httpchecksum.DEFAULT_CHECKSUM_ALGORITHM)
+
+
 # Token the goldens use in place of the concrete bucket name, so the same
 # golden replays against any bucket (moto's fixed bucket, the e2e bucket).
 BUCKET_TOKEN = "<BUCKET>"

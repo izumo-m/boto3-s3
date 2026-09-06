@@ -91,10 +91,15 @@ class SyncCommand(Command):
         case_conflict = transferargs.resolve_case_conflict(
             args, src, paths_type, operation="sync", recursive=True
         )
-        options = transferargs.build_transfer_options(args, case_conflict, operation="sync")
-
         s3 = head.s3
         client = head.client
+        options = transferargs.build_transfer_options(
+            args,
+            case_conflict,
+            operation="sync",
+            default_checksum_algorithm=transferargs.default_upload_checksum(client, paths_type),
+        )
+
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,

@@ -167,10 +167,12 @@ Over 1 GiB that is about 0.3 s of CRC32 against 0.05 s of CRC64NVME, and on
 four vCPUs pushing 800 MiB/s it shows in the wall time. Downloads were never
 affected because both tools validate with the CRT's own configuration.
 
-The fix (`eb5711c`) makes the library's CRT lane default to `CRC64NVME` like
-aws-cli's, where the installed awscrt has the algorithm; the classic lane
-keeps botocore's `CRC32` (design/transfer.md section 10). Confirmation runs
-of that commit, everything else as above:
+The fix names aws's default (`CRC64NVME`) on the CLI side wherever aws's
+bundled botocore would stamp it: first on the library's CRT lane alone
+(`eb5711c`, the commit the confirmation runs below measured), then moved to
+the CLI layer for both engines and every checksummed request, with the
+library back on boto3's defaults (the commit after it; design/cli.md
+section 4). Confirmation runs, everything else as above:
 
 | instance | crt cp_upload_large | crt cp_download_large | results files |
 |---|---|---|---|

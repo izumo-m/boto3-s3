@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import configfiles, s3errormsg
+from boto3_s3_cli import checksumdefault, configfiles, s3errormsg
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -1042,6 +1042,7 @@ def build_client(
             config=Config(**overrides),
         )
         s3errormsg.register(client)
+        checksumdefault.register(client)
         return client
     except (NoCredentialsError, NoRegionError) as exc:
         # aws has dedicated handlers for these two (-> 253); every other botocore

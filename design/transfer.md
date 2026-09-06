@@ -687,15 +687,21 @@ dest-existence check for download. We ported the same three faces:
 
 ## 10. Known divergence (invisible in the result; recorded only)
 
-- When `--checksum-algorithm` is unspecified, the classic engine's default
-  integrity checksum is `CRC32` (pip botocore's default); aws v2's bundled
-  botocore defaults to `CRC64NVME`. Both are valid integrity checks and do not
-  affect the transfer result or rc (stated explicitly in the awscli port's
-  adaptation rules); what differs is the checksum type stored on the object
-  (composite CRC32 against full-object CRC64NVME). When specified explicitly,
-  the two agree. The CRT engine is aligned (`CRC64NVME` when the installed
-  awscrt has it, crt.md section 6): there the difference was also a measured
-  10% on a 1 GB upload, because aws-checksums computes CRC32 in software.
+- The default integrity checksum belongs to the installed botocore: pip's
+  `DEFAULT_CHECKSUM_ALGORITHM` is `CRC32`, aws v2's bundled one is `CRC64NVME`,
+  and both s3transfers copy that constant onto an upload that names none
+  (the CRT modules have their own copy: `CRC32` in pip's, `CRC64NVME` in
+  aws's). The library leaves botocore's default in place (boto3-faithful,
+  crt.md section 1), so a library upload without `checksum_algorithm` stores a
+  composite CRC32 where `aws s3 cp` stores a full-object CRC64NVME - valid
+  integrity checks both, same result and rc. The CLI names aws's value
+  wherever aws's botocore would have stamped it (uploads on both engines, and
+  every other request with a `ChecksumAlgorithm` member: `checksumdefault`,
+  cli.md section 4), where the installed botocore can compute CRC64NVME;
+  without awscrt the CLI falls back to botocore's `CRC32`, the residual
+  difference docs/cli/aws-differences.md records. On the CRT engine the
+  algorithm also costs wall time: aws-checksums computes CRC32 in software,
+  a measured 10% on a 1 GB upload (benchmarks/RESULTS.md, 2026-09-06).
 - aws-cli's bundled s3transfer fork validates the full-object checksum of a
   **classic ranged download** (a single-object download at or above the
   multipart threshold, when the client resolves `response_checksum_validation`

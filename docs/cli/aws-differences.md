@@ -159,13 +159,16 @@ run comes out differently, listed in section 1.
   codes agree, and the bytes are identical. Real S3 never reports a
   `LastModified` that old, so reaching this at all takes an S3-compatible
   implementation that does.
-- **Default checksum algorithm.** Without `--checksum-algorithm`, the requests
-  that carry a client-computed checksum are checked with `CRC32` here and with
-  `CRC64NVME` on `aws` v2 — uploads chiefly, and also the annotation writes a
-  `--copy-props all` multipart copy sends. The default belongs to the installed
-  botocore rather than to either tool's own code. Both algorithms are valid and
-  neither changes the result or the exit code. An explicit
-  `--checksum-algorithm` makes uploads agree.
+- **Default checksum algorithm without awscrt.** Without `--checksum-algorithm`,
+  the requests that carry a client-computed checksum use `CRC64NVME` here as on
+  `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
+  writes a `--copy-props all` multipart copy sends — as long as the installed
+  botocore can compute it, which takes awscrt (the `crt` extra). Without
+  awscrt the installed botocore's own default, `CRC32`, is sent instead; `aws`
+  always bundles awscrt. Both algorithms are valid and neither changes the
+  result or the exit code; what differs is the checksum type left on an
+  uploaded object (a full-object CRC64NVME against a composite CRC32). An
+  explicit `--checksum-algorithm` makes the two agree regardless.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.

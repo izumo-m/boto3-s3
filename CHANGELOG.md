@@ -5,8 +5,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Uploads on the CRT transfer engine now default to a `CRC64NVME` checksum, as `aws s3`'s CRT mode does.
-
 ## [0.11.0] - 2026-08-23
 
 - Added `sync(pair_filter=...)`, one callback deciding every paired entry — create, update and delete alike — in place of the three lane filters.

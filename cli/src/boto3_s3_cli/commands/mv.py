@@ -126,7 +126,12 @@ class MvCommand(Command):
         # config, so a bad [s3] value beats the invalid-mode 252 (measured
         # on cp; mv shares aws's S3TransferCommand shape).
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="mv")
+        options = transferargs.build_transfer_options(
+            args,
+            case_conflict,
+            operation="mv",
+            default_checksum_algorithm=transferargs.default_upload_checksum(client, paths_type),
+        )
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:

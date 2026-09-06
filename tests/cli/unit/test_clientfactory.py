@@ -1827,6 +1827,27 @@ class TestS3ErrorMsgRegistration:
         assert parsed["Error"]["Message"] == "unchanged."
 
 
+class TestChecksumDefaultRegistration:
+    def test_every_built_client_names_aws_default_where_botocore_would(self) -> None:
+        # aws's bundled botocore stamps CRC64NVME on a DeleteObjects that names
+        # no algorithm; pip botocore would stamp CRC32. The built client carries
+        # the CLI's stamp (checksumdefault) at provide-client-params, ahead of
+        # botocore's own resolution - or nothing, where botocore cannot compute
+        # CRC64NVME, so botocore's default stands.
+        from botocore import httpchecksum
+
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        params: dict[str, Any] = {"Bucket": "b", "Delete": {"Objects": [{"Key": "k"}]}}
+        client.meta.events.emit(
+            "provide-client-params.s3.DeleteObjects",
+            params=params,
+            model=client.meta.service_model.operation_model("DeleteObjects"),
+            context={},
+        )
+        can_compute = "crc64nvme" in getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ())
+        assert params.get("ChecksumAlgorithm") == ("CRC64NVME" if can_compute else None)
+
+
 class TestBuildServiceClient:
     def test_regionless_s3control_raises_no_region_keeping_the_cause(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

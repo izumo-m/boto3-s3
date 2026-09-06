@@ -193,54 +193,6 @@ def has_crt_s3transfer() -> bool:
     )
 
 
-# The checksum aws-cli's bundled s3transfer stamps on a CRT upload that names
-# none; pip s3transfer's own default is CRC32.
-CRT_DEFAULT_UPLOAD_CHECKSUM = "CRC64NVME"
-
-# The upload extra_args that already settle the checksum: an algorithm request
-# or a precomputed full-object value (s3transfer's FULL_OBJECT_CHECKSUM_ARGS).
-UPLOAD_CHECKSUM_ARGS = (
-    "ChecksumAlgorithm",
-    "ChecksumCRC32",
-    "ChecksumCRC32C",
-    "ChecksumCRC64NVME",
-    "ChecksumSHA1",
-    "ChecksumSHA256",
-)
-
-
-def default_upload_checksum_algorithm() -> str | None:
-    """The ``ChecksumAlgorithm`` a CRT upload gets when the caller set none.
-
-    aws-cli's CRT lane checksums every upload with CRC64NVME (its bundled
-    s3transfer's default, matching its bundled botocore's) where pip
-    s3transfer stamps CRC32. The two are not equivalent in cost: aws-checksums
-    computes CRC32 in software on x86-64 (about 3 GiB/s against about 20 for
-    CRC64NVME), and on a 4-vCPU instance pushing 800 MiB/s that was a
-    measured 10% of a 1 GB upload's wall time against real S3 (RESULTS.md,
-    2026-09-06). The classic engine is not touched here: it keeps botocore's
-    CRC32 default (transfer.md section 10).
-
-    None when the installed CRT stack cannot take the value, so the caller
-    leaves s3transfer to its own default: awscrt below 0.23.8 has no
-    ``CRC64NVME`` member, and an s3transfer whose CRT module predates the
-    full-object checksum arguments would hand ``ChecksumAlgorithm`` to
-    botocore's serializer instead of the CRT's checksum config (the floor
-    0.6.2 handles no upload checksum at all).
-    """
-    try:
-        import awscrt.s3
-        import s3transfer.crt as crt
-    except ImportError:
-        return None
-    if not hasattr(crt, "FULL_OBJECT_CHECKSUM_ARGS"):
-        return None
-    algorithms = getattr(awscrt.s3, "S3ChecksumAlgorithm", None)
-    if algorithms is None or CRT_DEFAULT_UPLOAD_CHECKSUM not in algorithms.__members__:
-        return None
-    return CRT_DEFAULT_UPLOAD_CHECKSUM
-
-
 def is_optimized_for_system() -> bool:
     """awscrt's host-optimization probe; ``False`` without a usable awscrt.
 
