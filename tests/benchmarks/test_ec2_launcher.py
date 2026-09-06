@@ -13,6 +13,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import urllib.parse
 from typing import Any
 
 import pytest
@@ -151,6 +152,9 @@ class TestUserData:
         assert script.index("shutdown -h +45") < script.index("uv sync")
         assert "BOTO3_S3_BENCH_ALLOW_REMOTE=1" in script
         assert "scripts/install-awscli.sh 2.36.40" in script
+        # The interpreter is a uv-managed build, as on the local lane; Ubuntu
+        # ships a python3.14 that uv would otherwise accept for the request.
+        assert script.index("export UV_PYTHON_PREFERENCE=only-managed") < script.index("uv sync")
         # Each curl hands its URL over as exactly one word - no quoting left
         # inside it (a `"'url'"` would make curl reject the URL).
         curls = [
@@ -324,7 +328,53 @@ class TestMarketAndOutcome:
         if outcome.rc == "failed-at-line-2":
             assert "dnf install" in verdict
 
+    def test_results_without_a_marker_point_at_the_report_path(self) -> None:
+        # The first real run: both results files came back, the instance shut
+        # itself down at the end, but the presigned PUTs had failed, so no DONE.
+        outcome = Outcome(
+            "died",
+            None,
+            "shutting-down",
+            "Client.InstanceInitiatedShutdown: Instance initiated shutdown",
+            19.0,
+        )
+        verdict = ec2._classify(outcome, 60, "", downloaded=2)
+        assert "2 results file(s)" in verdict
+        assert "DONE marker never arrived" in verdict
+        assert "without reporting" in ec2._classify(outcome, 60, "", downloaded=0)
+
     def test_ok_requires_a_zero_marker(self) -> None:
         assert Outcome("completed", "0", None, None, 1.0).ok
         assert not Outcome("completed", "1", None, None, 1.0).ok
         assert not Outcome("died", None, "terminated", None, 1.0).ok
+
+
+class TestPresignedUrls:
+    def test_presigned_urls_stay_on_the_bucket_regional_endpoint(self) -> None:
+        # Presigning is offline, so fake credentials suffice. Without the
+        # launcher's config botocore presigns with SigV2 on the global
+        # endpoint, where a new bucket outside us-east-1 answers with a 307
+        # that `curl -T` does not follow (the first run's log and DONE were
+        # lost that way).
+        import boto3
+
+        session = boto3.Session(
+            aws_access_key_id="AKIAFAKEFAKEFAKEFAKE",
+            aws_secret_access_key="fake",
+            region_name="ap-northeast-1",
+        )
+        s3 = session.client("s3", config=ec2._s3_config())
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": "boto3-s3-bench-boot-1-r", "Key": "r/DONE"},
+            ExpiresIn=60,
+        )
+        parts = urllib.parse.urlsplit(url)
+        assert parts.netloc == "boto3-s3-bench-boot-1-r.s3.ap-northeast-1.amazonaws.com"
+        query = urllib.parse.parse_qs(parts.query)
+        assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+        assert query["X-Amz-SignedHeaders"] == ["host"]
+        # And the URL is one the user-data can carry verbatim.
+        assert "PLACEHOLDER" not in ec2._inline_urls(
+            "x DONE_PUT_URL_PLACEHOLDER", {"DONE_PUT_URL_PLACEHOLDER": url}
+        )

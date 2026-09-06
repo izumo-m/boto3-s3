@@ -81,11 +81,27 @@ DEFAULT_MAX_MINUTES = 60
 DEFAULT_LARGE_TRANSFER_MB = 1024
 
 
+def _s3_config() -> Any:
+    """Client config for the launcher's S3 calls, the presigned URLs above all.
+
+    botocore presigns S3 URLs with SigV2 and rewrites the host to the global
+    endpoint (`bucket.s3.amazonaws.com`) unless told otherwise. A bucket
+    created minutes earlier in another region answers there with a 307 to its
+    regional endpoint, which `curl -T` does not follow: the instance's log and
+    DONE PUTs silently failed that way on the first run (the tarball GET only
+    worked because it ran with `-L`). SigV4 plus virtual-host addressing keeps
+    every URL on the bucket's regional endpoint, where no redirect happens.
+    """
+    from botocore.config import Config
+
+    return Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
+
+
 def _client(kind: str, region: str, profile: str | None) -> Any:
     import boto3
 
     session = boto3.Session(profile_name=profile, region_name=region)
-    return session.client(kind)
+    return session.client(kind, config=_s3_config() if kind == "s3" else None)
 
 
 def _pinned_aws_version() -> str:
@@ -321,7 +337,11 @@ mkdir -p /opt/bench && cd /opt/bench
 curl -fsSL "TARBALL_URL_PLACEHOLDER" -o repo.tar.gz
 tar xzf repo.tar.gz
 
+# The same interpreter source as the local lane (scripts/bench-env.sh): a
+# uv-managed build, never the distribution's python3.14, which Ubuntu ships
+# and uv would otherwise pick up as satisfying the request.
 export UV_PYTHON={python}
+export UV_PYTHON_PREFERENCE=only-managed
 uv sync --all-packages --locked
 scripts/install-awscli.sh {aws_version}
 
@@ -552,7 +572,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"could not remove {bench_bucket}: {exc}; `ec2 cleanup` will")
 
     ok = outcome.ok and downloaded > 0
-    verdict = _classify(outcome, args.max_minutes, user_data)
+    verdict = _classify(outcome, args.max_minutes, user_data, downloaded=downloaded)
     if outcome.ok and downloaded == 0:
         verdict = "the run reported success but no results file came back"
     elif ok and downloaded < 2:
@@ -777,8 +797,13 @@ def _failing_line(user_data: str, rc: str) -> str | None:
     return None
 
 
-def _classify(outcome: Outcome, max_minutes: int, user_data: str) -> str:
-    """One sentence on how the run ended, naming the cause where it is known."""
+def _classify(outcome: Outcome, max_minutes: int, user_data: str, *, downloaded: int = 0) -> str:
+    """One sentence on how the run ended, naming the cause where it is known.
+
+    `downloaded` is how many results files came back; it separates an
+    instance that shut itself down after a full run whose DONE marker never
+    arrived (a reporting fault) from one that died before producing anything.
+    """
     reason = outcome.reason or ""
     spot_reclaimed = "SpotInstanceTermination" in reason
     over_budget = outcome.minutes >= max_minutes - 1
@@ -794,6 +819,12 @@ def _classify(outcome: Outcome, max_minutes: int, user_data: str) -> str:
             return f"budget exceeded: the instance shut itself down at {max_minutes} min"
         if reason.startswith("Server."):
             return f"EC2 stopped the instance on its side ({reason}); run again"
+        if "InstanceInitiatedShutdown" in reason and downloaded > 0:
+            return (
+                f"the instance shut itself down after uploading {downloaded} results file(s) "
+                "but its DONE marker never arrived: the benchmark ran to the end, its exit "
+                "codes are unknown, and the report path (the presigned PUTs) needs a look"
+            )
         return f"the instance ended {outcome.state!r} without reporting" + (
             f" ({reason})" if reason else ""
         )

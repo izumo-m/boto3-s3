@@ -336,16 +336,19 @@ runs both modes against real S3.
   trap that names the failing line; an outside shutdown (a spot reclaim, the
   budget timer) arrives as SIGTERM and is recorded as such; and the EXIT trap
   uploads the log and a `DONE` marker through two PUT URLs the launcher
-  presigned (valid past the budget), so reporting needs neither credentials
-  nor a CLI on the instance and a failure before anything was provisioned
-  still leaves a reason behind. The instance also syncs its log every minute,
-  so a stop that leaves no time for the trap still leaves a recent record,
-  and the launcher shows the log's latest line as progress while it waits.
-  When the instance disappears without a marker the launcher reads EC2's stop
+  presigned (valid past the budget; SigV4 on the bucket's regional endpoint,
+  because the global endpoint answers for a new bucket with a redirect that
+  `curl -T` does not follow), so reporting needs neither credentials nor a
+  CLI on the instance and a failure before anything was provisioned still
+  leaves a reason behind. The instance also syncs its log every minute, so a
+  stop that leaves no time for the trap still leaves a recent record, and
+  the launcher shows the log's latest line as progress while it waits. When
+  the instance disappears without a marker the launcher reads EC2's stop
   reason. The last line the launcher prints is the verdict: completed, a
   benchmark exit code, the provisioning line that failed, a spot
-  interruption, the budget exceeded, a service-side stop, or its own
-  timeout - followed by the log tail when the run did not succeed.
+  interruption, the budget exceeded, a service-side stop, results that
+  arrived without a marker (a reporting fault, not a benchmark one), or its
+  own timeout - followed by the log tail when the run did not succeed.
 - **Repeating a failed run is safe.** Everything a run creates is named by
   the run: the instance (tagged with the run id), its own bucket
   (`boto3-s3-bench-<run id>`, named by the launcher and handed to the
