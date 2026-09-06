@@ -103,13 +103,16 @@ Notes:
 - `--version` is the one thing that got slower, and it is the stdlib: a
   paired 30-round probe after the runs put `boto3-s3 --version` at 56 ms
   min / 77 ms median on 3.10 versus 77 / 99 on 3.14, with the bare
-  interpreter (`python -I -c pass`) at 12 / 18 versus 15 / 20. On 3.14
-  `logging` imports `traceback`, which now pulls in `_colorize` (about 7 ms
-  cumulative under `-X importtime`), and the `--version` path imports
-  `logging`. `startup_minimal`, the pre-work constant a real command pays,
-  went the other way (0.405 -> 0.359 classic, 0.287 -> 0.291 crt): the
-  dispatch floor grew by about 20 ms, real startup did not. Deferring
-  `logging` off the `--version` path would recover it; left as a follow-up.
+  interpreter (`python -I -c pass`) at 12 / 18 versus 15 / 20. The added
+  cost is `_colorize` (about 7 ms cumulative under `-X importtime`, half of
+  it `dataclasses`): on 3.14 argparse's `HelpFormatter.__init__` imports it
+  whenever a parser gains an argument, whatever the color setting, and
+  `logging` reaches it too through `traceback`. Keeping `logging` off the
+  path (the commit after this entry) took the `--version` median from 54
+  to 53 ms on 3.14 and 43 to 41 ms on 3.10 in a paired A/B; the rest is
+  argparse's and stays. `startup_minimal`, the pre-work constant a real
+  command pays, went the other way (0.405 -> 0.359 classic, 0.287 -> 0.291
+  crt): the dispatch floor grew by 10-20 ms, real startup did not.
 - Every flag the runs raised is a measurement artifact of that floor or of
   host noise: `startup_version` classic +40% is the 20 ms above; crt +142%
   is a burst (the five 3.14 samples were 0.069, 0.071, 0.149, 0.151 and
