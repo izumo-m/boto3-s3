@@ -312,8 +312,11 @@ trap 'RC="terminated-by-signal:$RC"; exit 143' TERM
 trap 'RC="failed-at-line-$LINENO"' ERR
 set -e
 # Sync the log every minute so even a stop that leaves no time for the trap
-# leaves a recent record, and the launcher can show progress meanwhile.
-( while sleep 60; do
+# leaves a recent record, and the launcher can show progress meanwhile. The
+# loop runs without xtrace so its own curl is not the log's newest line each
+# minute (the launcher shows that line as progress).
+( set +x
+  while sleep 60; do
     curl -fsS -T /var/log/bench-userdata.log "LOG_PUT_URL_PLACEHOLDER" >/dev/null 2>&1
   done ) &
 

@@ -190,6 +190,11 @@ class TestUserData:
         # minute through the same presigned PUT the trap uses.
         assert "trap 'RC=\"terminated-by-signal:$RC\"; exit 143' TERM" in script
         assert script.count(_URLS["LOG_PUT_URL_PLACEHOLDER"]) == 2
+        # The sync loop runs without xtrace, or its own curl would be the
+        # log's newest line every minute and hide the real progress.
+        sync_loop = script.split("( set +x", 1)[1].split(") &", 1)[0]
+        assert "while sleep 60" in sync_loop
+        assert _URLS["LOG_PUT_URL_PLACEHOLDER"] in sync_loop
         # Each mode runs on its own and uploads before the next starts, with
         # errexit and the ERR trap off around the benchmark's own exit codes.
         runs = [line for line in script.splitlines() if "python -m benchmarks run" in line]
