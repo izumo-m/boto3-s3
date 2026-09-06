@@ -219,7 +219,7 @@ class RmCommand(Command):
             # Same conversion as the cp/mv/sync span (transferargs.
             # finish_transfer): aws's shared result machinery makes a
             # mid-run Ctrl-C a cancelled run - one `cancelled: ctrl-c
-            # received` line, rc 1 (measured mid-rm, 2.36.1) - never the
+            # received` line, rc 1 (measured mid-rm, 2.36.40) - never the
             # dispatcher's 130.
             if not args.quiet:
                 sys.stderr.write("cancelled: ctrl-c received\n")

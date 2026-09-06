@@ -586,7 +586,7 @@ class TestDownloadRoute:
         # so " (reached max retries: N)" survives; composing the text has to
         # re-insert it in botocore's place, right after the operation name.
         # Reproduces `AWS_MAX_ATTEMPTS=1 aws s3 cp s3://b/no-such .` on
-        # aws 2.36.1, whose fatal line carries "(reached max retries: 0)".
+        # aws 2.36.40, whose fatal line carries "(reached max retries: 0)".
         exhausted = ClientError(
             {
                 "Error": {"Code": "404", "Message": "Not Found"},

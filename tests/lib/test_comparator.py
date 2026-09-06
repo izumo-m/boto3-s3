@@ -254,7 +254,7 @@ class TestCompareSizeTime:
 
     def test_exact_timestamps_wins_over_size_only(self) -> None:
         # Both flags fill the same aws-cli strategy slot and the override
-        # order makes --exact-timestamps win (aws 2.34.53 downloads
+        # order makes --exact-timestamps win (aws 2.36.40 downloads
         # a same-size, different-time file when both flags are given).
         src = _info()
         stale = _info(mtime=_TIME - timedelta(days=1))

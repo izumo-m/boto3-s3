@@ -100,7 +100,7 @@ class TestAbsolutePatterns:
 
 class TestJoinedParity:
     """The two aws behaviors that need the joined engine (both verified against
-    aws 2.36.1 in the task #184 probes)."""
+    aws 2.36.40 in the task #184 probes)."""
 
     def test_glob_chars_in_base_defeat_exclude(self) -> None:
         # aws joins 'bucket/prefix[1]/' + '*' and fnmatches the full path; the
@@ -139,7 +139,7 @@ class TestJoinedParity:
         assert keep(plain) is True
 
     def test_single_object_empty_component_matches_like_aws(self) -> None:
-        # rm s3://b/a//x --exclude '?x' (measured on aws 2.36.1, offline
+        # rm s3://b/a//x --exclude '?x' (measured on aws 2.36.40, offline
         # dryrun): aws joins 'b/a/?x' and fnmatches the full path 'b/a//x',
         # where '?' crosses the second '/', so the object is excluded. The
         # basename compare_key 'x' cannot express that - the parent-derived

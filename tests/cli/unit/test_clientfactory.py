@@ -415,7 +415,7 @@ class TestBuildClient:
     def test_mrap_target_lifts_the_pin_to_sigv4a(self, alias: str) -> None:
         # An explicit signature_version suppresses botocore's auth-scheme
         # resolution, and an MRAP endpoint must resolve to asymmetric SigV4a
-        # (region set `*`) - measured against aws 2.36.1, whose MRAP presign
+        # (region set `*`) - measured against aws 2.36.40, whose MRAP presign
         # signs AWS4-ECDSA-P256-SHA256 for each of these aliases (the empty
         # ARN region is the whole test; the `.mrap` suffix is a convention).
         # The s3v4 pin stands down when a positional names an MRAP ARN; the
@@ -462,7 +462,7 @@ class TestBuildClient:
     )
     def test_outpost_target_lifts_the_pin_to_sigv4a(self, region: str, arn: str) -> None:
         # An S3 Outposts access point resolves to SigV4a like an MRAP, which
-        # the pin would suppress - measured against aws 2.36.1, whose presign
+        # the pin would suppress - measured against aws 2.36.40, whose presign
         # for each of these signs AWS4-ECDSA-P256-SHA256 with a region-less
         # `.../s3-outposts/aws4_request` scope. Every separator mix, an
         # uppercase access point name, a dashed outpost id and a non-`aws`
@@ -489,7 +489,7 @@ class TestBuildClient:
     )
     def test_outpost_alias_target_lifts_the_pin_to_sigv4a(self, alias: str) -> None:
         # An Outposts access point *alias* has no ARN, but resolves to the same
-        # SigV4a endpoint as the ARN does - measured against aws 2.36.1, whose
+        # SigV4a endpoint as the ARN does - measured against aws 2.36.40, whose
         # presign for each of these signs AWS4-ECDSA-P256-SHA256 with a
         # region-less `.../s3-outposts/aws4_request` scope. The endpoint rules
         # read the alias by position (a `--op-s3` suffix, the hardware type 50

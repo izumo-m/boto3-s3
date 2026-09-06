@@ -101,7 +101,7 @@ solidified design is added here.
   still missing its positionals the required-argument report comes first, as
   in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
   `s3 help --help` breaks the exactly-`help` remainder into an invalid
-  choice `help` - all measured on 2.36.1).
+  choice `help` - all measured on 2.36.40).
 - Between those resolutions and the help-token rule sits the
   **`cli_timestamp_format` gate** (`ConfigScan.invalid_timestamp_format`),
   aws's only rc-253 `Configuration` failure on this surface (section 6). aws
@@ -1169,7 +1169,7 @@ the transfer-manager construction (255 on a CRT client the region cannot build)
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
 `cancelled: ctrl-c received` line + 1 (aws's result machinery swallows a
-mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.1;
+mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.40;
 rm's own pipeline catch converts identically, and the dispatcher's 130
 backstop keeps the pre-pipeline spans). aws only reaches that line through a
 *cancelled transfer future*, so where none is in flight - before the first

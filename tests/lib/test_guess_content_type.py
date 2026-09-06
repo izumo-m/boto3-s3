@@ -6,7 +6,7 @@ supported host - `boto3_s3.mimetable` carries it. The rows below are the
 extensions where a host table disagrees with 3.14's in one direction or the
 other, so at least one of them is load-bearing on any given interpreter.
 
-Oracle: the type aws 2.36.1 actually stored, read back with HeadObject after
+Oracle: the type aws 2.36.40 actually stored, read back with HeadObject after
 `cp` to MinIO (probes/wire/probe_content_type.py, and every candidate extension
 at once in probes/fixA/p2-all-extension-content-type.py).
 """

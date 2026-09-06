@@ -590,7 +590,7 @@ system PATH edits, any installed AWS CLI stays untouched) into
 junction. The NTFS test copy carries no aws-cli source checkout, so pass the
 version explicitly there (on a full checkout the argument is optional):
 
-    cmd.exe /c "scripts\install-awscli.cmd 2.36.1"
+    cmd.exe /c "scripts\install-awscli.cmd 2.36.40"
 
 The MinIO variables must be set in the **Windows** process - WSLENV
 propagation cannot be relied on - which is what `scripts/minio-env.cmd` (the

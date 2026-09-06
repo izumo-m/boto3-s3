@@ -307,7 +307,7 @@ class TestExitCodeShape:
     def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
         # aws's shared result machinery converts a Ctrl-C after the operation
         # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
-        # received` line (measured mid-rm on the pinned 2.36.1), never the
+        # received` line (measured mid-rm on the pinned 2.36.40), never the
         # dispatcher backstop's 130, which stays for the pre-pipeline spans.
         # The rc is the match; the line is uniform here by design, where aws
         # words it `fatal error: ` when - as in this interrupt on the first

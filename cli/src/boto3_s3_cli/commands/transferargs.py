@@ -928,7 +928,7 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
         # (`CommandResultRecorder.__exit__`), the shutdown cancels the
         # accepted transfers, and the printer emits one
         # `cancelled: ctrl-c received` line at rc 1 (measured mid-sync and
-        # mid-rm, 2.36.1). The per-item CANCELLED records stay silent like
+        # mid-rm, 2.36.40). The per-item CANCELLED records stay silent like
         # aws's (progress.py `_prints`); the pre-pipeline spans keep the
         # 130 backstop.
         if not quiet:

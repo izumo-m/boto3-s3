@@ -131,7 +131,7 @@ class TestIsMrapPath:
         ],
     )
     def test_every_alias_spelling_botocore_signs_sigv4a(self, alias: str) -> None:
-        # Measured against aws 2.36.1: `presign arn:aws:s3::<account>:
+        # Measured against aws 2.36.40: `presign arn:aws:s3::<account>:
         # accesspoint/<alias>/key` answers AWS4-ECDSA-P256-SHA256 with
         # X-Amz-Region-Set=* for each of these. The aws-cli resolver regex
         # above accepts only the first two, which is why the gate reads the
@@ -167,7 +167,7 @@ class TestIsMrapPath:
 class TestIsOutpostPath:
     def test_only_the_outpost_arn_shape_matches(self) -> None:
         # The second SigV4a stand-down shape: an Outposts access point resolves
-        # to asymmetric SigV4a, measured against aws 2.36.1 (its presign signs
+        # to asymmetric SigV4a, measured against aws 2.36.40 (its presign signs
         # AWS4-ECDSA-P256-SHA256). An Outposts access point *alias* is a plain
         # bucket name rather than an ARN, so this probe does not answer for it -
         # `is_outpost_alias_path` does.
@@ -198,7 +198,7 @@ class TestIsOutpostPath:
         ],
     )
     def test_every_arn_spelling_botocore_signs_sigv4a(self, resource: str) -> None:
-        # Measured against aws 2.36.1: each of these presigns
+        # Measured against aws 2.36.40: each of these presigns
         # AWS4-ECDSA-P256-SHA256 with a region-less credential scope.
         arn = f"arn:aws:s3-outposts:us-west-2:123456789012:{resource}"
         assert is_outpost_path(f"s3://{arn}/k.txt")
@@ -259,7 +259,7 @@ class TestIsOutpostAliasPath:
         ],
     )
     def test_every_alias_spelling_botocore_signs_sigv4a(self, alias: str) -> None:
-        # Measured against aws 2.36.1: each of these presigns
+        # Measured against aws 2.36.40: each of these presigns
         # AWS4-ECDSA-P256-SHA256 with a region-less credential scope and
         # X-Amz-Region-Set=*.
         assert is_outpost_alias_path(f"s3://{alias}/k.txt")
@@ -281,7 +281,7 @@ class TestIsOutpostAliasPath:
         ],
     )
     def test_names_outside_the_branch_keep_the_pin(self, bucket: str) -> None:
-        # Measured against aws 2.36.1: each of these presigns plain
+        # Measured against aws 2.36.40: each of these presigns plain
         # AWS4-HMAC-SHA256, so dropping the pin would diverge.
         assert not is_outpost_alias_path(f"s3://{bucket}/k.txt")
 

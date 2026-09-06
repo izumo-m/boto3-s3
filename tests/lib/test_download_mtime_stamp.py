@@ -7,10 +7,11 @@ seconds) the difference is user-visible: a stamp that kept the fraction matches
 the object exactly, so `--exact-timestamps` converges here and re-downloads on
 aws forever.
 
-Oracle for the expected stamp: probes/synctime/p03-stamp-then-exact-timestamps.sh
-against MinIO, where a `LastModified` of 2026-08-12T16:00:15.454000+00:00 left
-aws 2.36.1 with `stat -c %.9Y` = 1786550415.000000000. The epoch second is
-`date -u -d 2026-08-12T16:00:15Z +%s`.
+Oracle for the expected stamp: the procedure of
+probes/synctime/p03-stamp-then-exact-timestamps.sh (a recursive `cp` from
+MinIO), where a listing `LastModified` of 2026-09-06T00:31:01.491000+00:00 left
+aws 2.36.40 with `stat -c %.9Y` = 1788654661.000000000. The epoch second is
+`date -u -d 2026-09-06T00:31:01Z +%s`.
 """
 
 from __future__ import annotations

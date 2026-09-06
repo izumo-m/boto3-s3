@@ -665,7 +665,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # Nested s3->s3 paths: aws joins every pattern onto BOTH sides, so the
         # dest-joined "<bucket>/d/backup/x*" excludes the *source* entry
         # d/backup/x1.txt even though "x*" does not match its source-relative
-        # form (task #184 parity; verified against aws 2.36.1).
+        # form (task #184 parity; verified against aws 2.36.40).
         name="cp_copy_nested_dest_filter_cross",
         argv=(
             "cp",

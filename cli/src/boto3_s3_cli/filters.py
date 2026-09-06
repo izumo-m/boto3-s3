@@ -15,7 +15,7 @@ path for a local side, cut back to the parent for a single-file operation
 ``os.path.join``, and an entry is decided by fnmatching its full path against
 the joined patterns in appearance order, last match winning. Two aws
 behaviors follow from the joining and are reproduced deliberately (both
-verified against aws 2.36.1): the base is glob-interpreted like the rest of
+verified against aws 2.36.40): the base is glob-interpreted like the rest of
 the joined pattern (a ``[1]`` in the operation path is a character class
 there, which can defeat ``--exclude '*'``), and both sides' joined patterns
 apply to every entry whichever side produced it (nested s3->s3 paths let one
@@ -176,7 +176,7 @@ def _needs_joined(
       the entry's basename ``compare_key`` does not always reconstruct the full
       path - an empty component right before the basename (``s3://b/a//x``)
       collapses in the join, so ``--exclude '?x'`` matched aws's ``b/a/?x``
-      against ``b/a//x`` (``?`` crosses the ``/``; measured on aws 2.36.1)
+      against ``b/a//x`` (``?`` crosses the ``/``; measured on aws 2.36.40)
       while the basename form saw only ``x``. The listing is a single entry,
       so the joined engine costs nothing here;
     - a base contains a glob metacharacter: the base part of the joined pattern

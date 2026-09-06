@@ -178,7 +178,7 @@ class TestS3Format:
         # reaches s3_format with the scheme merely stripped, so the second
         # still ends in "/" and takes the source's name: `cp a.txt s3:///`
         # prints ".. to s3:///a.txt" while `cp a.txt s3://` prints ".. to
-        # s3://" (aws 2.36.1). Only the raw URI can tell them apart here.
+        # s3://" (aws 2.36.40). Only the raw URI can tell them apart here.
         assert S3Storage("s3:///").format(dir_op=False) == ("/", True)
         assert S3Storage("s3://").format(dir_op=False) == ("", False)
 
