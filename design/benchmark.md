@@ -59,7 +59,10 @@ selects another version for a one-off run in its own `.venv-bench-3.12`. The
 results meta records the exact version that ran, and a report whose baseline
 ran on a different minor says so in its header: the cross-run deltas then
 include the interpreter change, and only the same-run E2E ratio remains a
-like-for-like number.
+like-for-like number. The 2026-09-06 entry in
+[benchmarks/RESULTS.md](../benchmarks/RESULTS.md) records the step itself -
+one tree measured on 3.10 and 3.14 back to back - so the history stays
+readable across it.
 
 ## Modes
 

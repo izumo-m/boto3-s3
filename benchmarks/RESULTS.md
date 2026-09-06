@@ -6,6 +6,123 @@ measuring host; this file preserves the headline numbers with their exact
 revision and environment so they survive across hosts and cleanups. Metric
 definitions (net, ratio, flags) are in [design/benchmark.md](../design/benchmark.md).
 
+## 2026-09-06 - interpreter step: the local lane moves to Python 3.14
+
+- Commit: `9d352af` (`feat(bench): run the local lane on Python 3.14 in its
+  own environment`), clean working tree. This entry records the interpreter
+  change, not a code change: the same tree was measured on both interpreters
+  back to back, and the 3.14 numbers are the baseline every later run
+  compares against. Every entry below this one was measured on 3.10.
+- Runs, in this order within one session: on 3.10 (the development
+  environment) `python -m benchmarks run --mode e2e --engine both` and
+  `--mode inprocess`; then `source scripts/bench-env.sh` and the same two
+  runs on 3.14 with `--baseline last`, so each 3.14 run reports against its
+  3.10 twin.
+- Results files: `20260906-041410_e2e_9d352af9b2.jsonl` and
+  `20260906-041606_inprocess_9d352af9b2.jsonl` (3.10),
+  `20260906-042305_e2e_9d352af9b2.jsonl` and
+  `20260906-042445_inprocess_9d352af9b2.jsonl` (3.14).
+
+Environment:
+
+- Machine: Intel Core Ultra 5 225H (14 cores), 15 GiB RAM; Ubuntu 26.04 LTS
+  on WSL2 (kernel 6.18.33.1-microsoft-standard-WSL2). The recorded
+  specification matches the 2026-07-14 entry, but whether it is the same
+  physical machine is not established, and the absolute levels here sit
+  about 2x that entry's on both sides. Per "Reading the numbers", only the
+  ratios and this entry's same-day pair carry meaning.
+- Endpoint: MinIO `pgsty/minio:latest` in Docker, tmpfs-backed,
+  `http://127.0.0.1:9000`; local trees on ext4 under /tmp.
+- Python 3.10.20 (uv-managed, `.venv`) and 3.14.7 (uv-managed,
+  `.venv-bench`); boto3-s3 0.11.0 / boto3-s3-cli 0.8.0; boto3/botocore
+  1.43.44, s3transfer 0.19.2, awscrt 0.32.2 - identical in both environments
+  (one lockfile).
+- aws side: pinned aws-cli 2.36.40 (`exe/x86_64.ubuntu.26`, bundling
+  Python 3.14.6), the same binary on both runs.
+
+### E2E on Python 3.10 (medians in seconds; ratio = net ours / net aws)
+
+Startup probes (raw): `--version` ours 0.063 / aws 0.524 (classic),
+0.062 / 0.463 (crt); `startup_minimal` ours 0.405 / aws 0.765 (classic),
+0.287 / 0.559 (crt).
+
+| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 0.917 | 0.512 | 2.517 | 1.752 | 0.29 |
+| sync_noop_10k | classic | 0.756 | 0.351 | 2.300 | 1.535 | 0.23 |
+| cp_upload_small_1k | classic | 5.679 | 5.274 | 5.990 | 5.226 | 1.01 |
+| cp_download_small_1k | classic | 3.809 | 3.403 | 4.891 | 4.127 | 0.82 |
+| cp_upload_large (64MB) | classic | 0.552 | 0.147 | 0.929 | 0.164 | 0.89 |
+| cp_download_large (64MB) | classic | 0.468 | 0.062 | 0.885 | 0.121 | 0.52 |
+| rm_recursive_2k | classic | 0.748 | 0.343 | 7.000 | 6.235 | 0.06 |
+| cp_upload_small_1k | crt | 1.713 | 1.426 | 2.796 | 2.237 | 0.64 |
+| cp_download_small_1k | crt | 2.082 | 1.795 | 3.425 | 2.867 | 0.63 |
+| cp_upload_large (64MB) | crt | 0.498 | 0.211 | 0.741 | 0.182 | 1.16 |
+| cp_download_large (64MB) | crt | 0.451 | 0.164 | 0.748 | 0.189 | 0.87 |
+
+### E2E on Python 3.14 (same layout; "vs 3.10" is the change in ratio)
+
+Startup probes (raw): `--version` ours 0.088 / aws 0.437 (classic),
+0.149 / 0.682 (crt); `startup_minimal` ours 0.359 / aws 0.653 (classic),
+0.291 / 0.548 (crt).
+
+| scenario | engine | ours raw | ours net | aws raw | aws net | ratio | vs 3.10 |
+|---|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 0.668 | 0.309 | 1.982 | 1.329 | 0.23 | -21% |
+| sync_noop_10k | classic | 0.765 | 0.406 | 2.505 | 1.852 | 0.22 | -4% |
+| cp_upload_small_1k | classic | 4.904 | 4.545 | 5.981 | 5.328 | 0.85 | -16% |
+| cp_download_small_1k | classic | 3.396 | 3.037 | 4.725 | 4.073 | 0.75 | -10% |
+| cp_upload_large (64MB) | classic | 0.537 | 0.178 | 0.894 | 0.241 | 0.74 | -17% |
+| cp_download_large (64MB) | classic | 0.541 | 0.182 | 0.868 | 0.215 | 0.84 | +63% |
+| rm_recursive_2k | classic | 0.635 | 0.276 | 5.199 | 4.546 | 0.06 | +10% |
+| cp_upload_small_1k | crt | 1.292 | 1.001 | 2.193 | 1.646 | 0.61 | -5% |
+| cp_download_small_1k | crt | 1.565 | 1.274 | 2.758 | 2.211 | 0.58 | -8% |
+| cp_upload_large (64MB) | crt | 0.342 | 0.051 | 0.495 | - | - | - |
+| cp_download_large (64MB) | crt | 0.337 | 0.045 | 0.501 | - | - | - |
+
+### In-process (classic; medians in seconds, ± spread)
+
+| scenario | 3.10 median | spread | 3.14 median | spread | change |
+|---|---|---|---|---|---|
+| inproc_dispatch | 0.002 | ±0.001 | 0.003 | ±0.000 | +31% |
+| inproc_ls_100k | 3.808 | ±0.518 | 2.901 | ±0.348 | -24% |
+| inproc_sync_noop_20k | 0.798 | ±0.055 | 0.665 | ±0.020 | -17% |
+| inproc_rm_recursive_20k | 0.853 | ±0.062 | 0.704 | ±0.059 | -17% |
+| inproc_cp_upload_small_2k | 3.582 | ±0.305 | 3.612 | ±0.652 | +1% |
+| inproc_cp_upload_64mb | 0.408 | ±0.026 | 0.113 | ±0.004 | -72% |
+
+Notes:
+
+- The step: the enumeration and compare lanes gain 17-24% in-process on
+  3.14 and the E2E ratios move with them (ls 0.29 -> 0.23, small-file cp
+  1.01 -> 0.85 upload and 0.82 -> 0.75 download, 64MB classic upload
+  0.89 -> 0.74). The largest single move is the in-process 64MB upload
+  (0.408 -> 0.113); its E2E counterpart moved less because the socket send
+  the stub skips dominates there. Not investigated further. Small-file cp
+  in-process is flat (+1%) inside a ±0.65 s spread.
+- `--version` is the one thing that got slower, and it is the stdlib: a
+  paired 30-round probe after the runs put `boto3-s3 --version` at 56 ms
+  min / 77 ms median on 3.10 versus 77 / 99 on 3.14, with the bare
+  interpreter (`python -I -c pass`) at 12 / 18 versus 15 / 20. On 3.14
+  `logging` imports `traceback`, which now pulls in `_colorize` (about 7 ms
+  cumulative under `-X importtime`), and the `--version` path imports
+  `logging`. `startup_minimal`, the pre-work constant a real command pays,
+  went the other way (0.405 -> 0.359 classic, 0.287 -> 0.291 crt): the
+  dispatch floor grew by about 20 ms, real startup did not. Deferring
+  `logging` off the `--version` path would recover it; left as a follow-up.
+- Every flag the runs raised is a measurement artifact of that floor or of
+  host noise: `startup_version` classic +40% is the 20 ms above; crt +142%
+  is a burst (the five 3.14 samples were 0.069, 0.071, 0.149, 0.151 and
+  0.179, and aws's own `--version` in the same window spanned 0.41-0.90);
+  `cp_download_large` classic +63% and `rm_recursive_2k` +10% are
+  noise-floor rows (nets of 0.06-0.18 s; the rm ratio is 0.06 on both
+  interpreters and the flag is a quotient of two such numbers). The CRT
+  large-file rows show `-` on 3.14 because aws's raw medians (0.495 /
+  0.501) fell under its own `startup_minimal` (0.548), so no net exists;
+  the 1.16 flag on the 3.10 CRT upload is the same noise-floor row.
+  `inproc_dispatch` +31% is 0.002 -> 0.003 s, the `--version` floor at the
+  resolution limit.
+
 ## 2026-07-21 - fast timestamp parsing
 
 - Commit: `f48ca50` (`perf(deleter): check XML key compatibility with a
