@@ -78,6 +78,10 @@ Goldens are the recorded real-aws behavior that the in-process suite replays.
 Regenerate them against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
 tests/cli/e2e`, and review the diff before committing.
 
+The same suite runs on Windows — from a WSL2 shell, against an NTFS copy of
+the tree, with a pinned `aws.exe` — by the procedure in
+[`design/testing.md`](design/testing.md) section 8.
+
 The commands above are the ones to run; [`design/testing.md`](design/testing.md) is
 where the reasoning lives — the test tiers, the exit-code charter's detection
 surface, the golden contract, and why the stack is pinned the way it is. It

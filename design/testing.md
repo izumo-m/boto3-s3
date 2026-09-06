@@ -503,38 +503,130 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 ## 8. Running the suite on Windows (WSL2 host)
 
 Windows is a supported OS (overview.md section 2); the suite runs there on a
-real Windows CPython using a host-installed `uv`, driven either from a native
-Windows shell or from WSL2 through its interop. Two things make the run
-representative:
+real Windows CPython using a host-installed `uv`. The whole run - every tier,
+the e2e differential against `aws.exe` included - is driven from a WSL2 shell
+through the interop layer (`cmd.exe`, resolved from the Windows `PATH` that
+WSL2 appends by default), against an NTFS copy of the working tree. A native
+Windows shell can run the same `cmd.exe` command lines. None of it needs an
+elevated shell.
 
-- **Work from an NTFS copy, not the WSL tree.** A Windows process can read
-  the repo through `\\wsl.localhost\...`, but that path serves the ext4
-  filesystem over 9P - case-sensitive and slow, a hybrid no real Windows
-  deployment has. Copy the working tree to an NTFS directory instead,
-  excluding the platform-bound and derived trees:
+Prerequisites on the Windows side: `uv` on the Windows `PATH` (from WSL2,
+`cmd.exe /c "uv --version"` answers), and **Developer Mode** (or an elevated
+shell), because several `tests/lib` scenarios create symlinks. On the WSL2
+side: the repository checkout with its aws-cli submodule, `rsync`, and Docker
+for the MinIO stack (section 4).
 
-      rsync -a --delete --exclude .git --exclude .venv --exclude '<aws-cli-source-dir>' \
-        --exclude __pycache__ --exclude out --exclude .pytest_cache \
-        --exclude .ruff_cache  <repo>/  /mnt/c/tmp/boto3-s3-wintest/
+### The procedure
 
-  Replace `<aws-cli-source-dir>` with that checkout's repository-relative path.
-  The aws-cli source is reference-only for the tests - nothing imports from it -
-  so excluding it keeps the copy to a few MiB.
+1. **Copy the working tree to NTFS** (why: below). From `<repo>`:
 
-- **Sync with `--all-packages`**, for the reason
-  [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives — it applies here too:
+       rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ \
+         --exclude out --exclude .pytest_cache --exclude .ruff_cache \
+         --exclude "$(git config -f .gitmodules --get-regexp path | awk '{print $2}')" \
+         ./ /mnt/c/tmp/boto3-s3-wintest/
 
-      cd /mnt/c/tmp/boto3-s3-wintest
-      uv sync --all-packages
-      uv run pytest -q
+   The last exclusion is the aws-cli source checkout - reference-only for the
+   tests, nothing imports from it - which keeps the copy to a few MiB. Re-run
+   the command whenever the tree changes: `--delete` keeps the copy exact, and
+   the excluded `.venv` on the copy survives it.
 
-  `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
-  the support floor) - the host Python installation is not used.
+2. **Work from inside the copy.** Every `cmd.exe` call below is issued from a
+   WSL2 shell whose current directory is inside the copy: the interop layer
+   makes that the Windows process's directory, whereas from the ext4 tree
+   `cmd.exe` starts in `C:\Windows` (with a "UNC paths are not supported"
+   warning) and the relative `scripts\...` paths fail.
 
-Prerequisites: a Windows `uv` on `PATH`, and Windows **Developer Mode** (or
-an elevated shell) because several `tests/lib` scenarios create symlinks.
-Tests staged on chmod-revoked access skip themselves on Windows (the
-`skip_if_chmod_is_inert` mark in `tests/utils/host.py`).
+       cd /mnt/c/tmp/boto3-s3-wintest
+
+3. **Create the Windows virtualenv** with the Windows `uv` - the `cmd.exe`
+   wrapper is what keeps WSL2's own `uv` out of it:
+
+       cmd.exe /c "uv sync --all-packages --locked"
+
+   `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
+   the support floor) - the host Python installation is not used - and
+   `--locked` refuses to rewrite `uv.lock`. `--all-packages` matters for the
+   reason [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives.
+
+4. **Pin `aws.exe`** at the reference version. The copy carries no aws-cli
+   source, so the version is passed explicitly; read it from the checkout in
+   `<repo>` - the same value `scripts/install-awscli.sh` installs on Linux:
+
+       ver=$(cd <repo> && uv run python -c "from tests.utils.golden import pinned_aws_version as v; print(v())")
+       cmd.exe /c "scripts\install-awscli.cmd $ver"
+
+   `scripts\install-awscli.cmd` is `install-awscli.sh`'s Windows twin and
+   needs no admin rights: it extracts the version-pinned MSI's self-contained
+   payload with `msiexec /a` (an administrative *extraction* - no registry
+   entries, no system PATH edits, any installed AWS CLI stays untouched) into
+   `%LOCALAPPDATA%\boto3-s3\aws-cli\<version>` behind a stable `current`
+   junction. A matching extraction is reused. (On a full checkout the argument
+   is optional; the copy is not one.)
+
+5. **Start MinIO inside WSL2**: `scripts/compose-up.sh` from `<repo>`
+   (section 4). Windows reaches it on `127.0.0.1:9000` through WSL2's
+   localhost forwarding.
+
+6. **Run the suite.** `scripts\minio-env.cmd` is `minio-env.sh`'s twin - a
+   runner, because `cmd.exe` cannot `source`: it sets the MinIO variables in
+   the **Windows** process (WSLENV propagation is not relied on), puts the
+   pinned `aws.exe` first on `PATH` so it shadows any system install - as
+   `.venv/bin/aws` does on Linux - and executes the rest of its command line:
+
+       cmd.exe /c "scripts\minio-env.cmd uv run pytest -q"
+
+   That is the complete suite, e2e included; `cmd.exe /c "uv run pytest -q"`
+   runs everything but e2e, which deselects itself without the variables, as
+   on Linux. `cmd.exe`'s own messages arrive in the console's OEM code page;
+   pytest's summary is ASCII. Never run the Windows and Linux e2e suites at
+   the same time - the bucket-empty invariant (section 4) is shared.
+
+7. **Regenerate the Windows goldens** when the reference `aws.exe` moves or a
+   cp/mv/sync scenario changes. The copy must hold the current POSIX base
+   goldens (step 1, after the Linux capture): a variant is written or pruned
+   by comparing the Windows capture against that base, and a Windows run
+   never writes a base golden (section 3's capture rule).
+
+       cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+
+   The variants land in the copy, not the repo, so sync them back before
+   committing - only the variants, and with `--delete`, since a scenario
+   whose Windows capture stops differing from the base is pruned - and
+   convert them to LF: Windows writes the JSON with CRLF (Python text-mode
+   newline translation) and nothing normalizes line endings on commit.
+
+       rsync -rlt --delete --include='*/' --include='*.windows.json' --exclude='*' \
+         /mnt/c/tmp/boto3-s3-wintest/tests/cli/goldens/  <repo>/tests/cli/goldens/
+       find <repo>/tests/cli/goldens -name '*.windows.json' -exec sed -i 's/\r$//' {} +
+
+   `cp_case_conflict_warn` deliberately has no Windows golden and its
+   functional replay self-skips on a case-insensitive filesystem.
+
+### What skips on Windows, by design
+
+The skips a Windows run reports are the platform's, not gaps in the setup:
+anything that sets `TZ` mid-process (`time.tzset` is POSIX-only),
+chmod-revoked access and POSIX permission bits (`skip_if_chmod_is_inert` in
+`tests/utils/host.py`), `sh`-based external aliases, `mkfifo`, the POSIX
+`dir_fd` walk fast path (Windows length limits follow the `LongPathsEnabled`
+policy instead, and the MAX_PATH tests probe that policy for themselves, so
+either setting is fine), a `DirEntry`-cache race Windows cannot reproduce, a
+heading the console codec cannot encode, and the case-*sensitive* filesystem
+family - the `--case-conflict` scenarios where two names differing only by
+case must coexist at the destination, carrying aws-cli's own `Can't rename to
+same file` marker for Windows. The mirror family, the case-*insensitive*
+scenarios, needs no setup on Windows: the tmp dir is already
+case-insensitive, so they run as part of the normal suite (section 1, where a
+Linux host needs `BOTO3_S3_PYTEST_CASE_INSENSITIVE_DIR` instead).
+
+### Why an NTFS copy
+
+A Windows process can read the repo through `\\wsl.localhost\...`, but that
+path serves the ext4 filesystem over 9P - case-sensitive and slow, a hybrid
+no real Windows deployment has. The NTFS copy is what a Windows user actually
+runs on: case-insensitive, Windows path semantics, native speed.
+
+### Codec pinning
 
 **Pin any expectation that rides the locale's default codec.** Windows hosts
 disagree on it - the CI runner reads cp1252, a Japanese host cp932 (both
@@ -550,59 +642,6 @@ family entirely (measured on the pinned Linux binary - `PYTHONIOENCODING` set
 to `latin-1` leaves its output UTF-8). Both sides of a parity pair still land
 on the same codec, because that build writes UTF-8 of its own accord; the
 variable buys the child's determinism, not aws's.
-
-**Goldens on Windows.** The cp/mv/sync goldens resolve to their
-`<name>.windows.json` variants (section 3, "Platform variants"); regenerating
-them needs this Windows setup plus the e2e stack below. Work from a fresh
-NTFS copy (above) so its POSIX base goldens are current - the variant is
-written or pruned by comparing the Windows capture against that base - then
-run the suite through the runner below with `UPDATE_GOLDENS=1`, which writes
-only the variants and never the POSIX base:
-
-    cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
-
-The variants land in the NTFS copy, not the repo, so sync them back before
-committing - only the variants, and with `--delete`, since a scenario whose
-Windows capture stops differing from the base is pruned:
-
-    rsync -rlt --delete --include='*/' --include='*.windows.json' --exclude='*' \
-      /mnt/c/tmp/boto3-s3-wintest/tests/cli/goldens/  <repo>/tests/cli/goldens/
-
-Windows writes the JSON with CRLF (Python text-mode newline translation) and
-nothing normalizes line endings on commit, so convert the synced variants to
-LF to match the committed goldens:
-
-    find <repo>/tests/cli/goldens -name '*.windows.json' -exec sed -i 's/\r$//' {} +
-
-`cp_case_conflict_warn` deliberately has no Windows golden and its functional
-replay self-skips on a case-insensitive filesystem.
-
-**e2e on Windows.** The differential machinery works unchanged against the
-WSL2 MinIO stack: pin `aws.exe` at the version `scripts/install-awscli.sh`
-pins (the reference aws-cli source version - the section 4 drift rationale
-applies to this binary too), start the stack inside WSL2 (`scripts/compose-up.sh`), and
-Windows reaches it on `127.0.0.1:9000` through WSL2's localhost forwarding.
-`scripts\install-awscli.cmd` is `install-awscli.sh`'s Windows twin and needs
-no admin rights: it extracts the version-pinned MSI's self-contained payload
-with `msiexec /a` (an administrative extraction - no registry entries, no
-system PATH edits, any installed AWS CLI stays untouched) into
-`%LOCALAPPDATA%\boto3-s3\aws-cli\<version>` behind a stable `current`
-junction. The NTFS test copy carries no aws-cli source checkout, so pass the
-version explicitly there (on a full checkout the argument is optional):
-
-    cmd.exe /c "scripts\install-awscli.cmd 2.36.40"
-
-The MinIO variables must be set in the **Windows** process - WSLENV
-propagation cannot be relied on - which is what `scripts/minio-env.cmd` (the
-`minio-env.sh` twin; a runner, because cmd cannot `source`) is for. It also
-prepends the pinned `aws.exe` to `PATH` when present, mirroring how
-`.venv/bin/aws` shadows any system `aws` on Linux:
-
-    cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
-
-Section 3's capture rule - a Windows run never touches the base (POSIX)
-goldens - applies to the e2e golden drift checks of cp/mv/sync the same way. The bucket-empty invariant (section 4) is shared:
-never run the Windows and Linux e2e suites concurrently.
 
 ## 9. The output-parity criterion
 
