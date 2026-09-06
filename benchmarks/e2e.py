@@ -21,12 +21,11 @@ import shutil
 import subprocess
 import tempfile
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from benchmarks import workload
+from benchmarks import awsenv, workload
 from benchmarks.core import BenchmarkError, ScenarioResult, Side, VerificationError, round_order
 
 if TYPE_CHECKING:
@@ -49,13 +48,6 @@ _SETUP_HINT = (
     "  source scripts/minio-env.sh\n"
     "then rerun via `uv run python -m benchmarks run`"
 )
-
-# Set BOTO3_S3_BENCH_ALLOW_REMOTE=1 to accept a non-local endpoint. Off by
-# default: the harness creates/purges its bucket and moves hundreds of MB,
-# which must not silently land on (and bill against) real AWS.
-_ALLOW_REMOTE_ENV = "BOTO3_S3_BENCH_ALLOW_REMOTE"
-
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 @dataclass
@@ -113,20 +105,35 @@ class E2EScenario:
 
 
 def check_environment() -> tuple[str, str]:
-    """Resolve both executables and validate the endpoint env, or raise with guidance."""
-    missing = [
-        name
-        for name in ("AWS_ENDPOINT_URL_S3", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        raise BenchmarkError(f"missing environment: {', '.join(missing)}; {_SETUP_HINT}")
-    host = urllib.parse.urlsplit(os.environ["AWS_ENDPOINT_URL_S3"]).hostname
-    if host not in _LOCAL_HOSTS and not os.environ.get(_ALLOW_REMOTE_ENV):
+    """Resolve both executables and validate the S3 target, or raise with guidance.
+
+    Three shapes are accepted: local MinIO (an `AWS_ENDPOINT_URL_S3` on a local
+    host plus the static dev keys), a deliberate non-local endpoint, and real
+    S3 (no endpoint override, credentials from the default chain - a profile or
+    an instance role). The last two both require the explicit
+    `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
+    accident.
+    """
+    endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
+    opted_in = bool(os.environ.get(awsenv.ALLOW_REMOTE_ENV))
+    if not endpoint:
+        if not opted_in:
+            raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
+        _check_remote_credentials()
+    elif awsenv.targeting_local_minio():
+        missing = [
+            name
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            if not os.environ.get(name)
+        ]
+        if missing:
+            raise BenchmarkError(f"missing environment: {', '.join(missing)}; {_SETUP_HINT}")
+    elif not opted_in:
+        host = awsenv.endpoint_host()
         raise BenchmarkError(
             f"AWS_ENDPOINT_URL_S3 points at non-local host {host!r}; benchmarks create and "
-            f"purge bucket {BUCKET!r} and transfer hundreds of MB. Set {_ALLOW_REMOTE_ENV}=1 "
-            "if that endpoint really is the intended target."
+            f"purge a {BUCKET!r} bucket and transfer hundreds of MB. Set "
+            f"{awsenv.ALLOW_REMOTE_ENV}=1 if that endpoint really is the intended target."
         )
     ours = shutil.which("boto3-s3")
     if ours is None:
@@ -139,6 +146,26 @@ def check_environment() -> tuple[str, str]:
     return ours, aws
 
 
+def _check_remote_credentials() -> None:
+    """Fail fast when a real-S3 run has no region or no resolvable credentials.
+
+    Better to stop here than after seeding a corpus: create_bucket_in_region
+    needs the region, and every call needs credentials the default chain (env,
+    profile, or instance role) can produce.
+    """
+    if awsenv.resolve_region() is None:
+        raise BenchmarkError(
+            "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
+        )
+    import botocore.session
+
+    session: Any = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
+    if session.get_credentials() is None:
+        raise BenchmarkError(
+            "real-S3 run found no credentials (checked env, profile, and instance role)"
+        )
+
+
 def aws_version(aws_exe: str) -> str:
     proc = subprocess.run([aws_exe, "--version"], capture_output=True, text=True, timeout=30.0)
     return (proc.stdout or proc.stderr).strip()
@@ -147,11 +174,29 @@ def aws_version(aws_exe: str) -> str:
 def _build_client() -> Any:
     import boto3
 
+    # No endpoint override means real S3; MinIO reports us-east-1, so that is
+    # the only place the default applies.
     return boto3.client(
         "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL_S3"],
-        region_name=os.environ.get("AWS_REGION") or "us-east-1",
+        endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
+        region_name=awsenv.resolve_region() or "us-east-1",
     )
+
+
+def _bench_bucket() -> str:
+    """The bucket the run owns: the fixed name on MinIO, a unique one on S3.
+
+    On MinIO the name is private to the stack, so the documented
+    ``boto3-s3-bench`` is fine and matches design/benchmark.md. On real S3 the
+    namespace is global and the harness force-deletes whatever it creates, so a
+    per-run suffix avoids colliding with anyone (including a previous run whose
+    delete had not yet propagated).
+    """
+    if os.environ.get("AWS_ENDPOINT_URL_S3"):
+        return BUCKET
+    import secrets
+
+    return f"{BUCKET}-{secrets.token_hex(4)}"
 
 
 def _write_engine_config(workroot: Path, engine: str) -> Path:
@@ -297,8 +342,8 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
             env.client, env.bucket, env.s3_prefix("sync_noop") + "corpus/", sync_count, 1024
         )
 
-    def sync_verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
-        transfers = normalize_cp_stdout(result.stdout, bucket=BUCKET)
+    def sync_verify(env: E2EEnv, side: Side, result: CliResult) -> None:
+        transfers = normalize_cp_stdout(result.stdout, bucket=env.bucket)
         if transfers:
             raise VerificationError(
                 f"[sync_noop] {side.value} transferred {len(transfers)} files "
@@ -322,8 +367,8 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
     cp_small_count = _scale(1_000, quick)
 
     def transfer_count_verify(name: str, expected: int) -> Callable[..., None]:
-        def verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
-            transfers = normalize_cp_stdout(result.stdout, bucket=BUCKET)
+        def verify(env: E2EEnv, side: Side, result: CliResult) -> None:
+            transfers = normalize_cp_stdout(result.stdout, bucket=env.bucket)
             if len(transfers) != expected:
                 raise VerificationError(
                     f"[{name}] {side.value} reported {len(transfers)} transfers, "
@@ -540,11 +585,13 @@ def run_scenarios(
 
     ours_exe, aws_exe = check_environment()
     client = _build_client()
+    bucket = _bench_bucket()
+    region = awsenv.resolve_region()
     workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     results: list[ScenarioResult] = []
     failures: list[str] = []
-    force_delete_bucket(client, BUCKET)
-    create_bucket_in_region(client, BUCKET)
+    force_delete_bucket(client, bucket)
+    create_bucket_in_region(client, bucket)
     try:
         for engine in engines:
             config = _write_engine_config(workroot, engine)
@@ -552,10 +599,13 @@ def run_scenarios(
                 "AWS_CONFIG_FILE": str(config),
                 "AWS_CLI_AUTO_PROMPT": "off",
                 "AWS_PAGER": "",
+                # The engine config replaces ~/.aws/config, so hand both CLIs
+                # the region explicitly (real S3 needs it; harmless on MinIO).
+                **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
             }
             env = E2EEnv(
                 client=client,
-                bucket=BUCKET,
+                bucket=bucket,
                 engine=engine,
                 workdir=workroot / engine,
                 ours_exe=ours_exe,
@@ -582,6 +632,6 @@ def run_scenarios(
                     log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
                     failures.append(message)
     finally:
-        force_delete_bucket(client, BUCKET)
+        force_delete_bucket(client, bucket)
         shutil.rmtree(workroot, ignore_errors=True)
     return results, failures

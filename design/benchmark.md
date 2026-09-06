@@ -70,10 +70,12 @@ readable across it.
 per invocation, warmup discarded, then N rounds with the side order
 alternating every round (drift cancels in the median ratio). It owns the
 dedicated bucket `boto3-s3-bench` - created at run start, force-deleted on
-exit; the e2e test suite's `boto3-s3-e2e` (contractually empty) is never
+exit (on real S3 the name gets a per-run suffix, since that namespace is
+global); the e2e test suite's `boto3-s3-e2e` (contractually empty) is never
 touched. Destinations are purged between invocations so MinIO's tmpfs stays
-bounded. The endpoint must be local; set `BOTO3_S3_BENCH_ALLOW_REMOTE=1` to
-deliberately point it elsewhere.
+bounded. By default the endpoint must be the local MinIO stack;
+`BOTO3_S3_BENCH_ALLOW_REMOTE=1` opts into a non-local endpoint, or into real S3
+with no endpoint override at all (how the EC2 lane runs, below).
 
 **In-process** runs the CLI inside the runner process against stubbed S3:
 a real boto3 client whose `before-send` event returns canned responses, so
@@ -177,6 +179,70 @@ Flag rules (`--threshold`, default 1.10): an E2E work scenario flags when
 is the same-run control, so this survives cross-run host noise; without a
 baseline the ratio itself must exceed it. Startup probes and in-process
 scenarios flag on `median now / median baseline`.
+
+## Recording a baseline on EC2
+
+The local lane runs against MinIO on `127.0.0.1`: no round-trip latency, no
+TLS, unbounded bandwidth, static keys. That is the right *differential* - host
+noise hits both CLIs and cancels in the ratio - but the wrong *absolute*
+picture of where `aws s3` actually runs. The EC2 lane records a baseline in a
+representative environment (a quiet, fixed-performance instance against real S3
+in one region) whose "instance type + AMI + region" someone else can
+reproduce. It is not a per-commit lane; run it when recording a baseline for
+[RESULTS.md](../benchmarks/RESULTS.md).
+
+```
+python -m benchmarks ec2 setup-iam            # once, needs an administrator
+python -m benchmarks ec2 run                  # provision, measure, retrieve, terminate
+python -m benchmarks ec2 run --instance-type m7g.xlarge   # a Graviton run
+python -m benchmarks ec2 cleanup              # terminate anything a crash left tagged
+```
+
+The launcher orchestrates; the instance does the work. `run` resolves the
+instance type's architecture from EC2 and the matching latest Amazon Linux
+2023 AMI from its public SSM parameter, hands the instance a `git archive HEAD`
+of the tree over S3 (a dirty tree is refused, so a baseline is attributable to
+a commit), waits for a completion marker, pulls the results into
+`benchmarks/results/`, and terminates the instance. The instance provisions the
+same way the local lane does - the pinned `aws`, `uv sync --locked`, the
+chosen Python - and runs both modes against real S3.
+
+- **Credentials.** The launcher uses the ambient profile (`~/.aws`,
+  `AWS_PROFILE`, `--profile`) for its own EC2/S3/STS calls; the instance uses
+  an IAM role, never a copied key. The role's only permission is S3 on the
+  `boto3-s3-bench*` bucket family (the throwaway per-run bucket and the
+  per-account hand-off bucket). `setup-iam` creates that role and instance
+  profile; it is the one step that needs an administrator, so it is separate
+  and run once.
+- **Region.** Resolved as explicit `--region`, then `AWS_REGION`, then
+  `AWS_DEFAULT_REGION`, then the profile - and passed explicitly to every
+  client and to both CLIs on the instance, because this project's botocore
+  floor does not itself read `AWS_REGION`.
+- **The instance type is the only knob for architecture.** `--instance-type`
+  (or `BOTO3_S3_BENCH_INSTANCE_TYPE`) selects the machine; the architecture
+  follows from it, so an x86-64 and a Graviton baseline differ by that one
+  value. The default is `m7i.xlarge`: fixed-performance (never burstable -
+  a `t`-family instance's CPU credits would corrupt the numbers), enough vCPU
+  and RAM to keep the transfer pool, CRT's threads, and the harness from
+  contending, and a work tree on tmpfs so EBS is off the measured path.
+  `--python` (or `BOTO3_S3_BENCH_PYTHON`) picks the interpreter, default the
+  same 3.14 as the local lane.
+- **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
+  US$1 of on-demand instance time plus S3 request charges. The one real risk
+  is a leaked instance, so it has three independent deaths: a timed `shutdown`
+  armed before any work (`--max-minutes`, default 60), `terminate` as the
+  shutdown behavior, and the launcher's own terminate on the way out. `cleanup`
+  terminates anything a crashed launcher left tagged.
+- **A clean shell.** The launcher refuses to start if the shell is configured
+  for MinIO (`AWS_ENDPOINT_URL_S3` or the dev static key), because those would
+  redirect its S3 calls. Run it from a shell that has not sourced
+  `scripts/minio-env.sh`.
+
+Record the results the same way as the local lane (an entry in RESULTS.md with
+the instance type, AMI, region, and Python version in its environment block).
+Cross-run `--baseline` comparison stays like-for-like only within one instance
+type and architecture; treat an x86-64 and a Graviton run as two baselines to
+read side by side, not as a regression pair.
 
 ## Reading the numbers on this host
 

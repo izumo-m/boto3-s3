@@ -10,11 +10,12 @@ when re-rendering stored files.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-from benchmarks import e2e, inprocess, report, results
+from benchmarks import e2e, ec2, inprocess, report, results
 from benchmarks.core import BenchmarkError
 from benchmarks.report import STARTUP_PROBES
 
@@ -69,6 +70,41 @@ def _build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--no-adjust-startup", action="store_true")
 
     sub.add_parser("list", help="list scenarios and stored results files")
+
+    ec2parser = sub.add_parser(
+        "ec2", help="record a baseline on a throwaway EC2 instance (see design/benchmark.md)"
+    )
+    ec2sub = ec2parser.add_subparsers(dest="ec2_command", required=True)
+
+    def _add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--region", help="AWS region (default: AWS_REGION / profile)")
+        sp.add_argument("--profile", help="AWS profile for the launcher's own calls")
+
+    ec2run = ec2sub.add_parser("run", help="provision, benchmark, retrieve, terminate")
+    _add_common(ec2run)
+    ec2run.add_argument(
+        "--instance-type",
+        default=os.environ.get("BOTO3_S3_BENCH_INSTANCE_TYPE", ec2.DEFAULT_INSTANCE_TYPE),
+        help="EC2 instance type; its architecture is resolved from EC2 (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--python",
+        default=os.environ.get("BOTO3_S3_BENCH_PYTHON", ec2.DEFAULT_PYTHON),
+        help="Python version to provision on the instance (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--max-minutes",
+        type=int,
+        default=ec2.DEFAULT_MAX_MINUTES,
+        help="instance self-terminates after this budget (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
+    )
+
+    _add_common(ec2sub.add_parser("setup-iam", help="create the instance role/profile (one-time)"))
+    _add_common(ec2sub.add_parser("cleanup", help="terminate any tagged leftover instances"))
+
     return parser
 
 
@@ -210,6 +246,14 @@ def _cmd_list() -> int:
     return 0
 
 
+def _cmd_ec2(args: argparse.Namespace) -> int:
+    if args.ec2_command == "run":
+        return ec2.cmd_run(args)
+    if args.ec2_command == "setup-iam":
+        return ec2.cmd_setup_iam(args)
+    return ec2.cmd_cleanup(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
@@ -217,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_run(args)
         if args.command == "report":
             return _cmd_report(args)
+        if args.command == "ec2":
+            return _cmd_ec2(args)
         return _cmd_list()
     except BenchmarkError as exc:
         print(f"benchmarks: error: {exc}", file=sys.stderr)
