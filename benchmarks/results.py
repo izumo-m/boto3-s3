@@ -205,7 +205,11 @@ def resolve_baseline(
     candidate = Path(spec)
     if candidate.is_file():
         return candidate
-    runs = [run for run in list_runs(mode, lane=lane) if exclude is None or run != exclude]
+    # Stored runs are absolute; a `report` argument is whatever the user typed
+    # (usually relative), so compare resolved paths or the run under report
+    # becomes its own baseline.
+    excluded = exclude.resolve() if exclude is not None else None
+    runs = [run for run in list_runs(mode, lane=lane) if run.resolve() != excluded]
     if spec == "last":
         if not runs:
             raise BenchmarkError(f"no stored {mode} runs in lane {lane!r} to use as baseline")

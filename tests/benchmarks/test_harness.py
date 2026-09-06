@@ -205,6 +205,11 @@ class TestLanes:
         # `last` for the local lane skips the newer EC2 file; the EC2 lane
         # sees only its own; a revision prefix is scoped the same way.
         assert results.resolve_baseline("last", "e2e", lane="local", exclude=local_new) == local_old
+        # `report <file> --baseline last` excludes by the path as typed, which
+        # is usually relative while stored runs are absolute.
+        monkeypatch.chdir(tmp_path.parent)
+        relative = Path(tmp_path.name) / local_new.name
+        assert results.resolve_baseline("last", "e2e", lane="local", exclude=relative) == local_old
         assert results.resolve_baseline("last", "e2e", lane="ec2-m7i.xlarge") == ec2_new
         assert results.resolve_baseline("bbbb", "e2e", lane="ec2-m7i.xlarge") == ec2_new
         with pytest.raises(Exception, match="lane 'local'"):
