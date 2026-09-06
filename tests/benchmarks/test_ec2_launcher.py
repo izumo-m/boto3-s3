@@ -19,6 +19,7 @@ import pytest
 
 from benchmarks import awsenv, ec2
 from benchmarks.core import BenchmarkError
+from benchmarks.ec2 import Outcome
 
 
 class _FakeEC2:
@@ -118,6 +119,7 @@ def _render(**overrides: Any) -> str:
         git_rev="0123456789abcdef",
         lane="ec2-m7i.xlarge-ubuntu26.04",
         image="ami-0123",
+        bench_bucket="boto3-s3-bench-20260906-000000-abc",
     )
     params.update(overrides)
     return ec2._user_data(**params)
@@ -161,6 +163,20 @@ class TestUserData:
         assert "export BOTO3_S3_BENCH_GIT_REV=0123456789abcdef" in script
         assert "export BOTO3_S3_BENCH_LANE=ec2-m7i.xlarge-ubuntu26.04" in script
         assert "export BOTO3_S3_BENCH_IMAGE=ami-0123" in script
+        assert "export BOTO3_S3_BENCH_BUCKET=boto3-s3-bench-20260906-000000-abc" in script
+        # An outside shutdown is recorded as a signal; the log is synced every
+        # minute through the same presigned PUT the trap uses.
+        assert "trap 'RC=\"terminated-by-signal:$RC\"; exit 143' TERM" in script
+        assert script.count(_URLS["LOG_PUT_URL_PLACEHOLDER"]) == 2
+        # Each mode runs on its own and uploads before the next starts, with
+        # errexit and the ERR trap off around the benchmark's own exit codes.
+        runs = [line for line in script.splitlines() if "python -m benchmarks run" in line]
+        assert [("--mode inprocess" in r, "--mode e2e --engine both" in r) for r in runs] == [
+            (True, False),
+            (False, True),
+        ]
+        assert script.count("upload_results\n") == 2
+        assert script.index("trap - ERR") < script.index("--mode inprocess")
 
     @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash for a syntax check")
     def test_rendered_user_data_is_valid_bash(self) -> None:
@@ -219,3 +235,78 @@ class TestRegionAndGuards:
 
 def _as_list(value: object) -> list[str]:
     return value if isinstance(value, list) else [value]  # type: ignore[return-value]
+
+
+class TestMarketAndOutcome:
+    def test_spot_is_a_one_time_request_that_terminates(self) -> None:
+        options = ec2._market_options(True)["InstanceMarketOptions"]
+        assert options["MarketType"] == "spot"
+        assert options["SpotOptions"] == {
+            "SpotInstanceType": "one-time",
+            "InstanceInterruptionBehavior": "terminate",
+        }
+        assert ec2._market_options(False) == {}
+
+    def test_failing_line_is_looked_up_in_the_script(self) -> None:
+        script = "line one\nline two\nline three\n"
+        assert ec2._failing_line(script, "failed-at-line-2") == "line two"
+        assert ec2._failing_line(script, "failed-at-line-9") is None
+        assert ec2._failing_line(script, "0") is None
+
+    @pytest.mark.parametrize(
+        ("outcome", "expect"),
+        [
+            (Outcome("completed", "0", None, None, 35.0), "completed"),
+            (
+                Outcome("completed", "inprocess=0,e2e=1", None, None, 35.0),
+                "non-zero exit code",
+            ),
+            (
+                Outcome("completed", "inprocess=0,e2e=0,results-upload-failed", None, None, 35.0),
+                "results upload failed",
+            ),
+            (Outcome("completed", "failed-at-line-2", None, None, 3.0), "provisioning failed"),
+            (
+                Outcome(
+                    "completed",
+                    "terminated-by-signal:unknown",
+                    "shutting-down",
+                    "Server.SpotInstanceTermination: Spot Instance interrupted",
+                    20.0,
+                ),
+                "spot interruption",
+            ),
+            (
+                Outcome(
+                    "completed",
+                    "terminated-by-signal:unknown",
+                    "shutting-down",
+                    "Client.InstanceInitiatedShutdown: Instance initiated shutdown",
+                    60.2,
+                ),
+                "budget exceeded",
+            ),
+            (
+                Outcome(
+                    "died", None, "terminated", "Server.SpotInstanceTermination: reclaimed", 12.0
+                ),
+                "spot interruption",
+            ),
+            (
+                Outcome("died", None, "terminated", "Server.InternalError: host failure", 12.0),
+                "EC2 stopped the instance",
+            ),
+            (Outcome("died", None, "terminated", None, 12.0), "without reporting"),
+            (Outcome("timeout", None, "running", None, 66.0), "stopped waiting"),
+        ],
+    )
+    def test_classify_names_the_cause(self, outcome: Outcome, expect: str) -> None:
+        verdict = ec2._classify(outcome, 60, "l1\ndnf install\nl3\n")
+        assert expect in verdict
+        if outcome.rc == "failed-at-line-2":
+            assert "dnf install" in verdict
+
+    def test_ok_requires_a_zero_marker(self) -> None:
+        assert Outcome("completed", "0", None, None, 1.0).ok
+        assert not Outcome("completed", "1", None, None, 1.0).ok
+        assert not Outcome("died", None, "terminated", None, 1.0).ok

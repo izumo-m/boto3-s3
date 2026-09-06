@@ -271,7 +271,8 @@ python -m benchmarks ec2 setup-iam            # once, needs an administrator
 python -m benchmarks ec2 run                  # provision, measure, retrieve, terminate
 python -m benchmarks ec2 run --instance-type m7g.xlarge   # a Graviton run
 python -m benchmarks ec2 run --ubuntu-release 24.04       # the previous LTS
-python -m benchmarks ec2 cleanup              # terminate anything a crash left tagged
+python -m benchmarks ec2 run --on-demand      # when spot capacity is not there
+python -m benchmarks ec2 cleanup              # the safety net for a launcher that died
 ```
 
 The launcher orchestrates; the instance does the work. `run` resolves the
@@ -320,22 +321,45 @@ runs both modes against real S3.
   frees one engine's tree before the next seeds), checked against the memory
   EC2 reports for the instance type with 4 GiB kept back; a payload the
   instance cannot hold is refused before anything launches.
+- **Spot by default.** The instance is a one-time spot request that
+  terminates on interruption; the hardware is the same, a run this short is
+  rarely reclaimed, and when it is the run is simply repeated. `--on-demand`
+  pays the full price instead, and a spot launch that finds no capacity
+  stops with that message rather than falling back on its own: paying
+  on-demand is a choice.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
-  US$1 of on-demand instance time plus S3 request charges. The one real risk
-  is a leaked instance, so it has three independent deaths: a timed `shutdown`
+  US$1 of instance time plus S3 request charges. The one real risk is a
+  leaked instance, so it has three independent deaths: a timed `shutdown`
   armed before any work (`--max-minutes`, default 60), `terminate` as the
-  shutdown behavior, and the launcher's own terminate on the way out. The
-  instance reports on every exit path: provisioning runs under errexit with an
-  ERR trap that names the failing line, and the EXIT trap uploads the log and
-  a `DONE` marker through two PUT URLs the launcher presigned (valid past the
-  budget), so reporting needs neither credentials nor a CLI on the instance
-  and a failure before anything was provisioned still leaves a reason behind;
-  a run that brings back no results file exits 2. `cleanup` terminates anything a
-  crashed launcher left tagged and force-deletes any `boto3-s3-bench-*` bucket
-  a budget-killed instance left on real S3 (the persistent
-  `boto3-s3-bench-boot-*` hand-off buckets excepted); the boot bucket keeps
-  each run's log and results under its run prefix and loses the code tarball
-  once the results are back.
+  shutdown behavior, and the launcher's own terminate on the way out.
+- **Every ending is explained.** Provisioning runs under errexit with an ERR
+  trap that names the failing line; an outside shutdown (a spot reclaim, the
+  budget timer) arrives as SIGTERM and is recorded as such; and the EXIT trap
+  uploads the log and a `DONE` marker through two PUT URLs the launcher
+  presigned (valid past the budget), so reporting needs neither credentials
+  nor a CLI on the instance and a failure before anything was provisioned
+  still leaves a reason behind. The instance also syncs its log every minute,
+  so a stop that leaves no time for the trap still leaves a recent record,
+  and the launcher shows the log's latest line as progress while it waits.
+  When the instance disappears without a marker the launcher reads EC2's stop
+  reason. The last line the launcher prints is the verdict: completed, a
+  benchmark exit code, the provisioning line that failed, a spot
+  interruption, the budget exceeded, a service-side stop, or its own
+  timeout - followed by the log tail when the run did not succeed.
+- **Repeating a failed run is safe.** Everything a run creates is named by
+  the run: the instance (tagged with the run id), its own bucket
+  (`boto3-s3-bench-<run id>`, named by the launcher and handed to the
+  harness), and the `<run id>/` prefix in the hand-off bucket. Each mode's
+  results are uploaded as soon as that mode finishes, so an interruption in
+  the second mode keeps the first mode's file. Whatever the ending, the
+  launcher terminates the instance, removes the run's bucket if the harness
+  did not, and deletes the code tarball (also when the launch itself
+  failed); the log and results stay under the run prefix as the run's
+  record. So the answer to a failed run is another `ec2 run`. `cleanup` is
+  the safety net for a launcher that died before its own teardown: it
+  terminates anything still tagged and force-deletes any `boto3-s3-bench-*`
+  bucket left on real S3 (the persistent `boto3-s3-bench-boot-*` hand-off
+  buckets excepted) - do not run it while another run is in flight.
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;

@@ -239,6 +239,7 @@ class TestRemoteGuards:
         assert awsenv.remote_opted_in() is True
 
     def test_bucket_is_fixed_only_on_minio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(e2e.BUCKET_ENV, raising=False)
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
         assert e2e._bench_bucket() == e2e.BUCKET
         # An explicit real-S3 endpoint is still the global namespace.
@@ -246,6 +247,20 @@ class TestRemoteGuards:
         assert e2e._bench_bucket().startswith(e2e.BUCKET + "-")
         monkeypatch.delenv("AWS_ENDPOINT_URL_S3")
         assert e2e._bench_bucket().startswith(e2e.BUCKET + "-")
+
+    def test_launcher_may_name_the_bucket_inside_the_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
+        monkeypatch.setenv(e2e.BUCKET_ENV, "boto3-s3-bench-20260906-000000-abc")
+        assert e2e._bench_bucket() == "boto3-s3-bench-20260906-000000-abc"
+        # Outside the family the instance role could not touch it: refused.
+        monkeypatch.setenv(e2e.BUCKET_ENV, "someone-elses-bucket")
+        with pytest.raises(BenchmarkError, match="must start with"):
+            e2e._bench_bucket()
+        # MinIO ignores the override; its bucket is the documented fixed name.
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
+        assert e2e._bench_bucket() == e2e.BUCKET
 
     def test_real_s3_refuses_a_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_REGION", "ap-northeast-1")

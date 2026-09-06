@@ -115,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
     )
     ec2run.add_argument(
+        "--on-demand",
+        action="store_true",
+        help="launch on-demand instead of a one-time spot request (the default)",
+    )
+    ec2run.add_argument(
         "--large-transfer-mb",
         type=int,
         default=ec2.DEFAULT_LARGE_TRANSFER_MB,

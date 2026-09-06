@@ -44,6 +44,10 @@ if TYPE_CHECKING:
     from tests.utils.harness import CliResult
 
 BUCKET = "boto3-s3-bench"
+# A caller-chosen bucket name for a real-S3 run (the EC2 launcher's way of
+# knowing which bucket to remove if the run is cut short); must stay inside
+# the `boto3-s3-bench-*` family.
+BUCKET_ENV = "BOTO3_S3_BENCH_BUCKET"
 
 ENGINES = ("classic", "crt")
 
@@ -218,6 +222,14 @@ def _bench_bucket() -> str:
     """
     if awsenv.targeting_local_minio():
         return BUCKET
+    override = os.environ.get(BUCKET_ENV)
+    if override:
+        # The EC2 launcher names the run's bucket so it can remove exactly that
+        # one if the run is cut short; it must stay in the family the instance
+        # role is scoped to.
+        if not override.startswith(BUCKET + "-"):
+            raise BenchmarkError(f"{BUCKET_ENV} must start with {BUCKET + '-'!r}: {override!r}")
+        return override
     import secrets
 
     return f"{BUCKET}-{secrets.token_hex(4)}"
