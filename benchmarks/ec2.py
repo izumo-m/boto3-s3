@@ -16,6 +16,10 @@ three independent reasons to die (a timed `shutdown` armed before anything
 else, `InstanceInitiatedShutdownBehavior=terminate`, and this module's own
 terminate call), because the one real cost risk here is a leaked instance.
 
+The image is Ubuntu LTS (the local lane's distribution, so glibc and the
+kernel generation match across lanes), resolved from Canonical's public SSM
+parameters; the release is a knob.
+
 `setup-iam` (one-time, needs an administrator) creates the instance role;
 `run` provisions and measures; `cleanup` terminates anything a crashed `run`
 left tagged. See design/benchmark.md "Recording a baseline on EC2".
@@ -46,12 +50,23 @@ TAG_KEY = "boto3-s3-bench"
 ROLE_NAME = "boto3-s3-bench"
 INSTANCE_PROFILE_NAME = "boto3-s3-bench"
 
-# Public SSM parameters for the latest Amazon Linux 2023 AMI, per architecture.
-# Amazon owns these; reading them needs no special permission.
-_AL2023_SSM = {
-    "x86_64": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-    "arm64": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
-}
+# The image is Ubuntu LTS, resolved from Canonical's public SSM parameters
+# (reading them needs no special permission). Ubuntu rather than Amazon Linux
+# because the local lane develops and measures on Ubuntu (WSL2): the same
+# glibc and kernel generation on both lanes leaves hardware, network, and real
+# S3 as the only differences between them. The release is a knob so a
+# baseline can also be taken on the previous LTS.
+DEFAULT_UBUNTU_RELEASE = "26.04"
+_UBUNTU_SSM_ARCH = {"x86_64": "amd64", "arm64": "arm64"}
+
+
+def ubuntu_ssm_parameter(release: str, arch: str) -> str:
+    """Canonical's parameter naming the current stable Ubuntu Server AMI."""
+    return (
+        f"/aws/service/canonical/ubuntu/server/{release}/stable/current/"
+        f"{_UBUNTU_SSM_ARCH[arch]}/hvm/ebs-gp3/ami-id"
+    )
+
 
 # Defaults; each is overridable (a CLI flag, then an env var). The pair are the
 # same size class on the two architectures, fixed-performance (not burstable),
@@ -127,7 +142,9 @@ def _describe_instance_type(ec2: Any, instance_type: str) -> tuple[str, int]:
     for arch in ("x86_64", "arm64"):
         if arch in arches:
             return arch, memory_mib
-    raise BenchmarkError(f"{instance_type} reports no supported architecture in {_AL2023_SSM}")
+    raise BenchmarkError(
+        f"{instance_type} reports no supported architecture in {sorted(_UBUNTU_SSM_ARCH)}"
+    )
 
 
 # Memory the instance keeps for itself when the tmpfs work tree is sized:
@@ -155,8 +172,30 @@ def _tmpfs_gb(large_mb: int, memory_mib: int, *, instance_type: str) -> int:
     return need_gb
 
 
-def _resolve_ami(ssm: Any, arch: str) -> str:
-    return ssm.get_parameter(Name=_AL2023_SSM[arch])["Parameter"]["Value"]
+def _resolve_ami(ssm: Any, arch: str, release: str) -> str:
+    from botocore.exceptions import ClientError
+
+    name = ubuntu_ssm_parameter(release, arch)
+    try:
+        return ssm.get_parameter(Name=name)["Parameter"]["Value"]
+    except ClientError as exc:
+        raise BenchmarkError(
+            f"no Ubuntu {release} AMI parameter for {arch} in this region ({name}); "
+            "pass --ubuntu-release with an LTS Canonical publishes there"
+        ) from exc
+
+
+def _root_device_name(ec2: Any, ami: str) -> str:
+    """The AMI's root device name, so the root volume resize hits the root.
+
+    Distributions differ (Ubuntu AMIs use /dev/sda1, Amazon Linux /dev/xvda);
+    naming the wrong device would attach a second volume and leave the root at
+    the image's default size.
+    """
+    images = ec2.describe_images(ImageIds=[ami]).get("Images", [])
+    if not images:
+        raise BenchmarkError(f"AMI {ami} not found")
+    return str(images[0]["RootDeviceName"])
 
 
 def _boot_bucket_name(account: str, region: str) -> str:
@@ -189,18 +228,21 @@ def _user_data(
     tmpfs_gb: int,
     git_rev: str,
     lane: str,
+    image: str,
 ) -> str:
     """The cloud-init script the instance runs as root.
 
-    It arms a timed shutdown before anything else, provisions under errexit
-    with an ERR trap that names the failing line, unpacks the tree from a
-    presigned URL (curl, so no AWS CLI is needed for that), runs both modes
-    against real S3, and uploads the results. An EXIT trap uploads the log and
-    a `DONE` marker carrying the outcome on every path - success, a failed
-    provisioning step, a failed results upload - using the system `aws`
-    (Amazon Linux 2023 ships aws-cli v2) so it does not depend on the venv
-    having been built; then it powers off. The launcher therefore never waits
-    on a dead instance and always has a reason to show.
+    It arms a timed shutdown before anything else, quiets Ubuntu's background
+    apt and snap activity so nothing competes with the measurement, provisions
+    under errexit with an ERR trap that names the failing line, unpacks the
+    tree from a presigned URL, runs both modes against real S3, and uploads
+    the results. An EXIT trap uploads the log and a `DONE` marker carrying the
+    outcome on every path - success, a failed provisioning step, a failed
+    results upload - through two presigned PUT URLs the launcher minted, so
+    reporting needs neither credentials nor a CLI on the instance and works
+    however early the failure came; then it powers off. The launcher therefore
+    never waits on a dead instance and always has a reason to show. The three
+    URLs are spliced in afterwards by `_inline_urls`.
     """
     # `{{` / `}}` are literal braces for the shell; the rest is str.format.
     return _USER_DATA_TEMPLATE.format(
@@ -214,6 +256,7 @@ def _user_data(
         tmpfs_gb=tmpfs_gb,
         git_rev=git_rev,
         lane=lane,
+        image=image,
     )
 
 
@@ -229,28 +272,15 @@ export AWS_REGION={region}
 export AWS_DEFAULT_REGION={region}
 RC=unknown
 
-# Every exit path lands here: upload the log and a DONE marker carrying RC,
-# then power off. The system aws needs no venv, so a failure before `uv sync`
-# still reports; the venv's python is the fallback.
+# Every exit path lands here: upload the log and a DONE marker carrying RC
+# through the launcher's presigned PUTs (no credentials, no CLI, so this
+# works before anything was provisioned), then power off.
 finish() {{
   trap - ERR
   set +e
-  cd /opt/bench 2>/dev/null || true
-  if [ -x /usr/bin/aws ]; then
-    /usr/bin/aws s3 cp /var/log/bench-userdata.log "s3://$BOOT/$RUN/bench-userdata.log" \
-      --region {region}
-    printf 'rc=%s' "$RC" | /usr/bin/aws s3 cp - "s3://$BOOT/$RUN/DONE" --region {region}
-  elif [ -x .venv/bin/python ]; then
-    ./.venv/bin/python - <<PYEOF
-import boto3
-s3 = boto3.client("s3", region_name="{region}")
-try:
-    s3.upload_file("/var/log/bench-userdata.log", "$BOOT", "$RUN/bench-userdata.log")
-except Exception as exc:
-    print("log upload failed:", exc)
-s3.put_object(Bucket="$BOOT", Key="$RUN/DONE", Body=b"rc=$RC")
-PYEOF
-  fi
+  curl -fsS --retry 3 -T /var/log/bench-userdata.log "LOG_PUT_URL_PLACEHOLDER"
+  printf 'rc=%s' "$RC" > /run/bench-done
+  curl -fsS --retry 3 -T /run/bench-done "DONE_PUT_URL_PLACEHOLDER"
   shutdown -h now
 }}
 trap finish EXIT
@@ -259,8 +289,15 @@ trap finish EXIT
 trap 'RC="failed-at-line-$LINENO"' ERR
 set -e
 
-# tar/gzip for the tree, unzip for the aws-cli release zip install-awscli.sh unpacks.
-dnf -y install tar gzip unzip
+export DEBIAN_FRONTEND=noninteractive
+# Keep the instance quiet for the measurement: no unattended upgrades, apt
+# timers, or snap refreshes competing for CPU and network mid-run. Stopping
+# unattended-upgrades also waits out the dpkg lock a first boot may hold.
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service \
+  snapd.service snapd.socket snapd.seeded.service || true
+apt-get -o DPkg::Lock::Timeout=300 -q update
+# unzip for the aws-cli release zip install-awscli.sh unpacks (tar/gzip ship).
+apt-get -o DPkg::Lock::Timeout=300 -q install -y unzip
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 export PATH=/usr/local/bin:$PATH
 export HOME=/root
@@ -269,8 +306,6 @@ export HOME=/root
 mkdir -p /mnt/bench && mount -t tmpfs -o size={tmpfs_gb}g tmpfs /mnt/bench
 export TMPDIR=/mnt/bench
 mkdir -p /opt/bench && cd /opt/bench
-# The launcher inlines a presigned GET for the code tarball; curl needs no
-# credentials, so this works before the venv exists.
 curl -fsSL "TARBALL_URL_PLACEHOLDER" -o repo.tar.gz
 tar xzf repo.tar.gz
 
@@ -280,17 +315,20 @@ scripts/install-awscli.sh {aws_version}
 
 export BOTO3_S3_BENCH_ALLOW_REMOTE=1
 # Provenance: the tree is an archive with no .git, so the launcher supplies
-# the commit it archived (always clean) and the lane this run belongs to.
+# the commit it archived (always clean), the lane this run belongs to, and
+# the image it runs on.
 export BOTO3_S3_BENCH_GIT_REV={git_rev}
 export BOTO3_S3_BENCH_LANE={lane}
+export BOTO3_S3_BENCH_IMAGE={image}
 export PATH="$PWD/.venv/bin:$PATH"
 set +e
 uv run python -m benchmarks run --engine both --mode all --large-transfer-mb {large_mb}
 RC=$?
 set -e
 
-# Results go up before the EXIT trap fires; a failed upload is spelled into
-# RC instead of ending the script silently.
+# Results go up before the EXIT trap fires (the venv's boto3 with the
+# instance role; the file names are only known now); a failed upload is
+# spelled into RC instead of ending the script silently.
 if ! ./.venv/bin/python - <<PYEOF
 import boto3, glob, os
 s3 = boto3.client("s3", region_name="{region}")
@@ -304,20 +342,32 @@ fi
 """
 
 
-def _write_tarball_url_step(user_data: str, presigned_url: str) -> str:
-    """Inline the presigned tarball URL into the user-data.
+URL_PLACEHOLDERS = (
+    "TARBALL_URL_PLACEHOLDER",
+    "LOG_PUT_URL_PLACEHOLDER",
+    "DONE_PUT_URL_PLACEHOLDER",
+)
 
-    The URL is signed and can be long; keeping it out of the template and
-    substituting a single placeholder avoids any str.format collision with the
-    query string's own braces or percent-encoding.
+
+def _inline_urls(user_data: str, urls: dict[str, str]) -> str:
+    """Splice the presigned URLs into the rendered user-data.
+
+    They are signed and long; keeping them out of the template and replacing
+    placeholders afterwards avoids any str.format collision with a query
+    string's own braces. Each placeholder sits inside the template's double
+    quotes, which is all the quoting a presigned URL needs: the characters
+    that would break out of them never occur in one, and a URL that carried
+    them is refused rather than spliced in.
     """
-    # The placeholder sits inside the template's double quotes, which is all
-    # the quoting a presigned URL needs; the characters that would break out
-    # of them never occur in one, and a URL that carried them is refused
-    # rather than spliced in.
-    if any(ch in presigned_url for ch in '"$`\\'):
-        raise BenchmarkError(f"presigned URL contains a shell-active character: {presigned_url}")
-    return user_data.replace("TARBALL_URL_PLACEHOLDER", presigned_url)
+    for placeholder, url in urls.items():
+        if any(ch in url for ch in '"$`\\'):
+            raise BenchmarkError(f"presigned URL contains a shell-active character: {url}")
+        assert user_data.count(placeholder) == 1, placeholder
+        user_data = user_data.replace(placeholder, url)
+    missing = [ph for ph in URL_PLACEHOLDERS if ph in user_data]
+    if missing:
+        raise BenchmarkError(f"user-data placeholders left unfilled: {missing}")
+    return user_data
 
 
 def _estimated_note(instance_type: str, region: str) -> str:
@@ -343,16 +393,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     instance_type = args.instance_type
     arch, memory_mib = _describe_instance_type(ec2, instance_type)
     tmpfs_gb = _tmpfs_gb(args.large_transfer_mb, memory_mib, instance_type=instance_type)
-    ami = _resolve_ami(ssm, arch)
+    ami = _resolve_ami(ssm, arch, args.ubuntu_release)
+    root_device = _root_device_name(ec2, ami)
     aws_version = _pinned_aws_version()
 
     _require_instance_profile(ec2, region, profile)
 
     print(f"account {account}, region {region}")
     print(
-        f"instance type {instance_type} ({arch}, {memory_mib} MiB), AMI {ami}, "
-        f"Python {args.python}, large transfer {args.large_transfer_mb} MB on a "
-        f"{tmpfs_gb} GB tmpfs"
+        f"instance type {instance_type} ({arch}, {memory_mib} MiB), Ubuntu "
+        f"{args.ubuntu_release} AMI {ami} (root {root_device}), Python {args.python}, "
+        f"large transfer {args.large_transfer_mb} MB on a {tmpfs_gb} GB tmpfs"
     )
     print(f"pinned aws-cli {aws_version}")
     print(_estimated_note(instance_type, region))
@@ -366,11 +417,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     git_rev = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
-    presigned = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": boot_bucket, "Key": tarball_key},
-        ExpiresIn=3600,
-    )
+    # The instance reports through PUTs presigned here, valid past its budget
+    # so the final DONE still lands after a full run.
+    expiry = args.max_minutes * 60 + 900
+    presigned = {
+        "TARBALL_URL_PLACEHOLDER": s3.generate_presigned_url(
+            "get_object", Params={"Bucket": boot_bucket, "Key": tarball_key}, ExpiresIn=expiry
+        ),
+        "LOG_PUT_URL_PLACEHOLDER": s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": boot_bucket, "Key": f"{run_id}/bench-userdata.log"},
+            ExpiresIn=expiry,
+        ),
+        "DONE_PUT_URL_PLACEHOLDER": s3.generate_presigned_url(
+            "put_object", Params={"Bucket": boot_bucket, "Key": f"{run_id}/DONE"}, ExpiresIn=expiry
+        ),
+    }
 
     user_data = _user_data(
         boot_bucket=boot_bucket,
@@ -382,13 +444,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         large_mb=args.large_transfer_mb,
         tmpfs_gb=tmpfs_gb,
         git_rev=git_rev,
-        lane=f"ec2-{instance_type}",
+        lane=f"ec2-{instance_type}-ubuntu{args.ubuntu_release}",
+        image=ami,
     )
-    user_data = _write_tarball_url_step(user_data, presigned)
+    user_data = _inline_urls(user_data, presigned)
 
     instance_id = _launch(
         ec2,
         ami=ami,
+        root_device=root_device,
         instance_type=instance_type,
         user_data=user_data,
         run_id=run_id,
@@ -434,7 +498,9 @@ def _require_instance_profile(ec2: Any, region: str, profile: str | None) -> Non
         ) from exc
 
 
-def _launch(ec2: Any, *, ami: str, instance_type: str, user_data: str, run_id: str) -> str:
+def _launch(
+    ec2: Any, *, ami: str, root_device: str, instance_type: str, user_data: str, run_id: str
+) -> str:
     resp = ec2.run_instances(
         ImageId=ami,
         InstanceType=instance_type,
@@ -446,7 +512,7 @@ def _launch(ec2: Any, *, ami: str, instance_type: str, user_data: str, run_id: s
         MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
         BlockDeviceMappings=[
             {
-                "DeviceName": "/dev/xvda",
+                "DeviceName": root_device,
                 "Ebs": {"VolumeSize": 30, "VolumeType": "gp3", "DeleteOnTermination": True},
             }
         ],

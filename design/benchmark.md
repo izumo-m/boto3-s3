@@ -235,8 +235,8 @@ file path, or a git-revision prefix matched against stored filenames. Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
 a `--quick` run) are not compared.
 
-A run belongs to a *lane*: `local` (no suffix) or `ec2-<instance type>` for
-files the EC2 launcher brought back, and `last` / a revision prefix never
+A run belongs to a *lane*: `local` (no suffix) or
+`ec2-<instance type>-ubuntu<release>` for files the EC2 launcher brought back, and `last` / a revision prefix never
 cross lanes - an EC2 file downloaded onto this host is another machine's
 numbers and must not become a local baseline by being newest. An explicit
 path is the one way to compare across lanes, and the report header then says
@@ -270,17 +270,29 @@ reproduce. It is not a per-commit lane; run it when recording a baseline for
 python -m benchmarks ec2 setup-iam            # once, needs an administrator
 python -m benchmarks ec2 run                  # provision, measure, retrieve, terminate
 python -m benchmarks ec2 run --instance-type m7g.xlarge   # a Graviton run
+python -m benchmarks ec2 run --ubuntu-release 24.04       # the previous LTS
 python -m benchmarks ec2 cleanup              # terminate anything a crash left tagged
 ```
 
 The launcher orchestrates; the instance does the work. `run` resolves the
-instance type's architecture from EC2 and the matching latest Amazon Linux
-2023 AMI from its public SSM parameter, hands the instance a `git archive HEAD`
-of the tree over S3 (a dirty tree is refused, so a baseline is attributable to
-a commit), waits for a completion marker, pulls the results into
-`benchmarks/results/`, and terminates the instance. The instance provisions the
-same way the local lane does - the pinned `aws`, `uv sync --locked`, the
-chosen Python - and runs both modes against real S3.
+instance type's architecture and memory from EC2, the current Ubuntu LTS
+AMI for that architecture from Canonical's public SSM parameter, and the
+AMI's root device name; hands the instance a `git archive HEAD` of the tree
+over S3 (a dirty tree is refused, so a baseline is attributable to a commit);
+waits for a completion marker; pulls the results into `benchmarks/results/`;
+and terminates the instance. The instance provisions the same way the local
+lane does - the pinned `aws`, `uv sync --locked`, the chosen Python - and
+runs both modes against real S3.
+
+- **The image is Ubuntu LTS, 26.04 by default.** The local lane develops and
+  measures on Ubuntu (WSL2), so the same distribution on EC2 keeps glibc and
+  the kernel generation equal across lanes and leaves hardware, network, and
+  real S3 as the differences between them; the interpreter (uv-managed) and
+  both CLIs (self-contained) are the same either way. `--ubuntu-release` (or
+  `BOTO3_S3_BENCH_UBUNTU_RELEASE`) selects another LTS Canonical publishes in
+  the region. Before measuring, the instance silences Ubuntu's background
+  work - the apt timers, unattended upgrades, snapd - so nothing competes
+  for CPU or network mid-run.
 
 - **Credentials.** The launcher uses the ambient profile (`~/.aws`,
   `AWS_PROFILE`, `--profile`) for its own EC2/S3/STS calls; the instance uses
@@ -315,27 +327,30 @@ chosen Python - and runs both modes against real S3.
   shutdown behavior, and the launcher's own terminate on the way out. The
   instance reports on every exit path: provisioning runs under errexit with an
   ERR trap that names the failing line, and the EXIT trap uploads the log and
-  a `DONE` marker with the system `aws` (Amazon Linux 2023 ships aws-cli v2),
-  so a failure before the venv exists still leaves a reason behind; a run
-  that brings back no results file exits 2. `cleanup` terminates anything a
+  a `DONE` marker through two PUT URLs the launcher presigned (valid past the
+  budget), so reporting needs neither credentials nor a CLI on the instance
+  and a failure before anything was provisioned still leaves a reason behind;
+  a run that brings back no results file exits 2. `cleanup` terminates anything a
   crashed launcher left tagged and force-deletes any `boto3-s3-bench-*` bucket
   a budget-killed instance left on real S3 (the persistent
   `boto3-s3-bench-boot-*` hand-off buckets excepted); the boot bucket keeps
   each run's log and results under its run prefix and loses the code tarball
   once the results are back.
 - **What comes back.** The results files land in `benchmarks/results/` with
-  the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge.jsonl`) and
-  the archived commit as their revision; render them with `report`, compare
-  two EC2 runs with `--baseline last` from either, and record the entry in
-  RESULTS.md with the instance type, AMI, region, and Python version.
+  the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
+  the archived commit as their revision, and the AMI id in the meta record;
+  render them with `report`, compare two EC2 runs with `--baseline last` from
+  either, and record the entry in RESULTS.md with the instance type, Ubuntu
+  release and AMI, region, and Python version.
 - **A clean shell.** The launcher refuses to start if the shell is configured
   for MinIO (`AWS_ENDPOINT_URL_S3` or the dev static key), because those would
   redirect its S3 calls. Run it from a shell that has not sourced
   `scripts/minio-env.sh`.
 
 Cross-run `--baseline` comparison stays like-for-like only within one lane,
-which is one instance type; an x86-64 and a Graviton run are two baselines to
-read side by side, not a regression pair, and the lane scoping enforces that.
+which is one instance type on one Ubuntu release; an x86-64 and a Graviton
+run are two baselines to read side by side, not a regression pair, and the
+lane scoping enforces that.
 
 ## Reading the numbers on this host
 

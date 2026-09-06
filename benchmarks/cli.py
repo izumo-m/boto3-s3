@@ -100,6 +100,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Python version to provision on the instance (default: %(default)s)",
     )
     ec2run.add_argument(
+        "--ubuntu-release",
+        default=os.environ.get("BOTO3_S3_BENCH_UBUNTU_RELEASE", ec2.DEFAULT_UBUNTU_RELEASE),
+        metavar="LTS",
+        help="Ubuntu LTS release for the image, e.g. 24.04 (default: %(default)s)",
+    )
+    ec2run.add_argument(
         "--max-minutes",
         type=int,
         default=ec2.DEFAULT_MAX_MINUTES,

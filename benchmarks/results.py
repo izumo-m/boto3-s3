@@ -40,6 +40,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LANE_ENV = "BOTO3_S3_BENCH_LANE"
 GIT_REV_ENV = "BOTO3_S3_BENCH_GIT_REV"
 GIT_DIRTY_ENV = "BOTO3_S3_BENCH_GIT_DIRTY"
+IMAGE_ENV = "BOTO3_S3_BENCH_IMAGE"
 LOCAL_LANE = "local"
 
 # Versions recorded into every meta line; absent packages record null.
@@ -60,9 +61,10 @@ class RunMeta:
     aws_version: str | None
     options: dict[str, object]
     lane: str = LOCAL_LANE
+    image: str | None = None
 
     def record(self) -> dict[str, object]:
-        return {
+        record: dict[str, object] = {
             "kind": "meta",
             "mode": self.mode,
             "lane": self.lane,
@@ -75,6 +77,11 @@ class RunMeta:
             "aws_version": self.aws_version,
             "options": self.options,
         }
+        if self.image is not None:
+            # The machine image an EC2-lane run booted (an AMI id); a local
+            # run has none.
+            record["image"] = self.image
+        return record
 
 
 def _git(*args: str) -> str | None:
@@ -121,6 +128,7 @@ def collect_meta(
         git_rev=git_rev,
         git_dirty=git_dirty,
         lane=os.environ.get(LANE_ENV) or LOCAL_LANE,
+        image=os.environ.get(IMAGE_ENV) or None,
         python=platform.python_version(),
         platform=platform.platform(),
         versions=versions,

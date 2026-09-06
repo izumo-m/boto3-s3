@@ -172,20 +172,24 @@ class TestLanes:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(results.GIT_REV_ENV, "0123456789abcdef0123")
-        monkeypatch.setenv(results.LANE_ENV, "ec2-m7i.xlarge")
+        monkeypatch.setenv(results.LANE_ENV, "ec2-m7i.xlarge-ubuntu26.04")
+        monkeypatch.setenv(results.IMAGE_ENV, "ami-0123")
         monkeypatch.delenv(results.GIT_DIRTY_ENV, raising=False)
         meta = results.collect_meta("e2e", {})
         assert meta.git_rev == "0123456789"
         assert meta.git_dirty is False
-        assert meta.lane == "ec2-m7i.xlarge"
-        assert meta.record()["lane"] == "ec2-m7i.xlarge"
+        assert meta.lane == "ec2-m7i.xlarge-ubuntu26.04"
+        assert meta.record()["lane"] == "ec2-m7i.xlarge-ubuntu26.04"
+        assert meta.record()["image"] == "ami-0123"
 
     def test_default_lane_is_local_and_git_backed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(results.GIT_REV_ENV, raising=False)
         monkeypatch.delenv(results.LANE_ENV, raising=False)
+        monkeypatch.delenv(results.IMAGE_ENV, raising=False)
         meta = results.collect_meta("inprocess", {})
         assert meta.lane == "local"
         assert meta.git_rev != "unknown"
+        assert "image" not in meta.record()
 
     def test_filename_spells_a_non_local_lane_and_baselines_stay_in_lane(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
