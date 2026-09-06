@@ -186,7 +186,9 @@ def _table(header: list[str], rows: list[list[str]]) -> str:
 
 def _describe(meta: _Record) -> str:
     dirty = "-dirty" if meta.get("git_dirty") else ""
-    return f"{meta.get('git_rev')}{dirty} @ {meta.get('timestamp_utc')}"
+    lane = str(meta.get("lane") or "local")
+    where = "" if lane == "local" else f" [{lane}]"
+    return f"{meta.get('git_rev')}{dirty} @ {meta.get('timestamp_utc')}{where}"
 
 
 def _minor(version: object) -> str:
@@ -326,6 +328,11 @@ def render(
             lines.append(
                 f"interpreter: Python {meta.get('python')} now, {base_meta.get('python')} "
                 "in the baseline - cross-run deltas include the interpreter change"
+            )
+        if (meta.get("lane") or "local") != (base_meta.get("lane") or "local"):
+            lines.append(
+                f"lane: {meta.get('lane') or 'local'} now, {base_meta.get('lane') or 'local'} "
+                "in the baseline - different machines, cross-run deltas are not like-for-like"
             )
     if mode == "e2e":
         note = (

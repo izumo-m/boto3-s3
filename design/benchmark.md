@@ -212,10 +212,10 @@ rows, not as the project's transfer speed.
 
 ## Results files and baselines
 
-`benchmarks/results/{utc}_{mode}_{gitrev}[-dirty].jsonl`: line 1 is a `meta`
-record (git revision + dirty flag, Python/boto3/botocore/s3transfer/awscrt
-versions, `aws --version` on an E2E run - the in-process meta stores none -
-platform, run options), each further line one
+`benchmarks/results/{utc}_{mode}_{gitrev}[-dirty][.{lane}].jsonl`: line 1 is a
+`meta` record (lane, git revision + dirty flag, Python/boto3/botocore/
+s3transfer/awscrt versions, `aws --version` on an E2E run - the in-process
+meta stores none - platform, run options), each further line one
 scenario's samples per side plus the recorded execution order (the A/B
 interleaving is auditable), and for E2E the per-side peak RSS samples
 (`rss`, bytes) and the transfer scenarios' `payload_bytes`. Results are
@@ -225,6 +225,16 @@ host-specific timings and stay out of git.
 file path, or a git-revision prefix matched against stored filenames. Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
 a `--quick` run) are not compared.
+
+A run belongs to a *lane*: `local` (no suffix) or `ec2-<instance type>` for
+files the EC2 launcher brought back, and `last` / a revision prefix never
+cross lanes - an EC2 file downloaded onto this host is another machine's
+numbers and must not become a local baseline by being newest. An explicit
+path is the one way to compare across lanes, and the report header then says
+so. The EC2 instance runs from a `git archive` with no `.git`, so the
+launcher passes the archived commit and the lane down as environment
+(`BOTO3_S3_BENCH_GIT_REV`, `BOTO3_S3_BENCH_LANE`) and the meta records them
+as if `git` had answered.
 
 Officially recorded baselines - headline numbers with their revision and
 machine environment - are kept in [benchmarks/RESULTS.md](../benchmarks/RESULTS.md),
@@ -292,16 +302,19 @@ chosen Python - and runs both modes against real S3.
   armed before any work (`--max-minutes`, default 60), `terminate` as the
   shutdown behavior, and the launcher's own terminate on the way out. `cleanup`
   terminates anything a crashed launcher left tagged.
+- **What comes back.** The results files land in `benchmarks/results/` with
+  the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge.jsonl`) and
+  the archived commit as their revision; render them with `report`, compare
+  two EC2 runs with `--baseline last` from either, and record the entry in
+  RESULTS.md with the instance type, AMI, region, and Python version.
 - **A clean shell.** The launcher refuses to start if the shell is configured
   for MinIO (`AWS_ENDPOINT_URL_S3` or the dev static key), because those would
   redirect its S3 calls. Run it from a shell that has not sourced
   `scripts/minio-env.sh`.
 
-Record the results the same way as the local lane (an entry in RESULTS.md with
-the instance type, AMI, region, and Python version in its environment block).
-Cross-run `--baseline` comparison stays like-for-like only within one instance
-type and architecture; treat an x86-64 and a Graviton run as two baselines to
-read side by side, not as a regression pair.
+Cross-run `--baseline` comparison stays like-for-like only within one lane,
+which is one instance type; an x86-64 and a Graviton run are two baselines to
+read side by side, not a regression pair, and the lane scoping enforces that.
 
 ## Reading the numbers on this host
 

@@ -156,6 +156,8 @@ def _user_data(
     aws_version: str,
     max_minutes: int,
     large_mb: int,
+    git_rev: str,
+    lane: str,
 ) -> str:
     """The cloud-init script the instance runs as root.
 
@@ -185,6 +187,8 @@ def _user_data(
         aws_version=aws_version,
         large_mb=large_mb,
         tmpfs_gb=tmpfs_gb,
+        git_rev=git_rev,
+        lane=lane,
     )
 
 
@@ -217,7 +221,8 @@ PYEOF
 }}
 trap finish EXIT
 
-dnf -y install tar gzip
+# tar/gzip for the tree, unzip for the aws-cli release zip install-awscli.sh unpacks.
+dnf -y install tar gzip unzip
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 export PATH=/usr/local/bin:$PATH
 export HOME=/root
@@ -235,6 +240,10 @@ uv sync --all-packages --locked
 scripts/install-awscli.sh {aws_version}
 
 export BOTO3_S3_BENCH_ALLOW_REMOTE=1
+# Provenance: the tree is an archive with no .git, so the launcher supplies
+# the commit it archived (always clean) and the lane this run belongs to.
+export BOTO3_S3_BENCH_GIT_REV={git_rev}
+export BOTO3_S3_BENCH_LANE={lane}
 export PATH="$PWD/.venv/bin:$PATH"
 set +e
 uv run python -m benchmarks run --engine both --mode all --large-transfer-mb {large_mb}
@@ -304,6 +313,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     tarball_key = f"{run_id}/repo.tar.gz"
     s3.put_object(Bucket=boot_bucket, Key=tarball_key, Body=_archive_working_tree())
+    git_rev = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
     presigned = s3.generate_presigned_url(
         "get_object",
         Params={"Bucket": boot_bucket, "Key": tarball_key},
@@ -318,6 +330,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         aws_version=aws_version,
         max_minutes=args.max_minutes,
         large_mb=args.large_transfer_mb,
+        git_rev=git_rev,
+        lane=f"ec2-{instance_type}",
     )
     user_data = _write_tarball_url_step(user_data, presigned)
 

@@ -131,13 +131,14 @@ def _filter_names(names: list[str], pattern: str | None, *, keep: tuple[str, ...
 def _report_one(path: Path, baseline_spec: str | None, *, adjust: bool, threshold: float) -> bool:
     current = results.load_run(path)
     mode = str(current[0].get("mode"))
+    lane = str(current[0].get("lane") or results.LOCAL_LANE)
     baseline = None
     if baseline_spec is not None:
         # An unresolvable baseline (e.g. --baseline last on the first run of a
         # mode) degrades to a baseline-less table; the measurements themselves
         # must never be discarded over it.
         try:
-            baseline_path = results.resolve_baseline(baseline_spec, mode, exclude=path)
+            baseline_path = results.resolve_baseline(baseline_spec, mode, lane=lane, exclude=path)
         except BenchmarkError as exc:
             _log(f"[{mode}] baseline unavailable: {exc}")
         else:
@@ -255,7 +256,7 @@ def _cmd_list() -> int:
         print(f"  {scenario.name:24} [classic] {dims}")
     runs = results.list_runs()
     if runs:
-        print("stored results (newest last):")
+        print("stored results (newest last; a non-local lane is spelled after the revision):")
         for path in runs[-10:]:
             print(f"  {path}")
     return 0

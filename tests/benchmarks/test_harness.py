@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
-from benchmarks import e2e, inprocess, report
+from benchmarks import e2e, inprocess, report, results
 from benchmarks.core import DEFAULT_LARGE_MB, ScenarioResult
 
 _MIB = 1024 * 1024
@@ -149,3 +150,77 @@ class TestResourceTable:
         meta = {"mode": "e2e", "git_rev": "abc", "timestamp_utc": "t", "python": "3.14.7"}
         text, _flagged = report.render((meta, records), None)
         assert "throughput =" not in text
+
+
+class TestLanes:
+    def _write(self, mode: str, rev: str, lane: str, stamp: str) -> Path:
+        meta = results.RunMeta(
+            mode=mode,
+            timestamp_utc=stamp,
+            git_rev=rev,
+            git_dirty=False,
+            python="3.14.7",
+            platform="test",
+            versions={},
+            aws_version=None,
+            options={},
+            lane=lane,
+        )
+        return results.write_run(meta, [])
+
+    def test_provenance_can_come_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(results.GIT_REV_ENV, "0123456789abcdef0123")
+        monkeypatch.setenv(results.LANE_ENV, "ec2-m7i.xlarge")
+        monkeypatch.delenv(results.GIT_DIRTY_ENV, raising=False)
+        meta = results.collect_meta("e2e", {})
+        assert meta.git_rev == "0123456789"
+        assert meta.git_dirty is False
+        assert meta.lane == "ec2-m7i.xlarge"
+        assert meta.record()["lane"] == "ec2-m7i.xlarge"
+
+    def test_default_lane_is_local_and_git_backed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(results.GIT_REV_ENV, raising=False)
+        monkeypatch.delenv(results.LANE_ENV, raising=False)
+        meta = results.collect_meta("inprocess", {})
+        assert meta.lane == "local"
+        assert meta.git_rev != "unknown"
+
+    def test_filename_spells_a_non_local_lane_and_baselines_stay_in_lane(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(results, "RESULTS_DIR", tmp_path)
+        local_old = self._write("e2e", "aaaaaaaaaa", "local", "20260101-000000")
+        ec2_new = self._write("e2e", "bbbbbbbbbb", "ec2-m7i.xlarge", "20260102-000000")
+        local_new = self._write("e2e", "cccccccccc", "local", "20260103-000000")
+        assert local_old.name == "20260101-000000_e2e_aaaaaaaaaa.jsonl"
+        assert ec2_new.name == "20260102-000000_e2e_bbbbbbbbbb.ec2-m7i.xlarge.jsonl"
+        assert results.lane_of(ec2_new) == "ec2-m7i.xlarge"
+        assert results.lane_of(local_new) == "local"
+        # `last` for the local lane skips the newer EC2 file; the EC2 lane
+        # sees only its own; a revision prefix is scoped the same way.
+        assert results.resolve_baseline("last", "e2e", lane="local", exclude=local_new) == local_old
+        assert results.resolve_baseline("last", "e2e", lane="ec2-m7i.xlarge") == ec2_new
+        assert results.resolve_baseline("bbbb", "e2e", lane="ec2-m7i.xlarge") == ec2_new
+        with pytest.raises(Exception, match="lane 'local'"):
+            results.resolve_baseline("bbbb", "e2e", lane="local")
+
+    def test_report_header_names_the_lane_and_a_cross_lane_baseline(self) -> None:
+        current = (
+            {
+                "mode": "inprocess",
+                "git_rev": "c",
+                "timestamp_utc": "t2",
+                "python": "3.14.7",
+                "lane": "ec2-m7i.xlarge",
+            },
+            [],
+        )
+        baseline = (
+            {"mode": "inprocess", "git_rev": "a", "timestamp_utc": "t1", "python": "3.14.7"},
+            [],
+        )
+        text, _flagged = report.render(current, baseline)
+        assert "[ec2-m7i.xlarge]" in text.splitlines()[0]
+        assert "lane: ec2-m7i.xlarge now, local in the baseline" in text

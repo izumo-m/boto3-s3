@@ -71,6 +71,8 @@ class TestUserData:
             aws_version="2.36.40",
             max_minutes=45,
             large_mb=1024,
+            git_rev="0123456789abcdef",
+            lane="ec2-m7i.xlarge",
         )
         script = ec2._write_tarball_url_step(script, "https://example.test/x?sig=a&exp=b")
         assert "PLACEHOLDER" not in script
@@ -83,6 +85,11 @@ class TestUserData:
         # knob reaches the run line.
         assert "mount -t tmpfs -o size=5g" in script
         assert "--large-transfer-mb 1024" in script
+        # install-awscli.sh unpacks a zip; the provenance the archive lacks
+        # travels as environment.
+        assert "unzip" in script.split("uv sync")[0]
+        assert "export BOTO3_S3_BENCH_GIT_REV=0123456789abcdef" in script
+        assert "export BOTO3_S3_BENCH_LANE=ec2-m7i.xlarge" in script
 
     def test_an_oversized_transfer_is_refused_before_launch(self) -> None:
         with pytest.raises(BenchmarkError, match="tmpfs"):
@@ -94,6 +101,8 @@ class TestUserData:
                 aws_version="2.36.40",
                 max_minutes=60,
                 large_mb=8192,
+                git_rev="0",
+                lane="ec2-x",
             )
 
     def test_a_signed_url_with_braces_survives_substitution(self) -> None:
@@ -107,6 +116,8 @@ class TestUserData:
             aws_version="2.36.40",
             max_minutes=60,
             large_mb=64,
+            git_rev="0",
+            lane="ec2-x",
         )
         url = "https://example.test/o?X-Amz-Signature={not-a-field}"
         assert url in ec2._write_tarball_url_step(script, url)
