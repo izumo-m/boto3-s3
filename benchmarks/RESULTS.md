@@ -178,10 +178,13 @@ section 4). Confirmation runs, everything else as above:
 |---|---|---|---|
 | m7i.xlarge | 1.06 (732 / 773 MiB/s) | 1.00 (1018 / 1018) | `20260906-123336_inprocess_eb5711c865...`, `20260906-124901_e2e_eb5711c865...` |
 | m7g.xlarge | 0.98 (757 / 741 MiB/s) | 0.99 (1088 / 1077) | `20260906-124502_inprocess_eb5711c865...`, `20260906-130151_e2e_eb5711c865...` |
+| m7i.xlarge, CLI-side default on both engines (`578cd9a`) | 0.99 (767 / 760 MiB/s) | 1.07 (1035 / 1105) | `20260906-134541_inprocess_578cd9a1a3...`, `20260906-140106_e2e_578cd9a1a3...` |
 
-Both runs exit 0 (no row flags). The first m7g attempt of this commit was
-reclaimed by EC2 mid-run (a real spot interruption, reported as such by the
-launcher, in-process results retrieved, E2E lost) and simply run again.
+All three runs exit 0 (no row flags). The last one also puts CRC64NVME on
+the classic engine's uploads, where the 1 GB row stays at parity (0.98,
+612 / 598 MiB/s). The first m7g attempt of `eb5711c` was reclaimed by EC2
+mid-run (a real spot interruption, reported as such by the launcher,
+in-process results retrieved, E2E lost) and simply run again.
 
 ## 2026-09-06 - interpreter step: the local lane moves to Python 3.14
 
