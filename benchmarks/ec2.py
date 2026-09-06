@@ -60,6 +60,9 @@ _AL2023_SSM = {
 DEFAULT_INSTANCE_TYPE = "m7i.xlarge"
 DEFAULT_PYTHON = "3.14"
 DEFAULT_MAX_MINUTES = 60
+# Against real S3 on a 12.5 Gbps NIC a 64 MB object moves in well under the
+# startup constant; 1 GB puts the single-object rows a clear second above it.
+DEFAULT_LARGE_TRANSFER_MB = 1024
 
 
 def _client(kind: str, region: str, profile: str | None) -> Any:
@@ -145,7 +148,14 @@ def _ensure_boot_bucket(s3: Any, name: str, region: str) -> None:
 
 
 def _user_data(
-    *, boot_bucket: str, run_id: str, region: str, python: str, aws_version: str, max_minutes: int
+    *,
+    boot_bucket: str,
+    run_id: str,
+    region: str,
+    python: str,
+    aws_version: str,
+    max_minutes: int,
+    large_mb: int,
 ) -> str:
     """The cloud-init script the instance runs as root.
 
@@ -156,6 +166,15 @@ def _user_data(
     or early failure - so the launcher never waits on a dead instance, then
     powers off.
     """
+    # The work tree lives on tmpfs so EBS throughput is off the measured path.
+    # Peak occupancy is about three payloads (upload source, download source,
+    # one download destination) plus the small-file corpora.
+    tmpfs_gb = 2 + 3 * large_mb // 1024
+    if tmpfs_gb > 12:
+        raise BenchmarkError(
+            f"--large-transfer-mb {large_mb} needs a {tmpfs_gb} GB tmpfs work tree; "
+            "pick a smaller size or a larger instance"
+        )
     # `{{` / `}}` are literal braces for the shell; the rest is str.format.
     return _USER_DATA_TEMPLATE.format(
         max_minutes=max_minutes,
@@ -164,6 +183,8 @@ def _user_data(
         region=region,
         python=python,
         aws_version=aws_version,
+        large_mb=large_mb,
+        tmpfs_gb=tmpfs_gb,
     )
 
 
@@ -201,6 +222,8 @@ curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin s
 export PATH=/usr/local/bin:$PATH
 export HOME=/root
 
+mkdir -p /mnt/bench && mount -t tmpfs -o size={tmpfs_gb}g tmpfs /mnt/bench
+export TMPDIR=/mnt/bench
 mkdir -p /opt/bench && cd /opt/bench
 # The launcher put a presigned GET here; fetch with curl so we need no AWS CLI
 # before the venv exists.
@@ -214,7 +237,7 @@ scripts/install-awscli.sh {aws_version}
 export BOTO3_S3_BENCH_ALLOW_REMOTE=1
 export PATH="$PWD/.venv/bin:$PATH"
 set +e
-uv run python -m benchmarks run --engine both --mode all
+uv run python -m benchmarks run --engine both --mode all --large-transfer-mb {large_mb}
 RC=$?
 set -e
 
@@ -268,7 +291,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     _require_instance_profile(ec2, region, profile)
 
     print(f"account {account}, region {region}")
-    print(f"instance type {instance_type} ({arch}), AMI {ami}, Python {args.python}")
+    print(
+        f"instance type {instance_type} ({arch}), AMI {ami}, Python {args.python}, "
+        f"large transfer {args.large_transfer_mb} MB"
+    )
     print(f"pinned aws-cli {aws_version}")
     print(_estimated_note(instance_type, region))
 
@@ -291,6 +317,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         python=args.python,
         aws_version=aws_version,
         max_minutes=args.max_minutes,
+        large_mb=args.large_transfer_mb,
     )
     user_data = _write_tarball_url_step(user_data, presigned)
 

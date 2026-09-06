@@ -35,6 +35,7 @@ uv run python -m benchmarks run --mode inprocess        # no docker needed
 uv run python -m benchmarks run --engine both           # adds the CRT lane
 uv run python -m benchmarks run --baseline last         # flag regressions vs the previous run
 uv run python -m benchmarks run --quick --samples 2     # harness smoke test (shrunken corpora)
+uv run python -m benchmarks run --large-transfer-mb 1024 # size the single-object transfers
 uv run python -m benchmarks report [FILE] --baseline REV
 uv run python -m benchmarks list
 ```
@@ -126,7 +127,33 @@ it by default:
 - The startup probes themselves are baseline-compared on raw medians:
   startup growth (import bloat) is its own regression class.
 
-## Scenarios (v1, default scale)
+## Throughput and peak memory (E2E)
+
+Two recorded axes sit next to the timing table; neither raises a flag (the
+timing flags stay the regression gate).
+
+- **Throughput.** Transfer scenarios record the bytes one invocation moves
+  (`payload_bytes` in the results record); the report divides it by the *net*
+  median, the same startup-adjusted figure the ratio uses, so it reads as the
+  rate at which the tool moved bytes once it was ready to. On a wide link
+  against real S3 this is the natural unit for the large-object rows, and it
+  compares across instance types where seconds do not.
+- **Peak RSS.** Every E2E invocation records its peak resident set size, per
+  side. The project's "light" claim is otherwise unmeasured, and aws-cli v2 is
+  a frozen bundle whose footprint is a real difference. The number is exact,
+  not sampled: the CLI is started by a tiny intermediary (`python -I -S`, a
+  few MiB) that forks it, times fork-to-reap, and reports the child's
+  `ru_maxrss`. Linux floors a child's reported peak at the high-water mark of
+  the address space it was forked from, so a CLI spawned straight from the
+  boto3-laden harness could never report less than the harness's own ~65 MiB;
+  the intermediary's few MiB are the actual floor. Its startup is outside the
+  timed window, and the fork-to-reap edge is the exit itself, so E2E timings
+  since this change are marginally tighter than the earlier `subprocess.run`
+  ones - a few milliseconds off every raw median, on both sides alike, which
+  the ratio does not see. Where `fork` does not exist (Windows) the RSS is
+  simply absent.
+
+## Scenarios (default scale)
 
 | E2E scenario | Command | Scale | Engines |
 |---|---|---|---|
@@ -134,8 +161,11 @@ it by default:
 | `startup_minimal` | `ls` (empty prefix) | - | classic+crt |
 | `ls_recursive_10k` | `ls --recursive` | 10k keys x 1KB | classic |
 | `sync_noop_10k` | `sync` (nothing to do) | 10k files x 1KB | classic |
+| `sync_tiny` | `sync` of one new file | 1 x 11KB | classic+crt |
+| `sync_changed_10k` | `sync` re-uploading a stale subset | 10k files x 1KB, 2k changed | classic+crt |
+| `sync_delete_10k` | `sync --delete` removing remote extras | 8k kept + 2k extra keys | classic |
 | `cp_upload_small_1k` / `cp_download_small_1k` | `cp --recursive` | 1000 x 4KB | classic+crt |
-| `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart) | classic+crt |
+| `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart; `--large-transfer-mb`) | classic+crt |
 | `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded before every invocation (warmup and each timed side) | classic |
 
 | In-process scenario | Scale |
@@ -143,9 +173,10 @@ it by default:
 | `inproc_dispatch` (`--version`) | parse+dispatch floor |
 | `inproc_ls_100k` | 100 pages x 1000 keys |
 | `inproc_sync_noop_20k` | 20k local files + matching listing |
+| `inproc_sync_changed_20k` | as above, 2k local files differing in size |
 | `inproc_rm_recursive_20k` | 20k keys |
 | `inproc_cp_upload_small_2k` | 2000 x 1B |
-| `inproc_cp_upload_64mb` | 64MB multipart |
+| `inproc_cp_upload_large` | 64MB multipart (`--large-transfer-mb`) |
 
 Every scenario verifies its warmup output (transfer-line counts, listing
 sizes, no-op emptiness) before anything is timed - a scenario that silently
@@ -155,6 +186,30 @@ fake-fast ones. `sync` no-op corpora are
 seeded *after* the local tree with past mtimes, so both CLIs deterministically
 judge "nothing to transfer".
 
+The `sync` scenarios that do work stage their input deterministically before
+*every* invocation, warmup included, so each one faces the same job.
+`sync_tiny` is the README's one-file measurement: one new 11 KB file into an
+empty prefix (startup-dominated by design). `sync_changed_10k` seeds the whole
+corpus once at the local size and, before each invocation, rewrites the first
+2k keys at a *different* size - a size mismatch forces the upload whatever the
+timestamps say, and only the subset is rewritten, so the reset costs 2k puts,
+not 10k; the untouched 8k compare equal (size) and older (local mtime a day
+back), a no-op. `sync_delete_10k` keeps 8k matching keys and re-seeds 2k
+extras under a sub-prefix no local directory matches, so `--delete` has
+exactly those to remove and nothing to upload; the verify checks both counts.
+The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
+2k local files differ in size from the pre-rendered listing.
+
+The single-object rows measure two different things depending on the link.
+Against MinIO on localhost a 64 MB object moves in a few hundredths of a
+second, so `cp_upload_large` / `cp_download_large` there are the CPU cost of
+multipart orchestration, not throughput - and on the CRT lane the aws side can
+finish inside its own startup constant, which the report renders as `-`. For a
+throughput figure the object has to be large enough to outlast startup by a
+clear margin: `--large-transfer-mb` sizes both modes' large rows, and the EC2
+lane defaults it to 1024 for that reason. Read the 64 MB rows as overhead
+rows, not as the project's transfer speed.
+
 ## Results files and baselines
 
 `benchmarks/results/{utc}_{mode}_{gitrev}[-dirty].jsonl`: line 1 is a `meta`
@@ -162,8 +217,9 @@ record (git revision + dirty flag, Python/boto3/botocore/s3transfer/awscrt
 versions, `aws --version` on an E2E run - the in-process meta stores none -
 platform, run options), each further line one
 scenario's samples per side plus the recorded execution order (the A/B
-interleaving is auditable). Results are host-specific timings and stay out
-of git.
+interleaving is auditable), and for E2E the per-side peak RSS samples
+(`rss`, bytes) and the transfer scenarios' `payload_bytes`. Results are
+host-specific timings and stay out of git.
 
 `--baseline` accepts `last` (newest stored run of the same mode), a results
 file path, or a git-revision prefix matched against stored filenames. Rows
@@ -226,7 +282,10 @@ chosen Python - and runs both modes against real S3.
   and RAM to keep the transfer pool, CRT's threads, and the harness from
   contending, and a work tree on tmpfs so EBS is off the measured path.
   `--python` (or `BOTO3_S3_BENCH_PYTHON`) picks the interpreter, default the
-  same 3.14 as the local lane.
+  same 3.14 as the local lane. `--large-transfer-mb` defaults to 1024 here
+  (64 locally): on a 12.5 Gbps link a 64 MB object finishes inside the startup
+  constant, and the work tree is a tmpfs the launcher sizes for three payloads,
+  refusing a size the instance's memory cannot hold.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
   US$1 of on-demand instance time plus S3 request charges. The one real risk
   is a leaked instance, so it has three independent deaths: a timed `shutdown`

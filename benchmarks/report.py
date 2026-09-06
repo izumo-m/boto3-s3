@@ -19,6 +19,11 @@ Flag rules (threshold defaults to 1.10):
 A baseline recorded on another interpreter minor is still compared, but the
 header says so: every cross-run delta then includes the interpreter change,
 and only the same-run E2E ratio is a like-for-like number.
+
+E2E runs get a second table: throughput for the scenarios that record a
+payload (payload / net median, so it is the tool's moving rate, not the
+process's) and each side's median peak RSS. Neither is flagged; they are
+recorded axes, and the timing flags stay the regression gate.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 STARTUP_PROBES = ("startup_version", "startup_minimal")
+
+_MIB = 1024 * 1024
 
 _Record = dict[str, object]
 _Key = tuple[str, str]
@@ -106,6 +113,64 @@ def _fmt_ratio(value: float | None) -> str:
 
 def _fmt_delta(value: float | None) -> str:
     return f"{value:+.1%}" if value is not None else "-"
+
+
+def _fmt_mib(value: float | None) -> str:
+    return f"{value / _MIB:.1f}" if value is not None else "-"
+
+
+def _median_rss(record: _Record, side: Side) -> float | None:
+    rss = record.get("rss")
+    if not isinstance(rss, dict):
+        return None
+    values = rss.get(side.value)
+    if not isinstance(values, list) or not values:
+        return None
+    return statistics.median(float(v) for v in values)
+
+
+def _resource_table(records: Sequence[_Record], index: dict[_Key, _Record], adjust: bool) -> str:
+    """Throughput and peak-RSS rows for an E2E run, or "" when neither was recorded.
+
+    Throughput divides the recorded payload by the *net* median - the same
+    startup-adjusted figure the ratio uses - so it reads as the rate at which
+    the tool moved bytes once it was ready to. Rows with no payload (listing,
+    rm, the probes) leave those cells empty; every row with RSS samples shows
+    the per-side median and their ratio.
+    """
+    rows: list[list[str]] = []
+    for record in records:
+        scenario = str(record["scenario"])
+        engine = str(record["engine"])
+        payload = record.get("payload_bytes")
+        has_rss = isinstance(record.get("rss"), dict)
+        if payload is None and not has_rss:
+            continue
+        cells = [scenario, engine]
+        for side in (Side.OURS, Side.AWS):
+            rate: float | None = None
+            if isinstance(payload, (int, float)) and payload > 0:
+                net = _net(_median(record, side), index, engine, side, adjust)
+                if net:
+                    rate = float(payload) / _MIB / net
+            cells.append(f"{rate:.1f}" if rate is not None else "-")
+        rss_ours = _median_rss(record, Side.OURS)
+        rss_aws = _median_rss(record, Side.AWS)
+        rss_ratio = rss_ours / rss_aws if rss_ours and rss_aws else None
+        cells.extend([_fmt_mib(rss_ours), _fmt_mib(rss_aws), _fmt_ratio(rss_ratio)])
+        rows.append(cells)
+    if not rows:
+        return ""
+    header = [
+        "scenario",
+        "engine",
+        "ours(MiB/s)",
+        "aws(MiB/s)",
+        "ours(rssMiB)",
+        "aws(rssMiB)",
+        "rss-ratio",
+    ]
+    return _table(header, rows)
 
 
 def _table(header: list[str], rows: list[list[str]]) -> str:
@@ -271,4 +336,10 @@ def render(
         lines.append(note)
     lines.append("")
     lines.append(_table(header, rows))
+    if mode == "e2e":
+        extra = _resource_table(records, index, adjust)
+        if extra:
+            lines.append("")
+            lines.append("throughput = payload / net median; rss = median peak RSS per invocation")
+            lines.append(extra)
     return "\n".join(lines), flagged

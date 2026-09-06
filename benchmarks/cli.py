@@ -16,7 +16,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from benchmarks import e2e, ec2, inprocess, report, results
-from benchmarks.core import BenchmarkError
+from benchmarks.core import DEFAULT_LARGE_MB, BenchmarkError
 from benchmarks.report import STARTUP_PROBES
 
 
@@ -42,6 +42,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--samples", type=int, help="override every scenario's sample count")
     run.add_argument(
         "--quick", action="store_true", help="~1/100 workload sizes: a harness smoke test"
+    )
+    run.add_argument(
+        "--large-transfer-mb",
+        type=int,
+        default=DEFAULT_LARGE_MB,
+        metavar="MB",
+        help="size of the single-object transfer scenarios (default: %(default)s)",
     )
     run.add_argument(
         "--baseline",
@@ -101,6 +108,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ec2run.add_argument(
         "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
     )
+    ec2run.add_argument(
+        "--large-transfer-mb",
+        type=int,
+        default=ec2.DEFAULT_LARGE_TRANSFER_MB,
+        metavar="MB",
+        help="single-object transfer size on the instance (default: %(default)s)",
+    )
 
     _add_common(ec2sub.add_parser("setup-iam", help="create the instance role/profile (one-time)"))
     _add_common(ec2sub.add_parser("cleanup", help="terminate any tagged leftover instances"))
@@ -150,6 +164,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "quick": args.quick,
         "scenario": args.scenario,
         "handicap_ms": args.self_test_handicap_ms,
+        "large_transfer_mb": args.large_transfer_mb,
     }
 
     written: list[Path] = []
@@ -157,7 +172,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     any_flag = False
     for mode in modes:
         if mode == "inprocess":
-            scenarios = inprocess.build_scenarios(args.quick)
+            scenarios = inprocess.build_scenarios(args.quick, large_mb=args.large_transfer_mb)
             names = _filter_names([s.name for s in scenarios], args.scenario)
             selected = [s for s in scenarios if s.name in names]
             if not selected:
@@ -168,7 +183,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
             meta = results.collect_meta("inprocess", {**options, "failures": failures})
         else:
-            scenarios = e2e.build_scenarios(args.quick)
+            scenarios = e2e.build_scenarios(args.quick, large_mb=args.large_transfer_mb)
             names = _filter_names([s.name for s in scenarios], args.scenario, keep=STARTUP_PROBES)
             selected = [s for s in scenarios if s.name in names]
             if all(s.name in STARTUP_PROBES for s in selected):

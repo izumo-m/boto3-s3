@@ -70,6 +70,7 @@ class TestUserData:
             python="3.14",
             aws_version="2.36.40",
             max_minutes=45,
+            large_mb=1024,
         )
         script = ec2._write_tarball_url_step(script, "https://example.test/x?sig=a&exp=b")
         assert "PLACEHOLDER" not in script
@@ -78,6 +79,22 @@ class TestUserData:
         assert "BOTO3_S3_BENCH_ALLOW_REMOTE=1" in script
         assert "scripts/install-awscli.sh 2.36.40" in script
         assert "example.test/x?sig=a&exp=b" in script
+        # The work tree is a tmpfs sized for three payloads, and the size
+        # knob reaches the run line.
+        assert "mount -t tmpfs -o size=5g" in script
+        assert "--large-transfer-mb 1024" in script
+
+    def test_an_oversized_transfer_is_refused_before_launch(self) -> None:
+        with pytest.raises(BenchmarkError, match="tmpfs"):
+            ec2._user_data(
+                boot_bucket="boot",
+                run_id="r",
+                region="us-east-1",
+                python="3.14",
+                aws_version="2.36.40",
+                max_minutes=60,
+                large_mb=8192,
+            )
 
     def test_a_signed_url_with_braces_survives_substitution(self) -> None:
         # The URL is inlined after str.format, so query strings cannot collide
@@ -89,6 +106,7 @@ class TestUserData:
             python="3.14",
             aws_version="2.36.40",
             max_minutes=60,
+            large_mb=64,
         )
         url = "https://example.test/o?X-Amz-Signature={not-a-field}"
         assert url in ec2._write_tarball_url_step(script, url)

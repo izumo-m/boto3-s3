@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from benchmarks import stubs, workload
-from benchmarks.core import BenchmarkError, ScenarioResult, Side, VerificationError
+from benchmarks.core import (
+    DEFAULT_LARGE_MB,
+    BenchmarkError,
+    ScenarioResult,
+    Side,
+    VerificationError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
@@ -137,8 +143,12 @@ def _scale(value: int, quick: bool, *, minimum: int = 10) -> int:
     return value if not quick else max(value // 100, minimum)
 
 
-def build_scenarios(quick: bool) -> list[InProcScenario]:
-    """The v1 in-process scenario set (sizes divided by ~100 under --quick)."""
+def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[InProcScenario]:
+    """The in-process scenario set (sizes divided by ~100 under --quick).
+
+    *large_mb* sizes the multipart upload scenario, the same knob as the E2E
+    set so one `--large-transfer-mb` moves both.
+    """
     from tests.utils.harness import normalize_cp_stdout
 
     scenarios: list[InProcScenario] = []
@@ -205,6 +215,41 @@ def build_scenarios(quick: bool) -> list[InProcScenario]:
         )
     )
 
+    changed_count = _scale(2_000, quick)
+
+    def sync_changed_prepare(workdir: Path) -> Prepared:
+        tree = workdir / "tree"
+        workload.generate_tree(tree, sync_count, 16)
+        # The first `changed_count` local files differ in size from what the
+        # stubbed listing reports (32 B against 16 B), so the merge-join must
+        # schedule exactly those uploads and skip the rest. The stub keeps no
+        # state, so every sample faces the same work without a reset.
+        for rel in workload.rel_paths(changed_count):
+            (tree / rel).write_bytes(b"y" * 32)
+        corpus = stubs.ListingCorpus(bucket=BUCKET, prefix="corpus/", count=sync_count, size=16)
+        ctx = _make_context(stubs.S3Responder(corpus=corpus))
+
+        def verify(result: CliResult) -> None:
+            transfers = normalize_cp_stdout(result.stdout, bucket=BUCKET)
+            if len(transfers) != changed_count:
+                raise VerificationError(
+                    f"[inproc_sync_changed] expected {changed_count} uploads, got {len(transfers)}"
+                )
+
+        return Prepared(argv=["sync", str(tree), f"s3://{BUCKET}/corpus/"], ctx=ctx, verify=verify)
+
+    scenarios.append(
+        InProcScenario(
+            name="inproc_sync_changed_20k",
+            dimensions={
+                "file_count": str(sync_count),
+                "changed_count": str(changed_count),
+                "file_size": "16B",
+            },
+            prepare=sync_changed_prepare,
+        )
+    )
+
     rm_count = _scale(20_000, quick)
 
     def rm_prepare(_workdir: Path) -> Prepared:
@@ -258,7 +303,7 @@ def build_scenarios(quick: bool) -> list[InProcScenario]:
 
     # --quick still uses a just-past-threshold size (not /100) so the smoke
     # run exercises the same multipart path as the real one.
-    big_size = 64 * _MB if not quick else 9 * _MB
+    big_size = large_mb * _MB if not quick else 9 * _MB
 
     def cp_big_prepare(workdir: Path) -> Prepared:
         big = workdir / "big.bin"
@@ -276,7 +321,9 @@ def build_scenarios(quick: bool) -> list[InProcScenario]:
 
     scenarios.append(
         InProcScenario(
-            name="inproc_cp_upload_64mb",
+            # Size-agnostic name (was inproc_cp_upload_64mb): the size is a
+            # dimension now that --large-transfer-mb can move it.
+            name="inproc_cp_upload_large",
             dimensions={"file_size": f"{big_size // _MB}MB"},
             prepare=cp_big_prepare,
         )
