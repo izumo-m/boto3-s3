@@ -120,12 +120,11 @@ Notes:
   0.47-0.51, rm 0.37, delete-sync 0.40-0.41). The 1 GB classic upload is at
   parity (0.99-1.00, both tools near 600 MiB/s); the classic download is
   0.77-0.83 with ours at 440-545 MiB/s against 370-420.
-- **CRT 1 GB upload: ours is the slower tool on both instances** (1.11 and
+- **CRT 1 GB upload: ours was the slower tool on both instances** (1.11 and
   1.12; 729 vs 810 and 690 vs 774 MiB/s), and a superseded run of the same
   tree an hour earlier on m7i showed the same (1.16). The CRT download is at
-  parity (0.99 and 1.06, both tools at 1.0-1.2 GiB/s). This is the one row
-  that flags, so the lane's E2E exit code is 1 until it is understood; not
-  investigated here.
+  parity (0.99 and 1.06, both tools at 1.0-1.2 GiB/s). This was the one row
+  that flagged; the cause and the fix are in the follow-up below.
 - Peak RSS: ours runs at 60-85% of aws on every classic row (the listing,
   sync, and rm rows sit at 65-75 MiB against 87-134); on the CRT large-file
   rows both tools are dominated by the CRT's buffers (440-520 MiB each,
@@ -141,6 +140,46 @@ Notes:
   `ls_recursive_10k` (+11%, inside its 0.12 s spread), and in-process
   medians within 4%: the interpreter build made no visible difference and
   that is about the run-to-run noise of this lane.
+
+### Follow-up, same day: the CRT 1 GB upload row
+
+The row had two candidate causes, the only differences left between the two
+CRT lanes once the requests themselves were compared (part size, connection
+cap, threshold, and the file handed over by path were identical): the awscrt
+version (ours 0.32.2, pinned by botocore 1.43.44's `crt` extra; aws-cli
+bundles 0.36.2) and the default upload checksum (pip s3transfer stamps
+`CRC32` on a CRT upload that names none; aws-cli's bundled s3transfer stamps
+`CRC64NVME`). Each was tried on its own, on m7i.xlarge against real S3, as a
+local one-commit change on top of `40ce11e` (not pushed):
+
+| change under test | crt cp_upload_large ratio | ours / aws MiB/s |
+|---|---|---|
+| none (the baseline runs above) | 1.11, 1.12, 1.16 | 729 / 810, 690 / 774, 690 / 797 |
+| awscrt 0.36.2 (two runs) | 1.20, 1.19 | 685 / 824, 702 / 835 |
+| default checksum CRC64NVME | 1.05 | 788 / 830 |
+| both | 1.02 | 840 / 853 |
+
+The checksum is the cause and the awscrt version is not. The mechanism is
+the checksum's cost: aws-checksums computes CRC32 in software on x86-64,
+and `awscrt.checksums` on the local host (awscrt 0.32.2, 256 MiB buffer)
+runs at 3.1 GiB/s for CRC32 against 13.2 for CRC32C and 19.8 for CRC64NVME.
+Over 1 GiB that is about 0.3 s of CRC32 against 0.05 s of CRC64NVME, and on
+four vCPUs pushing 800 MiB/s it shows in the wall time. Downloads were never
+affected because both tools validate with the CRT's own configuration.
+
+The fix (`eb5711c`) makes the library's CRT lane default to `CRC64NVME` like
+aws-cli's, where the installed awscrt has the algorithm; the classic lane
+keeps botocore's `CRC32` (design/transfer.md section 10). Confirmation runs
+of that commit, everything else as above:
+
+| instance | crt cp_upload_large | crt cp_download_large | results files |
+|---|---|---|---|
+| m7i.xlarge | 1.06 (732 / 773 MiB/s) | 1.00 (1018 / 1018) | `20260906-123336_inprocess_eb5711c865...`, `20260906-124901_e2e_eb5711c865...` |
+| m7g.xlarge | 0.98 (757 / 741 MiB/s) | 0.99 (1088 / 1077) | `20260906-124502_inprocess_eb5711c865...`, `20260906-130151_e2e_eb5711c865...` |
+
+Both runs exit 0 (no row flags). The first m7g attempt of this commit was
+reclaimed by EC2 mid-run (a real spot interruption, reported as such by the
+launcher, in-process results retrieved, E2E lost) and simply run again.
 
 ## 2026-09-06 - interpreter step: the local lane moves to Python 3.14
 
