@@ -21,7 +21,9 @@ Two comparison axes, by design:
 
 ```
 scripts/compose-up.sh                  # MinIO stack (same as the e2e suite)
-scripts/install-awscli.sh              # pinned aws -> .venv/bin/aws
+source scripts/bench-env.sh            # the lane's interpreter + environment
+uv sync --all-packages --locked        # provisions .venv-bench on first use
+scripts/install-awscli.sh              # pinned aws -> .venv-bench/bin/aws
 source scripts/minio-env.sh            # endpoint + credentials env
 uv run python -m benchmarks run        # both modes, classic engine
 ```
@@ -41,6 +43,23 @@ Exit codes: 0 clean, 1 when a regression flag fired, 2 on harness or
 environment errors. Missing MinIO *variables* fail fast with the setup
 commands; the endpoint itself is not probed, so an unreachable stack surfaces
 only when the first S3 call fails.
+
+## Interpreter
+
+The lane runs on Python 3.14, the interpreter the pinned aws-cli bundles
+(`aws --version` prints it). With both sides on one interpreter the E2E
+differential compares two tools; boto3-s3 on the 3.10 floor against aws on
+3.14 would fold the interpreter generations into every ratio. Development
+stays on the floor (`.python-version`; CONTRIBUTING.md), so the lane has an
+environment of its own: `scripts/bench-env.sh` points uv at `.venv-bench`,
+requests 3.14 over the `.python-version` pin, and restricts the interpreter
+to uv-managed builds so its build source is the one every other lane uses (a
+distro `python3.14` would be a second variable). `BOTO3_S3_BENCH_PYTHON=3.12`
+selects another version for a one-off run in its own `.venv-bench-3.12`. The
+results meta records the exact version that ran, and a report whose baseline
+ran on a different minor says so in its header: the cross-run deltas then
+include the interpreter change, and only the same-run E2E ratio remains a
+like-for-like number.
 
 ## Modes
 

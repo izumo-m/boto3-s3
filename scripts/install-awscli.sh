@@ -3,6 +3,8 @@
 # .venv/bin, for the e2e parity suite (it finds `aws` via PATH). The live `aws`
 # then matches the source the library is ported against - and the version the
 # goldens are captured with - so parity is checked against one reference.
+# The target follows uv's own environment override: with UV_PROJECT_ENVIRONMENT
+# set (scripts/bench-env.sh), `aws` lands next to that environment's interpreter.
 #
 # Idempotent: a matching install is reused (no re-download). The target version
 # defaults to the source checkout's version, or pass one explicitly:
@@ -16,7 +18,8 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-venv="$repo/.venv"
+venv=${UV_PROJECT_ENVIRONMENT:-.venv}
+[[ "$venv" = /* ]] || venv="$repo/$venv"
 target=${1:-$(grep -m1 -Po "__version__ = '\K[0-9][^']*" "$repo/vendor/aws-cli/awscli/__init__.py")}
 
 current=$("$venv/bin/aws" --version 2>/dev/null | grep -m1 -Po 'aws-cli/\K[0-9.]+' || true)

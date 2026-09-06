@@ -15,6 +15,10 @@ Flag rules (threshold defaults to 1.10):
 - Startup probes and in-process scenarios: median now / median baseline over
   the threshold (in-process runs are network-free and deterministic enough
   to compare across runs directly).
+
+A baseline recorded on another interpreter minor is still compared, but the
+header says so: every cross-run delta then includes the interpreter change,
+and only the same-run E2E ratio is a like-for-like number.
 """
 
 from __future__ import annotations
@@ -118,6 +122,11 @@ def _table(header: list[str], rows: list[list[str]]) -> str:
 def _describe(meta: _Record) -> str:
     dirty = "-dirty" if meta.get("git_dirty") else ""
     return f"{meta.get('git_rev')}{dirty} @ {meta.get('timestamp_utc')}"
+
+
+def _minor(version: object) -> str:
+    """``3.14.7`` -> ``3.14``: the patch level is not a comparability boundary."""
+    return ".".join(str(version).split(".")[:2])
 
 
 def render(
@@ -248,6 +257,11 @@ def render(
     lines = [f"== {mode} == {_describe(meta)}"]
     if base_meta is not None:
         lines.append(f"baseline: {_describe(base_meta)}")
+        if _minor(meta.get("python")) != _minor(base_meta.get("python")):
+            lines.append(
+                f"interpreter: Python {meta.get('python')} now, {base_meta.get('python')} "
+                "in the baseline - cross-run deltas include the interpreter change"
+            )
     if mode == "e2e":
         note = (
             "net = median - startup_minimal median (per side)"

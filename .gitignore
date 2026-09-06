@@ -9,6 +9,7 @@ build/
 
 # Virtualenv
 .venv/
+.venv-bench*/
 
 # Tool caches
 .ruff_cache/
