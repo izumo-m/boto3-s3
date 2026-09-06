@@ -22,6 +22,24 @@ from benchmarks.core import BenchmarkError
 from benchmarks.ec2 import Outcome
 
 
+def _has_real_bash() -> bool:
+    """True when `bash` on PATH is a shell, not Windows' WSL launcher stub.
+
+    On a Windows host without a WSL distribution, `bash` resolves to
+    System32's bash.exe, which prints an install hint and exits 1 for any
+    argument, `-n` included; a syntax check there says nothing about the
+    script. The user data only ever runs on the Linux instance, so the check
+    is skipped wherever the shell cannot answer it.
+    """
+    if shutil.which("bash") is None:
+        return False
+    try:
+        proc = subprocess.run(["bash", "-c", "true"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 class _FakeEC2:
     """Just enough of an EC2 client for `_describe_instance_type`."""
 
@@ -178,7 +196,7 @@ class TestUserData:
         assert script.count("upload_results\n") == 2
         assert script.index("trap - ERR") < script.index("--mode inprocess")
 
-    @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash for a syntax check")
+    @pytest.mark.skipif(not _has_real_bash(), reason="needs a working bash for a syntax check")
     def test_rendered_user_data_is_valid_bash(self) -> None:
         script = ec2._inline_urls(_render(), _URLS)
         proc = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
