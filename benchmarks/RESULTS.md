@@ -6,6 +6,142 @@ measuring host; this file preserves the headline numbers with their exact
 revision and environment so they survive across hosts and cleanups. Metric
 definitions (net, ratio, flags) are in [design/benchmark.md](../design/benchmark.md).
 
+## 2026-09-06 - EC2 baseline: real S3 from m7i.xlarge and m7g.xlarge
+
+- Commit: `40ce11e` (`fix(benchmarks): report from the EC2 instance through
+  regional SigV4 URLs`), clean working tree, archived by the launcher. First
+  recorded runs of the EC2 lane (design/benchmark.md "Recording a baseline on
+  EC2"): one x86-64 and one Graviton instance, launched in parallel with
+  `python -m benchmarks ec2 run` and `... --instance-type m7g.xlarge`, each
+  running `--mode inprocess` and then `--mode e2e --engine both` against real
+  S3 with 1 GB single-object transfers (`--large-transfer-mb 1024`, the lane's
+  default). Nothing here compares to the local lane: different hardware,
+  endpoint, and transfer size.
+- Results files: `20260906-104745_inprocess_40ce11e6c4.ec2-m7i.xlarge-ubuntu26.04.jsonl`,
+  `20260906-110316_e2e_40ce11e6c4.ec2-m7i.xlarge-ubuntu26.04.jsonl`,
+  `20260906-104829_inprocess_40ce11e6c4.ec2-m7g.xlarge-ubuntu26.04.jsonl`,
+  `20260906-110525_e2e_40ce11e6c4.ec2-m7g.xlarge-ubuntu26.04.jsonl`.
+
+Environment:
+
+- Instances: m7i.xlarge (4 vCPU, 4th-gen Xeon, 16 GiB) and m7g.xlarge
+  (4 vCPU, Graviton3, 16 GiB), one-time spot, ap-northeast-1; Ubuntu 26.04.1
+  LTS from Canonical's current images (`ami-0b99aec539730ec7b` amd64,
+  `ami-0ce8b8843feb70588` arm64); apt timers, unattended upgrades and snapd
+  stopped before measuring; work tree on a 5 GB tmpfs.
+- Endpoint: S3 in the same region over TLS, a bucket created for the run,
+  instance-role credentials (IMDSv2). Nothing else ran on the instances.
+- Python 3.14.7 (uv-managed, uv 0.12.10) on both architectures; boto3-s3
+  0.11.0 / boto3-s3-cli 0.8.0; boto3/botocore 1.43.44, s3transfer 0.19.2,
+  awscrt 0.32.2.
+- aws side: pinned aws-cli 2.36.40 (the x86_64 and aarch64 Linux builds,
+  bundling Python 3.14.6).
+
+### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net aws)
+
+Startup probes (raw): `--version` ours 0.058 / aws 0.367 (classic),
+0.060 / 0.383 (crt); `startup_minimal` ours 0.301 / aws 0.527 (classic),
+0.308 / 0.549 (crt); `sync_tiny` ours 0.352 / aws 0.594 (classic),
+0.421 / 0.632 (crt).
+
+| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 1.328 | 1.027 | 2.474 | 1.947 | 0.53 |
+| sync_noop_10k | classic | 1.399 | 1.098 | 2.671 | 2.144 | 0.51 |
+| sync_changed_10k | classic | 8.069 | 7.768 | 9.797 | 9.270 | 0.84 |
+| sync_delete_10k | classic | 3.426 | 3.126 | 8.211 | 7.684 | 0.41 |
+| cp_upload_small_1k | classic | 4.093 | 3.792 | 4.705 | 4.178 | 0.91 |
+| cp_download_small_1k | classic | 3.219 | 2.918 | 3.962 | 3.435 | 0.85 |
+| cp_upload_large (1GB) | classic | 2.022 | 1.721 | 2.260 | 1.733 | 0.99 |
+| cp_download_large (1GB) | classic | 2.179 | 1.878 | 2.977 | 2.450 | 0.77 |
+| rm_recursive_2k | classic | 2.544 | 2.243 | 6.570 | 6.043 | 0.37 |
+| sync_changed_10k | crt | 3.580 | 3.272 | 5.796 | 5.247 | 0.62 |
+| cp_upload_small_1k | crt | 1.741 | 1.434 | 2.131 | 1.583 | 0.91 |
+| cp_download_small_1k | crt | 2.041 | 1.733 | 2.753 | 2.204 | 0.79 |
+| cp_upload_large (1GB) | crt | 1.713 | 1.405 | 1.812 | 1.264 | 1.11 |
+| cp_download_large (1GB) | crt | 1.272 | 0.964 | 1.524 | 0.976 | 0.99 |
+
+### E2E, m7g.xlarge (same layout)
+
+Startup probes (raw): `--version` ours 0.076 / aws 0.450 (classic),
+0.076 / 0.451 (crt); `startup_minimal` ours 0.387 / aws 0.637 (classic),
+0.390 / 0.630 (crt); `sync_tiny` ours 0.441 / aws 0.692 (classic),
+0.517 / 0.716 (crt).
+
+| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 1.506 | 1.118 | 2.632 | 1.994 | 0.56 |
+| sync_noop_10k | classic | 1.513 | 1.125 | 3.044 | 2.407 | 0.47 |
+| sync_changed_10k | classic | 8.643 | 8.255 | 9.925 | 9.288 | 0.89 |
+| sync_delete_10k | classic | 3.621 | 3.234 | 8.820 | 8.182 | 0.40 |
+| cp_upload_small_1k | classic | 4.275 | 3.887 | 4.791 | 4.154 | 0.94 |
+| cp_download_small_1k | classic | 3.410 | 3.023 | 4.272 | 3.635 | 0.83 |
+| cp_upload_large (1GB) | classic | 2.093 | 1.706 | 2.348 | 1.711 | 1.00 |
+| cp_download_large (1GB) | classic | 2.721 | 2.333 | 3.436 | 2.798 | 0.83 |
+| rm_recursive_2k | classic | 2.734 | 2.347 | 6.937 | 6.300 | 0.37 |
+| sync_changed_10k | crt | 3.615 | 3.224 | 6.381 | 5.750 | 0.56 |
+| cp_upload_small_1k | crt | 1.792 | 1.401 | 2.210 | 1.580 | 0.89 |
+| cp_download_small_1k | crt | 2.094 | 1.704 | 2.974 | 2.344 | 0.73 |
+| cp_upload_large (1GB) | crt | 1.875 | 1.485 | 1.954 | 1.323 | 1.12 |
+| cp_download_large (1GB) | crt | 1.318 | 0.928 | 1.504 | 0.873 | 1.06 |
+
+### Throughput and peak memory (E2E; MiB/s over net, median peak RSS in MiB)
+
+| scenario | engine | m7i ours | m7i aws | m7g ours | m7g aws | m7i RSS ours / aws | m7g RSS ours / aws |
+|---|---|---|---|---|---|---|---|
+| cp_upload_large (1GB) | classic | 595 | 591 | 600 | 599 | 107 / 131 | 110 / 131 |
+| cp_download_large (1GB) | classic | 545 | 418 | 439 | 366 | 79 / 103 | 91 / 111 |
+| cp_upload_large (1GB) | crt | 729 | 810 | 690 | 774 | 473 / 493 | 483 / 497 |
+| cp_download_large (1GB) | crt | 1062 | 1050 | 1104 | 1173 | 442 / 516 | 482 / 457 |
+| ls_recursive_10k | classic | - | - | - | - | 69 / 89 | 67 / 87 |
+| sync_changed_10k | classic | - | - | - | - | 100 / 124 | 125 / 140 |
+| rm_recursive_2k | classic | - | - | - | - | 70 / 115 | 70 / 134 |
+| startup_minimal | classic | - | - | - | - | 65 / 87 | 65 / 85 |
+
+### In-process (classic; medians in seconds, ± spread)
+
+| scenario | m7i median | spread | m7g median | spread |
+|---|---|---|---|---|
+| inproc_dispatch | 0.001 | ±0.000 | 0.002 | ±0.000 |
+| inproc_ls_100k | 1.998 | ±0.039 | 3.135 | ±0.011 |
+| inproc_sync_noop_20k | 0.488 | ±0.003 | 0.766 | ±0.003 |
+| inproc_sync_changed_20k | 2.717 | ±0.031 | 3.311 | ±0.005 |
+| inproc_rm_recursive_20k | 0.529 | ±0.004 | 0.857 | ±0.003 |
+| inproc_cp_upload_small_2k | 2.227 | ±0.017 | 2.532 | ±0.006 |
+| inproc_cp_upload_large (1GB) | 1.219 | ±0.012 | 1.300 | ±0.002 |
+
+Notes:
+
+- Against real S3 the differential is narrower than against MinIO and has a
+  different shape. Where the work is many small requests, both tools wait
+  on the same round trips: small-file cp lands at 0.85-0.94 (classic) and
+  0.73-0.91 (crt), and a changed-file sync at 0.84-0.89. The listing,
+  compare, and delete paths keep a clear lead (ls 0.53-0.56, no-op sync
+  0.47-0.51, rm 0.37, delete-sync 0.40-0.41). The 1 GB classic upload is at
+  parity (0.99-1.00, both tools near 600 MiB/s); the classic download is
+  0.77-0.83 with ours at 440-545 MiB/s against 370-420.
+- **CRT 1 GB upload: ours is the slower tool on both instances** (1.11 and
+  1.12; 729 vs 810 and 690 vs 774 MiB/s), and a superseded run of the same
+  tree an hour earlier on m7i showed the same (1.16). The CRT download is at
+  parity (0.99 and 1.06, both tools at 1.0-1.2 GiB/s). This is the one row
+  that flags, so the lane's E2E exit code is 1 until it is understood; not
+  investigated here.
+- Peak RSS: ours runs at 60-85% of aws on every classic row (the listing,
+  sync, and rm rows sit at 65-75 MiB against 87-134); on the CRT large-file
+  rows both tools are dominated by the CRT's buffers (440-520 MiB each,
+  ratios 0.86-1.06).
+- Graviton3 against the 4th-gen Xeon: in-process the same code runs 1.05x
+  (small-file upload, 1 GB upload) to 1.6x (ls_100k, sync no-op, rm) slower
+  on m7g; the E2E ratios keep the same shape on both, and wire throughput is
+  the same within noise.
+- Repeatability: the m7i run was preceded by a superseded run of the same
+  tree without the launcher fixes (`9cd2e07`, which had provisioned
+  Ubuntu's own Python 3.14.4 instead of the uv-managed 3.14.7). Its E2E
+  ratios were within 0.05 of the ones above, nets within 6% except
+  `ls_recursive_10k` (+11%, inside its 0.12 s spread), and in-process
+  medians within 4%: the interpreter build made no visible difference and
+  that is about the run-to-run noise of this lane.
+
 ## 2026-09-06 - interpreter step: the local lane moves to Python 3.14
 
 - Commit: `9d352af` (`feat(bench): run the local lane on Python 3.14 in its
