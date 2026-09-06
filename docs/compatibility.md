@@ -44,6 +44,10 @@ botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 `SHA256` and `SHA512` are pure Python and never need it.
 
 Missing awscrt fails only the features that need it, and nothing else changes.
+
+With the CRT transfer engine, an upload that names no algorithm is checksummed
+with `CRC64NVME` (aws-cli's CRT default) when the installed awscrt provides it
+(0.23.8 or later); an older awscrt leaves s3transfer's `CRC32` default in place.
 How it fails differs by feature: `preferred_transfer_client = crt` is refused
 before the run starts (exit code 253), while an explicit CRT-only
 `--checksum-algorithm` fails inside the run as a per-item

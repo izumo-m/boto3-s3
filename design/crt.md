@@ -545,5 +545,16 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   engine's ranged-download full-object combine validation (a feature of
   aws-cli's bundled s3transfer fork that pip s3transfer lacks) is the known
   divergence recorded in transfer.md section 10.
+- **Upload checksum default**: aws-cli's bundled s3transfer stamps `CRC64NVME`
+  on a CRT upload that names no checksum (pip s3transfer: `CRC32`), and the
+  library does the same on its CRT lane when the installed awscrt has the
+  algorithm (`crtsupport.default_upload_checksum_algorithm`; an explicit
+  `checksum_algorithm` or a precomputed full-object value is left alone).
+  Aligned on measurement: aws-checksums computes CRC32 in software on x86-64
+  (about 3 GiB/s against about 20 for CRC64NVME), which on a 4-vCPU instance
+  pushing 800 MiB/s was 10% of a 1 GB upload's wall time against real S3 -
+  the one benchmark row where ours trailed aws (benchmarks/RESULTS.md,
+  2026-09-06). The classic lane keeps botocore's CRC32 default (transfer.md
+  section 10).
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
   actual verification is only on the e2e (MinIO) lane.

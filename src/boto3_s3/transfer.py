@@ -833,6 +833,9 @@ class Transferrer:
         # default-session/fresh fallback there.
         self._session = session
         self._manager: Any = None
+        # Set when the CRT manager is built: the checksum its uploads default
+        # to (crtsupport.default_upload_checksum_algorithm); None on classic.
+        self._upload_checksum: str | None = None
         self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
         self._futures_lock = threading.Lock()
@@ -1163,6 +1166,13 @@ class Transferrer:
         if self._capture is not None:
             # Admit the key: only submitted items' responses are recorded.
             self._capture.expect(item.dest_bucket, item.dest_key)
+        if self._upload_checksum is not None and not any(
+            arg in extra_args for arg in crtsupport.UPLOAD_CHECKSUM_ARGS
+        ):
+            # The CRT lane's default checksum is aws-cli's (CRC64NVME), not pip
+            # s3transfer's CRC32; an explicit algorithm or a precomputed value
+            # wins, as it does there. See crtsupport.default_upload_checksum_algorithm.
+            extra_args["ChecksumAlgorithm"] = self._upload_checksum
         return manager.upload(
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
             bucket=item.dest_bucket,
@@ -1388,7 +1398,9 @@ class Transferrer:
             # builds it here at first submit. The s3transfer.manager module
             # itself is already imported (by boto3 at client build).
             manager = self._create_crt_manager()
-            if manager is None:
+            if manager is not None:
+                self._upload_checksum = crtsupport.default_upload_checksum_algorithm()
+            else:
                 manager = self._create_classic_manager()
             # Transfer-time breadcrumb: names the engine actually built for
             # this run (CRTTransferManager vs the classic TransferManager),

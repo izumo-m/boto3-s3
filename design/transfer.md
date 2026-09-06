@@ -687,11 +687,15 @@ dest-existence check for download. We ported the same three faces:
 
 ## 10. Known divergence (invisible in the result; recorded only)
 
-- When `--checksum-algorithm` is unspecified, the default integrity checksum is
-  `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
-  injects `CRC64NVME`. Both are valid integrity checks and do not affect the
-  transfer result or rc (stated explicitly in the awscli port's adaptation
-  rules). When specified explicitly, the two agree.
+- When `--checksum-algorithm` is unspecified, the classic engine's default
+  integrity checksum is `CRC32` (pip botocore's default); aws v2's bundled
+  botocore defaults to `CRC64NVME`. Both are valid integrity checks and do not
+  affect the transfer result or rc (stated explicitly in the awscli port's
+  adaptation rules); what differs is the checksum type stored on the object
+  (composite CRC32 against full-object CRC64NVME). When specified explicitly,
+  the two agree. The CRT engine is aligned (`CRC64NVME` when the installed
+  awscrt has it, crt.md section 6): there the difference was also a measured
+  10% on a 1 GB upload, because aws-checksums computes CRC32 in software.
 - aws-cli's bundled s3transfer fork validates the full-object checksum of a
   **classic ranged download** (a single-object download at or above the
   multipart threshold, when the client resolves `response_checksum_validation`

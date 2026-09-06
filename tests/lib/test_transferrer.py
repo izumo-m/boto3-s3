@@ -22,7 +22,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 from s3transfer.copies import CopySubmissionTask
 
-from boto3_s3 import transfer
+from boto3_s3 import crtsupport, transfer
 from boto3_s3.exceptions import (
     AccessDeniedError,
     CancelledError,
@@ -201,6 +201,63 @@ class TestUpload:
             TransferType.UPLOAD, [item], [{}], options=TransferOptions(guess_mime_type=False)
         )
         assert "ContentType" not in calls[0].params
+
+    def _upload_on_crt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        default: str | None = "CRC64NVME",
+        options: TransferOptions | None = None,
+    ) -> dict[str, Any]:
+        """Submit one upload through a stand-in CRT manager; its extra_args."""
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        manager = _CrtCapturingManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        monkeypatch.setattr(crtsupport, "default_upload_checksum_algorithm", lambda: default)
+        client, _ = make_recording_client([])
+        with Transferrer(TransferType.UPLOAD, client, options=options) as transferrer:
+            transferrer.submit(item)
+        return manager.uploads[0]["extra_args"]
+
+    def test_crt_lane_defaults_the_upload_checksum_to_aws_clis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's CRT lane stamps CRC64NVME on an upload that names no
+        # checksum (its bundled s3transfer's default); pip s3transfer would
+        # stamp CRC32, which aws-checksums computes in software - a measured
+        # 10% of a 1 GB upload against real S3 (benchmarks/RESULTS.md).
+        extra_args = self._upload_on_crt(tmp_path, monkeypatch)
+        assert extra_args["ChecksumAlgorithm"] == "CRC64NVME"
+
+    def test_an_explicit_checksum_is_kept_on_the_crt_lane(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        extra_args = self._upload_on_crt(
+            tmp_path, monkeypatch, options=TransferOptions(checksum_algorithm="SHA256")
+        )
+        assert extra_args["ChecksumAlgorithm"] == "SHA256"
+
+    def test_an_old_crt_stack_leaves_the_checksum_to_s3transfer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        extra_args = self._upload_on_crt(tmp_path, monkeypatch, default=None)
+        assert "ChecksumAlgorithm" not in extra_args
+
+    def test_classic_lane_keeps_s3transfers_crc32(self, tmp_path: Path) -> None:
+        # pip s3transfer's own default applies there (design/transfer.md
+        # section 10): the CRT-lane default must not leak into classic.
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        calls, _, _, _ = _run(TransferType.UPLOAD, [item], [{}])
+        assert calls[0].params["ChecksumAlgorithm"] == "CRC32"
 
     def test_request_params_flow_into_put_object(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
@@ -1098,6 +1155,25 @@ class _CrtDrainManager:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._drain()
+
+
+class _FakeCrtSuccessFuture(_FakeCrtFuture):
+    def result(self) -> None:
+        return None
+
+
+class _CrtCapturingManager(_CrtDrainManager):
+    """A CRT stand-in that records each upload's kwargs and settles it as a success."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.uploads: list[dict[str, Any]] = []
+
+    def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+        self.uploads.append(kwargs)
+        future = _FakeCrtSuccessFuture(RuntimeError("unused"))
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
 
 
 class TestCrtCancelClassification:
