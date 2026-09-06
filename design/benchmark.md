@@ -75,8 +75,15 @@ exit (on real S3 the name gets a per-run suffix, since that namespace is
 global); the e2e test suite's `boto3-s3-e2e` (contractually empty) is never
 touched. Destinations are purged between invocations so MinIO's tmpfs stays
 bounded. By default the endpoint must be the local MinIO stack;
-`BOTO3_S3_BENCH_ALLOW_REMOTE=1` opts into a non-local endpoint, or into real S3
-with no endpoint override at all (how the EC2 lane runs, below).
+`BOTO3_S3_BENCH_ALLOW_REMOTE=1` (exactly `1`) opts into a non-local endpoint,
+or into real S3 with no endpoint override at all (how the EC2 lane runs,
+below). A real-S3 run takes its credentials from the environment or an
+instance role, never from `AWS_PROFILE`: both CLIs run with `AWS_CONFIG_FILE`
+pointed at the per-engine config, which hides every profile from them, so the
+harness refuses the combination up front instead of failing on the first
+invocation. Each engine's work tree is removed before the next engine seeds
+its own, and a scenario that hits a local I/O error (a full work tree) is
+skipped and recorded like any other failed scenario.
 
 **In-process** runs the CLI inside the runner process against stubbed S3:
 a real boto3 client whose `before-send` event returns canned responses, so
@@ -189,7 +196,9 @@ judge "nothing to transfer".
 The `sync` scenarios that do work stage their input deterministically before
 *every* invocation, warmup included, so each one faces the same job.
 `sync_tiny` is the README's one-file measurement: one new 11 KB file into an
-empty prefix (startup-dominated by design). `sync_changed_10k` seeds the whole
+empty prefix, startup-dominated by design - so the report treats it like the
+startup probes (raw medians, cross-run flag on raw), since a ratio of two
+tens-of-milliseconds nets would be noise. `sync_changed_10k` seeds the whole
 corpus once at the local size and, before each invocation, rewrites the first
 2k keys at a *different* size - a size mismatch forces the upload whatever the
 timestamps say, and only the subset is rewritten, so the reset costs 2k puts,
@@ -294,14 +303,26 @@ chosen Python - and runs both modes against real S3.
   `--python` (or `BOTO3_S3_BENCH_PYTHON`) picks the interpreter, default the
   same 3.14 as the local lane. `--large-transfer-mb` defaults to 1024 here
   (64 locally): on a 12.5 Gbps link a 64 MB object finishes inside the startup
-  constant, and the work tree is a tmpfs the launcher sizes for three payloads,
-  refusing a size the instance's memory cannot hold.
+  constant. The work tree is a tmpfs the launcher sizes for three payloads
+  (upload source, download source, one download destination - the harness
+  frees one engine's tree before the next seeds), checked against the memory
+  EC2 reports for the instance type with 4 GiB kept back; a payload the
+  instance cannot hold is refused before anything launches.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
   US$1 of on-demand instance time plus S3 request charges. The one real risk
   is a leaked instance, so it has three independent deaths: a timed `shutdown`
   armed before any work (`--max-minutes`, default 60), `terminate` as the
-  shutdown behavior, and the launcher's own terminate on the way out. `cleanup`
-  terminates anything a crashed launcher left tagged.
+  shutdown behavior, and the launcher's own terminate on the way out. The
+  instance reports on every exit path: provisioning runs under errexit with an
+  ERR trap that names the failing line, and the EXIT trap uploads the log and
+  a `DONE` marker with the system `aws` (Amazon Linux 2023 ships aws-cli v2),
+  so a failure before the venv exists still leaves a reason behind; a run
+  that brings back no results file exits 2. `cleanup` terminates anything a
+  crashed launcher left tagged and force-deletes any `boto3-s3-bench-*` bucket
+  a budget-killed instance left on real S3 (the persistent
+  `boto3-s3-bench-boot-*` hand-off buckets excepted); the boot bucket keeps
+  each run's log and results under its run prefix and loses the code tarball
+  once the results are back.
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge.jsonl`) and
   the archived commit as their revision; render them with `report`, compare

@@ -128,7 +128,7 @@ def check_environment() -> tuple[str, str]:
     accident.
     """
     endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
-    opted_in = bool(os.environ.get(awsenv.ALLOW_REMOTE_ENV))
+    opted_in = awsenv.remote_opted_in()
     if not endpoint:
         if not opted_in:
             raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
@@ -170,6 +170,16 @@ def _check_remote_credentials() -> None:
         raise BenchmarkError(
             "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
         )
+    if os.environ.get("AWS_PROFILE"):
+        # Both CLIs run with AWS_CONFIG_FILE pointed at the per-engine config,
+        # which hides every [profile ...] section from them; the harness's own
+        # pre-flight would pass and the first CLI invocation would fail.
+        raise BenchmarkError(
+            "real-S3 run cannot use AWS_PROFILE: the harness pins AWS_CONFIG_FILE for both "
+            "CLIs, so a profile is invisible to them. Export the credentials into the "
+            "environment (e.g. `aws configure export-credentials --format env`) or run "
+            "from an instance role."
+        )
     import botocore.session
 
     session: Any = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
@@ -200,12 +210,13 @@ def _bench_bucket() -> str:
     """The bucket the run owns: the fixed name on MinIO, a unique one on S3.
 
     On MinIO the name is private to the stack, so the documented
-    ``boto3-s3-bench`` is fine and matches design/benchmark.md. On real S3 the
-    namespace is global and the harness force-deletes whatever it creates, so a
-    per-run suffix avoids colliding with anyone (including a previous run whose
-    delete had not yet propagated).
+    ``boto3-s3-bench`` is fine and matches design/benchmark.md. Anywhere else -
+    real S3 with or without an explicit endpoint - the namespace is global and
+    the harness force-deletes whatever it creates, so a per-run suffix avoids
+    colliding with anyone (including a previous run whose delete had not yet
+    propagated).
     """
-    if os.environ.get("AWS_ENDPOINT_URL_S3"):
+    if awsenv.targeting_local_minio():
         return BUCKET
     import secrets
 
@@ -849,9 +860,13 @@ def run_scenarios(
     startup probes their net adjustment needs.
 
     Returns ``(results, failures)``: one scenario failing (an unexpected rc,
-    a verification mismatch) is logged and skipped rather than discarding
-    every completed measurement with it - a multi-minute run must not be lost
-    to one flaky lane. Environment/bucket errors still abort the whole run.
+    a verification mismatch, a local I/O error such as a full work tree) is
+    logged and skipped rather than discarding every completed measurement
+    with it - a multi-minute run must not be lost to one flaky lane.
+    Environment/bucket errors still abort the whole run. Each engine's work
+    tree is removed before the next engine seeds its own, so the large
+    payloads of two engines never coexist: the EC2 lane's tmpfs is sized for
+    one engine's.
     """
     from tests.utils.harness import create_bucket_in_region, force_delete_bucket
 
@@ -884,25 +899,28 @@ def run_scenarios(
                 aws_exe=aws_exe,
                 overlay=overlay,
             )
-            for scenario in scenarios:
-                if engine != "classic" and not (
-                    scenario.crt_capable or scenario.name.startswith("startup_")
-                ):
-                    continue
-                try:
-                    results.append(
-                        _run_scenario(
-                            env,
-                            scenario,
-                            samples_override=samples_override,
-                            handicap=handicap,
-                            log=log,
+            try:
+                for scenario in scenarios:
+                    if engine != "classic" and not (
+                        scenario.crt_capable or scenario.name.startswith("startup_")
+                    ):
+                        continue
+                    try:
+                        results.append(
+                            _run_scenario(
+                                env,
+                                scenario,
+                                samples_override=samples_override,
+                                handicap=handicap,
+                                log=log,
+                            )
                         )
-                    )
-                except BenchmarkError as exc:
-                    message = f"[e2e/{engine}] {scenario.name}: {exc}"
-                    log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
-                    failures.append(message)
+                    except (BenchmarkError, OSError) as exc:
+                        message = f"[e2e/{engine}] {scenario.name}: {exc}"
+                        log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
+                        failures.append(message)
+            finally:
+                shutil.rmtree(env.workdir, ignore_errors=True)
     finally:
         force_delete_bucket(client, bucket)
         shutil.rmtree(workroot, ignore_errors=True)

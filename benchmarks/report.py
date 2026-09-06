@@ -24,6 +24,11 @@ E2E runs get a second table: throughput for the scenarios that record a
 payload (payload / net median, so it is the tool's moving rate, not the
 process's) and each side's median peak RSS. Neither is flagged; they are
 recorded axes, and the timing flags stay the regression gate.
+
+`sync_tiny` is reported like the startup probes - raw medians, flagged on
+the cross-run raw ratio - because one 11 KB file leaves a net of a few tens
+of milliseconds, and a ratio of two such numbers is noise. Its purpose is the
+README's one-file wall-clock figure, which *is* the raw median.
 """
 
 from __future__ import annotations
@@ -37,6 +42,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 STARTUP_PROBES = ("startup_version", "startup_minimal")
+
+# Rows compared on raw medians rather than on the startup-adjusted ratio: the
+# probes (they are the startup cost) and the scenarios whose work is too small
+# to separate from it.
+RAW_ROWS = (*STARTUP_PROBES, "sync_tiny")
 
 _MIB = 1024 * 1024
 
@@ -98,7 +108,9 @@ def _net(
         return raw
     startup = _median(index.get(("startup_minimal", engine)), side)
     if startup is None:
-        return raw
+        # The probe did not run (it failed and was skipped): rather than pass
+        # a raw figure off as an adjusted one, leave the cell empty.
+        return None
     net = raw - startup
     return net if net > 0 else None
 
@@ -241,9 +253,9 @@ def render(
         base_record = _comparable(record, base_index.get((scenario, engine)))
         ours_raw = _median(record, Side.OURS)
         spread = _spread(record, Side.OURS)
-        is_startup = scenario in STARTUP_PROBES
+        raw_row = scenario in RAW_ROWS
 
-        if mode != "e2e" or is_startup:
+        if mode != "e2e" or raw_row:
             # Cross-run comparison on raw medians (in-process rows and the
             # startup probes, which ARE the startup cost being tracked).
             base_raw = _median(base_record, Side.OURS)

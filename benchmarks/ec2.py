@@ -112,17 +112,47 @@ def _archive_working_tree() -> bytes:
     return proc.stdout
 
 
-def _resolve_architecture(ec2: Any, instance_type: str) -> str:
-    """Ask EC2 which architecture an instance type runs, so it is never guessed."""
+def _describe_instance_type(ec2: Any, instance_type: str) -> tuple[str, int]:
+    """Ask EC2 what an instance type is: ``(architecture, memory in MiB)``.
+
+    Both answers come from the service so neither is guessed: the
+    architecture picks the AMI, the memory bounds the tmpfs work tree.
+    """
     resp = ec2.describe_instance_types(InstanceTypes=[instance_type])
     infos = resp.get("InstanceTypes", [])
     if not infos:
         raise BenchmarkError(f"unknown instance type {instance_type!r}")
     arches = infos[0]["ProcessorInfo"]["SupportedArchitectures"]
+    memory_mib = int(infos[0]["MemoryInfo"]["SizeInMiB"])
     for arch in ("x86_64", "arm64"):
         if arch in arches:
-            return arch
+            return arch, memory_mib
     raise BenchmarkError(f"{instance_type} reports no supported architecture in {_AL2023_SSM}")
+
+
+# Memory the instance keeps for itself when the tmpfs work tree is sized:
+# the OS, the two CLIs (the CRT lane's native threads included), and the
+# harness's own seeding.
+_INSTANCE_HEADROOM_MIB = 4096
+
+
+def _tmpfs_gb(large_mb: int, memory_mib: int, *, instance_type: str) -> int:
+    """Size the tmpfs work tree, or refuse a payload the instance cannot hold.
+
+    Peak occupancy is about three payloads - the upload source, the download
+    source, and one download destination - plus the small-file corpora; the
+    harness frees each engine's work tree before the next engine seeds its
+    own, so the two engines do not stack. The rest of the instance's memory
+    stays free for everything else.
+    """
+    need_gb = 2 + 3 * large_mb // 1024
+    if need_gb * 1024 + _INSTANCE_HEADROOM_MIB > memory_mib:
+        raise BenchmarkError(
+            f"--large-transfer-mb {large_mb} needs a {need_gb} GB tmpfs work tree, which "
+            f"{instance_type} ({memory_mib} MiB) cannot hold with {_INSTANCE_HEADROOM_MIB} MiB "
+            "left over; pick a smaller size or a larger instance"
+        )
+    return need_gb
 
 
 def _resolve_ami(ssm: Any, arch: str) -> str:
@@ -156,27 +186,22 @@ def _user_data(
     aws_version: str,
     max_minutes: int,
     large_mb: int,
+    tmpfs_gb: int,
     git_rev: str,
     lane: str,
 ) -> str:
     """The cloud-init script the instance runs as root.
 
-    It arms a timed shutdown before doing anything else, unpacks the tree from
-    a presigned URL (so no AWS CLI is needed just to fetch it), provisions the
-    environment, runs both modes against real S3, and uploads the results and
-    log. A trap writes a `DONE` marker and the log on every exit path - success
-    or early failure - so the launcher never waits on a dead instance, then
-    powers off.
+    It arms a timed shutdown before anything else, provisions under errexit
+    with an ERR trap that names the failing line, unpacks the tree from a
+    presigned URL (curl, so no AWS CLI is needed for that), runs both modes
+    against real S3, and uploads the results. An EXIT trap uploads the log and
+    a `DONE` marker carrying the outcome on every path - success, a failed
+    provisioning step, a failed results upload - using the system `aws`
+    (Amazon Linux 2023 ships aws-cli v2) so it does not depend on the venv
+    having been built; then it powers off. The launcher therefore never waits
+    on a dead instance and always has a reason to show.
     """
-    # The work tree lives on tmpfs so EBS throughput is off the measured path.
-    # Peak occupancy is about three payloads (upload source, download source,
-    # one download destination) plus the small-file corpora.
-    tmpfs_gb = 2 + 3 * large_mb // 1024
-    if tmpfs_gb > 12:
-        raise BenchmarkError(
-            f"--large-transfer-mb {large_mb} needs a {tmpfs_gb} GB tmpfs work tree; "
-            "pick a smaller size or a larger instance"
-        )
     # `{{` / `}}` are literal braces for the shell; the rest is str.format.
     return _USER_DATA_TEMPLATE.format(
         max_minutes=max_minutes,
@@ -204,10 +229,19 @@ export AWS_REGION={region}
 export AWS_DEFAULT_REGION={region}
 RC=unknown
 
+# Every exit path lands here: upload the log and a DONE marker carrying RC,
+# then power off. The system aws needs no venv, so a failure before `uv sync`
+# still reports; the venv's python is the fallback.
 finish() {{
+  trap - ERR
+  set +e
   cd /opt/bench 2>/dev/null || true
-  if [ -x .venv/bin/python ]; then
-    ./.venv/bin/python - <<PYEOF || true
+  if [ -x /usr/bin/aws ]; then
+    /usr/bin/aws s3 cp /var/log/bench-userdata.log "s3://$BOOT/$RUN/bench-userdata.log" \
+      --region {region}
+    printf 'rc=%s' "$RC" | /usr/bin/aws s3 cp - "s3://$BOOT/$RUN/DONE" --region {region}
+  elif [ -x .venv/bin/python ]; then
+    ./.venv/bin/python - <<PYEOF
 import boto3
 s3 = boto3.client("s3", region_name="{region}")
 try:
@@ -220,6 +254,10 @@ PYEOF
   shutdown -h now
 }}
 trap finish EXIT
+# A failing provisioning step names its line in RC and exits (errexit), so
+# the DONE marker says where it died.
+trap 'RC="failed-at-line-$LINENO"' ERR
+set -e
 
 # tar/gzip for the tree, unzip for the aws-cli release zip install-awscli.sh unpacks.
 dnf -y install tar gzip unzip
@@ -227,12 +265,13 @@ curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin s
 export PATH=/usr/local/bin:$PATH
 export HOME=/root
 
+# The work tree lives on tmpfs so EBS throughput is off the measured path.
 mkdir -p /mnt/bench && mount -t tmpfs -o size={tmpfs_gb}g tmpfs /mnt/bench
 export TMPDIR=/mnt/bench
 mkdir -p /opt/bench && cd /opt/bench
-# The launcher put a presigned GET here; fetch with curl so we need no AWS CLI
-# before the venv exists.
-curl -fsSL "$(cat /run/bench-tarball-url 2>/dev/null || echo PLACEHOLDER)" -o repo.tar.gz
+# The launcher inlines a presigned GET for the code tarball; curl needs no
+# credentials, so this works before the venv exists.
+curl -fsSL "TARBALL_URL_PLACEHOLDER" -o repo.tar.gz
 tar xzf repo.tar.gz
 
 export UV_PYTHON={python}
@@ -250,13 +289,18 @@ uv run python -m benchmarks run --engine both --mode all --large-transfer-mb {la
 RC=$?
 set -e
 
-./.venv/bin/python - <<PYEOF
+# Results go up before the EXIT trap fires; a failed upload is spelled into
+# RC instead of ending the script silently.
+if ! ./.venv/bin/python - <<PYEOF
 import boto3, glob, os
 s3 = boto3.client("s3", region_name="{region}")
 for f in sorted(glob.glob("benchmarks/results/*.jsonl")):
     s3.upload_file(f, "$BOOT", "$RUN/results/" + os.path.basename(f))
     print("uploaded", f)
 PYEOF
+then
+  RC="results-upload-failed:$RC"
+fi
 """
 
 
@@ -267,9 +311,13 @@ def _write_tarball_url_step(user_data: str, presigned_url: str) -> str:
     substituting a single placeholder avoids any str.format collision with the
     query string's own braces or percent-encoding.
     """
-    marker = "$(cat /run/bench-tarball-url 2>/dev/null || echo PLACEHOLDER)"
-    replacement = "'" + presigned_url + "'"
-    return user_data.replace(marker, replacement)
+    # The placeholder sits inside the template's double quotes, which is all
+    # the quoting a presigned URL needs; the characters that would break out
+    # of them never occur in one, and a URL that carried them is refused
+    # rather than spliced in.
+    if any(ch in presigned_url for ch in '"$`\\'):
+        raise BenchmarkError(f"presigned URL contains a shell-active character: {presigned_url}")
+    return user_data.replace("TARBALL_URL_PLACEHOLDER", presigned_url)
 
 
 def _estimated_note(instance_type: str, region: str) -> str:
@@ -293,7 +341,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     account = sts.get_caller_identity()["Account"]
     instance_type = args.instance_type
-    arch = _resolve_architecture(ec2, instance_type)
+    arch, memory_mib = _describe_instance_type(ec2, instance_type)
+    tmpfs_gb = _tmpfs_gb(args.large_transfer_mb, memory_mib, instance_type=instance_type)
     ami = _resolve_ami(ssm, arch)
     aws_version = _pinned_aws_version()
 
@@ -301,8 +350,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"account {account}, region {region}")
     print(
-        f"instance type {instance_type} ({arch}), AMI {ami}, Python {args.python}, "
-        f"large transfer {args.large_transfer_mb} MB"
+        f"instance type {instance_type} ({arch}, {memory_mib} MiB), AMI {ami}, "
+        f"Python {args.python}, large transfer {args.large_transfer_mb} MB on a "
+        f"{tmpfs_gb} GB tmpfs"
     )
     print(f"pinned aws-cli {aws_version}")
     print(_estimated_note(instance_type, region))
@@ -330,6 +380,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         aws_version=aws_version,
         max_minutes=args.max_minutes,
         large_mb=args.large_transfer_mb,
+        tmpfs_gb=tmpfs_gb,
         git_rev=git_rev,
         lane=f"ec2-{instance_type}",
     )
@@ -346,7 +397,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         ok = _await_completion(s3, ec2, boot_bucket, run_id, instance_id, args.max_minutes)
-        _download_results(s3, boot_bucket, run_id)
+        downloaded = _download_results(s3, boot_bucket, run_id)
+        # The tarball is the one sizeable object; the log and results stay
+        # under the run prefix (kilobytes) as the run's record on the bucket.
+        s3.delete_object(Bucket=boot_bucket, Key=tarball_key)
+        if downloaded == 0:
+            print("no results file came back")
+            ok = False
+        elif downloaded < 2:
+            print(f"only {downloaded} results file came back (expected one per mode)")
         if not ok:
             _dump_diagnostics(s3, ec2, boot_bucket, run_id, instance_id)
     finally:
@@ -356,10 +415,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             ec2.terminate_instances(InstanceIds=[instance_id])
             print(f"terminated {instance_id}")
 
-    print(
-        "\nresults downloaded to benchmarks/results/; render with "
-        "`uv run python -m benchmarks report`"
-    )
+    if ok:
+        print(
+            "\nresults downloaded to benchmarks/results/; render with "
+            "`uv run python -m benchmarks report`"
+        )
     return 0 if ok else 2
 
 
@@ -439,15 +499,19 @@ def _instance_state(ec2: Any, instance_id: str) -> str:
     return "unknown"
 
 
-def _download_results(s3: Any, boot_bucket: str, run_id: str) -> None:
+def _download_results(s3: Any, boot_bucket: str, run_id: str) -> int:
+    """Pull the run's results files into benchmarks/results/; return how many."""
     dest = REPO_ROOT / "benchmarks" / "results"
     dest.mkdir(parents=True, exist_ok=True)
     prefix = f"{run_id}/results/"
     resp = s3.list_objects_v2(Bucket=boot_bucket, Prefix=prefix)
+    count = 0
     for obj in resp.get("Contents", []):
         name = obj["Key"].rsplit("/", 1)[-1]
         s3.download_file(boot_bucket, obj["Key"], str(dest / name))
         print(f"downloaded {name}")
+        count += 1
+    return count
 
 
 def _dump_diagnostics(s3: Any, ec2: Any, boot_bucket: str, run_id: str, instance_id: str) -> None:
@@ -559,11 +623,38 @@ def instance_policy_document() -> dict[str, Any]:
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
-    """Terminate any still-running instance a crashed run left tagged."""
+    """Remove what a crashed or budget-killed run leaves behind.
+
+    Two kinds of leftover exist. A still-running tagged instance, when the
+    launcher died before terminating it. And a per-run benchmark bucket on
+    real S3, when the instance was cut off mid-run (budget shutdown, a
+    launcher timeout) so the harness's own delete never ran; those names are
+    random, so the whole `boto3-s3-bench-*` family in the account is swept,
+    the persistent `boto3-s3-bench-boot-*` hand-off buckets excepted.
+    """
+    from botocore.exceptions import ClientError
+
+    from tests.utils.harness import force_delete_bucket
+
     awsenv.refuse_minio_env()
     region = awsenv.resolve_region(args.region)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION")
+    s3 = _client("s3", region, args.profile)
+    leftovers = [
+        b["Name"]
+        for b in s3.list_buckets().get("Buckets", [])
+        if b["Name"].startswith("boto3-s3-bench-")
+        and not b["Name"].startswith("boto3-s3-bench-boot-")
+    ]
+    for name in leftovers:
+        try:
+            force_delete_bucket(s3, name)
+            print(f"deleted leftover bucket {name}")
+        except ClientError as exc:
+            print(f"could not delete {name} (another region?): {exc}")
+    if not leftovers:
+        print("no leftover benchmark buckets")
     ec2 = _client("ec2", region, args.profile)
     resp = ec2.describe_instances(
         Filters=[

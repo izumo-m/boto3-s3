@@ -19,11 +19,15 @@ from benchmarks.core import BenchmarkError
 # (the e2e suite's endpoint), not real S3.
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
-# Set to 1 to accept a non-local endpoint, or to run against real S3 with no
-# endpoint override at all. Off by default so a bare run (a shell that never
-# sourced scripts/minio-env.sh) fails fast instead of creating a bucket and
-# moving hundreds of MB on real S3.
+# Set to exactly "1" to accept a non-local endpoint, or to run against real
+# S3 with no endpoint override at all. Off by default, and "0"/"false" stay
+# off, so a bare run (a shell that never sourced scripts/minio-env.sh) fails
+# fast instead of creating a bucket and moving hundreds of MB on real S3.
 ALLOW_REMOTE_ENV = "BOTO3_S3_BENCH_ALLOW_REMOTE"
+
+
+def remote_opted_in() -> bool:
+    return os.environ.get(ALLOW_REMOTE_ENV) == "1"
 
 
 def endpoint_host() -> str | None:

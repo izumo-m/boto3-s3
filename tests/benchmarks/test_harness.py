@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks import e2e, inprocess, report, results
-from benchmarks.core import DEFAULT_LARGE_MB, ScenarioResult
+from benchmarks import awsenv, e2e, inprocess, report, results
+from benchmarks.core import DEFAULT_LARGE_MB, BenchmarkError, ScenarioResult
 
 _MIB = 1024 * 1024
 _POSIX = hasattr(os, "fork") and hasattr(os, "killpg")
@@ -224,3 +224,72 @@ class TestLanes:
         text, _flagged = report.render(current, baseline)
         assert "[ec2-m7i.xlarge]" in text.splitlines()[0]
         assert "lane: ec2-m7i.xlarge now, local in the baseline" in text
+
+
+class TestRemoteGuards:
+    def test_opt_in_is_exactly_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for value in ("0", "false", "no", ""):
+            monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, value)
+            assert awsenv.remote_opted_in() is False
+        monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, "1")
+        assert awsenv.remote_opted_in() is True
+
+    def test_bucket_is_fixed_only_on_minio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
+        assert e2e._bench_bucket() == e2e.BUCKET
+        # An explicit real-S3 endpoint is still the global namespace.
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://s3.eu-west-1.amazonaws.com")
+        assert e2e._bench_bucket().startswith(e2e.BUCKET + "-")
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3")
+        assert e2e._bench_bucket().startswith(e2e.BUCKET + "-")
+
+    def test_real_s3_refuses_a_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
+        monkeypatch.setenv("AWS_PROFILE", "someone")
+        with pytest.raises(BenchmarkError, match="AWS_PROFILE"):
+            e2e._check_remote_credentials()
+
+
+class TestRawRows:
+    def test_sync_tiny_is_reported_on_raw_medians(self) -> None:
+        meta = {"mode": "e2e", "git_rev": "abc", "timestamp_utc": "t", "python": "3.14.7"}
+        records: list[dict[str, object]] = [
+            {
+                "scenario": "startup_minimal",
+                "engine": "classic",
+                "dimensions": {},
+                "samples": {"boto3-s3": [0.2], "aws": [0.4]},
+            },
+            {
+                "scenario": "sync_tiny",
+                "engine": "classic",
+                "dimensions": {},
+                "samples": {"boto3-s3": [0.3], "aws": [0.5]},
+            },
+        ]
+        text, flagged = report.render((meta, records), None)
+        row = next(line for line in text.splitlines() if line.startswith("sync_tiny"))
+        # net and ratio cells are empty, like the probes; no flag from a
+        # 0.1 s / 0.1 s "ratio" that would otherwise be noise.
+        assert row.split()[2:] == ["0.300s", "-", "0.000s", "0.500s", "-", "-", "-", "-"]
+        assert flagged is False
+
+    def test_missing_startup_probe_blanks_the_adjusted_cells(self) -> None:
+        meta = {"mode": "e2e", "git_rev": "abc", "timestamp_utc": "t", "python": "3.14.7"}
+        records: list[dict[str, object]] = [
+            {
+                "scenario": "cp_upload_large",
+                "engine": "classic",
+                "dimensions": {},
+                "samples": {"boto3-s3": [1.0], "aws": [2.0]},
+                "payload_bytes": 64 * _MIB,
+            }
+        ]
+        text, _flagged = report.render((meta, records), None)
+        row = next(line for line in text.splitlines() if line.startswith("cp_upload_large"))
+        # No startup_minimal in this run: net, ratio and throughput are "-",
+        # never the raw figure passed off as adjusted.
+        assert row.split()[3] == "-"
+        assert row.split()[7] == "-"
+        resource_row = [line for line in text.splitlines() if line.startswith("cp_upload_large")][1]
+        assert resource_row.split()[2:4] == ["-", "-"]

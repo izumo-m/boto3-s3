@@ -10,6 +10,9 @@ user-data template renders with no leftover placeholder.
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
+import subprocess
 from typing import Any
 
 import pytest
@@ -19,27 +22,46 @@ from benchmarks.core import BenchmarkError
 
 
 class _FakeEC2:
-    """Just enough of an EC2 client for `_resolve_architecture`."""
+    """Just enough of an EC2 client for `_describe_instance_type`."""
 
-    def __init__(self, arches: list[str]) -> None:
+    def __init__(self, arches: list[str], memory_mib: int = 16384) -> None:
         self._arches = arches
+        self._memory = memory_mib
 
     def describe_instance_types(self, InstanceTypes: list[str]) -> dict[str, Any]:  # noqa: N803
         if not self._arches:
             return {"InstanceTypes": []}
-        return {"InstanceTypes": [{"ProcessorInfo": {"SupportedArchitectures": self._arches}}]}
+        return {
+            "InstanceTypes": [
+                {
+                    "ProcessorInfo": {"SupportedArchitectures": self._arches},
+                    "MemoryInfo": {"SizeInMiB": self._memory},
+                }
+            ]
+        }
 
 
-class TestArchitecture:
+class TestInstanceType:
     def test_intel_type_resolves_to_x86_64(self) -> None:
-        assert ec2._resolve_architecture(_FakeEC2(["x86_64"]), "m7i.xlarge") == "x86_64"
+        arch, memory = ec2._describe_instance_type(_FakeEC2(["x86_64"]), "m7i.xlarge")
+        assert (arch, memory) == ("x86_64", 16384)
 
     def test_graviton_type_resolves_to_arm64(self) -> None:
-        assert ec2._resolve_architecture(_FakeEC2(["arm64"]), "m7g.xlarge") == "arm64"
+        arch, _memory = ec2._describe_instance_type(_FakeEC2(["arm64"]), "m7g.xlarge")
+        assert arch == "arm64"
 
     def test_unknown_type_is_an_error(self) -> None:
         with pytest.raises(BenchmarkError, match="unknown instance type"):
-            ec2._resolve_architecture(_FakeEC2([]), "nonexistent.type")
+            ec2._describe_instance_type(_FakeEC2([]), "nonexistent.type")
+
+    def test_tmpfs_is_sized_for_three_payloads_within_the_instance_memory(self) -> None:
+        # 1 GB payloads -> 5 GB; fits a 16 GiB xlarge with headroom to spare.
+        assert ec2._tmpfs_gb(1024, 16384, instance_type="m7i.xlarge") == 5
+        # The local default barely needs anything.
+        assert ec2._tmpfs_gb(64, 8192, instance_type="m7i.large") == 2
+        # 1 GB payloads on an 8 GiB instance would leave under 4 GiB: refused.
+        with pytest.raises(BenchmarkError, match=r"m7i\.large"):
+            ec2._tmpfs_gb(1024, 8192, instance_type="m7i.large")
 
     def test_both_architectures_map_to_a_public_al2023_parameter(self) -> None:
         for arch in ("x86_64", "arm64"):
@@ -71,39 +93,69 @@ class TestUserData:
             aws_version="2.36.40",
             max_minutes=45,
             large_mb=1024,
+            tmpfs_gb=5,
             git_rev="0123456789abcdef",
             lane="ec2-m7i.xlarge",
         )
-        script = ec2._write_tarball_url_step(script, "https://example.test/x?sig=a&exp=b")
+        url = "https://example.test/x?sig=a&exp=b"
+        script = ec2._write_tarball_url_step(script, url)
         assert "PLACEHOLDER" not in script
         # The safety-net shutdown is armed before the work.
         assert script.index("shutdown -h +45") < script.index("uv sync")
         assert "BOTO3_S3_BENCH_ALLOW_REMOTE=1" in script
         assert "scripts/install-awscli.sh 2.36.40" in script
-        assert "example.test/x?sig=a&exp=b" in script
-        # The work tree is a tmpfs sized for three payloads, and the size
-        # knob reaches the run line.
+        # The curl line hands the URL over as one word, exactly - no quoting
+        # left inside it (a `"'url'"` would make curl reject the URL).
+        (curl_line,) = [line for line in script.splitlines() if line.startswith("curl -fsSL")]
+        assert shlex.split(curl_line) == ["curl", "-fsSL", url, "-o", "repo.tar.gz"]
+        # The work tree is a tmpfs of the size the launcher computed, and the
+        # size knob reaches the run line.
         assert "mount -t tmpfs -o size=5g" in script
         assert "--large-transfer-mb 1024" in script
         # install-awscli.sh unpacks a zip; the provenance the archive lacks
         # travels as environment.
-        assert "unzip" in script.split("uv sync")[0]
+        assert "unzip" in script.split("uv sync --all-packages --locked")[0]
         assert "export BOTO3_S3_BENCH_GIT_REV=0123456789abcdef" in script
         assert "export BOTO3_S3_BENCH_LANE=ec2-m7i.xlarge" in script
+        # Reporting does not depend on the venv: the EXIT trap uses the system
+        # aws first, and provisioning runs under errexit with an ERR trap.
+        finish = script.split("finish() {", 1)[1].split("}", 1)[0]
+        assert "/usr/bin/aws s3 cp" in finish
+        assert "trap 'RC=\"failed-at-line-$LINENO\"' ERR" in script
 
-    def test_an_oversized_transfer_is_refused_before_launch(self) -> None:
-        with pytest.raises(BenchmarkError, match="tmpfs"):
-            ec2._user_data(
-                boot_bucket="boot",
-                run_id="r",
-                region="us-east-1",
-                python="3.14",
-                aws_version="2.36.40",
-                max_minutes=60,
-                large_mb=8192,
-                git_rev="0",
-                lane="ec2-x",
-            )
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash for a syntax check")
+    def test_rendered_user_data_is_valid_bash(self) -> None:
+        script = ec2._user_data(
+            boot_bucket="boot",
+            run_id="r",
+            region="us-east-1",
+            python="3.14",
+            aws_version="2.36.40",
+            max_minutes=60,
+            large_mb=1024,
+            tmpfs_gb=5,
+            git_rev="0",
+            lane="ec2-x",
+        )
+        script = ec2._write_tarball_url_step(script, "https://example.test/x?a=b&c=d")
+        proc = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        assert proc.returncode == 0, proc.stderr
+
+    def test_a_shell_active_url_is_refused(self) -> None:
+        script = ec2._user_data(
+            boot_bucket="boot",
+            run_id="r",
+            region="us-east-1",
+            python="3.14",
+            aws_version="2.36.40",
+            max_minutes=60,
+            large_mb=64,
+            tmpfs_gb=2,
+            git_rev="0",
+            lane="ec2-x",
+        )
+        with pytest.raises(BenchmarkError, match="shell-active"):
+            ec2._write_tarball_url_step(script, 'https://example.test/x?a="b"')
 
     def test_a_signed_url_with_braces_survives_substitution(self) -> None:
         # The URL is inlined after str.format, so query strings cannot collide
@@ -116,6 +168,7 @@ class TestUserData:
             aws_version="2.36.40",
             max_minutes=60,
             large_mb=64,
+            tmpfs_gb=2,
             git_rev="0",
             lane="ec2-x",
         )
