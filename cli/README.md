@@ -60,19 +60,21 @@ self-contained distribution that bundles its own runtime and dependencies
 (installed once — it does not unpack itself on every invocation).
 
 For a concrete comparison, the following measurement synced a directory
-containing one 11 KiB file to an empty prefix in the same local MinIO instance.
-Each tool ran as a fresh process 20 times, with a different destination for
-every run and alternating execution order, on one x86-64 WSL2/Linux host with a
-warm filesystem cache:
+containing one 11 KiB file to an empty prefix of an S3 bucket in the same
+region, from an m7i.xlarge EC2 instance (Ubuntu 26.04, Python 3.14). Each tool
+ran as a fresh process 5 times, with a different destination for every run and
+alternating execution order:
 
-| Operation | `boto3-s3-cli` 0.6.0 | aws-cli 2.36.1 |
+| Operation | `boto3-s3-cli` 0.8.0 | aws-cli 2.36.40 |
 | --- | ---: | ---: |
-| One-file `sync` (median) | 204 ms | 452 ms |
+| One-file `sync` (median) | 352 ms | 594 ms |
 
-The measurement includes SDK setup, remote listing, and the actual upload.
+The measurement includes SDK setup, remote listing, and the actual upload; the
+five runs spanned 339-363 ms and 582-600 ms respectively.
 
-Installed package sizes on the same host were measured with `du` using Python
-3.10 and the same pinned dependency versions, with bytecode caches included:
+Installed package sizes were measured on an x86-64 Linux host with `du` using
+Python 3.10 and the same pinned dependency versions, with bytecode caches
+included:
 
 | Installed packages | Size |
 | --- | ---: |
