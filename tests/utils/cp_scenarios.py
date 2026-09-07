@@ -389,6 +389,27 @@ SCENARIOS: tuple[CpScenario, ...] = (
         ),
     ),
     CpScenario(
+        # A filter on that same doomed upload matches aws's local_format form
+        # of the source - `<abspath>/`, trailing separator - not the bare
+        # path: `--exclude src` does not exclude it, so the run still reaches
+        # the directory and fails at rc 1 like the unfiltered scenario.
+        name="cp_upload_dir_no_recursive_exclude",
+        argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src"),
+        local_src=_SRC_SINGLE,
+        expected_stderr_tokens_ours=("upload failed", "Is a directory"),
+        expected_stderr_tokens_aws=(
+            "upload failed",
+            "Is a directory" if os.name != "nt" else "[Errno 2]",
+        ),
+    ),
+    CpScenario(
+        # The complement: the separator-terminated pattern is what matches a
+        # directory source, so nothing is attempted and the run ends at rc 0.
+        name="cp_upload_dir_no_recursive_exclude_slash",
+        argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src/"),
+        local_src=_SRC_SINGLE,
+    ),
+    CpScenario(
         name="cp_upload_dest_bucket_missing",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}-missing-cp/key.txt"),
         local_src=_SRC_SINGLE,

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty or whitespace-only CA bundle value (`--ca-bundle`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, a blank `ca_bundle` profile key) now fails the run like `aws` instead of silently turning TLS verification off, on every supported `boto3`.
 - A single-object `cp` / `mv` whose `HeadObject` response lacks `ContentLength` or `LastModified` now ends with `fatal error:` like `aws` instead of transferring.
 - `rm`, `sync --delete` and `rb --force` now report a delete request that fails outside botocore's own errors as a `delete failed:` line like `aws`, instead of a `fatal error:`.
+- `--exclude` / `--include` on a non-recursive `cp` / `mv` whose local source is a directory now match the source the way `aws` does (its trailing-separator form), so `--exclude dir` no longer skips what `aws` attempts, and `--exclude dir/` does.
 
 ## [0.8.0] - 2026-08-13
 

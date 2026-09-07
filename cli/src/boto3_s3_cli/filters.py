@@ -13,15 +13,18 @@ aws-cli calls the ``rootdir``: ``bucket/key`` for an s3 side, the absolutized
 path for a local side, cut back to the parent for a single-file operation
 (``_storage_base``). Every pattern is joined onto BOTH bases with
 ``os.path.join``, and an entry is decided by fnmatching its full path against
-the joined patterns in appearance order, last match winning. Two aws
-behaviors follow from the joining and are reproduced deliberately (both
+the joined patterns in appearance order, last match winning. Three aws
+behaviors follow from the joining and are reproduced deliberately (all
 verified against aws 2.36.40): the base is glob-interpreted like the rest of
 the joined pattern (a ``[1]`` in the operation path is a character class
-there, which can defeat ``--exclude '*'``), and both sides' joined patterns
+there, which can defeat ``--exclude '*'``), both sides' joined patterns
 apply to every entry whichever side produced it (nested s3->s3 paths let one
-side's pattern bite the other side's entries). Matching is host-aware exactly
-like aws-cli: case-insensitive on Windows (its ``fnmatch`` normcases both
-sides), byte-exact elsewhere.
+side's pattern bite the other side's entries), and the full path of a
+single-object command's local source is aws's ``local_format`` form - a
+trailing separator when it is a directory, so ``cp d s3://b/k --exclude d``
+does not exclude it and ``--exclude 'd/'`` does. Matching is host-aware
+exactly like aws-cli: case-insensitive on Windows (its ``fnmatch`` normcases
+both sides), byte-exact elsewhere.
 
 As an optimization, ``compile_filter`` delegates to the ``boto3_s3.globsieve``
 engine - a relative pattern matched against each entry's ``compare_key`` -
@@ -230,11 +233,23 @@ class _JoinedFilter:
     ``storage`` falls back to its bare ``key``.
     """
 
-    def __init__(self, patterns: Sequence[GlobPattern], bases: Sequence[str], fold: bool) -> None:
+    def __init__(
+        self,
+        patterns: Sequence[GlobPattern],
+        bases: Sequence[str],
+        fold: bool,
+        *,
+        local_single: str | None = None,
+    ) -> None:
         from boto3_s3 import S3Storage
 
         self._s3_storage: type[S3Storage] = S3Storage
         self._fold = fold
+        # The path aws matches for a single-object command's local source
+        # (`compile_filter`): its `local_format` form, which carries a trailing
+        # separator when the source is a directory, where the entry's key
+        # (an absolute path) never does.
+        self._local_single = local_single
         items: list[tuple[PatternKind, re.Pattern[str]]] = []
         for p in patterns:
             branches: list[str] = []
@@ -252,6 +267,9 @@ class _JoinedFilter:
             path = f"{storage.bucket}/{info.key}"
         else:
             path = info.key
+            single = self._local_single
+            if single is not None and path.rstrip("/") == single.rstrip("/"):
+                path = single
         if self._fold:
             path = path.lower()
         included = True
@@ -277,7 +295,7 @@ def compile_filter(
     """
     if not patterns:
         return None
-    from boto3_s3 import S3Storage  # deferred like the storages the caller just built
+    from boto3_s3 import LocalStorage, S3Storage  # deferred like the storages just built
 
     src_base = _storage_base(src, dir_op)
     dest_base = _storage_base(dest, dir_op)
@@ -289,7 +307,19 @@ def compile_filter(
         both_s3=isinstance(src, S3Storage) and isinstance(dest, S3Storage),
         dir_op=dir_op,
     ):
-        return _JoinedFilter(patterns, (src_base, dest_base), fold)
+        local_single = None
+        if not dir_op and isinstance(src, LocalStorage):
+            # aws threads a single-object command's local source through in
+            # its `local_format` form and fnmatches the joined patterns against
+            # that: `<abspath>` for a file, `<abspath>` + separator for an
+            # existing directory (or one written with a trailing separator),
+            # so `cp d s3://b/k --exclude d` still transfers - and fails on
+            # the directory - while `--exclude 'd/'` excludes it (measured on
+            # aws 2.36.40, rc 1 against rc 0). The entry's key is the bare
+            # absolute path either way, so the matcher gets aws's form here;
+            # `LocalStorage.format` is `local_format`'s port.
+            local_single = src.format(dir_op=False)[0].replace(os.sep, "/")
+        return _JoinedFilter(patterns, (src_base, dest_base), fold, local_single=local_single)
     # On Windows aws-cli's fnmatch normcases both the pattern and the key, so the
     # filter is case-insensitive. Lower-case the patterns at compile time and the
     # keys at match time (via _CaseFoldMatcher) to reproduce that; on POSIX

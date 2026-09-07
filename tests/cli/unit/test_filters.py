@@ -13,12 +13,16 @@ derived through the host ``os.path`` so the suite passes on both OS families.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import pytest
 
 from boto3_s3 import FileInfo, GlobPattern, LocalStorage, S3Storage
 from boto3_s3.types import FileFilter
 from boto3_s3_cli import filters
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PATTERNS = [GlobPattern.exclude("*"), GlobPattern.include("*.TXT")]
 
@@ -151,6 +155,37 @@ class TestJoinedParity:
         )
         assert keep is not None
         assert keep(FileInfo(key="a//x", compare_key="x", storage=target)) is False
+
+    @pytest.mark.parametrize(
+        ("source", "pattern", "kept"),
+        [
+            ("d", "d", True),
+            ("d", "d/", False),
+            ("d/", "d", True),
+            ("d/", "d/", False),
+            ("d/f", "f", False),
+            ("d/f", "f/", True),
+        ],
+    )
+    def test_single_local_source_matches_its_local_format_form(
+        self, tmp_path: Path, source: str, pattern: str, kept: bool
+    ) -> None:
+        # aws fnmatches the joined pattern against the source in its
+        # `local_format` form: `<abspath>/` for a directory (written with or
+        # without the separator), `<abspath>` for a file. Measured on aws
+        # 2.36.40: `cp d s3://b/k --exclude d` still previews and, live, fails
+        # on the directory at rc 1, while `--exclude 'd/'` excludes it (rc 0);
+        # boto3-s3 used to match the bare absolute path and flipped both.
+        (tmp_path / "d").mkdir()
+        (tmp_path / "d" / "f").write_bytes(b"x")
+        src = LocalStorage(str(tmp_path / source))
+        keep = filters.compile_filter(
+            [GlobPattern.exclude(pattern)], src=src, dest=S3Storage("s3://b/k"), dir_op=False
+        )
+        assert keep is not None
+        info = src.get_fileinfo()
+        assert info is not None
+        assert keep(info) is kept
 
     def test_single_object_plain_key_is_not_excluded(self) -> None:
         # The complement (same aws probe): rm s3://b/a/x --exclude '?x' still
