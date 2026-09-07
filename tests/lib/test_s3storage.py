@@ -760,6 +760,27 @@ class TestMalformedListingEntries:
         assert keys == ["prefix/good/"]
 
     @pytest.mark.parametrize(
+        ("head", "missing"),
+        [
+            ({"ContentLength": 7, "ETag": '"abc"'}, "LastModified"),
+            ({"LastModified": MTIME, "ETag": '"abc"'}, "ContentLength"),
+            ({"ETag": '"abc"'}, "ContentLength"),
+        ],
+    )
+    def test_a_head_missing_an_element_raises_keyerror_naming_it(
+        self, head: dict[str, Any], missing: str
+    ) -> None:
+        # The single-object HEAD follows the same rule in aws-cli's
+        # `_list_single_object` order - ContentLength first, then LastModified;
+        # ETag is read with a default there - so a doubly incomplete response
+        # is blamed on ContentLength (the transfer engine's `head_single` reads
+        # it the same way; the CLI measurement is in that route's suite).
+        storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        with pytest.raises(KeyError) as excinfo:
+            storage.get_fileinfo()
+        assert excinfo.value.args[0] == missing
+
+    @pytest.mark.parametrize(
         ("entry", "missing"),
         [({"Name": "zzz"}, "CreationDate"), ({"CreationDate": MTIME}, "Name")],
     )

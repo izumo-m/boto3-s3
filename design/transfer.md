@@ -523,6 +523,15 @@ dest-existence check for download. We ported the same three faces:
   the same banding the local side uses). A single blind delete is exempt
   because aws issues no HeadObject for it - `rm s3://bkt/key` stays rc 0 on
   both tools.
+- **a single-object HEAD missing `ContentLength` or `LastModified` ends the
+  run** the same way: aws-cli's `_list_single_object` reads those two by
+  subscript (`ContentLength` first) and `ETag` with a default, so
+  `producers.head_single` does too - a `KeyError` naming the element, the
+  CLI's `fatal error: 'LastModified'` at rc 1 (measured for a download, a
+  `--dryrun` copy and a `--dryrun` move) - rather than an entry carrying
+  `None`. The single-object counterpart of the listing rule
+  ([`storage.md`](./storage.md) section 2); the stream route never resolves
+  its source this way, and aws is lenient there too.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length

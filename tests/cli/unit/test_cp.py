@@ -210,6 +210,34 @@ class TestPipelineErrors:
             'Key "no-such" does not exist\n'
         )
 
+    @pytest.mark.parametrize(
+        ("head", "missing"),
+        [
+            ({"ContentLength": 1, "ETag": '"e"'}, "LastModified"),
+            ({"LastModified": MTIME, "ETag": '"e"'}, "ContentLength"),
+        ],
+    )
+    def test_a_head_missing_a_required_element_is_a_fatal_error(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        head: dict[str, Any],
+        missing: str,
+    ) -> None:
+        # aws-cli's `_list_single_object` reads ContentLength and LastModified
+        # by subscript, so a HEAD without one ends the run in the result
+        # recorder like an incomplete listing entry does: `fatal error:
+        # 'LastModified'` at rc 1 for `cp s3://bkt/a ./out.bin` (and for a
+        # `--dryrun` copy or move), measured against the pinned aws (2.36.40)
+        # through a 127.0.0.1 fake. ETag is read with a default there, so its
+        # absence transfers; `cp s3://bkt/a -` never heads this way and streams
+        # on both tools.
+        ctx, calls = _recording_ctx([head])
+        rc = cli.main(["cp", "s3://b/a", str(tmp_path / "x")], ctx=ctx)
+        assert rc == 1
+        assert capsys.readouterr().err == f"fatal error: '{missing}'\n"
+        assert [c.operation for c in calls] == ["HeadObject"]
+
     def test_transfer_failure_is_rc_1_with_a_failed_line(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -745,7 +773,7 @@ class TestChecksumOptions:
 
         ctx, calls = _recording_ctx(
             [
-                {"ContentLength": 1, "ETag": '"e"'},
+                {"ContentLength": 1, "ETag": '"e"', "LastModified": MTIME},
                 {"Body": io.BytesIO(b"x"), "ContentLength": 1, "ETag": '"e"'},
             ]
         )

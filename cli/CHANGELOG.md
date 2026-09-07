@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Requests that carry a checksum now default to `CRC64NVME` like `aws` (uploads on both transfer engines, deletes, bucket configuration writes) wherever the installed botocore can compute it; `CRC32` stays the fallback without awscrt.
 - An empty or whitespace-only CA bundle value (`--ca-bundle`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, a blank `ca_bundle` profile key) now fails the run like `aws` instead of silently turning TLS verification off, on every supported `boto3`.
+- A single-object `cp` / `mv` whose `HeadObject` response lacks `ContentLength` or `LastModified` now ends with `fatal error:` like `aws` instead of transferring.
 
 ## [0.8.0] - 2026-08-13
 

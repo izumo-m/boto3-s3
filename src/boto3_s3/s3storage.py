@@ -1135,15 +1135,21 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
+        # Read by subscript in aws-cli's own order (`ContentLength`, then
+        # `LastModified`; `ETag` takes a default), like the listing converter
+        # above and the transfer engine's `producers.head_single`: a response
+        # missing one raises `KeyError` naming it instead of yielding an entry
+        # with the value unset.
+        size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
         etag = head.get("ETag")
-        mtime = head.get("LastModified")
         # aws-cli converts the HeadObject stamp to the local zone as it reads the
         # response (filegenerator's single-object branch), so an unrepresentable
         # one kills the run there rather than downstream.
         reject_unrepresentable_stamp(mtime)
         return S3FileInfo(
             key=target_key,
-            size=head.get("ContentLength"),
+            size=size,
             mtime=mtime,
             etag=etag.strip('"') if etag else None,
             storage_class=head.get("StorageClass"),
