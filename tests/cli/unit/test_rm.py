@@ -75,7 +75,7 @@ class _RaisingPaginatorClient:
 class _RaisingDeleteClient:
     """Fake whose DeleteObject raises."""
 
-    def __init__(self, error: ClientError) -> None:
+    def __init__(self, error: Exception) -> None:
         self._error = error
 
     def delete_object(self, **_kwargs: Any) -> dict[str, Any]:
@@ -236,6 +236,20 @@ class TestExitCodeShape:
         assert result.rc == 1
         assert result.stderr.startswith("delete failed: s3://b-no-such/k ")
         assert "NoSuchBucket" in result.stderr
+
+    def test_a_request_error_outside_botocore_is_a_per_key_failure(self) -> None:
+        # What the delete request raises is that key's failure whatever its
+        # type: aws's per-key DeleteObject runs as an s3transfer task, whose
+        # any-exception capture turns an S3 Express CreateSession reply
+        # without Credentials (KeyError) or a redirect loop (RecursionError)
+        # into a `delete failed:` line - `delete failed: s3://bkt/k
+        # 'Credentials'` at rc 1, measured against the pinned aws (2.36.40)
+        # through a 127.0.0.1 fake, for the recursive form too. The span's own
+        # `fatal error:` (below) is for what escapes the pipeline, not this.
+        client = _RaisingDeleteClient(KeyError("Credentials"))
+        result = run_cli_in_process(["rm", "s3://b/k"], ctx=client_ctx(client))
+        assert result.rc == 1
+        assert result.stderr == "delete failed: s3://b/k 'Credentials'\n"
 
     def test_listing_failure_is_rc_1_fatal_not_254(self) -> None:
         # ls maps a server ClientError to 254; rm must report rc 1 with a

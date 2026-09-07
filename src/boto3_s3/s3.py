@@ -59,7 +59,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, s3_errors, translate_boto_error
+from boto3_s3.s3storage import S3Storage, request_failure, s3_errors, translate_boto_error
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
@@ -2244,11 +2244,20 @@ class S3:
             return
         try:
             response = storage.delete(info, request_payer=request_payer)
-        except Boto3S3Error as exc:
+        except AssertionError:
+            raise  # a test double's guard or an invariant, never a request outcome
+        except Exception as exc:
             # The single key is still one batch item (aws counts it as a task
             # failure -> "delete failed:" + rc 1), so aggregate rather than
-            # re-raising the category error.
-            _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.FAILED, error=exc)
+            # re-raising the category error. Whatever the request raised is
+            # that failure - the delete's own translated error, or anything
+            # else botocore threw from inside the call, wrapped by
+            # request_failure the way the deleter wraps it (aws's task records
+            # both alike).
+            failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
+            _emit_result(
+                on_result, info=info, storage=storage, outcome=OpOutcome.FAILED, error=failure
+            )
             raise BatchError(
                 "1 of 1 deletes failed",
                 succeeded=0,
@@ -2256,7 +2265,7 @@ class S3:
                 warned=0,
                 skipped=0,
                 operation="rm",
-            ) from exc
+            ) from failure
         # capture_response surfaces the DeleteObject response (minus
         # ResponseMetadata) under extra_info["delete"], the same shape the batched
         # path reconstructs from a DeleteObjects entry.

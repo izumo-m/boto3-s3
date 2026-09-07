@@ -12,7 +12,7 @@ import contextlib
 import logging
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -36,6 +36,9 @@ from boto3_s3 import (
 )
 from boto3_s3.deleter import S3_DELETE_BATCH
 from tests.utils.fakes3 import client_error
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class _FakeS3Client:
@@ -92,6 +95,19 @@ def _info(key: str) -> S3FileInfo:
 
 def _keys(calls: list[dict[str, Any]]) -> list[list[str]]:
     return [[obj["Key"] for obj in call["Delete"]["Objects"]] for call in calls]
+
+
+def _raise_once(exc: Exception) -> Callable[[OpResult], None]:
+    """An ``on_result`` that raises ``exc`` on its first record and then stays quiet."""
+    fired = False
+
+    def callback(_result: OpResult) -> None:
+        nonlocal fired
+        if not fired:
+            fired = True
+            raise exc
+
+    return callback
 
 
 def _client_error(
@@ -515,6 +531,64 @@ class TestResults:
         assert (deleter.succeeded, deleter.failed) == (0, 2)
         assert deleter.first_error is error
 
+    def test_request_raising_outside_the_boto_family_fails_the_batch(self) -> None:
+        # What the client call raises is the request failing, whatever the
+        # type: botocore reading an S3 Express CreateSession reply without
+        # Credentials (KeyError), a redirect loop (RecursionError). aws-cli's
+        # per-key DeleteObject runs as an s3transfer task, which records any of
+        # them as that key's failure - `delete failed: s3://b/k 'Credentials'`
+        # at rc 1, measured against the pinned aws (2.36.40) through a
+        # 127.0.0.1 fake - so the deleter fails every key of the request the
+        # same way instead of re-raising from flush() / close().
+        boom = KeyError("Credentials")
+        fake = _FakeS3Client(script=[boom])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append, operation="delete")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()  # must not raise: the failure is recorded per key
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert str(error) == "'Credentials'"  # str(KeyError), what aws's line carries
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == ("delete", "bucket", None)
+        assert results[1].error is error
+        assert (deleter.succeeded, deleter.failed) == (0, 2)
+        assert deleter.first_error is error
+
+    def test_request_raising_outside_the_boto_family_fails_the_single_key(self) -> None:
+        # The DeleteObject fallback route records the same way, keyed.
+        boom = RecursionError("maximum recursion depth exceeded")
+        fake = _FakeS3Client(single_script=[boom])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, operation="delete")
+        deleter.submit(_info("k\x01"))  # XML-incompatible: the per-key route
+        deleter.close()
+        assert fake.calls == []
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert str(error) == "maximum recursion depth exceeded"
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == ("delete", "bucket", "k\x01")
+        assert (deleter.succeeded, deleter.failed) == (0, 1)
+
+    @pytest.mark.parametrize("route", ["batch", "single"])
+    def test_an_assertion_from_the_request_still_propagates(self, route: str) -> None:
+        # The one exception left out of the per-key capture: a test double's
+        # unexpected-call guard (or an invariant) is never a request outcome,
+        # the same carve-out the CLI's result spans make.
+        boom = AssertionError("unexpected call")
+        fake = (
+            _FakeS3Client(script=[boom])
+            if route == "batch"
+            else _FakeS3Client(single_script=[boom])
+        )
+        deleter = _deleter(fake, batch_size=10)
+        deleter.submit(_info("a" if route == "batch" else "a\x01"))
+        with pytest.raises(AssertionError, match="unexpected call"):
+            deleter.close()
+
     def test_later_batches_run_after_request_failure(self) -> None:
         fake = _FakeS3Client(script=[_client_error(), {}])
         results: list[OpResult] = []
@@ -824,19 +898,23 @@ class TestThreading:
         assert threads[0] != threading.get_ident()
         assert threads[0] == fake.call_threads[0]
 
+    # The worker error these three drive comes from outside the request - an
+    # on_result callback that raises, standing in for a programming error in
+    # the deleter's own response handling. What the request itself raises is
+    # a per-key failure instead (TestResults), so it cannot play this part.
+
     def test_unexpected_worker_exception_reraises_at_next_flush(self) -> None:
-        fake = _FakeS3Client(script=[RuntimeError("worker boom")])
-        results: list[OpResult] = []
-        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        fake = _FakeS3Client()
+        deleter = _deleter(fake, batch_size=10, on_result=_raise_once(RuntimeError("worker boom")))
         deleter.submit(_info("a"))
         deleter.flush()  # batch 1 will fail with a non-boto (programming) error
         deleter.submit(_info("b"))
         with pytest.raises(RuntimeError, match="worker boom"):
             deleter.flush()
-        # The failure was not converted to per-key results, and the buffered
+        # The failure was not converted to per-key results (the record it
+        # interrupted was counted before the callback ran), and the buffered
         # key survived the failed flush.
-        assert results == []
-        assert (deleter.succeeded, deleter.failed) == (0, 0)
+        assert (deleter.succeeded, deleter.failed) == (1, 0)
         deleter.close(flush=False)
         assert _keys(fake.calls) == [["a"]]
 
@@ -845,8 +923,8 @@ class TestThreading:
         # once the caller keeps submitting, the buffer exceeds batch_size and
         # must be re-split so no single DeleteObjects call ever carries more
         # than batch_size keys (1000 is an AWS hard limit).
-        fake = _FakeS3Client(script=[RuntimeError("worker boom")])
-        deleter = _deleter(fake, batch_size=2)
+        fake = _FakeS3Client()
+        deleter = _deleter(fake, batch_size=2, on_result=_raise_once(RuntimeError("worker boom")))
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))  # auto-flush; the batch will fail in the worker
         deleter.submit(_info("c"))
@@ -857,8 +935,8 @@ class TestThreading:
         assert _keys(fake.calls) == [["a", "b"], ["c", "d"], ["e"]]
 
     def test_unexpected_worker_exception_reraises_at_close(self) -> None:
-        fake = _FakeS3Client(script=[RuntimeError("worker boom")])
-        deleter = _deleter(fake, batch_size=10)
+        fake = _FakeS3Client()
+        deleter = _deleter(fake, batch_size=10, on_result=_raise_once(RuntimeError("worker boom")))
         deleter.submit(_info("a"))
         deleter.flush()
         with pytest.raises(RuntimeError, match="worker boom"):

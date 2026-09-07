@@ -277,6 +277,31 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
+def request_failure(
+    exc: Exception, *, operation: str | None, bucket: str | None = None, key: str | None = None
+) -> Boto3S3Error:
+    """The per-item failure for an exception a single S3 request raised.
+
+    `s3_errors` has already translated the boto family. Anything else the
+    client call raised - botocore reading a response that lacks an element it
+    needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
+    ``KeyError``), a redirect loop ending in ``RecursionError`` - is the
+    request failing all the same, and becomes `translate_boto_error`'s
+    last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
+    carrying the original as ``__cause__``; an existing ``Boto3S3Error``
+    passes through with its own cause. This is aws-cli's shape: its per-key
+    ``DeleteObject`` runs as an s3transfer task, which records whatever the
+    request raises as that key's failure, so the CLI's line reads
+    ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
+    transfer engine gets the same from s3transfer itself; the deleter and the
+    blind single-key delete apply it by hand.
+    """
+    error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
+    if error is not exc:
+        error.__cause__ = exc
+    return error
+
+
 # Years a listing timestamp can carry without its local-zone rendering being
 # able to leave datetime's range: everything strictly inside the first and the
 # last calendar year is more than a day from either end, further than any zone's

@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - A single-object `cp` / `mv` (and `S3Storage.get_fileinfo`) now stops on a `HeadObject` response missing `ContentLength` or `LastModified` the way `aws s3` stops, with a `KeyError` naming the element, instead of carrying the value as `None`.
+- `S3Deleter` and the single-key `rm` now record an exception the delete request raises outside botocore's own errors as that request's per-key failure, like `aws s3`, instead of re-raising it.
 
 ## [0.11.0] - 2026-08-23
 

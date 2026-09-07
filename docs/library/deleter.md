@@ -124,8 +124,12 @@ licenses you to drop your own record of the object: the object may still be
 there. S3 answers only for the keys you sent, so in practice this never fires;
 it is a guard, and it logs a warning as well.
 
-Anything outside that — a genuine programming error — is not turned into per-key
-results. It is re-raised to you on the next non-empty `flush()` or `close()`.
+An exception the delete request itself raises that is not a botocore error —
+botocore choking on a malformed response, a redirect loop — fails the keys of
+that request all the same, as a plain `Boto3S3Error` carrying the original as
+`__cause__`. Anything outside that — a genuine programming error, or an
+`on_result` callback that raises — is not turned into per-key results. It is
+re-raised to you on the next non-empty `flush()` or `close()`.
 
 `S3Deleter` never raises `BatchError`. If you want one, build it from
 `succeeded` / `failed` after `close()`.
