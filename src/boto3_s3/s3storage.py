@@ -27,6 +27,7 @@ untouched by them (design/storage.md section 6).
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import secrets
@@ -81,6 +82,17 @@ if TYPE_CHECKING:
 
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
+
+# The package logger takes a NullHandler, as boto3's and botocore's own do (the
+# logging HOWTO's rule for libraries): the library reports through `logging` and
+# never prints, so a WARNING it emits where the application configured no
+# handler - the deleter's unattributable-entry guard - must not reach stderr
+# through Python's `lastResort` handler. Registered here because every path
+# that logs imports this module: the deleter and the transfer engine directly,
+# and the CRT support's one warning fires inside the manager builder only the
+# transfer engine calls. A configured handler (the CLI's --debug stream logger,
+# an application's root handler) still sees every record.
+logging.getLogger("boto3_s3").addHandler(logging.NullHandler())
 
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays

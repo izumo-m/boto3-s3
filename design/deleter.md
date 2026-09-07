@@ -194,7 +194,11 @@ versioned bucket) cannot be mapped back to submission order.
   responsibility to assemble from `on_result`. The library does not print; it
   only emits the `boto3_s3.deleter` logger (debug: batch dispatch, request-level
   failures, per-key failures / warning: unattributable entries) - an intentional
-  break from parity. The CLI's `--debug` picks up this logger.
+  break from parity. The CLI's `--debug` picks up this logger, and nothing
+  else does: the `boto3_s3` package logger carries a `NullHandler` (registered
+  by `s3storage`, which every logging path imports - as boto3's own loggers
+  do), so where no handler is configured the warning stays off stderr instead
+  of surfacing through Python's `lastResort` handler.
 
 ## 5. Out of scope (outside this component)
 
