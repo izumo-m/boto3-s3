@@ -130,7 +130,9 @@ class MvCommand(Command):
             args,
             case_conflict,
             operation="mv",
-            default_checksum_algorithm=transferargs.default_upload_checksum(client, paths_type),
+            default_checksum_algorithm=transferargs.default_upload_checksum(
+                client, paths_type, transfer_config
+            ),
         )
         printer = transferargs.build_printer(args, progress_frequency)
 

@@ -26,6 +26,7 @@ from boto3_s3 import (
     S3Storage,
     TransferOptions,
     ValidationError,
+    crtsupport,
 )
 from boto3_s3.localstorage import translate_os_error
 from boto3_s3.pathresolver import is_s3express_path
@@ -632,15 +633,24 @@ def resolve_case_conflict(
     return CaseConflictMode.IGNORE
 
 
-def default_upload_checksum(client: Any, paths_type: str) -> str | None:
+def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) -> str | None:
     """aws's default request checksum for the uploads a run makes, else None.
 
-    Only an upload run (``locals3``) gets one: aws sends no checksum algorithm
-    on a copy's CopyObject / UploadPartCopy (measured against the pinned aws),
-    and a download writes nothing. The value itself is `checksumdefault`'s.
+    Only an upload run (``locals3``) gets one: by default aws sends no
+    checksum algorithm on a copy's CopyObject / UploadPartCopy (measured
+    against the pinned aws; an explicit ``--checksum-algorithm`` reaches them
+    on both tools through the request mapping), and a download writes
+    nothing. The value is `checksumdefault`'s, chosen by the engine
+    *transfer_config* resolves to (`resolve_transfer_config`; the same
+    `crtsupport.selects_crt` test the engine applies): the CRT engine's
+    default holds whatever ``request_checksum_calculation`` says, the classic
+    engine's only under ``when_supported`` - aws's own split, measured on
+    the wire.
     """
     if paths_type != "locals3":
         return None
+    if crtsupport.selects_crt(transfer_config):
+        return checksumdefault.crt_default_algorithm()
     return checksumdefault.default_algorithm(client)
 
 

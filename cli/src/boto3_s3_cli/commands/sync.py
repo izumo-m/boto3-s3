@@ -93,12 +93,6 @@ class SyncCommand(Command):
         )
         s3 = head.s3
         client = head.client
-        options = transferargs.build_transfer_options(
-            args,
-            case_conflict,
-            operation="sync",
-            default_checksum_algorithm=transferargs.default_upload_checksum(client, paths_type),
-        )
 
         src_location, dest_location = transferargs.resolve_locations(
             args,
@@ -124,6 +118,17 @@ class SyncCommand(Command):
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
+        # After the engine is resolved: the upload checksum default is the
+        # engine's (nothing in build_transfer_options can fail, so the move
+        # past resolve_locations / compile_filter changes no error order).
+        options = transferargs.build_transfer_options(
+            args,
+            case_conflict,
+            operation="sync",
+            default_checksum_algorithm=transferargs.default_upload_checksum(
+                client, paths_type, transfer_config
+            ),
+        )
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:

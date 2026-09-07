@@ -46,7 +46,8 @@ class TestDefaultAlgorithm:
         assert checksumdefault.default_algorithm(_client()) == "CRC64NVME"
 
     def test_when_required_client_gets_none(self) -> None:
-        # botocore stamps no default there, on either tool.
+        # botocore stamps no default on an upload there, on either tool (the
+        # checksum-required operations are register's business).
         assert (
             checksumdefault.default_algorithm(_client(request_checksum_calculation="when_required"))
             is None
@@ -101,12 +102,42 @@ class TestRegister:
         self._emit(client, "PutObject", params, is_presign_request=True)
         assert "ChecksumAlgorithm" not in params
 
-    def test_when_required_client_registers_nothing(self) -> None:
+    def test_when_required_client_stamps_only_the_checksum_required_operations(self) -> None:
+        # botocore's own order: a `requestChecksumRequired` operation gets the
+        # default under either setting (aws's bundled botocore stamps CRC64NVME
+        # on a `when_required` `website`, measured on the wire against the
+        # pinned aws 2.36.40; pip botocore would stamp its CRC32 there), the
+        # others only under when_supported.
         client = _client(request_checksum_calculation="when_required")
         checksumdefault.register(client)
-        params: dict[str, Any] = {"Bucket": "b"}
-        self._emit(client, "DeleteObjects", params)
-        assert "ChecksumAlgorithm" not in params
+        for operation in ("DeleteObjects", "PutBucketTagging", "PutBucketWebsite"):
+            params: dict[str, Any] = {"Bucket": "b"}
+            self._emit(client, operation, params)
+            assert params["ChecksumAlgorithm"] == "CRC64NVME", operation
+        for operation in ("PutObject", "PutObjectAnnotation", "UploadPart"):
+            params = {"Bucket": "b"}
+            self._emit(client, operation, params)
+            assert "ChecksumAlgorithm" not in params, operation
+
+    def test_the_required_set_is_read_off_the_model(self) -> None:
+        # The stamp asks the operation model, not a list of its own: the three
+        # the CLI reaches are marked required there (with two dozen bucket
+        # configuration puts the CLI never sends), and every marked operation
+        # names the ChecksumAlgorithm member the stamp fills.
+        model = _client().meta.service_model
+        required = {
+            name
+            for name in model.operation_names
+            if model.operation_model(name).http_checksum.get("requestChecksumRequired")
+        }
+        assert {"DeleteObjects", "PutBucketTagging", "PutBucketWebsite"} <= required
+        for name in required:
+            member = model.operation_model(name).http_checksum.get("requestAlgorithmMember")
+            assert member == "ChecksumAlgorithm", name
+
+
+_CLASSIC = SimpleNamespace(preferred_transfer_client="classic")
+_CRT = SimpleNamespace(preferred_transfer_client="crt")
 
 
 class TestUploadDefault:
@@ -115,6 +146,19 @@ class TestUploadDefault:
         # download writes nothing, so the transfer default is locals3's alone.
         monkeypatch.setattr(checksumdefault, "default_algorithm", lambda _client: "CRC64NVME")
         client = _fake_client("when_supported")
-        assert transferargs.default_upload_checksum(client, "locals3") == "CRC64NVME"
-        assert transferargs.default_upload_checksum(client, "s3s3") is None
-        assert transferargs.default_upload_checksum(client, "s3local") is None
+        assert transferargs.default_upload_checksum(client, "locals3", _CLASSIC) == "CRC64NVME"
+        assert transferargs.default_upload_checksum(client, "s3s3", _CLASSIC) is None
+        assert transferargs.default_upload_checksum(client, "s3local", _CLASSIC) is None
+
+    @pytest.mark.skipif(not _CAN_COMPUTE, reason="this botocore cannot compute CRC64NVME")
+    def test_the_crt_engine_keeps_the_default_under_when_required(self) -> None:
+        # aws's CRT module has CRC64NVME written in as its fallback and never
+        # reads request_checksum_calculation - only its classic manager is
+        # gated on when_supported - so a when_required CRT upload still trails
+        # CRC64NVME (measured on the wire against the pinned aws 2.36.40,
+        # single-part and multipart) while the same classic upload sends none.
+        client = _client(request_checksum_calculation="when_required")
+        assert transferargs.default_upload_checksum(client, "locals3", _CRT) == "CRC64NVME"
+        assert transferargs.default_upload_checksum(client, "locals3", _CLASSIC) is None
+        # And an s3->s3 run is classic (no CRT copy) with no default either way.
+        assert transferargs.default_upload_checksum(client, "s3s3", _CRT) is None

@@ -149,7 +149,9 @@ class CpCommand(Command):
             args,
             case_conflict,
             operation="cp",
-            default_checksum_algorithm=transferargs.default_upload_checksum(client, paths_type),
+            default_checksum_algorithm=transferargs.default_upload_checksum(
+                client, paths_type, transfer_config
+            ),
         )
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.

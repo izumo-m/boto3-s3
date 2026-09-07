@@ -16,10 +16,11 @@ commands here left CRC32 (docs/cli/aws-differences.md used to record it).
 The CLI reproduces aws's value in two places, both on the CLI side - the
 library keeps boto3's defaults (design/crt.md section 1):
 
-- `default_algorithm` feeds the transfer options of an upload run
-  (`transferargs.default_upload_checksum`), so both transfer engines name it:
-  the classic engine hands it to botocore, and the CRT engine decides its
-  trailing checksum from that argument alone.
+- `default_algorithm` / `crt_default_algorithm` feed the transfer options of
+  an upload run (`transferargs.default_upload_checksum`, which picks by the
+  resolved engine), so both transfer engines name it: the classic engine
+  hands it to botocore, and the CRT engine decides its trailing checksum from
+  that argument alone.
 - `register` stamps it on every other request a built client sends where
   botocore would have stamped its own default, at ``provide-client-params``,
   before botocore's own resolution sees the parameters.
@@ -28,7 +29,11 @@ Nothing process-global is patched: an application embedding the library keeps
 its botocore's default. The value applies only where botocore can compute it
 (CRC64NVME needs awscrt; without it botocore's own default stands) and only
 where botocore would have stamped a default at all (a ``when_required`` client
-sends no checksum on either tool; a presigned request gets none).
+sends one only on the operations that require a checksum - a delete batch, a
+bucket configuration put - and none on a classic-engine upload, on either
+tool; a presigned request gets none). The CRT engine is the exception: aws's
+CRT module carries CRC64NVME as its own fallback and never reads the setting,
+so a CRT upload names it under either value (`crt_default_algorithm`).
 
 This is not cosmetic: aws-checksums computes CRC32 in software on x86-64
 (about 3 GiB/s against about 20 for CRC64NVME), which on a 4-vCPU instance
@@ -44,14 +49,10 @@ from typing import Any
 AWS_DEFAULT_CHECKSUM_ALGORITHM = "CRC64NVME"
 
 
-def default_algorithm(client: Any) -> str | None:
-    """aws's default for this client, or None where botocore would send no
-    default checksum (``request_checksum_calculation`` other than
-    ``when_supported``, or a botocore that predates the setting) or cannot
-    compute CRC64NVME (no awscrt, or one too old; botocore's own registry is
-    the authority on that, so it is read rather than re-derived)."""
-    if getattr(client.meta.config, "request_checksum_calculation", None) != "when_supported":
-        return None
+def _computable_default() -> str | None:
+    """aws's default where the installed botocore can compute it, else None
+    (no awscrt, or one too old; botocore's own registry is the authority on
+    that, so it is read rather than re-derived)."""
     from botocore import httpchecksum
 
     supported = getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ())
@@ -60,26 +61,64 @@ def default_algorithm(client: Any) -> str | None:
     return AWS_DEFAULT_CHECKSUM_ALGORITHM
 
 
+def default_algorithm(client: Any) -> str | None:
+    """aws's default for this client's classic-engine uploads, or None where
+    botocore would send no default checksum on a PutObject
+    (``request_checksum_calculation`` other than ``when_supported``, or a
+    botocore that predates the setting) or cannot compute CRC64NVME. The
+    checksum-required operations, which get a default under either setting,
+    are `register`'s business; the CRT engine's uploads are
+    `crt_default_algorithm`'s."""
+    if getattr(client.meta.config, "request_checksum_calculation", None) != "when_supported":
+        return None
+    return _computable_default()
+
+
+def crt_default_algorithm() -> str | None:
+    """aws's default for a CRT-engine upload: CRC64NVME whatever the client's
+    ``request_checksum_calculation`` says. aws's bundled s3transfer has the
+    constant written into its CRT module as the fallback for an upload that
+    names no algorithm, and that module never consults the setting - only
+    the classic manager's ``_add_operation_defaults`` is gated on
+    ``when_supported`` - so a ``when_required`` CRT upload still trails a
+    CRC64NVME on aws (measured on the wire, single-part and multipart) where
+    pip s3transfer's CRT module would trail its own CRC32. None only where
+    botocore cannot compute it, which a working CRT engine rules out."""
+    return _computable_default()
+
+
 def register(client: Any) -> None:
     """Attach aws's default to one S3 client (`clientfactory.build_client`).
 
-    Stamps the algorithm on any request whose operation has a
-    ``requestAlgorithmMember`` and whose caller left it unset - the same test
-    botocore applies before stamping its own default - so the CLI's deletes,
-    bucket puts and annotation writes carry what aws's do. An explicit value
+    Stamps the algorithm on any request whose caller left the operation's
+    ``requestAlgorithmMember`` unset and where botocore would then stamp its
+    own default - botocore's own test, in its order: an operation that
+    requires a checksum (``requestChecksumRequired``; of the ones the CLI
+    sends, DeleteObjects, PutBucketTagging and PutBucketWebsite) gets one
+    under either ``request_checksum_calculation`` setting, every other one
+    only under ``when_supported`` - so the CLI's deletes, bucket puts and annotation
+    writes carry what aws's do (a ``when_required`` ``website`` sends
+    CRC64NVME on both tools, measured). An explicit value
     (``--checksum-algorithm``, or the transfer default) is left alone.
     """
-    algorithm = default_algorithm(client)
+    algorithm = _computable_default()
     if algorithm is None:
         return
+    calculation = getattr(client.meta.config, "request_checksum_calculation", None)
 
     def stamp(
         params: dict[str, Any], model: Any, context: dict[str, Any] | None = None, **_: Any
     ) -> None:
         if context and context.get("is_presign_request"):
             return
-        member = model.http_checksum.get("requestAlgorithmMember")
-        if member and member not in params:
+        http_checksum = model.http_checksum
+        member = http_checksum.get("requestAlgorithmMember")
+        if not member or member in params:
+            return
+        required = getattr(model, "http_checksum_required", False) or http_checksum.get(
+            "requestChecksumRequired"
+        )
+        if required or calculation == "when_supported":
             params[member] = algorithm
 
     client.meta.events.register("provide-client-params.s3.*", stamp)
