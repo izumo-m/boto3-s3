@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-07
+
 - The default request checksum is now `CRC64NVME` like `aws` wherever the installed botocore can compute it; without awscrt, botocore's `CRC32` stays.
 - An empty or blank CA bundle value (`--ca-bundle`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, a profile's `ca_bundle`) now fails the run like `aws` instead of silently turning TLS verification off.
 - More `aws` parity on error paths and filter corners.
@@ -90,7 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...HEAD
+[0.8.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...boto3-s3-cli-v0.8.1
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.7.0...boto3-s3-cli-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.1...boto3-s3-cli-v0.7.0
 [0.6.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.0...boto3-s3-cli-v0.6.1
