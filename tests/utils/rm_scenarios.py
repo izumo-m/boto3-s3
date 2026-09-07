@@ -144,7 +144,7 @@ SCENARIOS: tuple[RmScenario, ...] = (
     ),
     # The prefix's "[1]" is glob-interpreted inside the joined pattern, so
     # --exclude '*' matches nothing and everything is deleted anyway
-    # (verified against aws 2.36.1).
+    # (verified against aws 2.36.40).
     RmScenario(
         "rm_exclude_glob_chars_prefix",
         ("rm", f"s3://{BUCKET_TOKEN}/f[1]/", "--recursive", "--exclude", "*"),

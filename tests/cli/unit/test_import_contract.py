@@ -1,10 +1,10 @@
 """Import contract for the two top-level informational exits.
 
 The top-level ``help`` token and ``--version`` complete without importing the
-AWS SDK, a command module, or any library module beyond the lazy ``boto3_s3``
+AWS SDK, a command module, any library module beyond the lazy ``boto3_s3``
 root and its pure exceptions taxonomy - in particular not the SDK-backed
-``boto3_s3.s3``, which imports boto3 at module top. No import guarantee applies
-to normal dispatch, usage errors, or subcommand help.
+``boto3_s3.s3``, which imports boto3 at module top - or ``logging``. No import
+guarantee applies to normal dispatch, usage errors, or subcommand help.
 
 Each case runs ``main()`` in a fresh interpreter (``python -c``) so imports
 already made by the test runner can't mask a regression.
@@ -38,6 +38,11 @@ _PRELUDE = """
             if m.startswith("boto3_s3_cli.commands") and m not in infra
         )
         assert not loaded, loaded
+
+    def assert_no_logging():
+        # `logging` is dead weight on these exits (on 3.14 it also drags
+        # traceback in); the two --debug helpers in cli.py import it lazily.
+        assert "logging" not in sys.modules
 
     def assert_no_library_modules():
         # The lazy boto3_s3 root and the pure exceptions taxonomy are the only
@@ -77,6 +82,7 @@ class TestCliImportContract:
             assert_no_heavy_imports()
             assert_no_command_modules()
             assert_no_library_modules()
+            assert_no_logging()
             """
         )
 
@@ -89,6 +95,7 @@ class TestCliImportContract:
             assert_no_heavy_imports()
             assert_no_command_modules()
             assert_no_library_modules()
+            assert_no_logging()
             """
         )
         assert "boto3-s3-cli/" in out

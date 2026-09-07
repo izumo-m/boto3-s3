@@ -1998,7 +1998,7 @@ def _presign_ctx(client: _RecordingPresignClient) -> Context:
 
 
 class TestTopLevelGlobalsStripping:
-    """The aws-shaped token flow (measured on the pinned aws-cli 2.36.1).
+    """The aws-shaped token flow (measured on the pinned aws-cli 2.36.40).
 
     aws parses and REMOVES the globals over the full argv first, locates the
     subcommand among the survivors (unknown optionals assumed valueless), and

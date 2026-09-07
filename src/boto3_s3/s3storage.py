@@ -27,6 +27,7 @@ untouched by them (design/storage.md section 6).
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import secrets
@@ -81,6 +82,17 @@ if TYPE_CHECKING:
 
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import ListBucketsOutputTypeDef, ListObjectsV2OutputTypeDef
+
+# The package logger takes a NullHandler, as boto3's and botocore's own do (the
+# logging HOWTO's rule for libraries): the library reports through `logging` and
+# never prints, so a WARNING it emits where the application configured no
+# handler - the deleter's unattributable-entry guard - must not reach stderr
+# through Python's `lastResort` handler. Registered here because every path
+# that logs imports this module: the deleter and the transfer engine directly,
+# and the CRT support's one warning fires inside the manager builder only the
+# transfer engine calls. A configured handler (the CLI's --debug stream logger,
+# an application's root handler) still sees every record.
+logging.getLogger("boto3_s3").addHandler(logging.NullHandler())
 
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays
@@ -275,6 +287,31 @@ def s3_errors(
         yield
     except (ClientError, BotoCoreError) as exc:
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
+
+
+def request_failure(
+    exc: Exception, *, operation: str | None, bucket: str | None = None, key: str | None = None
+) -> Boto3S3Error:
+    """The per-item failure for an exception a single S3 request raised.
+
+    `s3_errors` has already translated the boto family. Anything else the
+    client call raised - botocore reading a response that lacks an element it
+    needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
+    ``KeyError``), a redirect loop ending in ``RecursionError`` - is the
+    request failing all the same, and becomes `translate_boto_error`'s
+    last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
+    carrying the original as ``__cause__``; an existing ``Boto3S3Error``
+    passes through with its own cause. This is aws-cli's shape: its per-key
+    ``DeleteObject`` runs as an s3transfer task, which records whatever the
+    request raises as that key's failure, so the CLI's line reads
+    ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
+    transfer engine gets the same from s3transfer itself; the deleter and the
+    blind single-key delete apply it by hand.
+    """
+    error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
+    if error is not exc:
+        error.__cause__ = exc
+    return error
 
 
 # Years a listing timestamp can carry without its local-zone rendering being
@@ -1135,15 +1172,21 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
+        # Read by subscript in aws-cli's own order (`ContentLength`, then
+        # `LastModified`; `ETag` takes a default), like the listing converter
+        # above and the transfer engine's `producers.head_single`: a response
+        # missing one raises `KeyError` naming it instead of yielding an entry
+        # with the value unset.
+        size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
         etag = head.get("ETag")
-        mtime = head.get("LastModified")
         # aws-cli converts the HeadObject stamp to the local zone as it reads the
         # response (filegenerator's single-object branch), so an unrepresentable
         # one kills the run there rather than downstream.
         reject_unrepresentable_stamp(mtime)
         return S3FileInfo(
             key=target_key,
-            size=head.get("ContentLength"),
+            size=size,
             mtime=mtime,
             etag=etag.strip('"') if etag else None,
             storage_class=head.get("StorageClass"),

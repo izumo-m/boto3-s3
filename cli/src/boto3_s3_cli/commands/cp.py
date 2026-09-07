@@ -145,7 +145,14 @@ class CpCommand(Command):
         # the invalid-mode 252 (measured: `Invalid size value: nope` rc 255
         # wins over `--case-conflict skip` on a directory bucket).
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
-        options = transferargs.build_transfer_options(args, case_conflict, operation="cp")
+        options = transferargs.build_transfer_options(
+            args,
+            case_conflict,
+            operation="cp",
+            default_checksum_algorithm=transferargs.default_upload_checksum(
+                client, paths_type, transfer_config
+            ),
+        )
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
         printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)

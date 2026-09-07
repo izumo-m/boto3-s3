@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-07
+
+- The package logger now carries a `NullHandler` like boto3's, so a library warning no longer prints on its own where no logging is configured.
+- A delete request that raises outside botocore's own errors now fails its keys instead of propagating.
+
 ## [0.11.0] - 2026-08-23
 
 - Added `sync(pair_filter=...)`, one callback deciding every paired entry — create, update and delete alike — in place of the three lane filters.
@@ -90,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...HEAD
+[0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
 [0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.8.0...boto3-s3-v0.9.0

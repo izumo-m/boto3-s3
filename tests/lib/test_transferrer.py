@@ -202,6 +202,55 @@ class TestUpload:
         )
         assert "ContentType" not in calls[0].params
 
+    def _upload_on_crt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        options: TransferOptions | None = None,
+    ) -> dict[str, Any]:
+        """Submit one upload through a stand-in CRT manager; its extra_args."""
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        manager = _CrtCapturingManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        client, _ = make_recording_client([])
+        with Transferrer(TransferType.UPLOAD, client, options=options) as transferrer:
+            transferrer.submit(item)
+        return manager.uploads[0]["extra_args"]
+
+    def test_the_library_names_no_checksum_of_its_own_on_the_crt_lane(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3-faithful: the default is s3transfer's (CRC32 in its CRT module).
+        # aws's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
+        # design/crt.md section 1) - and it matters there, since aws-checksums
+        # computes CRC32 in software (benchmarks/RESULTS.md 2026-09-06).
+        extra_args = self._upload_on_crt(tmp_path, monkeypatch)
+        assert "ChecksumAlgorithm" not in extra_args
+
+    def test_an_explicit_checksum_reaches_the_crt_lane(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        extra_args = self._upload_on_crt(
+            tmp_path, monkeypatch, options=TransferOptions(checksum_algorithm="CRC64NVME")
+        )
+        assert extra_args["ChecksumAlgorithm"] == "CRC64NVME"
+
+    def test_classic_lane_keeps_s3transfers_default(self, tmp_path: Path) -> None:
+        # pip s3transfer stamps botocore's default (CRC32) on a classic upload
+        # that names none; the library leaves it (design/transfer.md section 10).
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        calls, _, _, _ = _run(TransferType.UPLOAD, [item], [{}])
+        assert calls[0].params["ChecksumAlgorithm"] == "CRC32"
+
     def test_request_params_flow_into_put_object(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
@@ -1098,6 +1147,25 @@ class _CrtDrainManager:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._drain()
+
+
+class _FakeCrtSuccessFuture(_FakeCrtFuture):
+    def result(self) -> None:
+        return None
+
+
+class _CrtCapturingManager(_CrtDrainManager):
+    """A CRT stand-in that records each upload's kwargs and settles it as a success."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.uploads: list[dict[str, Any]] = []
+
+    def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+        self.uploads.append(kwargs)
+        future = _FakeCrtSuccessFuture(RuntimeError("unused"))
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
 
 
 class TestCrtCancelClassification:

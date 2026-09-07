@@ -10,7 +10,7 @@ zone here.
 
 The expected verdicts are measured, not derived: every (zone, mtime) row below
 is one cell of probes/fixA/p1-mtime-boundary-matrix.sh, which runs
-`cp <file> s3://bucket/key --dryrun` on aws 2.36.1 and reads back its rc and
+`cp <file> s3://bucket/key --dryrun` on aws 2.36.40 and reads back its rc and
 warning. The UTC instants are `date -u -d @<mtime>`.
 
 The stat results are synthesized so the cases hold on any filesystem (a real

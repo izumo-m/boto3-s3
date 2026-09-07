@@ -95,7 +95,10 @@ front only when the declaration is honest:
   for a bucket), so an entry missing one raises `KeyError` naming the element
   instead of being silently dropped - the object listing emitting the part of
   the page it had converted, the bucket listing being streamed entry by entry
-  to begin with.
+  to begin with. Its single-object `HeadObject` (`get_fileinfo`, and the
+  transfer engine's `producers.head_single`) reads `ContentLength` ->
+  `LastModified` the same way, `ETag` with a default - aws-cli's
+  `_list_single_object` order.
 
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()` as a safety net** by default, so a `scan_pages` that forgets it

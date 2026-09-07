@@ -44,6 +44,11 @@ botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 `SHA256` and `SHA512` are pure Python and never need it.
 
 Missing awscrt fails only the features that need it, and nothing else changes.
+
+The CLI's default request checksum is aws's `CRC64NVME` when the installed
+botocore can compute it (boto3 1.36 or later with awscrt 0.23.4 or later);
+otherwise botocore's own `CRC32` default stands. The library leaves botocore's
+default in place either way; name `checksum_algorithm` to choose.
 How it fails differs by feature: `preferred_transfer_client = crt` is refused
 before the run starts (exit code 253), while an explicit CRT-only
 `--checksum-algorithm` fails inside the run as a per-item

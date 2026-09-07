@@ -46,7 +46,7 @@ from concurrent.futures import (
 from typing import TYPE_CHECKING, Any
 
 from boto3_s3.exceptions import Boto3S3Error, ValidationError
-from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, s3_errors
+from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, request_failure, s3_errors
 from boto3_s3.types import (
     CancelMode,
     CancelToken,
@@ -388,13 +388,18 @@ class S3Deleter:
         try:
             with s3_errors(operation=self._operation, bucket=self._bucket):
                 response = self._client.delete_objects(**kwargs)
-        except Boto3S3Error as exc:
+        except AssertionError:
+            raise  # a test double's guard or an invariant, never a request outcome
+        except Exception as exc:
             # Request-level failure: every key in this batch failed with the
-            # same translated cause; later batches still run. Anything
-            # s3_errors does not translate (a programming error) propagates
-            # and re-raises at the caller's next non-empty flush() or close().
-            logger.debug("delete_objects failed for s3://%s: %s", self._bucket, exc)
-            failures = {info.key: exc for _, info in batch}
+            # same cause - translated by s3_errors, or wrapped by
+            # request_failure when the request raised outside the boto family;
+            # later batches still run. What the deleter's own code raises after
+            # the request (a programming error) still propagates and re-raises
+            # at the caller's next non-empty flush() or close().
+            failure = request_failure(exc, operation=self._operation, bucket=self._bucket)
+            logger.debug("delete_objects failed for s3://%s: %s", self._bucket, failure)
+            failures = {info.key: failure for _, info in batch}
         else:
             failures, unattributable = self._translate_errors(
                 response.get("Errors", []), [info for _, info in batch]
@@ -426,8 +431,12 @@ class S3Deleter:
         try:
             with s3_errors(operation=self._operation, bucket=self._bucket, key=info.key):
                 response = self._client.delete_object(**kwargs)
-        except Boto3S3Error as exc:
-            errors[index] = exc
+        except AssertionError:
+            raise  # as in _run_delete_objects
+        except Exception as exc:
+            errors[index] = request_failure(
+                exc, operation=self._operation, bucket=self._bucket, key=info.key
+            )
         else:
             if self._capture_response:
                 deletes[index] = strip_response_metadata(response)

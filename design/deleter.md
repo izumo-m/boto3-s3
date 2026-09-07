@@ -142,10 +142,24 @@ versioned bucket) cannot be mapped back to submission order.
   continues with subsequent batches
   (`NoSuchBucket` and the like fail across all batches alike and show up in the
   counts).
-- **unexpected exceptions** (anything outside the boto family = a programming
-  error): not turned into per-key results; passed straight through from the
-  worker and re-raised to the caller on the next non-empty `flush()` or on
-  `close()` (fails loudly).
+- **the request raising outside the boto family** (botocore reading a
+  response that lacks an element it needs - an S3 Express `CreateSession`
+  reply without `Credentials`, a `KeyError` - or a redirect loop ending in
+  `RecursionError`): recorded exactly like a translated request-level
+  failure - for every key of a `DeleteObjects` request, for the one key of a
+  `DeleteObject` - as a plain `Boto3S3Error` whose message is the exception's
+  `str()` and whose `__cause__` is the exception
+  (`s3storage.request_failure`, which `S3.rm`'s blind single-key delete
+  applies too). This is aws-cli's shape: its per-key `DeleteObject` runs as an
+  s3transfer task, which records whatever the request raises as that key's
+  failure, so the CLI's line reads `delete failed: s3://b/k 'Credentials'` on
+  both tools (measured). `AssertionError` is the one exception left to
+  propagate - a test double's guard or an invariant, never a request outcome.
+- **unexpected exceptions elsewhere** (a programming error in the deleter's
+  own response handling, or an `on_result` callback that raises): not turned
+  into per-key results; passed straight through from the worker and re-raised
+  to the caller on the next non-empty `flush()` or on `close()` (fails
+  loudly).
 
 ## 4. aws-cli parity notes
 
@@ -180,7 +194,11 @@ versioned bucket) cannot be mapped back to submission order.
   responsibility to assemble from `on_result`. The library does not print; it
   only emits the `boto3_s3.deleter` logger (debug: batch dispatch, request-level
   failures, per-key failures / warning: unattributable entries) - an intentional
-  break from parity. The CLI's `--debug` picks up this logger.
+  break from parity. The CLI's `--debug` picks up this logger, and nothing
+  else does: the `boto3_s3` package logger carries a `NullHandler` (registered
+  by `s3storage`, which every logging path imports - as boto3's own loggers
+  do), so where no handler is configured the warning stays off stderr instead
+  of surfacing through Python's `lastResort` handler.
 
 ## 5. Out of scope (outside this component)
 

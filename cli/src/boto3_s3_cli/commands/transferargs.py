@@ -26,11 +26,13 @@ from boto3_s3 import (
     S3Storage,
     TransferOptions,
     ValidationError,
+    crtsupport,
 )
 from boto3_s3.localstorage import translate_os_error
 from boto3_s3.pathresolver import is_s3express_path
 from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
+    checksumdefault,
     clientfactory,
     filters,
     globalargs,
@@ -631,10 +633,42 @@ def resolve_case_conflict(
     return CaseConflictMode.IGNORE
 
 
+def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) -> str | None:
+    """aws's default request checksum for the uploads a run makes, else None.
+
+    Only an upload run (``locals3``) gets one: by default aws sends no
+    checksum algorithm on a copy's CopyObject / UploadPartCopy (measured
+    against the pinned aws; an explicit ``--checksum-algorithm`` reaches them
+    on both tools through the request mapping), and a download writes
+    nothing. The value is `checksumdefault`'s, chosen by the engine
+    *transfer_config* resolves to (`resolve_transfer_config`; the same
+    `crtsupport.selects_crt` test the engine applies): the CRT engine's
+    default holds whatever ``request_checksum_calculation`` says, the classic
+    engine's only under ``when_supported`` - aws's own split, measured on
+    the wire.
+    """
+    if paths_type != "locals3":
+        return None
+    if crtsupport.selects_crt(transfer_config):
+        return checksumdefault.crt_default_algorithm()
+    return checksumdefault.default_algorithm(client)
+
+
 def build_transfer_options(
-    args: argparse.Namespace, case_conflict: CaseConflictMode, *, operation: str
+    args: argparse.Namespace,
+    case_conflict: CaseConflictMode,
+    *,
+    operation: str,
+    default_checksum_algorithm: str | None = None,
 ) -> TransferOptions:
-    """Translate parsed flags into the library's ``TransferOptions``."""
+    """Translate parsed flags into the library's ``TransferOptions``.
+
+    ``default_checksum_algorithm`` (`default_upload_checksum`) stands in for
+    an absent ``--checksum-algorithm`` the way aws's bundled botocore default
+    does for aws: named here, it reaches both transfer engines through the
+    options, where the library would otherwise leave each engine to pip
+    s3transfer's own CRC32.
+    """
     options = TransferOptions(
         annotation_copy_mode=AnnotationCopyMode.PRELOAD_MEMORY,
         copy_props=CopyPropsMode(args.copy_props),
@@ -667,6 +701,8 @@ def build_transfer_options(
             # (aws resolves them at parse time), so the values here are
             # consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
+    if args.checksum_algorithm is None and default_checksum_algorithm is not None:
+        options["checksum_algorithm"] = default_checksum_algorithm
     if args.metadata is not None:
         options["metadata"] = args.metadata
     if args.sse_c_key is not None:
@@ -928,7 +964,7 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
         # (`CommandResultRecorder.__exit__`), the shutdown cancels the
         # accepted transfers, and the printer emits one
         # `cancelled: ctrl-c received` line at rc 1 (measured mid-sync and
-        # mid-rm, 2.36.1). The per-item CANCELLED records stay silent like
+        # mid-rm, 2.36.40). The per-item CANCELLED records stay silent like
         # aws's (progress.py `_prints`); the pre-pipeline spans keep the
         # 130 backstop.
         if not quiet:

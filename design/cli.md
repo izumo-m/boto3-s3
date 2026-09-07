@@ -101,7 +101,7 @@ solidified design is added here.
   still missing its positionals the required-argument report comes first, as
   in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
   `s3 help --help` breaks the exactly-`help` remainder into an invalid
-  choice `help` - all measured on 2.36.1).
+  choice `help` - all measured on 2.36.40).
 - Between those resolutions and the help-token rule sits the
   **`cli_timestamp_format` gate** (`ConfigScan.invalid_timestamp_format`),
   aws's only rc-253 `Configuration` failure on this surface (section 6). aws
@@ -306,6 +306,7 @@ solidified design is added here.
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
 | `alias.py` | The SDK-free read of `~/.aws/cli/alias` and the two things an entry can be: a shell command line or CLI arguments (section 9). `cli.py` owns where they resolve; this module owns the file, the splitting and the shell quoting |
 | `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
+| `checksumdefault.py` | aws's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 4, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
@@ -404,7 +405,16 @@ These implement the policy in
   walked at request time - which the CRT engine never sees, since
   `create_s3_crt_client(verify=None)` means the platform trust store
   ([`crt.md`](./crt.md)). Leaving it unresolved had the two engines trusting
-  different roots.
+  different roots. An empty or whitespace-only answer is **refused** rather
+  than used: `_reject_empty_ca_bundle` raises botocore's own
+  `InvalidConfigError` (rc 255, its exact wording), which is what aws v2 does
+  from 2.36.2 on and what the installed botocore does from 1.43.54 - the
+  supported floor is older, so the CLI supplies the check itself and the
+  rejection holds across the whole range. It runs where aws runs it, after
+  `session.client` has resolved the profile and the endpoint, so an undeclared
+  `--profile` and an empty `--region` (`Invalid endpoint`) still report first,
+  and a rejected retry mode still beats it (all measured). `--no-verify-ssl`
+  resolves to `False` ahead of the chain and is unaffected.
 - **The alignment with aws v2**: `build_client` and the botocore session every
   client is opened on absorb ten differences between the installed botocore on
   a host interpreter and the botocore aws v2 ships frozen. Where a correction
@@ -1114,6 +1124,31 @@ but this is allowed because the charter stipulates that awscrt-dependent feature
 are subject to it only when awscrt is present (overview.md section 3, transfer.md section 9).
 Signing stays pure-Python via the pin of section 4.
 
+Without `--checksum-algorithm`, aws's default is its bundled botocore's
+`DEFAULT_CHECKSUM_ALGORITHM`, `CRC64NVME`, stamped on every request whose
+operation names a `ChecksumAlgorithm` member; pip botocore's is `CRC32`. The
+CLI names aws's value (`checksumdefault.py`) in the two places botocore would
+have stamped its own: an upload run's `TransferOptions` (`locals3` only - aws
+sends no algorithm on a copy's requests, measured - so both transfer engines
+see it; the CRT engine reads its trailing checksum from that argument alone),
+and a `provide-client-params.s3.*` handler `build_client` attaches for every
+other request (`rm`'s DeleteObjects, `website` / `mb --tags`, the annotation
+writes). Only where the installed botocore can compute CRC64NVME (awscrt) and
+only where botocore would have stamped a default of its own: on every such
+request for a client whose `request_checksum_calculation` resolves to
+`when_supported`, and under `when_required` only on the operations that
+require a checksum (`DeleteObjects`, the bucket configuration puts) - the
+handler asks the operation model, in botocore's own order, so a
+`when_required` `website` sends CRC64NVME on both tools while a
+`when_required` classic upload sends none on either. The CRT engine is the
+exception aws itself makes: its bundled CRT module carries CRC64NVME as its
+own upload fallback and never reads the setting, so
+`transferargs.default_upload_checksum` picks by the resolved engine and a
+`when_required` CRT upload trails CRC64NVME on both tools (measured).
+The library keeps botocore's default (crt.md section 1); the measured stake
+is the CRT engine's 1 GB upload, where CRC32's software implementation cost
+10% (benchmarks/RESULTS.md, 2026-09-06).
+
 The validation order of `run()` (corresponding to aws's stages; the
 combined-error cases are measured against the pinned aws-cli):
 **a top-level global that fails to parse, or a parse-time `--version` (252 /
@@ -1160,7 +1195,7 @@ the transfer-manager construction (255 on a CRT client the region cannot build)
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
 `cancelled: ctrl-c received` line + 1 (aws's result machinery swallows a
-mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.1;
+mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.40;
 rm's own pipeline catch converts identically, and the dispatcher's 130
 backstop keeps the pre-pipeline spans). aws only reaches that line through a
 *cancelled transfer future*, so where none is in flight - before the first

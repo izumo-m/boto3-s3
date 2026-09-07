@@ -34,7 +34,7 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Thirteen of section 2's entries
+does change from one `aws` release to the next. Fourteen of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
 engine, the failure lines of a batched delete, the closing line of a Ctrl-C
@@ -44,8 +44,9 @@ failure line of a
 directory copied without `--recursive`, the invalid-bucket-name reports this
 command writes itself, the `--version` line, two argument-parsing corners, the
 history warning `aws` writes and this command has not, the messages the
-installed botocore itself writes, and the element a listing entry missing two
-required ones is blamed on. The interactive prompt
+installed botocore itself writes, the element a listing entry missing two
+required ones is blamed on, and the request a failing stream download is
+blamed on under a non-default checksum-validation setting. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -159,13 +160,16 @@ run comes out differently, listed in section 1.
   codes agree, and the bytes are identical. Real S3 never reports a
   `LastModified` that old, so reaching this at all takes an S3-compatible
   implementation that does.
-- **Default checksum algorithm.** Without `--checksum-algorithm`, the requests
-  that carry a client-computed checksum are checked with `CRC32` here and with
-  `CRC64NVME` on `aws` v2 — uploads chiefly, and also the annotation writes a
-  `--copy-props all` multipart copy sends. The default belongs to the installed
-  botocore rather than to either tool's own code. Both algorithms are valid and
-  neither changes the result or the exit code. An explicit
-  `--checksum-algorithm` makes uploads agree.
+- **Default checksum algorithm without awscrt.** Without `--checksum-algorithm`,
+  the requests that carry a client-computed checksum use `CRC64NVME` here as on
+  `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
+  writes a `--copy-props all` multipart copy sends — as long as the installed
+  botocore can compute it, which takes awscrt (the `crt` extra). Without
+  awscrt the installed botocore's own default, `CRC32`, is sent instead; `aws`
+  always bundles awscrt. Both algorithms are valid and neither changes the
+  result or the exit code; what differs is the checksum type left on an
+  uploaded object (a full-object CRC64NVME against a composite CRC32). An
+  explicit `--checksum-algorithm` makes the two agree regardless.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -396,6 +400,23 @@ run comes out differently, listed in section 1.
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit
   code 255) where `aws` runs as if it were unset.
+- **A failing stream download under `response_checksum_validation =
+  when_required` is blamed on a different request.** With that config key (or
+  `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` — not the default), the
+  installed `s3transfer` skips the `HeadObject` it would otherwise send before
+  a download and opens the object with a ranged `GetObject` straight away,
+  where `aws`'s bundled copy still heads first. A download to a file is
+  unaffected — both tools resolve the source with their own `HeadObject`
+  before the transfer starts — and a stream download that succeeds is byte
+  for byte the same. But `cp s3://bkt/k -` resolves nothing of its own, so
+  when the object cannot be read the failure line names the request that
+  failed: `download failed: s3://bkt/k to - An error occurred (NoSuchKey)
+  when calling the GetObject operation: The specified key does not exist.`
+  here, against `... An error occurred (404) when calling the HeadObject
+  operation: Not Found` on `aws` — for a missing key, and for an SSE-C
+  object read without its key. Exit code 1 on both, nothing written. This
+  lives in the installed `s3transfer`, the same family as the mid-stream
+  retry above, so no option here changes it.
 - **Where a failing stdout stops a stream download.** `cp s3://bkt/k -` hands
   the object's bytes to the process's stdout and never flushes them, exactly as
   `aws` does, so a stdout that cannot take them fails in one of two places:

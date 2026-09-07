@@ -24,6 +24,7 @@ from boto3_s3_cli import runtimeconfig
 from boto3_s3_cli.cli import exit_code_for
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Context
+from tests.utils.fakes3 import MTIME
 from tests.utils.harness import run_cli_in_process
 from tests.utils.recorder import ApiCall, make_recording_client
 
@@ -620,7 +621,9 @@ class TestCrtEngineConstructionSlot:
         config_file = tmp_path / "config"
         config_file.write_text(self._CRT)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
-        client, calls = make_recording_client([{"ContentLength": 1, "ETag": '"e"'}, {}])
+        client, calls = make_recording_client(
+            [{"ContentLength": 1, "ETag": '"e"', "LastModified": MTIME}, {}]
+        )
         ctx = Context(client_factory=lambda _args: client, transfer_config=None)
         result = run_cli_in_process(["cp", "s3://bucket/a", "s3://bucket/b"], ctx=ctx)
         assert result.rc == 0, (result.stderr, calls)

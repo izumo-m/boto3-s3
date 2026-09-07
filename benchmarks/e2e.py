@@ -15,19 +15,28 @@ touched.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from benchmarks import workload
-from benchmarks.core import BenchmarkError, ScenarioResult, Side, VerificationError, round_order
+from benchmarks import awsenv, workload
+from benchmarks.core import (
+    DEFAULT_LARGE_MB,
+    BenchmarkError,
+    ScenarioResult,
+    Side,
+    VerificationError,
+    round_order,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -35,6 +44,10 @@ if TYPE_CHECKING:
     from tests.utils.harness import CliResult
 
 BUCKET = "boto3-s3-bench"
+# A caller-chosen bucket name for a real-S3 run (the EC2 launcher's way of
+# knowing which bucket to remove if the run is cut short); must stay inside
+# the `boto3-s3-bench-*` family.
+BUCKET_ENV = "BOTO3_S3_BENCH_BUCKET"
 
 ENGINES = ("classic", "crt")
 
@@ -49,13 +62,6 @@ _SETUP_HINT = (
     "  source scripts/minio-env.sh\n"
     "then rerun via `uv run python -m benchmarks run`"
 )
-
-# Set BOTO3_S3_BENCH_ALLOW_REMOTE=1 to accept a non-local endpoint. Off by
-# default: the harness creates/purges its bucket and moves hundreds of MB,
-# which must not silently land on (and bill against) real AWS.
-_ALLOW_REMOTE_ENV = "BOTO3_S3_BENCH_ALLOW_REMOTE"
-
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 @dataclass
@@ -97,7 +103,9 @@ class E2EScenario:
     tmpfs-backed storage bounded. `verify` runs on both warmup results only -
     it guards against a run that silently did no work, which would otherwise
     record fake-fast timings. `top_level` marks argv for the program itself
-    (``--version``), where aws takes no ``s3`` token.
+    (``--version``), where aws takes no ``s3`` token. `payload_bytes` is what
+    one invocation moves (transfer scenarios only); the report turns it into
+    throughput.
     """
 
     name: str
@@ -110,23 +118,39 @@ class E2EScenario:
     crt_capable: bool = False
     top_level: bool = False
     ok_rcs: frozenset[int] = frozenset({0})
+    payload_bytes: int | None = None
 
 
 def check_environment() -> tuple[str, str]:
-    """Resolve both executables and validate the endpoint env, or raise with guidance."""
-    missing = [
-        name
-        for name in ("AWS_ENDPOINT_URL_S3", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        raise BenchmarkError(f"missing environment: {', '.join(missing)}; {_SETUP_HINT}")
-    host = urllib.parse.urlsplit(os.environ["AWS_ENDPOINT_URL_S3"]).hostname
-    if host not in _LOCAL_HOSTS and not os.environ.get(_ALLOW_REMOTE_ENV):
+    """Resolve both executables and validate the S3 target, or raise with guidance.
+
+    Three shapes are accepted: local MinIO (an `AWS_ENDPOINT_URL_S3` on a local
+    host plus the static dev keys), a deliberate non-local endpoint, and real
+    S3 (no endpoint override, credentials from the default chain - a profile or
+    an instance role). The last two both require the explicit
+    `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
+    accident.
+    """
+    endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
+    opted_in = awsenv.remote_opted_in()
+    if not endpoint:
+        if not opted_in:
+            raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
+        _check_remote_credentials()
+    elif awsenv.targeting_local_minio():
+        missing = [
+            name
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            if not os.environ.get(name)
+        ]
+        if missing:
+            raise BenchmarkError(f"missing environment: {', '.join(missing)}; {_SETUP_HINT}")
+    elif not opted_in:
+        host = awsenv.endpoint_host()
         raise BenchmarkError(
             f"AWS_ENDPOINT_URL_S3 points at non-local host {host!r}; benchmarks create and "
-            f"purge bucket {BUCKET!r} and transfer hundreds of MB. Set {_ALLOW_REMOTE_ENV}=1 "
-            "if that endpoint really is the intended target."
+            f"purge a {BUCKET!r} bucket and transfer hundreds of MB. Set "
+            f"{awsenv.ALLOW_REMOTE_ENV}=1 if that endpoint really is the intended target."
         )
     ours = shutil.which("boto3-s3")
     if ours is None:
@@ -139,6 +163,36 @@ def check_environment() -> tuple[str, str]:
     return ours, aws
 
 
+def _check_remote_credentials() -> None:
+    """Fail fast when a real-S3 run has no region or no resolvable credentials.
+
+    Better to stop here than after seeding a corpus: create_bucket_in_region
+    needs the region, and every call needs credentials the default chain (env,
+    profile, or instance role) can produce.
+    """
+    if awsenv.resolve_region() is None:
+        raise BenchmarkError(
+            "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
+        )
+    if os.environ.get("AWS_PROFILE"):
+        # Both CLIs run with AWS_CONFIG_FILE pointed at the per-engine config,
+        # which hides every [profile ...] section from them; the harness's own
+        # pre-flight would pass and the first CLI invocation would fail.
+        raise BenchmarkError(
+            "real-S3 run cannot use AWS_PROFILE: the harness pins AWS_CONFIG_FILE for both "
+            "CLIs, so a profile is invisible to them. Export the credentials into the "
+            "environment (e.g. `aws configure export-credentials --format env`) or run "
+            "from an instance role."
+        )
+    import botocore.session
+
+    session: Any = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
+    if session.get_credentials() is None:
+        raise BenchmarkError(
+            "real-S3 run found no credentials (checked env, profile, and instance role)"
+        )
+
+
 def aws_version(aws_exe: str) -> str:
     proc = subprocess.run([aws_exe, "--version"], capture_output=True, text=True, timeout=30.0)
     return (proc.stdout or proc.stderr).strip()
@@ -147,11 +201,38 @@ def aws_version(aws_exe: str) -> str:
 def _build_client() -> Any:
     import boto3
 
+    # No endpoint override means real S3; MinIO reports us-east-1, so that is
+    # the only place the default applies.
     return boto3.client(
         "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL_S3"],
-        region_name=os.environ.get("AWS_REGION") or "us-east-1",
+        endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
+        region_name=awsenv.resolve_region() or "us-east-1",
     )
+
+
+def _bench_bucket() -> str:
+    """The bucket the run owns: the fixed name on MinIO, a unique one on S3.
+
+    On MinIO the name is private to the stack, so the documented
+    ``boto3-s3-bench`` is fine and matches design/benchmark.md. Anywhere else -
+    real S3 with or without an explicit endpoint - the namespace is global and
+    the harness force-deletes whatever it creates, so a per-run suffix avoids
+    colliding with anyone (including a previous run whose delete had not yet
+    propagated).
+    """
+    if awsenv.targeting_local_minio():
+        return BUCKET
+    override = os.environ.get(BUCKET_ENV)
+    if override:
+        # The EC2 launcher names the run's bucket so it can remove exactly that
+        # one if the run is cut short; it must stay in the family the instance
+        # role is scoped to.
+        if not override.startswith(BUCKET + "-"):
+            raise BenchmarkError(f"{BUCKET_ENV} must start with {BUCKET + '-'!r}: {override!r}")
+        return override
+    import secrets
+
+    return f"{BUCKET}-{secrets.token_hex(4)}"
 
 
 def _write_engine_config(workroot: Path, engine: str) -> Path:
@@ -166,10 +247,10 @@ def _write_engine_config(workroot: Path, engine: str) -> Path:
     return config
 
 
-def _invoke(env: E2EEnv, scenario: E2EScenario, side: Side) -> tuple[float, CliResult]:
-    """Run one side once, returning (wall-clock seconds, outcome)."""
-    from tests.utils.harness import CliResult
-
+def _invoke(
+    env: E2EEnv, scenario: E2EScenario, side: Side
+) -> tuple[float, CliResult, float | None]:
+    """Run one side once: (wall-clock seconds, outcome, peak RSS in bytes or None)."""
     argv = scenario.make_argv(env, side)
     if env.engine == "crt" and not scenario.top_level:
         # aws's CRT client reads use_ssl from the CLI argument only, so an
@@ -186,24 +267,131 @@ def _invoke(env: E2EEnv, scenario: E2EScenario, side: Side) -> tuple[float, CliR
         cmd = [env.aws_exe, *argv]
     else:
         cmd = [env.aws_exe, "s3", *argv]
-    start = time.perf_counter()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=_SUBPROCESS_TIMEOUT,
-            env={**os.environ, **env.overlay},
-        )
+        return _run_child(cmd, {**os.environ, **env.overlay})
     except subprocess.TimeoutExpired as exc:
         raise BenchmarkError(
             f"[{scenario.name}] {side.value} exceeded {_SUBPROCESS_TIMEOUT:.0f}s: {cmd}"
         ) from exc
-    elapsed = time.perf_counter() - start
-    return elapsed, CliResult(
-        proc.returncode,
-        proc.stdout.decode(errors="replace"),
-        proc.stderr.decode(errors="replace"),
-    )
+
+
+def _run_child(cmd: list[str], env: dict[str, str]) -> tuple[float, CliResult, float | None]:
+    """Run one CLI process: wall-clock seconds, its outcome, its peak RSS in bytes.
+
+    The child is started by a tiny intermediary (``python -I -S``, a few MiB)
+    rather than by this harness directly, and the intermediary does the timing
+    and the reaping. Two reasons. First, Linux floors a reaped child's
+    ``ru_maxrss`` at the high-water mark of the address space it was forked
+    from, so a CLI spawned straight from this boto3-laden process could never
+    report a peak below the harness's own (~65 MiB) - the ours-side numbers
+    would all read the same. Second, the intermediary's ``wait4`` returns that
+    one child's rusage, which ``getrusage(RUSAGE_CHILDREN)`` (a running
+    maximum over every child ever reaped) cannot. The intermediary's own
+    startup sits outside the timed window, and its ``fork`` -> ``wait4`` edge
+    is the exit itself, so the timing is if anything tighter than a
+    ``subprocess.run`` from here. Output goes to temporary files so a chatty
+    child (``ls`` of 10k keys) can never stall on a full pipe, and stdin is
+    ``/dev/null`` so neither CLI can notice a terminal. On timeout the whole
+    process group is killed so no orphan keeps transferring. Where
+    ``fork`` does not exist (Windows) ``subprocess.run`` measures the time
+    alone and the RSS is None.
+    """
+    import json
+    import signal
+
+    from tests.utils.harness import CliResult
+
+    if not hasattr(os, "fork") or not hasattr(os, "killpg"):
+        start = time.perf_counter()
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=_SUBPROCESS_TIMEOUT,
+            env=env,
+        )
+        elapsed = time.perf_counter() - start
+        return (
+            elapsed,
+            CliResult(
+                proc.returncode,
+                proc.stdout.decode(errors="replace"),
+                proc.stderr.decode(errors="replace"),
+            ),
+            None,
+        )
+    with (
+        tempfile.TemporaryDirectory(prefix="boto3-s3-bench-run-") as tmp,
+        tempfile.TemporaryFile() as out,
+        tempfile.TemporaryFile() as err,
+    ):
+        report = Path(tmp) / "report.json"
+        timed_out = threading.Event()
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", _INTERMEDIARY, str(report), *cmd],
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            env=env,
+            start_new_session=True,
+        )
+
+        def _kill_group() -> None:
+            timed_out.set()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+
+        timer = threading.Timer(_SUBPROCESS_TIMEOUT, _kill_group)
+        timer.start()
+        try:
+            proc.wait()
+        except BaseException:
+            # Ctrl-C (or anything else) must not leave the CLI running on.
+            _kill_group()
+            raise
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
+            raise subprocess.TimeoutExpired(cmd, _SUBPROCESS_TIMEOUT)
+        out.seek(0)
+        err.seek(0)
+        stdout = out.read().decode(errors="replace")
+        stderr = err.read().decode(errors="replace")
+        if not report.is_file():
+            raise BenchmarkError(
+                f"the timing intermediary produced no report for {cmd} "
+                f"(rc={proc.returncode})\nstderr:\n{stderr}"
+            )
+        data = json.loads(report.read_text())
+    rc = os.waitstatus_to_exitcode(int(data["status"]))
+    return float(data["elapsed"]), CliResult(rc, stdout, stderr), _maxrss_bytes(data["maxrss"])
+
+
+# The intermediary. It forks the CLI, times fork -> reap, and writes elapsed
+# seconds, the raw wait status and ru_maxrss to the report path in argv[1].
+# It imports only what it needs so its own address space stays small: that
+# size is the floor below which the child's peak cannot be reported.
+_INTERMEDIARY = """
+import json, os, sys, time
+report, cmd = sys.argv[1], sys.argv[2:]
+start = time.perf_counter()
+pid = os.fork()
+if pid == 0:
+    try:
+        os.execvp(cmd[0], cmd)
+    finally:
+        os._exit(127)
+_, status, usage = os.wait4(pid, 0)
+elapsed = time.perf_counter() - start
+with open(report, "w") as fh:
+    json.dump({"elapsed": elapsed, "status": status, "maxrss": usage.ru_maxrss}, fh)
+"""
+
+
+def _maxrss_bytes(maxrss: float) -> float:
+    """``ru_maxrss`` normalized to bytes: Linux reports KiB, macOS bytes."""
+    value = float(maxrss)
+    return value if sys.platform == "darwin" else value * 1024.0
 
 
 def _require_rc(scenario: E2EScenario, side: Side, stage: str, result: CliResult) -> None:
@@ -218,8 +406,14 @@ def _scale(value: int, quick: bool, *, minimum: int = 10) -> int:
     return value if not quick else max(value // 100, minimum)
 
 
-def build_scenarios(quick: bool) -> list[E2EScenario]:
-    """The v1 E2E scenario set (sizes divided by ~100 under --quick)."""
+def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2EScenario]:
+    """The E2E scenario set (sizes divided by ~100 under --quick).
+
+    *large_mb* sizes the single-object transfer scenarios. The 64 MB default
+    suits the local MinIO lane; against real S3 on a wide NIC that finishes
+    inside the startup constant, so the EC2 lane raises it
+    (``--large-transfer-mb``).
+    """
     from tests.utils.harness import normalize_cp_stdout
 
     scenarios: list[E2EScenario] = []
@@ -297,8 +491,8 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
             env.client, env.bucket, env.s3_prefix("sync_noop") + "corpus/", sync_count, 1024
         )
 
-    def sync_verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
-        transfers = normalize_cp_stdout(result.stdout, bucket=BUCKET)
+    def sync_verify(env: E2EEnv, side: Side, result: CliResult) -> None:
+        transfers = normalize_cp_stdout(result.stdout, bucket=env.bucket)
         if transfers:
             raise VerificationError(
                 f"[sync_noop] {side.value} transferred {len(transfers)} files "
@@ -322,8 +516,8 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
     cp_small_count = _scale(1_000, quick)
 
     def transfer_count_verify(name: str, expected: int) -> Callable[..., None]:
-        def verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
-            transfers = normalize_cp_stdout(result.stdout, bucket=BUCKET)
+        def verify(env: E2EEnv, side: Side, result: CliResult) -> None:
+            transfers = normalize_cp_stdout(result.stdout, bucket=env.bucket)
             if len(transfers) != expected:
                 raise VerificationError(
                     f"[{name}] {side.value} reported {len(transfers)} transfers, "
@@ -331,6 +525,140 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
                 )
 
         return verify
+
+    # sync that does work. sync_noop above measures enumerate+compare with
+    # nothing to do; these three cover the decisions that lead somewhere: one
+    # new file (the README's one-file measurement, startup-dominated), a
+    # corpus where a fixed subset must be re-uploaded, and --delete over a
+    # corpus with remote-only extras. Deterministic re-staging keeps every
+    # invocation, warmup included, facing the same work.
+    tiny_size = 11 * 1024
+
+    def sync_tiny_setup(env: E2EEnv) -> None:
+        workload.generate_tree(env.dir_for("sync_tiny") / "tree", 1, tiny_size)
+
+    def sync_tiny_reset(env: E2EEnv) -> None:
+        from tests.utils.harness import delete_under
+
+        delete_under(env.client, env.bucket, env.s3_prefix("sync_tiny"))
+
+    scenarios.append(
+        E2EScenario(
+            name="sync_tiny",
+            dimensions={"file_count": "1", "file_size": "11KB"},
+            payload_bytes=tiny_size,
+            crt_capable=True,
+            setup=sync_tiny_setup,
+            reset=sync_tiny_reset,
+            make_argv=lambda env, side: [
+                "sync",
+                str(env.dir_for("sync_tiny") / "tree"),
+                env.s3_url(env.s3_prefix("sync_tiny") + env.unique(side) + "/"),
+            ],
+            verify=transfer_count_verify("sync_tiny", 1),
+        )
+    )
+
+    changed_total = _scale(10_000, quick)
+    changed_count = _scale(2_000, quick)
+
+    def sync_changed_setup(env: E2EEnv) -> None:
+        # Local tree a day old, remote seeded now at the same size: the
+        # untouched keys compare equal (size) and older (mtime) - a no-op.
+        workload.generate_tree(
+            env.dir_for("sync_changed") / "tree", changed_total, 1024, mtime=time.time() - 86400
+        )
+        workload.seed_prefix(
+            env.client,
+            env.bucket,
+            env.s3_prefix("sync_changed") + "corpus/",
+            changed_total,
+            1024,
+        )
+
+    def sync_changed_reset(env: E2EEnv) -> None:
+        # Re-stale the first `changed_count` keys by *size* (2 KB against a
+        # 1 KB local file): a size mismatch forces the upload whatever the
+        # timestamps say, and the previous invocation's uploads (which made
+        # them 1 KB again) are undone. Only the subset is rewritten, so the
+        # reset costs changed_count puts, not the whole corpus.
+        workload.seed_prefix(
+            env.client,
+            env.bucket,
+            env.s3_prefix("sync_changed") + "corpus/",
+            changed_count,
+            2048,
+        )
+
+    scenarios.append(
+        E2EScenario(
+            name="sync_changed_10k",
+            dimensions={
+                "file_count": str(changed_total),
+                "changed_count": str(changed_count),
+                "file_size": "1KB",
+            },
+            payload_bytes=changed_count * 1024,
+            crt_capable=True,
+            setup=sync_changed_setup,
+            reset=sync_changed_reset,
+            make_argv=lambda env, _side: [
+                "sync",
+                str(env.dir_for("sync_changed") / "tree"),
+                env.s3_url(env.s3_prefix("sync_changed") + "corpus/"),
+            ],
+            verify=transfer_count_verify("sync_changed", changed_count),
+        )
+    )
+
+    delete_kept = _scale(8_000, quick)
+    delete_extra = _scale(2_000, quick)
+
+    def sync_delete_setup(env: E2EEnv) -> None:
+        workload.generate_tree(
+            env.dir_for("sync_delete") / "tree", delete_kept, 1024, mtime=time.time() - 86400
+        )
+        workload.seed_prefix(
+            env.client, env.bucket, env.s3_prefix("sync_delete") + "corpus/", delete_kept, 1024
+        )
+
+    def sync_delete_reset(env: E2EEnv) -> None:
+        # The extras live under a sub-prefix no local directory matches, so
+        # every one of them is remote-only; the previous invocation deleted
+        # them and this puts them back.
+        workload.seed_prefix(
+            env.client,
+            env.bucket,
+            env.s3_prefix("sync_delete") + "corpus/extra/",
+            delete_extra,
+            1,
+        )
+
+    def sync_delete_verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
+        lines = result.stdout.splitlines()
+        deletes = [line for line in lines if line.startswith("delete:")]
+        uploads = [line for line in lines if line.startswith("upload:")]
+        if len(deletes) != delete_extra or uploads:
+            raise VerificationError(
+                f"[sync_delete] {side.value} deleted {len(deletes)} keys (expected "
+                f"{delete_extra}) and uploaded {len(uploads)} (expected 0)"
+            )
+
+    scenarios.append(
+        E2EScenario(
+            name="sync_delete_10k",
+            dimensions={"file_count": str(delete_kept), "extra_count": str(delete_extra)},
+            setup=sync_delete_setup,
+            reset=sync_delete_reset,
+            make_argv=lambda env, _side: [
+                "sync",
+                "--delete",
+                str(env.dir_for("sync_delete") / "tree"),
+                env.s3_url(env.s3_prefix("sync_delete") + "corpus/"),
+            ],
+            verify=sync_delete_verify,
+        )
+    )
 
     def cp_up_small_setup(env: E2EEnv) -> None:
         workload.generate_tree(env.dir_for("cp_up_small") / "tree", cp_small_count, 4096)
@@ -345,6 +673,7 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
         E2EScenario(
             name="cp_upload_small_1k",
             dimensions={"file_count": str(cp_small_count), "file_size": "4KB"},
+            payload_bytes=cp_small_count * 4096,
             crt_capable=True,
             setup=cp_up_small_setup,
             reset=cp_up_small_reset,
@@ -374,6 +703,7 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
         E2EScenario(
             name="cp_download_small_1k",
             dimensions={"file_count": str(cp_small_count), "file_size": "4KB"},
+            payload_bytes=cp_small_count * 4096,
             crt_capable=True,
             setup=cp_dl_small_setup,
             reset=cp_dl_small_reset,
@@ -389,7 +719,7 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
 
     # --quick keeps a just-past-threshold size (not /100) so the smoke run
     # still exercises multipart.
-    big_size = 64 * _MB if not quick else 9 * _MB
+    big_size = large_mb * _MB if not quick else 9 * _MB
     big_dim = f"{big_size // _MB}MB"
 
     def cp_up_large_setup(env: E2EEnv) -> None:
@@ -404,6 +734,7 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
         E2EScenario(
             name="cp_upload_large",
             dimensions={"file_size": big_dim},
+            payload_bytes=big_size,
             crt_capable=True,
             setup=cp_up_large_setup,
             reset=cp_up_large_reset,
@@ -428,6 +759,7 @@ def build_scenarios(quick: bool) -> list[E2EScenario]:
         E2EScenario(
             name="cp_download_large",
             dimensions={"file_size": big_dim},
+            payload_bytes=big_size,
             crt_capable=True,
             setup=cp_dl_large_setup,
             reset=cp_dl_large_reset,
@@ -488,23 +820,29 @@ def _run_scenario(
     for side in (Side.OURS, Side.AWS):
         if scenario.reset is not None:
             scenario.reset(env)
-        _elapsed, result = _invoke(env, scenario, side)
+        _elapsed, result, _peak = _invoke(env, scenario, side)
         _require_rc(scenario, side, "warmup", result)
         if scenario.verify is not None:
             scenario.verify(env, side, result)
     n = samples_override if samples_override is not None else scenario.samples
     log(f"[e2e/{env.engine}] {scenario.name}: timing {n} rounds x 2 sides")
     samples: dict[str, list[float]] = {Side.OURS.value: [], Side.AWS.value: []}
+    rss: dict[str, list[float]] = {Side.OURS.value: [], Side.AWS.value: []}
+    rss_available = True
     order: list[str] = []
     for round_index in range(n):
         for side in round_order(round_index):
             if scenario.reset is not None:
                 scenario.reset(env)
-            elapsed, result = _invoke(env, scenario, side)
+            elapsed, result, peak = _invoke(env, scenario, side)
             _require_rc(scenario, side, f"round {round_index}", result)
             if side is Side.OURS:
                 elapsed += handicap
             samples[side.value].append(elapsed)
+            if peak is None:
+                rss_available = False
+            else:
+                rss[side.value].append(peak)
             order.append(side.value)
     return ScenarioResult(
         scenario=scenario.name,
@@ -513,6 +851,8 @@ def _run_scenario(
         dimensions=dict(scenario.dimensions),
         samples=samples,
         order=order,
+        rss=rss if rss_available else None,
+        payload_bytes=scenario.payload_bytes,
     )
 
 
@@ -532,19 +872,25 @@ def run_scenarios(
     startup probes their net adjustment needs.
 
     Returns ``(results, failures)``: one scenario failing (an unexpected rc,
-    a verification mismatch) is logged and skipped rather than discarding
-    every completed measurement with it - a multi-minute run must not be lost
-    to one flaky lane. Environment/bucket errors still abort the whole run.
+    a verification mismatch, a local I/O error such as a full work tree) is
+    logged and skipped rather than discarding every completed measurement
+    with it - a multi-minute run must not be lost to one flaky lane.
+    Environment/bucket errors still abort the whole run. Each engine's work
+    tree is removed before the next engine seeds its own, so the large
+    payloads of two engines never coexist: the EC2 lane's tmpfs is sized for
+    one engine's.
     """
     from tests.utils.harness import create_bucket_in_region, force_delete_bucket
 
     ours_exe, aws_exe = check_environment()
     client = _build_client()
+    bucket = _bench_bucket()
+    region = awsenv.resolve_region()
     workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     results: list[ScenarioResult] = []
     failures: list[str] = []
-    force_delete_bucket(client, BUCKET)
-    create_bucket_in_region(client, BUCKET)
+    force_delete_bucket(client, bucket)
+    create_bucket_in_region(client, bucket)
     try:
         for engine in engines:
             config = _write_engine_config(workroot, engine)
@@ -552,36 +898,42 @@ def run_scenarios(
                 "AWS_CONFIG_FILE": str(config),
                 "AWS_CLI_AUTO_PROMPT": "off",
                 "AWS_PAGER": "",
+                # The engine config replaces ~/.aws/config, so hand both CLIs
+                # the region explicitly (real S3 needs it; harmless on MinIO).
+                **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
             }
             env = E2EEnv(
                 client=client,
-                bucket=BUCKET,
+                bucket=bucket,
                 engine=engine,
                 workdir=workroot / engine,
                 ours_exe=ours_exe,
                 aws_exe=aws_exe,
                 overlay=overlay,
             )
-            for scenario in scenarios:
-                if engine != "classic" and not (
-                    scenario.crt_capable or scenario.name.startswith("startup_")
-                ):
-                    continue
-                try:
-                    results.append(
-                        _run_scenario(
-                            env,
-                            scenario,
-                            samples_override=samples_override,
-                            handicap=handicap,
-                            log=log,
+            try:
+                for scenario in scenarios:
+                    if engine != "classic" and not (
+                        scenario.crt_capable or scenario.name.startswith("startup_")
+                    ):
+                        continue
+                    try:
+                        results.append(
+                            _run_scenario(
+                                env,
+                                scenario,
+                                samples_override=samples_override,
+                                handicap=handicap,
+                                log=log,
+                            )
                         )
-                    )
-                except BenchmarkError as exc:
-                    message = f"[e2e/{engine}] {scenario.name}: {exc}"
-                    log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
-                    failures.append(message)
+                    except (BenchmarkError, OSError) as exc:
+                        message = f"[e2e/{engine}] {scenario.name}: {exc}"
+                        log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
+                        failures.append(message)
+            finally:
+                shutil.rmtree(env.workdir, ignore_errors=True)
     finally:
-        force_delete_bucket(client, BUCKET)
+        force_delete_bucket(client, bucket)
         shutil.rmtree(workroot, ignore_errors=True)
     return results, failures

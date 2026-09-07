@@ -526,6 +526,22 @@ class TestSecretMaskingFilter:
         assert f.filter(record) is True
 
 
+class TestPackageLogger:
+    def test_the_package_logger_carries_a_null_handler(self) -> None:
+        # The library reports through logging and never prints (design/deleter.md
+        # section 4): with no handler configured anywhere, a WARNING it emits -
+        # the deleter's unattributable-entry guard - would otherwise reach
+        # stderr through Python's lastResort handler. boto3's and botocore's own
+        # package loggers carry the same NullHandler; a configured handler (the
+        # CLI's --debug stream logger, an application's root handler) still
+        # sees every record.
+        import importlib
+
+        importlib.import_module("boto3_s3.s3storage")  # the registering module
+        handlers = logging.getLogger("boto3_s3").handlers
+        assert [type(h) for h in handlers].count(logging.NullHandler) == 1
+
+
 class TestSetStreamLogger:
     def test_attaches_handler_at_level(self) -> None:
         with _stream_logger("test.boto3_s3.attach", level=logging.INFO) as (logger, _buf):

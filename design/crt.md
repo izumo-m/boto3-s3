@@ -517,24 +517,25 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
   past 0.16.
-- **Empty / whitespace-only `verify`**: pip s3transfer >= 0.19.2 rejects an
-  empty or whitespace-only `verify` string outright with `InvalidConfigError`,
-  where aws's bundled fork reads the empty string as falsy and turns TLS
-  verification off, letting the transfer proceed - measured 2026-08-02, a dead
-  endpoint and `--ca-bundle ""`: aws 2.36.1 runs on to
-  `AWS_IO_SOCKET_CONNECTION_REFUSED: socket connection refused` at rc 1, and
-  so does this library once `_derive_verify` normalizes the empty string to
-  `False`, uniformly across pip s3transfer versions (the classic lane needs no
-  such normalization - botocore gives the empty string the same falsy read on
-  both sides). A whitespace-only value stays through and still fails, since
-  aws attempts it as a CA-bundle path too, but the shape now depends on the
-  installed s3transfer: on 0.19.0 this library's `[Errno 2] No such file or
-  directory: '   '` at rc 255 matches aws's own `[Errno 2] No such file or
-  directory: '   '` at rc 255 exactly; on 0.19.2 the upfront check fires first
-  and this library's `Invalid CA bundle: ...` at rc 255 diverges from aws's
-  `[Errno 2] No such file or directory: '   '` at rc 255 - an engine-rooted
-  divergence under `overview.md` section 3's third exception (measured
-  2026-08-02).
+- **Empty / whitespace-only `verify`**: aws refuses such a value outright from
+  2.36.2 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
+  s3transfer fork both carrying the check), and so does the CLI - but at the
+  botocore client build, which every command performs before any transfer
+  engine exists ([`cli.md`](./cli.md) section 4, `_reject_empty_ca_bundle`).
+  So the CRT lane is never handed one from the CLI, whichever engine the run
+  selects, and both tools report the same line at the same point (measured
+  2026-09-06 under `preferred_transfer_client = crt`: an empty `--ca-bundle`,
+  a whitespace-only one, and an empty `AWS_CA_BUNDLE`). What remains below is a **library**
+  concern only, for a caller that builds its own client and bypasses that
+  resolution: pip s3transfer >= 0.19.2 and botocore >= 1.43.54 raise
+  `InvalidConfigError` on the value, while older ones read the empty string as
+  falsy and turn TLS verification off. `_derive_verify` normalizes the empty
+  string to `False` so that lane behaves uniformly across installed versions
+  rather than swinging with the patch level; a whitespace-only value is left
+  through and fails either as a missing CA path or as that same rejection,
+  depending on the version. Whether the library should adopt aws's refusal
+  instead is open (`overview.md` section 3's third exception covers the
+  engine-rooted half).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).
@@ -544,5 +545,17 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   engine's ranged-download full-object combine validation (a feature of
   aws-cli's bundled s3transfer fork that pip s3transfer lacks) is the known
   divergence recorded in transfer.md section 10.
+- **Upload checksum default**: pip s3transfer's CRT module stamps `CRC32` on
+  an upload that names no checksum; aws-cli's bundled one stamps `CRC64NVME`
+  (its bundled botocore's default). The library keeps boto3's (section 1):
+  a library caller names `checksum_algorithm` itself. The CLI names aws's
+  value for both engines (`checksumdefault`, cli.md section 4), which is
+  where the two agree. The difference is not cosmetic on this lane:
+  aws-checksums computes CRC32 in software on x86-64 (about 3 GiB/s against
+  about 20 for CRC64NVME), which on a 4-vCPU instance pushing 800 MiB/s was
+  10% of a 1 GB upload's wall time against real S3 - the one benchmark row
+  where the CLI trailed aws until the default was aligned
+  (benchmarks/RESULTS.md, 2026-09-06). A library caller on the CRT lane who
+  wants that speed passes `checksum_algorithm="CRC64NVME"`.
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
   actual verification is only on the e2e (MinIO) lane.

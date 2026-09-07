@@ -523,6 +523,15 @@ dest-existence check for download. We ported the same three faces:
   the same banding the local side uses). A single blind delete is exempt
   because aws issues no HeadObject for it - `rm s3://bkt/key` stays rc 0 on
   both tools.
+- **a single-object HEAD missing `ContentLength` or `LastModified` ends the
+  run** the same way: aws-cli's `_list_single_object` reads those two by
+  subscript (`ContentLength` first) and `ETag` with a default, so
+  `producers.head_single` does too - a `KeyError` naming the element, the
+  CLI's `fatal error: 'LastModified'` at rc 1 (measured for a download, a
+  `--dryrun` copy and a `--dryrun` move) - rather than an entry carrying
+  `None`. The single-object counterpart of the listing rule
+  ([`storage.md`](./storage.md) section 2); the stream route never resolves
+  its source this way, and aws is lenient there too.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
@@ -687,11 +696,21 @@ dest-existence check for download. We ported the same three faces:
 
 ## 10. Known divergence (invisible in the result; recorded only)
 
-- When `--checksum-algorithm` is unspecified, the default integrity checksum is
-  `CRC32` (pip s3transfer's `setdefault` injection). aws v2's bundled botocore
-  injects `CRC64NVME`. Both are valid integrity checks and do not affect the
-  transfer result or rc (stated explicitly in the awscli port's adaptation
-  rules). When specified explicitly, the two agree.
+- The default integrity checksum belongs to the installed botocore: pip's
+  `DEFAULT_CHECKSUM_ALGORITHM` is `CRC32`, aws v2's bundled one is `CRC64NVME`,
+  and both s3transfers copy that constant onto an upload that names none
+  (the CRT modules have their own copy: `CRC32` in pip's, `CRC64NVME` in
+  aws's). The library leaves botocore's default in place (boto3-faithful,
+  crt.md section 1), so a library upload without `checksum_algorithm` stores a
+  composite CRC32 where `aws s3 cp` stores a full-object CRC64NVME - valid
+  integrity checks both, same result and rc. The CLI names aws's value
+  wherever aws's botocore would have stamped it (uploads on both engines, and
+  every other request with a `ChecksumAlgorithm` member: `checksumdefault`,
+  cli.md section 4), where the installed botocore can compute CRC64NVME;
+  without awscrt the CLI falls back to botocore's `CRC32`, the residual
+  difference docs/cli/aws-differences.md records. On the CRT engine the
+  algorithm also costs wall time: aws-checksums computes CRC32 in software,
+  a measured 10% on a 1 GB upload (benchmarks/RESULTS.md, 2026-09-06).
 - aws-cli's bundled s3transfer fork validates the full-object checksum of a
   **classic ranged download** (a single-object download at or above the
   multipart threshold, when the client resolves `response_checksum_validation`
@@ -727,10 +746,21 @@ dest-existence check for download. We ported the same three faces:
   (when the size is unknown) and issues a plain GetObject below the multipart
   threshold, so under that setting the two sides send different request
   shapes for a small single-object download (the branch fires before any
-  provided size is consulted). Same bytes, same rc; only the wire shape
-  differs, and only under that non-default setting - recorded, not worked
-  around, for the same reason as the fork-only combine above: the divergence
-  lives in the installed s3transfer, not in this codebase.
+  provided size is consulted). Same bytes and same rc whenever the download
+  succeeds; where it fails, the *stream* route (`cp s3://bkt/k -`, which
+  resolves no source of its own) reports the request that failed, and that
+  is the ranged GetObject here against the HeadObject on aws - `download
+  failed: s3://bkt/k to - An error occurred (NoSuchKey) when calling the
+  GetObject operation: The specified key does not exist.` against `... An
+  error occurred (404) when calling the HeadObject operation: Not Found`,
+  for a missing key and for an SSE-C object read without its key alike
+  (measured; rc 1 on both). A file destination is unaffected: `head_single`
+  heads the source on both tools before either engine runs. Only the wire
+  shape and that failure line differ, and only under that non-default
+  setting - recorded, not worked around, for the same reason as the
+  fork-only combine above: the divergence lives in the installed s3transfer,
+  not in this codebase. The user-facing entry is in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 

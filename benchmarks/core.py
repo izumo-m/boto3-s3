@@ -16,6 +16,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+# Single-object transfer size (MB) for the default, local-MinIO lane. Both
+# modes size their large-file scenarios from it; `--large-transfer-mb`
+# overrides it, and the EC2 lane raises it because a 64 MB object finishes
+# inside the startup constant on a wide NIC against real S3.
+DEFAULT_LARGE_MB = 64
+
+
 class BenchmarkError(Exception):
     """A harness failure: bad environment, unexpected rc, or an unstubbed call."""
 
@@ -80,7 +87,12 @@ class ScenarioResult:
     `samples` is keyed by `Side.value`; in-process results carry only the
     `boto3-s3` key. `order` records the per-invocation execution order of the
     timed rounds (side values, in sequence) so the A/B interleaving is
-    auditable from the results file.
+    auditable from the results file. `rss`, when present, mirrors `samples`
+    with each invocation's peak resident set size in bytes (E2E only, and only
+    where the platform can measure a child's peak; None everywhere else).
+    `payload_bytes` is what one invocation moves, for the transfer scenarios,
+    so the report can state a throughput; it is not a workload dimension and
+    does not take part in baseline comparability.
     """
 
     scenario: str
@@ -89,10 +101,12 @@ class ScenarioResult:
     dimensions: dict[str, str]
     samples: dict[str, list[float]]
     order: list[str]
+    rss: dict[str, list[float]] | None = None
+    payload_bytes: int | None = None
 
     def record(self) -> dict[str, object]:
         """The JSONL representation (one line in a results file)."""
-        return {
+        record: dict[str, object] = {
             "kind": "result",
             "scenario": self.scenario,
             "mode": self.mode,
@@ -102,3 +116,9 @@ class ScenarioResult:
             "order": self.order,
             "unit": "s",
         }
+        if self.rss is not None:
+            record["rss"] = self.rss
+            record["rss_unit"] = "bytes"
+        if self.payload_bytes is not None:
+            record["payload_bytes"] = self.payload_bytes
+        return record

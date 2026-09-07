@@ -10,12 +10,13 @@ when re-rendering stored files.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-from benchmarks import e2e, inprocess, report, results
-from benchmarks.core import BenchmarkError
+from benchmarks import e2e, ec2, inprocess, report, results
+from benchmarks.core import DEFAULT_LARGE_MB, BenchmarkError
 from benchmarks.report import STARTUP_PROBES
 
 
@@ -41,6 +42,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--samples", type=int, help="override every scenario's sample count")
     run.add_argument(
         "--quick", action="store_true", help="~1/100 workload sizes: a harness smoke test"
+    )
+    run.add_argument(
+        "--large-transfer-mb",
+        type=int,
+        default=DEFAULT_LARGE_MB,
+        metavar="MB",
+        help="size of the single-object transfer scenarios (default: %(default)s)",
     )
     run.add_argument(
         "--baseline",
@@ -69,6 +77,59 @@ def _build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--no-adjust-startup", action="store_true")
 
     sub.add_parser("list", help="list scenarios and stored results files")
+
+    ec2parser = sub.add_parser(
+        "ec2", help="record a baseline on a throwaway EC2 instance (see design/benchmark.md)"
+    )
+    ec2sub = ec2parser.add_subparsers(dest="ec2_command", required=True)
+
+    def _add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--region", help="AWS region (default: AWS_REGION / profile)")
+        sp.add_argument("--profile", help="AWS profile for the launcher's own calls")
+
+    ec2run = ec2sub.add_parser("run", help="provision, benchmark, retrieve, terminate")
+    _add_common(ec2run)
+    ec2run.add_argument(
+        "--instance-type",
+        default=os.environ.get("BOTO3_S3_BENCH_INSTANCE_TYPE", ec2.DEFAULT_INSTANCE_TYPE),
+        help="EC2 instance type; its architecture is resolved from EC2 (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--python",
+        default=os.environ.get("BOTO3_S3_BENCH_PYTHON", ec2.DEFAULT_PYTHON),
+        help="Python version to provision on the instance (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--ubuntu-release",
+        default=os.environ.get("BOTO3_S3_BENCH_UBUNTU_RELEASE", ec2.DEFAULT_UBUNTU_RELEASE),
+        metavar="LTS",
+        help="Ubuntu LTS release for the image, e.g. 24.04 (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--max-minutes",
+        type=int,
+        default=ec2.DEFAULT_MAX_MINUTES,
+        help="instance self-terminates after this budget (default: %(default)s)",
+    )
+    ec2run.add_argument(
+        "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
+    )
+    ec2run.add_argument(
+        "--on-demand",
+        action="store_true",
+        help="launch on-demand instead of a one-time spot request (the default)",
+    )
+    ec2run.add_argument(
+        "--large-transfer-mb",
+        type=int,
+        default=ec2.DEFAULT_LARGE_TRANSFER_MB,
+        metavar="MB",
+        help="single-object transfer size on the instance (default: %(default)s)",
+    )
+
+    _add_common(ec2sub.add_parser("setup-iam", help="create the instance role/profile (one-time)"))
+    _add_common(ec2sub.add_parser("cleanup", help="terminate any tagged leftover instances"))
+
     return parser
 
 
@@ -81,13 +142,14 @@ def _filter_names(names: list[str], pattern: str | None, *, keep: tuple[str, ...
 def _report_one(path: Path, baseline_spec: str | None, *, adjust: bool, threshold: float) -> bool:
     current = results.load_run(path)
     mode = str(current[0].get("mode"))
+    lane = str(current[0].get("lane") or results.LOCAL_LANE)
     baseline = None
     if baseline_spec is not None:
         # An unresolvable baseline (e.g. --baseline last on the first run of a
         # mode) degrades to a baseline-less table; the measurements themselves
         # must never be discarded over it.
         try:
-            baseline_path = results.resolve_baseline(baseline_spec, mode, exclude=path)
+            baseline_path = results.resolve_baseline(baseline_spec, mode, lane=lane, exclude=path)
         except BenchmarkError as exc:
             _log(f"[{mode}] baseline unavailable: {exc}")
         else:
@@ -114,6 +176,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "quick": args.quick,
         "scenario": args.scenario,
         "handicap_ms": args.self_test_handicap_ms,
+        "large_transfer_mb": args.large_transfer_mb,
     }
 
     written: list[Path] = []
@@ -121,7 +184,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     any_flag = False
     for mode in modes:
         if mode == "inprocess":
-            scenarios = inprocess.build_scenarios(args.quick)
+            scenarios = inprocess.build_scenarios(args.quick, large_mb=args.large_transfer_mb)
             names = _filter_names([s.name for s in scenarios], args.scenario)
             selected = [s for s in scenarios if s.name in names]
             if not selected:
@@ -132,7 +195,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
             meta = results.collect_meta("inprocess", {**options, "failures": failures})
         else:
-            scenarios = e2e.build_scenarios(args.quick)
+            scenarios = e2e.build_scenarios(args.quick, large_mb=args.large_transfer_mb)
             names = _filter_names([s.name for s in scenarios], args.scenario, keep=STARTUP_PROBES)
             selected = [s for s in scenarios if s.name in names]
             if all(s.name in STARTUP_PROBES for s in selected):
@@ -204,10 +267,18 @@ def _cmd_list() -> int:
         print(f"  {scenario.name:24} [classic] {dims}")
     runs = results.list_runs()
     if runs:
-        print("stored results (newest last):")
+        print("stored results (newest last; a non-local lane is spelled after the revision):")
         for path in runs[-10:]:
             print(f"  {path}")
     return 0
+
+
+def _cmd_ec2(args: argparse.Namespace) -> int:
+    if args.ec2_command == "run":
+        return ec2.cmd_run(args)
+    if args.ec2_command == "setup-iam":
+        return ec2.cmd_setup_iam(args)
+    return ec2.cmd_cleanup(args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_run(args)
         if args.command == "report":
             return _cmd_report(args)
+        if args.command == "ec2":
+            return _cmd_ec2(args)
         return _cmd_list()
     except BenchmarkError as exc:
         print(f"benchmarks: error: {exc}", file=sys.stderr)

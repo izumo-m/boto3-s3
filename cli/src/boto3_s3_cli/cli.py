@@ -6,7 +6,6 @@ import argparse
 import contextlib
 import importlib
 import io
-import logging
 import os
 import re
 import sys
@@ -673,6 +672,8 @@ def _enable_debug_logging() -> None:
     # Deferred (only --debug pays it): the library's masked, boto3-faithful
     # stream-logger setup. mask_secrets defaults to True, so credentials in the
     # botocore DEBUG output (signed headers, signatures, tokens) are redacted.
+    import logging
+
     from boto3_s3 import set_stream_logger
     from boto3_s3.masking import SecretMaskingFilter
 
@@ -702,6 +703,11 @@ def _debug_handlers_detached() -> Generator[None, None, None]:
     the prompt are dropped instead, and the handlers come back for the
     re-dispatch.
     """
+    # Deferred like _enable_debug_logging: `logging` (and the traceback module
+    # it pulls in on 3.14) stays off the --version and help path;
+    # tests/cli/unit/test_import_contract.py pins this.
+    import logging
+
     saved: list[tuple[logging.Logger, list[logging.Handler]]] = []
     for name in _DEBUG_LOGGERS:
         logger = logging.getLogger(name)

@@ -666,8 +666,18 @@ def head_single(
             bucket=src_storage.bucket,
             key=key,
         ) from (exc.__cause__ or exc)
+    # aws-cli's `_list_single_object` reads the two elements the HEAD must
+    # carry by subscript - `ContentLength` first, then `LastModified` - and
+    # `ETag` with a default, so a response missing one of the two ends the run
+    # with a KeyError naming it (`fatal error: 'ContentLength'` /
+    # `'LastModified'` at rc 1 on the CLI, measured) rather than riding on as
+    # None: the single-object counterpart of the listing rule the S3 backend
+    # applies (design/storage.md). The order decides which element a doubly
+    # incomplete response is blamed on. The stream route never comes here, and
+    # aws is lenient there too.
+    size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
     etag = head.get("ETag")
-    mtime = head.get("LastModified")
     # aws-cli converts the HeadObject stamp to the local zone as the last thing
     # `_list_single_object` does, so a stamp the local calendar cannot hold
     # ends the run right here - before the transfer, and before a dryrun would
@@ -682,7 +692,7 @@ def head_single(
     # with OpResult.src_storage and a filter can reach the backend.
     yield S3FileInfo(
         key=key,
-        size=head.get("ContentLength"),
+        size=size,
         mtime=mtime,
         etag=etag.strip('"') if etag else None,
         storage_class=head.get("StorageClass"),

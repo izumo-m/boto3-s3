@@ -15,6 +15,20 @@ Flag rules (threshold defaults to 1.10):
 - Startup probes and in-process scenarios: median now / median baseline over
   the threshold (in-process runs are network-free and deterministic enough
   to compare across runs directly).
+
+A baseline recorded on another interpreter minor is still compared, but the
+header says so: every cross-run delta then includes the interpreter change,
+and only the same-run E2E ratio is a like-for-like number.
+
+E2E runs get a second table: throughput for the scenarios that record a
+payload (payload / net median, so it is the tool's moving rate, not the
+process's) and each side's median peak RSS. Neither is flagged; they are
+recorded axes, and the timing flags stay the regression gate.
+
+`sync_tiny` is reported like the startup probes - raw medians, flagged on
+the cross-run raw ratio - because one 11 KB file leaves a net of a few tens
+of milliseconds, and a ratio of two such numbers is noise. Its purpose is the
+README's one-file wall-clock figure, which *is* the raw median.
 """
 
 from __future__ import annotations
@@ -28,6 +42,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 STARTUP_PROBES = ("startup_version", "startup_minimal")
+
+# Rows compared on raw medians rather than on the startup-adjusted ratio: the
+# probes (they are the startup cost) and the scenarios whose work is too small
+# to separate from it.
+RAW_ROWS = (*STARTUP_PROBES, "sync_tiny")
+
+_MIB = 1024 * 1024
 
 _Record = dict[str, object]
 _Key = tuple[str, str]
@@ -87,7 +108,9 @@ def _net(
         return raw
     startup = _median(index.get(("startup_minimal", engine)), side)
     if startup is None:
-        return raw
+        # The probe did not run (it failed and was skipped): rather than pass
+        # a raw figure off as an adjusted one, leave the cell empty.
+        return None
     net = raw - startup
     return net if net > 0 else None
 
@@ -104,6 +127,64 @@ def _fmt_delta(value: float | None) -> str:
     return f"{value:+.1%}" if value is not None else "-"
 
 
+def _fmt_mib(value: float | None) -> str:
+    return f"{value / _MIB:.1f}" if value is not None else "-"
+
+
+def _median_rss(record: _Record, side: Side) -> float | None:
+    rss = record.get("rss")
+    if not isinstance(rss, dict):
+        return None
+    values = rss.get(side.value)
+    if not isinstance(values, list) or not values:
+        return None
+    return statistics.median(float(v) for v in values)
+
+
+def _resource_table(records: Sequence[_Record], index: dict[_Key, _Record], adjust: bool) -> str:
+    """Throughput and peak-RSS rows for an E2E run, or "" when neither was recorded.
+
+    Throughput divides the recorded payload by the *net* median - the same
+    startup-adjusted figure the ratio uses - so it reads as the rate at which
+    the tool moved bytes once it was ready to. Rows with no payload (listing,
+    rm, the probes) leave those cells empty; every row with RSS samples shows
+    the per-side median and their ratio.
+    """
+    rows: list[list[str]] = []
+    for record in records:
+        scenario = str(record["scenario"])
+        engine = str(record["engine"])
+        payload = record.get("payload_bytes")
+        has_rss = isinstance(record.get("rss"), dict)
+        if payload is None and not has_rss:
+            continue
+        cells = [scenario, engine]
+        for side in (Side.OURS, Side.AWS):
+            rate: float | None = None
+            if isinstance(payload, (int, float)) and payload > 0:
+                net = _net(_median(record, side), index, engine, side, adjust)
+                if net:
+                    rate = float(payload) / _MIB / net
+            cells.append(f"{rate:.1f}" if rate is not None else "-")
+        rss_ours = _median_rss(record, Side.OURS)
+        rss_aws = _median_rss(record, Side.AWS)
+        rss_ratio = rss_ours / rss_aws if rss_ours and rss_aws else None
+        cells.extend([_fmt_mib(rss_ours), _fmt_mib(rss_aws), _fmt_ratio(rss_ratio)])
+        rows.append(cells)
+    if not rows:
+        return ""
+    header = [
+        "scenario",
+        "engine",
+        "ours(MiB/s)",
+        "aws(MiB/s)",
+        "ours(rssMiB)",
+        "aws(rssMiB)",
+        "rss-ratio",
+    ]
+    return _table(header, rows)
+
+
 def _table(header: list[str], rows: list[list[str]]) -> str:
     widths = [len(cell) for cell in header]
     for row in rows:
@@ -117,7 +198,14 @@ def _table(header: list[str], rows: list[list[str]]) -> str:
 
 def _describe(meta: _Record) -> str:
     dirty = "-dirty" if meta.get("git_dirty") else ""
-    return f"{meta.get('git_rev')}{dirty} @ {meta.get('timestamp_utc')}"
+    lane = str(meta.get("lane") or "local")
+    where = "" if lane == "local" else f" [{lane}]"
+    return f"{meta.get('git_rev')}{dirty} @ {meta.get('timestamp_utc')}{where}"
+
+
+def _minor(version: object) -> str:
+    """``3.14.7`` -> ``3.14``: the patch level is not a comparability boundary."""
+    return ".".join(str(version).split(".")[:2])
 
 
 def render(
@@ -165,9 +253,9 @@ def render(
         base_record = _comparable(record, base_index.get((scenario, engine)))
         ours_raw = _median(record, Side.OURS)
         spread = _spread(record, Side.OURS)
-        is_startup = scenario in STARTUP_PROBES
+        raw_row = scenario in RAW_ROWS
 
-        if mode != "e2e" or is_startup:
+        if mode != "e2e" or raw_row:
             # Cross-run comparison on raw medians (in-process rows and the
             # startup probes, which ARE the startup cost being tracked).
             base_raw = _median(base_record, Side.OURS)
@@ -248,6 +336,16 @@ def render(
     lines = [f"== {mode} == {_describe(meta)}"]
     if base_meta is not None:
         lines.append(f"baseline: {_describe(base_meta)}")
+        if _minor(meta.get("python")) != _minor(base_meta.get("python")):
+            lines.append(
+                f"interpreter: Python {meta.get('python')} now, {base_meta.get('python')} "
+                "in the baseline - cross-run deltas include the interpreter change"
+            )
+        if (meta.get("lane") or "local") != (base_meta.get("lane") or "local"):
+            lines.append(
+                f"lane: {meta.get('lane') or 'local'} now, {base_meta.get('lane') or 'local'} "
+                "in the baseline - different machines, cross-run deltas are not like-for-like"
+            )
     if mode == "e2e":
         note = (
             "net = median - startup_minimal median (per side)"
@@ -257,4 +355,10 @@ def render(
         lines.append(note)
     lines.append("")
     lines.append(_table(header, rows))
+    if mode == "e2e":
+        extra = _resource_table(records, index, adjust)
+        if extra:
+            lines.append("")
+            lines.append("throughput = payload / net median; rss = median peak RSS per invocation")
+            lines.append(extra)
     return "\n".join(lines), flagged
