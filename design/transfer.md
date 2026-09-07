@@ -746,10 +746,21 @@ dest-existence check for download. We ported the same three faces:
   (when the size is unknown) and issues a plain GetObject below the multipart
   threshold, so under that setting the two sides send different request
   shapes for a small single-object download (the branch fires before any
-  provided size is consulted). Same bytes, same rc; only the wire shape
-  differs, and only under that non-default setting - recorded, not worked
-  around, for the same reason as the fork-only combine above: the divergence
-  lives in the installed s3transfer, not in this codebase.
+  provided size is consulted). Same bytes and same rc whenever the download
+  succeeds; where it fails, the *stream* route (`cp s3://bkt/k -`, which
+  resolves no source of its own) reports the request that failed, and that
+  is the ranged GetObject here against the HeadObject on aws - `download
+  failed: s3://bkt/k to - An error occurred (NoSuchKey) when calling the
+  GetObject operation: The specified key does not exist.` against `... An
+  error occurred (404) when calling the HeadObject operation: Not Found`,
+  for a missing key and for an SSE-C object read without its key alike
+  (measured; rc 1 on both). A file destination is unaffected: `head_single`
+  heads the source on both tools before either engine runs. Only the wire
+  shape and that failure line differ, and only under that non-default
+  setting - recorded, not worked around, for the same reason as the
+  fork-only combine above: the divergence lives in the installed s3transfer,
+  not in this codebase. The user-facing entry is in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 
