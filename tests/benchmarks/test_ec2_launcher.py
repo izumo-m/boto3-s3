@@ -208,8 +208,10 @@ class TestUserData:
     @pytest.mark.skipif(not _has_real_bash(), reason="needs a working bash for a syntax check")
     def test_rendered_user_data_is_valid_bash(self) -> None:
         script = ec2._inline_urls(_render(), _URLS)
-        proc = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
-        assert proc.returncode == 0, proc.stderr
+        # Bytes, not text: Windows text-mode stdin would turn every LF into
+        # CRLF, which bash rejects, while the instance receives the LF script.
+        proc = subprocess.run(["bash", "-n"], input=script.encode(), capture_output=True)
+        assert proc.returncode == 0, proc.stderr.decode(errors="replace")
 
     def test_a_signed_url_with_braces_survives_substitution(self) -> None:
         # URLs are inlined after str.format, so query strings cannot collide

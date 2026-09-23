@@ -186,9 +186,14 @@ class TestLanes:
         monkeypatch.delenv(results.GIT_REV_ENV, raising=False)
         monkeypatch.delenv(results.LANE_ENV, raising=False)
         monkeypatch.delenv(results.IMAGE_ENV, raising=False)
+        # Stub git so the test holds outside a work tree too (a copy without
+        # `.git` legitimately yields "unknown").
+        answers = {("rev-parse", "--short=10", "HEAD"): "0123456789", ("status", "--porcelain"): ""}
+        monkeypatch.setattr(results, "_git", lambda *args: answers[args])
         meta = results.collect_meta("inprocess", {})
         assert meta.lane == "local"
-        assert meta.git_rev != "unknown"
+        assert meta.git_rev == "0123456789"
+        assert meta.git_dirty is False
         assert "image" not in meta.record()
 
     def test_filename_spells_a_non_local_lane_and_baselines_stay_in_lane(
