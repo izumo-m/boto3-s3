@@ -22,8 +22,10 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 
 Prerequisites:
 
-- Python 3.10+ (`.python-version` pins development to the 3.10 floor).
-- [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- [mise](https://mise.jdx.dev/getting-started.html). It installs the uv
+  version pinned in `mise.toml` — the one CI uses — and uv provisions
+  everything else: Python (`.python-version` pins development to the 3.10
+  floor) and the dev tools (`uv.lock`).
 - For any end-to-end run: the `aws` CLI v2 at the pinned reference version.
   Install it into `.venv/bin` with `scripts/install-awscli.sh` (below); an
   arbitrary `aws` found on `PATH` may behave differently and invalidate the
@@ -31,11 +33,18 @@ Prerequisites:
 - For the local MinIO end-to-end environment: Docker with Compose. A run against
   real S3 does not need Docker.
 
-Install the workspace and its dev tools into a local virtualenv:
+Install the pinned uv, then the workspace and its dev tools into a local
+virtualenv:
 
 ```bash
+mise install
 uv sync --all-packages
 ```
+
+The commands here assume mise is
+[activated](https://mise.jdx.dev/getting-started.html#activate-mise) in your
+shell, so `uv` resolves to the pinned one; otherwise prefix them with
+`mise exec --`.
 
 (A bare `uv sync` installs only the library; without the `cli` workspace member
 the `tests/cli` suite fails at collection.)

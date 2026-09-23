@@ -17,10 +17,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: jdx/mise-action@v4
         with:
-          version: "0.12.2"
-          enable-cache: true
+          version: 2026.9.1
       - run: uv sync --all-packages --locked
       - run: uv run ruff format --check
       - run: uv run ruff check
@@ -55,10 +54,9 @@ jobs:
       UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: jdx/mise-action@v4
         with:
-          version: "0.12.2"
-          enable-cache: true
+          version: 2026.9.1
       - run: uv sync --all-packages --locked
       - run: uv run pytest
 
@@ -67,10 +65,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: jdx/mise-action@v4
         with:
-          version: "0.12.2"
-          enable-cache: true
+          version: 2026.9.1
       - run: uv sync --all-packages --locked
       - name: Resolve direct dependencies at their declared floors
         run: uv pip install --resolution lowest-direct --reinstall -e . -e cli

@@ -503,15 +503,16 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 ## 8. Running the suite on Windows (WSL2 host)
 
 Windows is a supported OS (overview.md section 2); the suite runs there on a
-real Windows CPython using a host-installed `uv`. The whole run - every tier,
-the e2e differential against `aws.exe` included - is driven from a WSL2 shell
-through the interop layer (`cmd.exe`, resolved from the Windows `PATH` that
-WSL2 appends by default), against an NTFS copy of the working tree. A native
+real Windows CPython that uv provisions - the uv `mise.toml` pins, run
+through a host-installed mise. The whole run - every tier, the e2e
+differential against `aws.exe` included - is driven from a WSL2 shell through
+the interop layer (`cmd.exe`, resolved from the Windows `PATH` that WSL2
+appends by default), against an NTFS copy of the working tree. A native
 Windows shell can run the same `cmd.exe` command lines. None of it needs an
 elevated shell.
 
-Prerequisites on the Windows side: `uv` on the Windows `PATH` (from WSL2,
-`cmd.exe /c "uv --version"` answers), and **Developer Mode** (or an elevated
+Prerequisites on the Windows side: mise on the Windows `PATH` (from WSL2,
+`cmd.exe /c "mise --version"` answers), and **Developer Mode** (or an elevated
 shell), because several `tests/lib` scenarios create symlinks. On the WSL2
 side: the repository checkout with its aws-cli submodule, `rsync`, and Docker
 for the MinIO stack (section 4).
@@ -538,14 +539,18 @@ for the MinIO stack (section 4).
 
        cd /mnt/c/tmp/boto3-s3-wintest
 
-3. **Create the Windows virtualenv** with the Windows `uv` - the `cmd.exe`
-   wrapper is what keeps WSL2's own `uv` out of it:
+3. **Create the Windows virtualenv** with the Windows mise and uv - the
+   `cmd.exe` wrapper is what keeps WSL2's own mise and uv out of it:
 
-       cmd.exe /c "uv sync --all-packages --locked"
+       cmd.exe /c "mise exec -- uv sync --all-packages --locked"
 
-   `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
-   the support floor) - the host Python installation is not used - and
-   `--locked` refuses to rewrite `uv.lock`. `--all-packages` matters for the
+   `mise exec --` runs the uv the copied `mise.toml` pins - installing it on
+   first use - so Windows builds with the same uv as Linux and CI; it needs
+   no shell activation, which a one-shot `cmd.exe` never has. Every `uv`
+   call below goes through it for the same reason. `uv` provisions its
+   managed CPython for the pinned `.python-version` (3.10, the support
+   floor) - the host Python installation is not used - and `--locked`
+   refuses to rewrite `uv.lock`. `--all-packages` matters for the
    reason [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives.
 
 4. **Pin `aws.exe`** at the reference version. The copy carries no aws-cli
@@ -573,13 +578,14 @@ for the MinIO stack (section 4).
    pinned `aws.exe` first on `PATH` so it shadows any system install - as
    `.venv/bin/aws` does on Linux - and executes the rest of its command line:
 
-       cmd.exe /c "scripts\minio-env.cmd uv run pytest -q"
+       cmd.exe /c "scripts\minio-env.cmd mise exec -- uv run pytest -q"
 
-   That is the complete suite, e2e included; `cmd.exe /c "uv run pytest -q"`
-   runs everything but e2e, which deselects itself without the variables, as
-   on Linux. `cmd.exe`'s own messages arrive in the console's OEM code page;
-   pytest's summary is ASCII. Never run the Windows and Linux e2e suites at
-   the same time - the bucket-empty invariant (section 4) is shared.
+   That is the complete suite, e2e included;
+   `cmd.exe /c "mise exec -- uv run pytest -q"` runs everything but e2e,
+   which deselects itself without the variables, as on Linux. `cmd.exe`'s own
+   messages arrive in the console's OEM code page; pytest's summary is ASCII.
+   Never run the Windows and Linux e2e suites at the same time - the
+   bucket-empty invariant (section 4) is shared.
 
 7. **Regenerate the Windows goldens** when the reference `aws.exe` moves or a
    cp/mv/sync scenario changes. The copy must hold the current POSIX base
@@ -587,7 +593,7 @@ for the MinIO stack (section 4).
    by comparing the Windows capture against that base, and a Windows run
    never writes a base golden (section 3's capture rule).
 
-       cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+       cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd mise exec -- uv run pytest -q tests\cli\e2e"
 
    The variants land in the copy, not the repo, so sync them back before
    committing - only the variants, and with `--delete`, since a scenario

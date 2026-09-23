@@ -48,10 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # setup-uv v8+ publishes only immutable full-version tags (no @v8).
-      - uses: astral-sh/setup-uv@v8.2.0
+      # uv at the mise.toml pin, fetched and verified fresh: the publishing
+      # job does not restore the toolchain from the Actions cache.
+      - uses: jdx/mise-action@v4
         with:
-          version: "0.12.2"
+          version: 2026.9.1
+          cache: false
 
       - name: Resolve target package and version
         id: target

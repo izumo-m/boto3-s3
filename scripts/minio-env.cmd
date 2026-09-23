@@ -5,7 +5,7 @@ rem cmd.exe cannot export into the calling shell the way `source` does, so
 rem this is a runner: it sets the MinIO environment, then executes the rest
 rem of its command line in that environment (cwd is left untouched):
 rem
-rem   cmd.exe /c "scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+rem   cmd.exe /c "scripts\minio-env.cmd mise exec -- uv run pytest -q tests\cli\e2e"
 rem
 rem Keep the values in lockstep with scripts/minio-env.sh.
 set "AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000"

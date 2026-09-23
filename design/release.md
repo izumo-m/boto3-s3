@@ -137,7 +137,7 @@ treat the PR like a hotfix:
 
 Two notes for perspective: `uv.lock` serves development and CI only — the
 published packages declare version ranges, so a lock-only advisory does not
-by itself affect users of the released artifacts. And keep the local uv at
-the version the workflows pin — uv generations format the lock slightly
-differently, so a regeneration from a mismatched uv rewrites unrelated lock
-lines alongside the actual bump.
+by itself affect users of the released artifacts. And regenerate the lock
+only with the uv that `mise.toml` pins, the one the workflows install: uv
+generations format the lock slightly differently, so a regeneration from a
+mismatched uv rewrites unrelated lock lines alongside the actual bump.

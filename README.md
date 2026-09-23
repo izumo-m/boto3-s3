@@ -249,7 +249,8 @@ The design documents behind all of this are indexed in
 Bug reports, questions, and ideas are welcome on the
 [issue tracker](https://github.com/izumo-m/boto3-s3/issues). To work on the code,
 [`CONTRIBUTING.md`](https://github.com/izumo-m/boto3-s3/blob/main/CONTRIBUTING.md)
-covers local setup (uv), the test suite, and the coding and commit conventions.
+covers local setup (mise and uv), the test suite, and the coding and commit
+conventions.
 Report security vulnerabilities privately as described in
 [`SECURITY.md`](https://github.com/izumo-m/boto3-s3/blob/main/SECURITY.md),
 not on the public issue tracker.
