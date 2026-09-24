@@ -48,8 +48,7 @@ maintaining high functional compatibility (parity).
 - **AWS SDK floor**: the oldest SDKs supported are roughly three years old. The
   numbers themselves live in each package's `pyproject.toml`, which is what
   enforces them and is where they are read from; this states only the policy
-  behind them. A future release may raise the floor (when it does, the
-  back-compat shims that carry a comment to that effect can be removed).
+  behind them.
 - **The installed SDK decides the feature set**: rather than emulate newer AWS
   behavior on an older SDK, features that depend on a newer S3 model are simply
   unavailable below the version that introduced them - on a par with the awscrt

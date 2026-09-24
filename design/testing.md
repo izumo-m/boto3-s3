@@ -465,10 +465,9 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 
 ## 7. Known limitations
 
-- **xdist** (not currently configured): if parallel runs are added, the e2e
-  tier shares one bucket with an empty-before/after invariant and would not be
-  xdist-safe (the other tiers would be). Move to per-worker key prefixes if
-  parallel e2e becomes necessary.
+- **xdist** (not configured): the e2e tier shares one bucket with an
+  empty-before/after invariant, so it runs serially (the other tiers would be
+  xdist-safe).
 - **moto fidelity**: moto raises an internal `IndexError` for `MaxKeys=-1`
   instead of S3's `InvalidArgument`, so `ls_page_size_negative` and
   `rm_page_size_negative` are `diff_only` (e2e only). Likewise `mb_existing`:

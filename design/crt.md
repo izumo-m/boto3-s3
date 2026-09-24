@@ -507,16 +507,16 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   in docs/cli/aws-differences.md section 2).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
-  `create_s3_crt_client`'s signature rather than a version, so the keys start
-  flowing the moment the parameter ships upstream.
+  `create_s3_crt_client`'s signature rather than a version, so the keys are
+  passed whenever the installed s3transfer's `create_s3_crt_client` accepts
+  the parameter.
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself
   still gets `part_size` / `target_throughput`, passed to
   `create_s3_crt_client` directly ([`compatibility.md`](../docs/compatibility.md) for
   what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
-  `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
-  past 0.16.
+  `hasattr(TransferConfig, "UNSET_DEFAULT")`.
 - **Empty / whitespace-only `verify`**: aws refuses such a value outright from
   2.36.2 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
   s3transfer fork both carrying the check), and so does the CLI - but at the
@@ -533,9 +533,8 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   string to `False` so that lane behaves uniformly across installed versions
   rather than swinging with the patch level; a whitespace-only value is left
   through and fails either as a missing CA path or as that same rejection,
-  depending on the version. Whether the library should adopt aws's refusal
-  instead is open (`overview.md` section 3's third exception covers the
-  engine-rooted half).
+  depending on the version. The engine-rooted half of this version dependence
+  falls under `overview.md` section 3's third exception.
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).

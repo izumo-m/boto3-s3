@@ -730,14 +730,11 @@ dest-existence check for download. We ported the same three faces:
   listing-driven (recursive / sync) download is validated by neither side
   (ListObjectsV2 returns no checksum value; the combine applies only to the
   single-source point op, whose HeadObject response `head_single` already
-  fetches with `ChecksumMode: ENABLED` - section 9 - so the expected value is
-  on `S3FileInfo.head` should the validation ever be implemented). The trigger
-  is narrow (an object stored as `ChecksumType=FULL_OBJECT` with a CRC value,
-  at or above the multipart threshold) and the divergence is observable only
-  under actual corruption, which no test lane can produce; adding the
-  validation later is non-breaking (it only turns a corrupted success into a
-  failure), so this is recorded as an accepted deviation until the feature
-  reaches pip s3transfer.
+  fetches with `ChecksumMode: ENABLED`, section 9). The trigger is narrow (an
+  object stored as `ChecksumType=FULL_OBJECT` with a CRC value, at or above
+  the multipart threshold) and the divergence is observable only under actual
+  corruption, which no test lane can produce, so this is recorded as an
+  accepted deviation.
 - Under `response_checksum_validation = when_required` (env
   `AWS_RESPONSE_CHECKSUM_VALIDATION` or the config key; not the default), pip
   s3transfer (0.19) skips the sizing HeadObject and opens every classic

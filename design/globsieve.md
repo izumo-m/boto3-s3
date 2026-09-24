@@ -202,8 +202,8 @@ runs **per page** on the listing's prefetch worker thread (an excluded entry is
 not handed to the consumer; a page wiped out entirely never reaches the
 hand-off queue), so it must be thread-safe and lightweight.
 
-The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync (all
-implemented); ls does not apply it yet. **sync prunes each side's listing
+The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync; ls does
+not apply it. **sync prunes each side's listing
 independently as its visibility layer** (before the comparator pairs the
 streams): the S3 side(s) do this through `ScanOptions.filter` (the same
 scan-level mechanism), while the local walk applies the predicate inline. Both

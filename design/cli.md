@@ -337,9 +337,8 @@ import (and module-alias attribute access) in the CLI sources against those
 
 ### 3.1 The subcommand interface (`Command`) and dependency injection (`Context`)
 
-For testability (eliminating monkeypatch) and to prepare for a growing number of
-subcommands (cp / sync ...), subcommands are classes and receive their
-dependencies through a `Context`.
+For testability (eliminating monkeypatch), subcommands are classes and receive
+their dependencies through a `Context`.
 
 - `Command` is an ABC (the `name` / `help` ClassVars, `configure(parser)`,
   `run(args, ctx) -> int`). Adding a subcommand requires only one subclass plus
@@ -1692,7 +1691,7 @@ the library. The overall design and the library side (boto3-faithful) are in
   `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
   multipart source annotation before creating the destination, matching
   aws-cli, while no new CLI option is exposed. The tempfile/deferred modes are
-  library-only until the post-1.0 CLI surface is reconsidered.
+  library-only.
 - **Known deviation (classic ranged download)**: aws validates the full-object
   checksum across the ranges of a classic ranged download (a feature of
   aws-cli's bundled s3transfer fork that pip s3transfer lacks), so under

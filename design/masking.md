@@ -130,9 +130,7 @@ masked debug output the supported way (run the CLI with `--debug`, or call
 ### 3.4 The `http.client` wire dump is not handled
 
 As in section 2, the `http.client` wire dump does not appear under the default
-`--debug`. If a wire-dump output option is added in the future, the monkeypatch-
-style redactor is reintroduced at that point (binding the global install/uninstall
-to the ON/OFF of debug rather than to a per-operation scope).
+`--debug`.
 
 ## 4. Replacement notation (parity)
 

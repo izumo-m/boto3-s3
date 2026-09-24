@@ -43,8 +43,8 @@ preserve here - and a completion that is *more* helpful than `aws s3`'s is itsel
 a reason to reach for `boto3-s3`. The guiding rule is therefore one-directional:
 **where aws completes, we aim to complete too; where aws does not, we still
 may** when it helps the user finish the command. The first half is a goal, not
-an absolute: an aws-only nicety can lag (e.g. aws offers a `{}` autoclose
-candidate for the map-shaped `--metadata`, which we currently do not). This is
+an absolute: aws offers a `{}` autoclose candidate for the map-shaped
+`--metadata`, which this implementation does not. This is
 the opposite of the exit-code charter (which demands exact parity) precisely
 because the UI is charter-exempt.
 
