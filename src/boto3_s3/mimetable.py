@@ -14,7 +14,8 @@ compression suffixes, and `KNOWNFILES` the system files `mimetypes.init()`
 overlays on top - a local /etc/mime.types still reaches both tools.
 
 Regenerate by dumping the four table globals plus `knownfiles` from a stock
-CPython 3.14, before any `mimetypes.init()` so no host data leaks in.
+CPython 3.14, before any `mimetypes.init()` so no host data leaks in, and keep
+the empty `__all__` at the end.
 """
 
 from __future__ import annotations
@@ -260,3 +261,7 @@ KNOWNFILES: list[str] = [
     "/usr/local/etc/httpd/conf/mime.types",
     "/usr/local/etc/mime.types",
 ]
+
+# Package-internal: the tables are consumed by transfer.py only and carry no
+# documented surface (design/imports.md).
+__all__: list[str] = []
