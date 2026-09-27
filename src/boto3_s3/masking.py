@@ -181,12 +181,13 @@ _SSE_C_PARAM_RE = re.compile(
 
 # SigV2 (HmacV1) Authorization header ``AWS <access-key-id>:<signature>`` (legacy
 # signature_version='s3'; non-default for the library, never for the CLI which
-# pins s3v4). Mask the signature after the colon; the access key id in the kept
-# prefix is tail-revealed by ``_ACCESS_KEY_ID_RE`` afterwards. SigV4's
+# pins s3v4). The signature after the colon is fully masked, and the id goes
+# through ``_reveal_access_key`` like every other id slot, so an id of any
+# shape - an S3-compatible endpoint's ``minioadmin``, say - is covered: an
+# AWS-shaped id keeps its tail, anything else masks entirely. The id runs to
+# the first colon (a signature is base64 and has none). SigV4's
 # ``AWS4-HMAC-SHA256 ...`` does not match (no space before the digit).
-_SIGV2_AUTH_HEADER_RE = re.compile(
-    rf"(?P<key>AWS (?:AKIA|ASIA)[0-9A-Z]{{16}}:)(?P<val>{_TOKEN_VALUE})"
-)
+_SIGV2_AUTH_HEADER_RE = re.compile(rf"(?P<key>\bAWS )(?P<id>[^\s'\"\\:]+):(?P<val>{_TOKEN_VALUE})")
 
 # STS / metadata-service response-body temporary credentials. botocore logs the
 # raw response body at DEBUG (``Response body:``), so an AssumeRole /
@@ -294,8 +295,9 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_PROVIDED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
-    # Before _ACCESS_KEY_ID_RE so the kept ``AWS <id>:`` prefix is tail-revealed.
-    text = _SIGV2_AUTH_HEADER_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SIGV2_AUTH_HEADER_RE.sub(
+        lambda m: m.group("key") + _reveal_access_key(m.group("id")) + ":" + MASK, text
+    )
     text = _CREDENTIAL_RE.sub(lambda m: m.group("key") + _reveal_access_key(m.group("val")), text)
     text = _AWS_ACCESS_KEY_ID_PARAM_RE.sub(
         lambda m: m.group("key") + _reveal_access_key(m.group("val")), text

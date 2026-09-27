@@ -230,6 +230,19 @@ class TestMaskTextNotation:
         assert SIGNATURE not in out
         assert "AWS ***MPLE:***" in out
 
+    def test_sigv2_authorization_header_non_aws_shaped_id_masks_entirely(self) -> None:
+        # An S3-compatible endpoint's id (MinIO's `minioadmin`) in the same
+        # header: the signature is still masked, and the id masks entirely
+        # instead of leaking (no tail reveal for a non-AWS-shaped id).
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"headers={{'Authorization': 'AWS minioadmin:{sig}'}}")
+        assert out == "headers={'Authorization': 'AWS ***:***'}"
+
+    def test_sigv2_authorization_header_plain_line_form(self) -> None:
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"Authorization: AWS minioadmin:{sig}\nDate: x")
+        assert out == "Authorization: AWS ***:***\nDate: x"
+
     def test_sigv4_header_not_touched_by_sigv2_rule(self) -> None:
         # `AWS4-HMAC-SHA256 ...` must not match the SigV2 `AWS <id>:` shape.
         header = (

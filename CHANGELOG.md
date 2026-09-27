@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Log masking now also hides a legacy SigV2 `Authorization` header whose access key id is not AWS-shaped (an S3-compatible endpoint's, say).
+
 ## [0.11.1] - 2026-09-07
 
 - The package logger now carries a `NullHandler` like boto3's, so a library warning no longer prints on its own where no logging is configured.
