@@ -41,8 +41,9 @@ class CpCommand(Command):
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
         source, and the ``--recursive`` destination-directory pre-create
-        are 255; client creation (unresolvable credentials/region) is
-        253 - while everything raised by the transfer pipeline is rc 1
+        are 255 - while everything raised by the transfer pipeline is rc 1,
+        credentials that cannot be located included (the client builds
+        without them; the first request fails)
         (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
         kills the run (a listing error, the single-source 404, a bad

@@ -49,9 +49,10 @@ class PresignCommand(Command):
         ``s3://`` service root and the bucket-less ``s3:///k``, which aws
         splits into Bucket="" plus a key rather than refusing up front),
         both surfaced as the library's ValidationError through main; 253 for
-        client construction's unresolvable credentials / region (its other
-        botocore failures - a bad ``--profile``, partial credentials - are
-        255); 255 for a non-integer ``--expires-in``.
+        credentials that cannot be located when signing (a missing region is
+        no failure: the client signs for us-east-1); 255 for client
+        construction's botocore failures - a bad ``--profile``, partial
+        credentials - and for a non-integer ``--expires-in``.
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """

@@ -954,9 +954,10 @@ adds is only that the pin is visible in its own configuration.
 rc forms: **0 / 252 / 253 / 255 only** (because the server is never reached, 1 /
 254 cannot occur). Unlike mb / rb there is no local catch - botocore's
 `ParamValidationError` becomes a `ValidationError` in the library and is 252 via
-`main()`, a client-creation failure is 253 for the unresolvable pair
-(credentials / region) and 255 for a present-but-unusable config
-(`InvalidConfigError`, section 6), and a non-integer `--expires-in` is 255.
+`main()`, credentials that cannot be located are 253 when signing (a missing
+region is no failure: the client signs for us-east-1), a client-creation
+failure is 255 for a present-but-unusable config (`InvalidConfigError`,
+section 6), and a non-integer `--expires-in` is 255.
 A key with no bucket (`s3:///k`, or the scheme-less `/k`) is part of that
 botocore 252 rather than a rejection of the form: aws splits it into `Bucket=""`
 plus the key and signs, so the bad-bucket-name text - regex tail included - is

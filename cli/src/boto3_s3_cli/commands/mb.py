@@ -75,9 +75,9 @@ class MbCommand(Command):
         the dispatcher's 255). The key part
         of the path is silently dropped, exactly like aws. aws builds the client
         before validating the path (``S3Command._run_main``), so a
-        client-construction failure (bad ``--profile`` / unresolved credentials /
-        region) takes precedence over a path usage error - we build it first to
-        match (253/255 wins over the 252).
+        client-construction failure (a bad ``--profile``, partial credentials,
+        an empty region) takes precedence over a path usage error - we build it
+        first to match (its 255 wins over the 252).
         """
         # Parse-time head (measured, design/cli.md section 6): the --query compile
         # (252), the --endpoint-url scheme check (252), and the positional
