@@ -22,8 +22,9 @@ Related: the entry point to the design as a whole is
 - **The root is never raised directly for a known failure** - every raise site
   uses a category (or refining) class, so `except Boto3S3Error` is purely the
   catch-all. Direct base instances appear only where no classification exists:
-  the error translators' last-resort fallback (section 3) and the message
-  envelope on WARNED / NOTICE `OpResult` records.
+  the error translators' last-resort fallback (section 3), the deleter's
+  fail-closed failure for a deletion it cannot confirm (section 3), and the
+  message envelope on WARNED / NOTICE `OpResult` records.
 - Backend exceptions (`botocore` / `OSError` / `urllib3`, etc.) are converted at
   the library boundary and the original is preserved on `__cause__` via
   `raise ... from <backend>` (never swallowed).
@@ -74,7 +75,8 @@ class Boto3S3Error(Exception):
   inside the pipeline rather than at argument time
   ([`sync.md`](./sync.md) section 3).
 - **Intentional pass-through exception**: using
-  `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent passes
+  `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent (or
+  older than boto3's minimum) passes
   through the same `botocore.exceptions.MissingDependencyException` as boto3 does.
   This is a deliberate exception to the boundary conversion of section 1, kept to
   stay boto3-faithful ([`crt.md`](./crt.md) section 3 / section 6). The CLI
@@ -105,11 +107,11 @@ pass-through `Boto3S3Error` keeps whatever cause it already has). `BatchError`
 is two levels deep: its `__cause__` is the **translated** first failure (a
 `Boto3S3Error`, section 4), never the raw backend exception, so an
 exception-backed failure's original - a `ClientError` where the server was
-reached - sits at `__cause__.__cause__`, and that is a guarantee. The one
-exception-free path is a per-key `DeleteObjects` `Errors[]` entry: it is
-synthesized from the response body (section 3) with no exception object
-behind it, so its `__cause__` is `None` and only the message carries the
-code.
+reached - sits at `__cause__.__cause__`, and that is a guarantee. The
+exception-free paths are the deleter's per-key syntheses from a `DeleteObjects`
+response body (section 3) - an `Errors[]` entry, and the unconfirmed-deletion
+failure an unattributable entry forces - with no exception object behind them,
+so their `__cause__` is `None` and only the message carries the code.
 
 The context attributes are best-effort, and `operation=None` is a legitimate
 value: it means no subcommand-scoped operation was in scope - client
@@ -133,10 +135,10 @@ site. `bucket` and `key` fill **as a pair**: an error that set only `key` named
 the entry in its own address space (a local path, `bucket` unset by contract),
 and pairing this item's bucket with it would invent a mixed address. A
 `BatchError` is skipped by that pair fill entirely - it stands for a whole run,
-and section 4 pins its coordinates as always `None`. The fill is in place on
-the recorded object, so a raiser that reuses one exception instance across
-items sees the first item's attribution on every later record: attribution is
-best-effort, not per-record.
+and its constructor (section 4) takes no `bucket` / `key`, so both are always
+`None`. The fill is in place on the recorded object, so a raiser that reuses one
+exception instance across items sees the first item's attribution on every later
+record: attribution is best-effort, not per-record.
 
 Custom backends: an exception a custom `Storage` raises that is not already a
 `Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as
@@ -166,14 +168,17 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | `CancelToken.cancel()` | `CancelledError` |
 
 `CancelToken.cancel()` defaults to `CancelMode.GRACEFUL`: operations stop
-accepting new work, discard work not yet accepted, drain accepted work, reclaim
-their workers, and then raise `CancelledError`. Passing
+accepting new work, discard work not yet accepted, drain accepted work (a
+delete lane instead discards the deleter's unsent buffer - deleter.md
+section 2), reclaim their workers, and then raise `CancelledError`. Passing
 `mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
 pending and in-flight futures. Synchronous external I/O already running cannot
 be killed safely and may still finish - such a completion reports its real
 outcome, while a revoked accepted item reports one `CANCELLED` record
 ([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error
-cancels the same way). Cancellation is monotonic and idempotent:
+cancels the same way on the classic engine, while on the CRT engine only a
+`CancelToken` cancel yields `CANCELLED` and every other cancellation reports
+`FAILED`). Cancellation is monotonic and idempotent:
 an immediate request upgrades graceful cancellation, and later requests never
 downgrade it. `on_result` may call `cancel()`; it only changes token state and
 never shuts an engine down from the callback's worker thread.
@@ -206,9 +211,11 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
   with no HTTP status to widen on (an unknown code becomes the base category,
   deleter.md section 3).
 
-The one remaining direct-base site is the message envelope on WARNED / NOTICE
-`OpResult` records (`Warner.warn` / `Transferrer.notice` in `transfer.py` -
-section 1).
+Two direct-base sites remain outside the translation: the deleter's
+fail-closed failure for the keys an unattributable `Errors[]` entry leaves
+unconfirmed ([`deleter.md`](./deleter.md) section 3), and the message envelope
+on WARNED / NOTICE `OpResult` records (`Warner.warn` / `Transferrer.notice` in
+`transfer.py` - section 1).
 
 ## 4. The batch aggregation exception `BatchError`
 
@@ -225,17 +232,20 @@ class BatchError(Boto3S3Error):
     failed: int       # -> exit code 1
     warned: int       # -> exit code 2
     skipped: int      # informational (does not affect rc; op-layer skip is the main case. Skips at the enumeration/filter level are generally not included)
-    total: int        # read-only @property: succeeded + failed + warned + skipped (items that reached the op layer; not a ctor argument)
+    total: int        # read-only @property: succeeded + failed + warned + skipped (a rollup sum, not an item count - `warned` counts warnings, walk warnings included; not a ctor argument)
     # __cause__ = the first failure (a diagnostic sample, not a list)
 ```
 
-- The raise condition is **only when `failed > 0`** (Model 1). It does not raise
+- The raise condition is **only when `failed > 0`**. It does not raise
   for `warned`/`skipped` alone (`failed == 0`). In that case, obtain the counts
   through the `on_result` hook (for the exit code, see section 5).
 - `CANCELLED` records never reach a `BatchError`: a cancelling run ends by
   raising the fatal (or `CancelledError`) instead, and cancelled items are not
   failures - the engine's separate `cancelled` rollup counter carries them
-  ([`opresult.md`](./opresult.md), the `on_result` contract).
+  ([`opresult.md`](./opresult.md), the `on_result` contract). The CRT engine
+  narrows this: only a `CancelToken` cancel reports `CANCELLED` there, every
+  other CRT cancellation is `FAILED`, and a drain-time Ctrl-C the CRT manager
+  swallows ends the run in `BatchError` ([`crt.md`](./crt.md) section 6).
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
 - `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item
@@ -246,8 +256,9 @@ class BatchError(Boto3S3Error):
   are single-item operations that do not aggregate; they raise the
   corresponding category exception on the spot. Note that an error before item
   processing begins - such as a failure of the enumeration (scan) itself, or
-  `cp`'s missing-source check - **propagates as the category exception** (CLI
-  rm maps both to rc 1, cli.md section 6).
+  `cp`'s missing-source check - **propagates as the category exception** (the
+  CLI's transfer-family commands turn an enumeration failure into rc 1, while
+  `cp`'s missing local source is rc 255 as on aws; cli.md section 6).
 - `OpOutcome.DRYRUN` is the report for an item a dry run *would* have acted on
   (transferred or deleted); the item's mutating API call does not occur
   (enumeration and HeadObject still run) and it does not affect rc (an
@@ -260,9 +271,10 @@ destination-existence check, an upload/copy's `IfNoneMatch` rejection) and a
 glacier-blocked source passed over under `ignore_glacier_warnings` - but skips
 at the enumeration/filter level (a symlink under `--no-follow-symlinks`, an
 `--exclude` exclusion) never reach the op layer and are generally not counted.
-`sync` contributes nothing here: a pair it finds up to date produces no record
-and no counter at all, and its `no_overwrite` is applied by dropping the update
-lane outright rather than by skipping pairs one at a time.
+`sync` counts only one kind of skip: a glacier-blocked source passed over under
+`ignore_glacier_warnings`. A pair it finds up to date produces no record and no
+counter at all, and its `no_overwrite` is applied by dropping the update lane
+outright rather than by skipping pairs one at a time.
 
 ## 5. exit code mapping (CLI)
 

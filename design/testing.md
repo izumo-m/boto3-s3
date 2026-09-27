@@ -9,7 +9,7 @@ is the operational definition every output comparison applies.
 
 | location | what | mechanism | runs |
 |---|---|---|---|
-| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (one moto-backed file, `test_capture_response.py` - the capture rides botocore's real event stream) | always |
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
@@ -17,11 +17,13 @@ is the operational definition every output comparison applies.
 
 Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
-except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
-quality gates and package builds on Linux, then runs this default suite on
-Linux, macOS and Windows at both ends of the supported Python range (the 3.10
-floor and 3.14). A test silent for five minutes dumps every thread's stack
-(pytest's `faulthandler_timeout`), so a hang pins its location in the job log
+except e2e (skipped with a reason) - `tests/benchmarks/` included, the
+benchmark harness's own unit tests (synthetic records, no S3;
+[`benchmark.md`](./benchmark.md)). The `ci` GitHub Actions workflow runs, as
+parallel jobs, the quality gates and package builds on Linux and this default
+suite on Linux, macOS and Windows at both ends of the supported Python range
+(the 3.10 floor and 3.14). A test silent for five minutes dumps every thread's
+stack (pytest's `faulthandler_timeout`), so a hang pins its location in the job log
 instead of ending as a silent timeout kill.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
 runs the library and CLI compatibility-seam tests whose expected request
@@ -57,10 +59,10 @@ The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
 `ours.rc == aws.rc` for **every** scenario - scenario flags can relax stdout
 comparison and golden handling, but by design the sole rc carve-out is
 `undefined_on_case_insensitive_dest` (on a case-insensitive destination aws's
-own rc is racy - the warn-mode note in section 1 - so only `ours.rc == 0` is
-asserted there); no other flag can relax the rc comparison. The scenario sets
-(`tests/utils/<cmd>_scenarios.py`) are the charter's detection surface:
-extend them whenever a subcommand or option is added, including error paths
+own rc is racy - the warn-mode note in section 3's "Platform variants" - so
+only `ours.rc == 0` is asserted there); no other flag can relax the rc
+comparison. The scenario sets (`tests/utils/<cmd>_scenarios.py`) are the
+charter's detection surface: extend them whenever a subcommand or option is added, including error paths
 (nonexistent bucket, out-of-range values). Which code a given failure is
 expected to produce differs by command family, so consult
 [`cli.md`](./cli.md) section 6 when adding an error scenario rather than
@@ -341,14 +343,14 @@ the process-global default session caches the first credentials it resolves.
 Two mechanisms pin classic, because the CLI tiers and the library-default
 path resolve the engine differently. The same root fixture points
 `AWS_CONFIG_FILE` at a session-scoped file pinning
-`[s3] preferred_transfer_client = classic`: now that cp/mv/sync read the
+`[s3] preferred_transfer_client = classic`: as cp / mv / sync / rm read the
 profile's `[s3]` section (cli.md section 8), this stops the host config from
 leaking tuning into the moto/recorder tiers and - on a CRT-optimized host -
 keeps `auto` from silently resolving to an engine moto cannot intercept. That
 config file only covers the CLI transfer tiers (`resolve_transfer_client`),
 not the library's own default `auto` path, which consults
-`awscrt.s3.is_optimized_for_system()` directly (transfer.py); a second
-autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
+`awscrt.s3.is_optimized_for_system()` directly (`crtsupport.should_use_crt`);
+a second autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
 so the in-process/library transfer tests stay deterministic on a
 CRT-optimized host (`test_transferrer.py` depends on it).
 
@@ -440,13 +442,14 @@ is, section 4) `botocore.crt.auth` - and keeps aws-cli's expected URLs -
 frozen-time signatures included - bit-for-bit.
 The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
-against the positional canned list, and rewrites aws-cli's expected
-default `ChecksumAlgorithm: 'CRC64NVME'` to the `'CRC32'` that pip s3transfer
-injects on upload paths (both engines add a default integrity checksum;
-they just pick different algorithms - an explicit `--checksum-algorithm`
-makes them agree, and design/transfer.md section 10 has the full wire-deviation
-list). Its case-conflict classes guard the existing-local-file variants
-with a live case-insensitivity probe of the test directory (aws-cli's
+against the positional canned list, and spells aws-cli's expected default
+`ChecksumAlgorithm: 'CRC64NVME'` as `DEFAULT_CHECKSUM`: the CLI names aws's
+CRC64NVME itself (`checksumdefault`, cli.md section 5.7) wherever the
+installed botocore can compute it, and elsewhere (no awscrt) pip botocore's
+`'CRC32'` stands (an explicit `--checksum-algorithm` makes the two agree, and
+design/transfer.md section 10 has the full wire-deviation list). Its
+case-conflict classes guard the existing-local-file variants with a live
+case-insensitivity probe of the test directory (aws-cli's
 `skip_if_case_sensitive`), so they run on macOS/Windows-like filesystems
 and skip on default Linux ones.
 
@@ -581,7 +584,7 @@ for the MinIO stack (section 4).
 
    That is the complete suite, e2e included;
    `cmd.exe /c "mise exec -- uv run pytest -q"` runs everything but e2e,
-   which deselects itself without the variables, as on Linux. `cmd.exe`'s own
+   which skips itself without the variables, as on Linux. `cmd.exe`'s own
    messages arrive in the console's OEM code page; pytest's summary is ASCII.
    Never run the Windows and Linux e2e suites at the same time - the
    bucket-empty invariant (section 4) is shared.
@@ -641,12 +644,16 @@ than lean on the host. Left to the host, such a test passes on one Windows and
 fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
 same knob is how a test picks a codec deliberately. Subprocess runs are already
 pinned - the harness passes `PYTHONUTF8=1`, which fixes the child's stdio and
-its default codec at UTF-8. It does not pin the `aws` side: the official
-distribution is a frozen interpreter in isolated mode and ignores the `PYTHON*`
-family entirely (measured on the pinned Linux binary - `PYTHONIOENCODING` set
-to `latin-1` leaves its output UTF-8). Both sides of a parity pair still land
-on the same codec, because that build writes UTF-8 of its own accord; the
-variable buys the child's determinism, not aws's.
+its default codec at UTF-8. On the `aws` side it reaches the error reports
+alone: the official distribution is a frozen interpreter in isolated mode, so
+the interpreter ignores the `PYTHON*` family (measured on the pinned Linux
+binary - `PYTHONIOENCODING` set to `latin-1` leaves its output UTF-8 - and on
+the pinned `aws.exe`, whose result lines keep the host code page under
+`PYTHONUTF8=1`), but aws's own code reads `PYTHONUTF8=1` back for the streams
+it writes error reports on, so `aws.exe`'s error reports move to UTF-8 with
+the child's (measured; `PYTHONIOENCODING` does not move them). On Linux both
+sides of a parity pair land on the same codec regardless, because that build
+writes UTF-8 of its own accord.
 
 ## 9. The output-parity criterion
 

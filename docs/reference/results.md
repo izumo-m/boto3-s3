@@ -22,13 +22,17 @@ consumes a caller-built one.
 
 Emission is not confined to the calling thread. Submitted transfers report from
 the transfer engine's worker threads — including the warning a failed
-post-download mtime stamp adds — batched deletes from the deleter's worker
-thread, and a backend walk's enumeration warnings from the scan's prefetch
-worker; a `sync` walks both sides through one shared warning sink, so its two
-prefetch workers can report concurrently. The remaining records — dry runs,
-skips, notices, the gate warnings raised while items are produced, the
-single-key `rm`, and local or custom-backend deletes — are emitted inline on
-the thread that called the operation. With `use_threads=False` in the
+post-download mtime stamp adds, and the `SKIPPED` of an upload or copy S3 turns
+down on `no_overwrite`'s precondition — batched deletes from the deleter's
+worker thread, and a backend walk's enumeration warnings from the scan's
+prefetch worker (from the calling thread for a walk without read-ahead,
+[`ScanOptions.read_ahead`](./options.md#scanoptions)); a `sync` walks both sides
+through one shared warning sink, so its two prefetch workers can report
+concurrently. The remaining records — dry runs, the skips decided before
+submission (the glacier gate under `ignore_glacier_warnings`, a download's
+`no_overwrite` check), notices, the gate warnings raised while items are
+produced, the single-key `rm`, and local or custom-backend deletes — are emitted
+inline on the thread that called the operation. With `use_threads=False` in the
 `TransferConfig` ([`options.md`](./options.md)) the transfer engine also reports
 on the calling thread. The callback must therefore be fast, thread-safe, and
 non-raising; see [`ResultCallback`](#resultcallback) for what a raising callback
@@ -50,10 +54,11 @@ submission or discarded after acceptance:
   directory (one `WARNED` record). Under `ignore_glacier_warnings` the glacier
   gate emits a terminal `SKIPPED` record instead. Both option keys are on
   `TransferOptions` ([`options.md`](./options.md));
-- entries discarded from the deleter's unsent buffer — accepted but never
-  dispatched — which produce no record at all. A cancellation discards them,
-  and so does an exception that ends the run, such as a listing failure
-  part-way through ([`../../design/deleter.md`](../../design/deleter.md)).
+- entries the deleter accepted but never ran, which produce no record at all:
+  its unsent buffer, discarded by a cancellation or by an exception that ends
+  the run (a listing failure part-way through, say), and, under
+  `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started
+  ([`../../design/deleter.md`](../../design/deleter.md)).
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
 Being advisories rather than outcomes, they are not tied one-to-one to an item:
@@ -158,7 +163,8 @@ source ETag and the `PutObject` response is discarded, so its `extra_info` is
 `None`, as it is for a delete and for advisories. Only what the transfer engine
 exposes is surfaced, so the ETag may also be `None` on an s3transfer that does
 not provide it and under the CRT engine — a documented degradation
-([`../../design/overview.md`](../../design/overview.md)).
+([`../compatibility.md`](../compatibility.md#1-features-by-required-version);
+for the CRT engine, [`../../design/crt.md`](../../design/crt.md) section 3).
 
 Under `capture_response=True` (a parameter of `cp` / `mv` / `rm` / `sync`,
 [`operations/README.md`](./operations/README.md)) each successful record instead
@@ -237,19 +243,23 @@ carries its own `warning: ` prefix.
 
 `CANCELLED` — an accepted item revoked before it could complete, because a fatal
 error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
-down. `error` is a [`CancelledError`](./exceptions.md#cancellederror) naming the
-cause where the canceller supplied one; an immediate-mode escalation arriving
-during a drain revokes without a message and those records carry the bare
-`canceled`, while the CRT manager cancels without the message and its records
-carry awscrt's cancellation wording. It is deliberately distinct from `FAILED`:
-nothing is wrong with the item itself, so it is not counted as a failure, it
-appears in no `BatchError` counter, and it is not sampled as `BatchError`'s
-`__cause__`. A run that produced such records ends by raising — the fatal that
-triggered the shutdown, `CancelledError`, or the `KeyboardInterrupt` that
-interrupted it — and never with a `BatchError`: the run's outcome is carried by
-that exception, not by these records. The per-item `CANCELLED` records are a
-library surface with no `aws s3` counterpart: the AWS CLI reports one fatal line
-and drops the cancelled items from its output and counts.
+down. On the CRT engine only a cancellation this run's `CancelToken` ordered
+reports `CANCELLED`: every other CRT cancellation reports `FAILED`, and a Ctrl-C
+the CRT manager swallows during its transfer drain ends the run in `BatchError`
+([`../../design/opresult.md`](../../design/opresult.md)). `error` is a
+[`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
+canceller supplied one; an immediate-mode escalation arriving during a drain
+revokes without a message and those records carry the bare `canceled`, while the
+CRT manager cancels without the message and its records carry awscrt's
+cancellation wording. It is deliberately distinct from `FAILED`: nothing is
+wrong with the item itself, so it is not counted as a failure, it appears in no
+`BatchError` counter, and it is not sampled as `BatchError`'s `__cause__`. A run
+that produced such records ends by raising — the fatal that triggered the
+shutdown, `CancelledError`, or the `KeyboardInterrupt` that interrupted it — and
+never with a `BatchError`: the run's outcome is carried by that exception, not
+by these records. The per-item `CANCELLED` records are a library surface with no
+`aws s3` counterpart: the AWS CLI reports one fatal line and drops the cancelled
+items from its output and counts.
 
 ## TransferProgress
 
@@ -583,7 +593,7 @@ For the delete lanes of `rm` and `sync`, `GRACEFUL` discards the deleter's
 unsent buffer and drains the batch already dispatched; `IMMEDIATE` additionally
 cancels a dispatched batch that has not started. A batch whose S3 request has
 started always completes and delivers its per-key records first. Discarded
-buffered entries produce no records
+buffered entries and the entries of a cancelled batch produce no records
 ([`../../design/deleter.md`](../../design/deleter.md)).
 
 For `ls`, both modes behave identically: cancellation stops entry delivery,
@@ -632,9 +642,11 @@ class CancelMode(enum.Enum):
     IMMEDIATE = "immediate"
 ```
 
-`GRACEFUL` — the default of `CancelToken.cancel` — stops accepting new work and
-drains the work the operation already accepted. Accepted items therefore report
-their real outcomes and produce no `CANCELLED` records.
+`GRACEFUL` — the default of `CancelToken.cancel` — stops accepting new work. On
+the transfer lanes it drains the work the operation already accepted, so
+accepted items report their real outcomes and produce no `CANCELLED` records;
+on the delete lanes the deleter's unsent buffer is discarded without records,
+and only the batch already dispatched is drained.
 
 `IMMEDIATE` additionally asks each engine to cancel pending and in-flight work
 wherever its implementation supports cancellation. What that yields per lane is

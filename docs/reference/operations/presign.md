@@ -78,13 +78,14 @@ For a default client — one whose configuration sets no `signature_version`,
 which is the state a plain boto3 client is in — against an ordinary bucket, the
 returned URL is SigV4 query-signed: it carries
 `X-Amz-Algorithm=AWS4-HMAC-SHA256` and an `X-Amz-Signature` parameter. The
-observable difference from calling `generate_presigned_url` on the same client
-directly is confined to the regions that accept SigV2 (`us-east-1` among
+signature-version difference from calling `generate_presigned_url` on the same
+client directly is confined to the regions that accept SigV2 (`us-east-1` among
 them), where stock botocore downgrades such a client's presigned URL to the
-deprecated SigV2 query form (`AWSAccessKeyId` / `Signature` / `Expires`) — a
-URL a SigV4-only bucket, or a bucket policy that requires SigV4, rejects. In
-the remaining regions a default client already produces SigV4 and `presign`
-changes nothing observable. `aws s3 presign` produces SigV4, and `presign`
+deprecated SigV2 query form (`AWSAccessKeyId` / `Signature` / `Expires`) — a URL
+a SigV4-only bucket, or a bucket policy that requires SigV4, rejects. In the
+remaining regions a default client already produces SigV4 and `presign` changes
+nothing about how the URL is signed; the host is corrected separately
+([below](#the-host-in-the-url)). `aws s3 presign` produces SigV4, and `presign`
 matches it in every region.
 
 The upgrade is confined to that one case; every other signer choice is left as
@@ -110,11 +111,11 @@ client signs exactly as it did before once the call returns.
 
 The URL names the endpoint the client itself would send a request to. This too
 differs from calling `generate_presigned_url` directly: stock botocore resolves
-a *presigned* URL's endpoint as if the client's region were `aws-global`, so a
-`eu-west-1` client's URL points at `bucket.s3.amazonaws.com` while every real
-request that client sends goes to `bucket.s3.eu-west-1.amazonaws.com` — and the
-URL's own credential scope still names `eu-west-1`, so its host and its
-signature disagree. `presign` keeps the resolved regional host, matching
+a *presigned* URL's endpoint as if the client's region were `aws-global`, so an
+`eu-central-1` client's URL points at `bucket.s3.amazonaws.com` while every
+real request that client sends goes to `bucket.s3.eu-central-1.amazonaws.com` —
+and the URL's own credential scope still names `eu-central-1`, so its host and
+its signature disagree. `presign` keeps the resolved regional host, matching
 `aws s3 presign`.
 
 As with the signing above, the correction reaches only the case botocore
@@ -123,9 +124,11 @@ unchanged: a `us-east-1` client that resolves
 `us_east_1_regional_endpoint` to `regional` (the value the `boto3-s3` command
 pins on its session, so every client it builds resolves
 it), a dualstack or accelerate endpoint, an explicit
-`s3={"addressing_style": ...}`, an access point ARN, a directory bucket, and a
-bucket name too long or DNS-incompatible for virtual hosting, which addresses
-path-style. An explicit `endpoint_url` overrides the host either way.
+`s3={"addressing_style": ...}` of `"path"` or `"virtual"` (an explicit `"auto"`
+is substituted like the default, and corrected), an access point ARN, a
+directory bucket, and a bucket name too long or DNS-incompatible for virtual
+hosting, which addresses path-style. An explicit `endpoint_url` overrides the
+host either way.
 
 ### Raises
 
@@ -139,14 +142,14 @@ The category contracts are specified in
   ARN, a key with no bucket); or botocore's client-side parameter validation
   rejects the request, which is what an absent key or an empty bucket name
   produces.
-- [`ConfigurationError`](../exceptions.md#configurationerror) — credentials or
-  region cannot be resolved, either while this `S3` builds its client or while
-  the request is signed; or an optional dependency the resolved signer needs is
-  absent, which is what a multi-region access point ARN produces when `awscrt`
-  is not installed, its asymmetric SigV4a signing requiring it. Its
+- [`ConfigurationError`](../exceptions.md#configurationerror) — credentials
+  cannot be resolved while the request is signed; or an optional dependency
+  the resolved signer needs is absent, which is what a multi-region access
+  point ARN produces when `awscrt` is not installed, its asymmetric SigV4a
+  signing requiring it. Its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement covers
   configuration that is present but unusable, such as a set-but-unknown
-  `AWS_PROFILE`, partial credentials, or a malformed `endpoint_url`.
+  `AWS_PROFILE`, partial credentials, or a malformed region or `endpoint_url`.
 - [`NotFoundError`](../exceptions.md#notfounderror),
   [`AccessDeniedError`](../exceptions.md#accessdeniederror) and
   [`TransportError`](../exceptions.md#transporterror) — on the directory-bucket

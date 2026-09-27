@@ -287,7 +287,7 @@ normal dispatch, so the subsequent rc follows each subcommand's convention.
 
 ## 7. Context injection and tests
 
-`Context` in `commands/base.py` gains `auto_prompter` (`AutoPrompter | None`,
+`Context` in `commands/base.py` carries `auto_prompter` (`AutoPrompter | None`,
 default None -> lazily created by `main`). Tests inject a fake `AutoPrompter`
 (returns canned argv) to verify "seed -> prompt -> re-dispatch" without a tty
 (the same DI style by which other subcommands inject `client_factory`; no
@@ -305,7 +305,7 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
 - **Wiring**: mutual exclusion 252, missing-dep (stub `find_spec`) guidance +
   252, re-dispatch via an injected prompter, `help`-token precedence,
   `--no-cli-auto-prompt` triggering no prompt.
-- **Mode resolution (Phase 2)**: env on/off/invalid, config file (`[default]` /
+- **Mode resolution**: env on/off/invalid, config file (`[default]` /
   `[profile X]`, `AWS_CONFIG_FILE`), env > config precedence, explicit flag >
   env, on-partial (valid = no prompt / usage error = prompt), config-driven AND
   prompt_toolkit absent -> fall-through. Tests pin `AWS_CLI_AUTO_PROMPT=off` via

@@ -48,7 +48,8 @@ to exactly this contract - the "Library consumption contract" in
   `compat` module),
   and `transferconfig.py` (the re-export home for the public `TransferConfig`:
   boto3's subclass plus the CRT fields and `annotation_temp_dir`, crt.md
-  section 2) imports `boto3.s3.transfer`. The bare-import contract holds because the lazy root
+  section 2) imports `boto3.s3.transfer`, while `transfer.py` imports
+  `s3transfer` directly. The bare-import contract holds because the lazy root
   defers those *module* loads, not because the modules defer the SDK -
   touching a root symbol homed in one of them pays the SDK import.
   `crtsupport.py` keeps all of awscrt / `s3transfer.crt` in-function, so the

@@ -77,10 +77,12 @@ as `"20200101"` is an epoch-seconds value to botocore, while Python 3.11+'s
 input on botocore's interpretation on every supported Python.
 
 The return is a `datetime`. For every input both paths accept, the two agree in
-value; the difference is the tzinfo class — `datetime.timezone.utc` on the fast
-path where botocore's fallback yields dateutil's `tzutc` — which compares,
-subtracts and formats identically. A value neither path can parse raises out of
-botocore's `parse_timestamp` unchanged; no library exception is involved.
+value; the difference is the tzinfo class — `datetime.timezone` on the fast
+path where botocore's fallback yields dateutil's `tzutc` / `tzoffset` — which
+compares, subtracts and renders `str()` / `isoformat()` identically;
+`strftime('%Z')` differs for a non-UTC offset. A value neither path can parse
+raises out of botocore's `parse_timestamp` unchanged; no library exception is
+involved.
 
 ## AwsConfig
 
@@ -165,8 +167,8 @@ non-`None` default narrows the return to that type, while omitting it (or
 passing `None`) admits `None`.
 
 The reader holds no defaults table of its own — every getter takes the
-caller's default — and the operations never consult it, so no operation
-carries a hidden dependence on ambient `[s3]` settings
+caller's default — and the operations never consult it, so none of `aws s3`'s
+own `[s3]` transfer settings applies to an operation implicitly
 ([`S3.aws_config()`](./s3.md#aws_config)). The `[s3]` values are readable here
 all the same, as `cfg.profile().get_size("s3.multipart_chunksize", default)`;
 applying `aws s3`'s own interpretation of that section — its defaults table,
@@ -234,9 +236,9 @@ range-check what they return.
 [`InvalidConfigError`](./exceptions.md#invalidconfigerror), so a config typo is
 surfaced rather than silently defaulted. So does a key naming a whole
 subsection instead of a value — for every getter, `get_bool` included.
-Otherwise `get_bool` is the one getter that never rejects a value: following
-`ensure_boolean`, any scalar other than a case-insensitive `"true"` reads as
-`False`.
+Otherwise `get_bool` is the one converting getter that never rejects a value
+(`get_str` converts nothing): following `ensure_boolean`, any scalar other than
+a case-insensitive `"true"` reads as `False`.
 
 The section holds the mapping it was built from and nothing else; the file was
 read by `AwsConfig`, so a getter here reads no file. It defines `slots`, so no
@@ -553,9 +555,9 @@ because of an exception abandons the unsent buffer while still waiting for the
 batch already in flight, and a worker error raised at that point propagates
 with the body's exception chained as its `__context__`.
 
-Closing matters: the worker thread inherits daemon-ness from the thread that
-created the deleter, so from an ordinary non-daemon thread an unclosed deleter
-keeps the interpreter alive until the in-flight batch finishes.
+Closing matters: the worker thread inherits daemon-ness from the thread whose
+first dispatch starts it, so from an ordinary non-daemon thread an unclosed
+deleter keeps the interpreter alive until the in-flight batch finishes.
 
 ### Threading
 
@@ -666,9 +668,15 @@ therefore fails everything and shows up in the counts. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
-Anything the translation does not cover is a programming error: it is not
-turned into per-key results but propagates from the worker and re-raises on the
-caller's thread at the next non-empty `flush()` or at `close()`.
+An exception a request of either route raises outside the botocore family —
+botocore choking on a malformed response, a redirect loop — fails the keys of
+that request the same way, as a plain
+[`Boto3S3Error`](./exceptions.md#boto3s3error) carrying the original as
+`__cause__`. Anything else — an `AssertionError`, a
+programming error in the deleter's own response handling, or an `on_result`
+callback that raises — is not turned into per-key results but propagates from
+the worker and re-raises on the caller's thread at the next non-empty `flush()`
+or at `close()`.
 
 ### Cancellation
 
@@ -691,7 +699,7 @@ per-key success and failure are preserved. Two consequences follow. A run that
 dies mid-way leaves different remote state, because the unsent buffer — up to
 `batch_size - 1` entries — is abandoned, where the AWS CLI has already issued a
 delete for everything it enumerated. And a key that XML 1.0 cannot carry
-(control characters other than TAB/LF/CR, surrogate code points, `U+FFFE` /
+(C0 control characters other than TAB/LF/CR, surrogate code points, `U+FFFE` /
 `U+FFFF`) falls back to an individual `DeleteObject`, the route the AWS CLI
 uses for every key, while the rest of the batch stays batched. Deleting a
 specific `VersionId` is not provided, as `aws s3 rm` does not offer it either.

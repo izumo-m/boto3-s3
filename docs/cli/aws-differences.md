@@ -1,8 +1,8 @@
 # Differences from `aws s3`
 
 Read this before you switch a script over. Most `aws s3` invocations behave
-identically; the handful that do not are listed below, and two of them are
-silent — one on each side.
+identically; the handful that do not are listed below, and three of them are
+silent — one here, two on `aws`'s side.
 
 For what each option does, run `boto3-s3 <subcommand> help`; every option is an
 `aws s3` option and is described there. For exit codes see
@@ -20,9 +20,11 @@ dies below the HTTP layer, a download body cut mid-stream, a listing an
 S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
 part way, a plain-HTTP
 endpoint taken from the environment under the CRT engine, an `aws` plugin the
-config file declares, the modification time a download stamps for an object
+config file loads through `cli_legacy_plugin_path`, a `cli_history` directory
+`aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a `--copy-props all` copy whose
-oversized tag write and its rollback both fail, the `PYTHON*` environment
+oversized tag write and its rollback both fail, an invalid `AWS_DEFAULTS_MODE`
+or `sts_regional_endpoints` value, the `PYTHON*` environment
 variables, and three failures the interpreter decides rather than
 either tool: a stdout that cannot take a streamed object, an error report that
 cannot be written at all, and a standard stream that cannot be set up at all —
@@ -331,6 +333,11 @@ run comes out differently, listed in section 1.
   `Warning: Unable to record CLI history. Check file permissions for <path>` —
   without changing the exit code. This command has no history mechanism, so it
   records nothing and warns about nothing; the rest of the run is unchanged.
+  **When the database's directory cannot be created the run comes out
+  differently**: `aws` stops before doing anything — exit code 255 with the
+  file-system error (`[Errno 17] File exists: ...`,
+  `[Errno 13] Permission denied: ...`), a `help` page included, `--version`
+  excepted — while this command runs normally.
 - **`~/.aws/cli/cache/session.db` is not written.** On the first client it
   builds, `aws` opens — creating the directory and the file if they are not
   there — an SQLite database at that path, and keeps a host id and a rolling
@@ -341,13 +348,14 @@ run comes out differently, listed in section 1.
   changes nothing observable there either — the file simply stops being touched
   once a script switches over.
 - **The `[plugins]` section is not read.** `aws` hands its merged
-  configuration to a plugin loader before it parses anything: the
-  `cli_legacy_plugin_path` entry is added to its import path, and every other
-  entry of `[plugins]` is imported and its `awscli_initialize` called — on
-  every invocation, `--version` included. This command has no plugin mechanism
-  and never reads the section, so whatever a plugin was doing on your `aws`
-  runs — registering handlers, auditing, extra output — simply does not
-  happen. **When the plugin cannot be imported the run comes out
+  configuration to a plugin loader before it parses anything: when
+  `[plugins]` sets `cli_legacy_plugin_path`, that entry is added to its import
+  path, and every other entry of the section is imported and its
+  `awscli_initialize` called — on every invocation, `--version` included.
+  Without that entry `aws` imports no plugin at all. This command has no
+  plugin mechanism and never reads the section, so whatever a plugin was doing
+  on your `aws` runs — registering handlers, auditing, extra output — simply
+  does not happen. **When such a plugin cannot be imported the run comes out
   differently**: `aws` refuses to start at all (exit code 255, `No module
   named '<name>'`, nothing done), while this command runs the operation and
   exits normally — so a `rm --recursive` that `aws` would never have begun
@@ -446,9 +454,10 @@ run comes out differently, listed in section 1.
   The official `aws` distribution is a frozen interpreter running in isolated
   mode, so the interpreter ignores that whole family; this command runs on
   your own Python, which does not. `PYTHONIOENCODING` therefore re-codes what
-  is printed here while `aws` keeps writing UTF-8 — under
-  `PYTHONIOENCODING=ascii` a `café.txt` result line comes out `caf?.txt`, and
-  under `latin-1` it comes out in latin-1 bytes. One member `aws`'s own code
+  is printed here while `aws` keeps its own codec (UTF-8 on Linux, the host
+  code page on Windows): under `PYTHONIOENCODING=ascii` a `café.txt` result
+  line comes out `caf?.txt`, and under `latin-1` it comes out in latin-1
+  bytes. One member `aws`'s own code
   reads back: `PYTHONUTF8=1`, kept as a compatibility fallback for the streams
   it writes error reports on, and honored here the same way — so setting it
   brings an error report into agreement again, while result lines stay as they
@@ -508,6 +517,7 @@ uniform. These are rejected outright on the wrong route:
 | `--checksum-algorithm` | upload, or S3-to-S3 copy |
 | `--checksum-mode` | download |
 | `--sse-c-copy-source`, `--sse-c-copy-source-key` | S3-to-S3 copy only |
+| `--no-overwrite` | any route but a download to standard output (`cp s3://… -`) |
 
 Every other direction-specific option is accepted anywhere and simply has no
 effect off its route. The write-side options in particular — `--acl`,

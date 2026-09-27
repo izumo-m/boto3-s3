@@ -191,7 +191,8 @@ transfer, with the other side always S3**.
 Operations never read the `[s3]` tuning section of `~/.aws/config` on their own:
 transfer settings come from arguments, never from ambient configuration.
 Credentials, region and profile still resolve through boto3's usual chain, which
-does read the file. When you want a value from it yourself, ask:
+does read the file, and so do botocore's own client-level `s3` settings such as
+`addressing_style`. When you want a value from it yourself, ask:
 
 ```python
 cfg = s3.aws_config()

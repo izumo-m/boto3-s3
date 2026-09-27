@@ -167,8 +167,9 @@ Markdown links inside each half resolve relatively and need no prefix.
 ### Design documents
 
 - [`glossary.md`](./glossary.md) - glossary.
-- [`compatibility.md`](../docs/compatibility.md) - which feature needs which
-  `botocore` / `s3transfer` / `awscrt`, and how an unavailable one behaves.
+- [`compatibility.md`](../docs/compatibility.md) - which `boto3` version (and
+  whether the `crt` extra) each feature needs, and how an unavailable one
+  behaves.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
   callback): the fields, the `src` / `dest` convention, and which operation

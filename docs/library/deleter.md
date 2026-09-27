@@ -26,8 +26,10 @@ S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
 its client and bucket are used for addressing — the key part is ignored — but
 the object itself rides along on every result. Keep it open until the deleter is
-closed. The client is resolved during construction so that a credential problem
-surfaces on your thread rather than in the worker.
+closed. The client is built during construction, so a client that cannot be
+built — an unknown profile, say — fails on your thread rather than in the
+worker. Credentials are resolved by the first request, so missing credentials
+arrive as per-key failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
 
@@ -45,9 +47,10 @@ Used as a context manager, exiting normally flushes; exiting because of an
 exception discards the unsent buffer while still waiting for what is already in
 flight.
 
-**Close it.** The worker thread is not a daemon, so if you neither close it nor
-use the context manager, interpreter shutdown blocks until the in-flight batch
-finishes.
+**Close it.** The worker thread inherits daemon-ness from the thread whose
+first dispatch starts it, so from an ordinary thread, if you neither close it
+nor use the context manager, interpreter shutdown blocks until the in-flight
+batch finishes.
 
 ### Rehearsing with `dryrun`
 
@@ -150,7 +153,7 @@ Two consequences of batching:
 - **A run that dies mid-way leaves different state.** `aws` has already issued
   a delete for everything it enumerated; here the unsent buffer — up to
   `batch_size - 1` entries — is abandoned.
-- **Keys XML cannot carry** (control characters, surrogates, `U+FFFE` /
-  `U+FFFF`) fall back to individual requests, which is what `aws` does for
-  every key. The rest of the buffer stays batched.
+- **Keys XML cannot carry** (C0 control characters other than TAB / LF / CR,
+  surrogates, `U+FFFE` / `U+FFFF`) fall back to individual requests, which is
+  what `aws` does for every key. The rest of the buffer stays batched.
 

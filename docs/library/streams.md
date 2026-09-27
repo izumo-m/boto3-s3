@@ -17,9 +17,15 @@ with open("hello.txt", "rb") as f:
 # upload from a text buffer
 s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
 
-# download straight into a gzip writer — no temporary file, no seeking
+# download straight into a gzip writer — no temporary file. A gzip writer
+# reports seekable() but seeks only forward, so hand over just its write():
+# a stream without seek is written strictly in order.
+class WriteOnly:
+    def __init__(self, stream):
+        self.write = stream.write
+
 with gzip.open("hello.txt.gz", "wb") as f:
-    s3.cp("s3://bucket/hello.txt", IOStorage(f))
+    s3.cp("s3://bucket/hello.txt", IOStorage(WriteOnly(f)))
 ```
 
 `StdioStorage()` is the shortcut for the process's own standard input and
@@ -41,11 +47,14 @@ Uploads encode, downloads decode.
 
 ## 2. The stream stays yours
 
-**`IOStorage` never closes your stream and never repositions it.** Its lifecycle
-and its final position are your business.
+**`IOStorage` never closes your stream.** Its lifecycle is your business.
+Where a download writes into it depends on the stream and the engine: on the
+classic transfer engine a seekable binary stream is written at absolute offsets
+from 0, so whatever position it held beforehand is ignored, and a multipart
+download can leave it anywhere. A text stream, a stream that cannot seek, and
+any stream under the CRT engine are written in order from where they stand.
 
-The practical consequence is on downloads: afterwards the stream sits at the end
-of the bytes just written, so reading them back needs a rewind.
+Either way, reading a download back needs a rewind.
 
 ```python
 buf = io.StringIO()
@@ -54,9 +63,12 @@ buf.seek(0)
 print(buf.read())        # or just: buf.getvalue()
 ```
 
-A stream that cannot seek is fine — a `gzip` writer, `sys.stdout`, a pipe.
-There is nothing to rewind; the bytes go wherever the stream sends them, and
-your own `with` block or `close()` finalizes it.
+A stream that cannot seek is fine — `sys.stdout`, a pipe, or a writer that
+exposes only `write`, as in the `gzip` example above. There is nothing to
+rewind; the bytes go wherever the stream sends them, and your own `with` block
+or `close()` finalizes it. A `gzip` writer handed over directly is not such a
+stream: it reports itself seekable but seeks only forward, so a download large
+enough to go multipart can fail on it.
 
 ## 3. Where a stream may appear
 

@@ -54,15 +54,16 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   riding CreateMultipartUpload) holds verbatim: the engine removes upstream
   s3transfer >= 0.19's ``Tagging`` create-blacklist entry at manager build
   (``_allow_inline_mpu_tagging``), realigning with aws-cli's bundled table.
-- ``--copy-props all``'s multipart annotation carryover rides upstream
+- ``--copy-props all``'s multipart annotation carryover reads every source
+  annotation before creating the upload, in aws-cli's order (the CLI's
+  ``PRELOAD_MEMORY`` staging), but writes them through upstream
   s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
-  SetAnnotationsSubscriber (design/transfer.md section 4), so the
-  TestCopyPropsAllCpCommand port adapts the canned order: the annotation reads run
-  *after* CompleteMultipartUpload (aws-cli reads them before creating the
-  upload), gets and puts interleave per annotation, the listing is a single
-  unpaginated call, and no source ``VersionId`` is pinned on the reads.
-  ``get_object_annotation_response`` wraps the payload in ``io.BytesIO``
-  (the engine calls ``.read()``) where aws-cli builds a ``StreamingBody``.
+  SetAnnotationsSubscriber (design/transfer.md section 4). The
+  TestCopyPropsAllCpCommand port therefore keeps aws-cli's canned order,
+  adding only the best-effort ``AbortMultipartUpload`` s3transfer sends after a
+  failed annotation write. ``get_object_annotation_response`` wraps the
+  payload in ``io.BytesIO`` (the engine calls ``.read()``) where aws-cli
+  builds a ``StreamingBody``.
 - ``mock.patch`` targets translate: ``os.utime`` is an identical seam;
   ``mimetypes.guess_type`` becomes ``mimetypes.MimeTypes.guess_type``, the
   datastore method (the guess runs on boto3-s3's own ``MimeTypes``, built from
@@ -1524,10 +1525,10 @@ def _annotations_sdk_supported() -> bool:
     reason="requires the S3 annotations SDK (botocore >= 1.43.31, s3transfer >= 0.19)",
 )
 class TestCopyPropsAllCpCommand:
-    # aws-cli: TestCopyPropsAllCpCommand. The multipart carryover rides
-    # s3transfer's native _apply_annotations here - the canned order and the
-    # missing source-VersionId pin follow the module docstring's adaptation
-    # rule (design/transfer.md section 4 records the deviations).
+    # aws-cli: TestCopyPropsAllCpCommand. The multipart annotation writes ride
+    # s3transfer's native _apply_annotations here - the canned responses
+    # follow the module docstring's adaptation rule (design/transfer.md
+    # section 4 records the deviations).
     DEST_ETAG = '"dest-etag"'
     DEST_VERSION_ID = "dest-version-id"
     PAYLOAD = b"annotation-payload"

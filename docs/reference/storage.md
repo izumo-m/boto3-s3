@@ -255,8 +255,8 @@ The base implementation raises `NotImplementedError` naming
 
 Returns the `FileInfo` for a single entry, or `None` when there is no
 transferable entry there. This is the single-entry counterpart to `scan`: a
-non-recursive `cp` / `mv` resolves its source with it, and an existence check
-reads it for `None`.
+non-recursive `cp` / `mv` resolves its source with it. The engine runs no
+destination existence check through it.
 
 `key` is relative to this storage's location. The default `""` is the location
 itself — the single source or destination the storage points at — and a
@@ -647,10 +647,12 @@ therefore optional here — `S3Storage("bucket/key")` reads exactly as
 `S3Storage("s3://bucket/key")` — a deliberate library leniency that `S3.resolve`
 does not share, since `resolve` must still route a bare `bucket/key` to local.
 The stored text is split once into `bucket` and `key`, which are the properties
-every operation reads and from which `as_text`, `format`, `normalized_uri` and
-`same_path_as` are all derived. So `uri` is the input as accepted, scheme
-filled in, while `as_text()` is the canonical rebuilt token; they differ when
-the input carried a trailing slash on a keyless bucket.
+every operation reads and from which `as_text`, `normalized_uri` and
+`same_path_as` are derived, as is `format` everywhere but the bare service root
+(below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
+is the canonical rebuilt token; they differ when the input carried a trailing
+slash on a keyless bucket or on the service root, or an Outposts access point
+ARN whose key follows a `:` rather than a `/`.
 
 An empty bucket part — a bare `"s3://"` — is the service root: `list_buckets`
 lists the account's buckets there, while object listing or a transfer needs a
@@ -746,7 +748,9 @@ echoing the constructor input, so a keyless location normalizes to a slashless
 
 `format` returns the scheme-less `bucket/key` as the root, with the same
 keyless-bucket normalization (`s3://bucket` formats as `bucket/`); only the
-bare service root formats empty. A `dir_op` root is `/`-terminated and
+bare service root formats empty — or as `/`, taking the source's name, when
+spelled `s3:///`, the one case where the stored text rather than the held
+bucket and key decides. A `dir_op` root is `/`-terminated and
 `use_src_name` is `True`; otherwise `use_src_name` is whether the root already
 ends in `/`, and a `dir_op` on the service root formats it as `/`.
 
@@ -772,9 +776,13 @@ Returns the boto3 S3 client, building a default one lazily when none was
 supplied. Memoized: the first call builds or returns the client and every later
 call returns the same instance. Deliberately not guarded by a lock.
 
-Raises: `ConfigurationError` when credentials or region cannot be resolved,
-`InvalidConfigError` for a set-but-unusable profile or a malformed environment
-endpoint. A raw botocore error never escapes.
+Raises: `InvalidConfigError` for a set-but-unusable profile, partial
+credentials or a malformed environment endpoint, and any other failure of the
+default build translated into the library taxonomy
+([`./exceptions.md`](./exceptions.md)); a raw botocore error never escapes.
+Missing credentials and an unset region do not fail the build: missing
+credentials fail the client's first request instead, and an unset region falls
+back to botocore's default for S3.
 
 ### close()
 
@@ -959,8 +967,8 @@ s3transfer's own download lane has — so:
 - an existing **regular** destination's permission bits are carried onto the
   replacement, since the swap lands a new inode — this lane's own addition, not
   something s3transfer does; a destination that did not exist gets the bits a
-  plain `open(…, "wb")` would give it (the umask decides, and the temp file's
-  own restrictive mode never leaks through);
+  plain `open(…, "wb")` would give it (the temp file is created with mode
+  `0o666`, so the umask decides);
 - missing parent directories are created.
 
 Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
@@ -1046,11 +1054,16 @@ decoding on write for a download.
 incremental encoder or decoder spans the whole transfer, so a stateful codec
 behaves as one stream — utf-16 emits its BOM once, not per chunk.
 
-**The caller's stream is never closed by this class, and never repositioned.**
-The transfer closes every file object `open` returns, since that close is how a
-real backend flushes a write; each view here absorbs that close into a flush of
-the wrapped stream at most. Lifecycle and final position stay the caller's:
-after a download the stream sits at the end of the written bytes.
+**The caller's stream is never closed by this class.** The transfer closes
+every file object `open` returns, since that close is how a real backend
+flushes a write; each view here absorbs that close into a flush of the wrapped
+stream at most. Lifecycle stays the caller's, and so does rewinding after a
+download, whose landing place depends on the stream and the engine: the binary
+view passes `seek` through, so on the classic engine `s3transfer` writes a
+seekable binary stream at absolute offsets from 0 — its prior position is
+ignored, and a multipart download can leave it anywhere — while a text stream,
+a stream that cannot seek, and any stream under the CRT engine are written in
+order from their current position.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`
@@ -1061,8 +1074,9 @@ Where a stream may appear is enforced by the operations, not by capabilities:
 it is a side of a non-recursive `cp`, or the destination of a non-recursive
 `mv`; it is never a `mv` source, never a recursive `mv` destination, never both
 sides at once, and never an `ls` or `rm` target. `S3.cp` and `S3.mv` raise
-`ValidationError` for those cases ([`./operations/cp.md`](./operations/cp.md),
-[`./operations/mv.md`](./operations/mv.md)).
+`ValidationError` for their cases ([`./operations/cp.md`](./operations/cp.md),
+[`./operations/mv.md`](./operations/mv.md)), and `S3.ls` and `S3.rm`, which
+take only an S3 location, for theirs.
 
 ### open(key, mode, \*, size=None)
 
@@ -1119,8 +1133,9 @@ Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
 `"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
 rather than letting a transfer worker receive an unusable file object. The
 error names no operation of its own: the run that invoked the storage stamps
-the one it is performing — a streaming `cp` reports `"cp"`, a `mv` onto a
-stream reports `"mv"` — while a direct call leaves `operation` as `None`.
+the one it is performing — the streaming `cp` that reads stdin reports `"cp"`
+(`mv` rejects a stream source before opening it) — while a direct call leaves
+`operation` as `None`.
 Stdout has no such precondition, again like the AWS CLI: a process without one
 fails on the writer's first `write`, from inside the transfer, so it is that
 item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
@@ -1559,7 +1574,8 @@ The warn-and-skip battery on a path, in the AWS CLI's order and wording: the
 path does not exist, then it is a character or block special device, FIFO or
 socket, then it is not readable. Returns whether any check fired, having sent
 that check's message to `notify`. Used for the root, for a directory whose scan
-could not be established, and for the near-boundary re-vetting.
+could not be established, for a leaf whose re-stat fails at its turn
+(`restat_leaf`), and for the near-boundary re-vetting.
 
 ### should_ignore_entry(entry, full, dir\_fd, st, \*, notify)
 

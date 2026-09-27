@@ -66,9 +66,10 @@ class TransferOptions(TypedDict, total=False):
 Because there are no field defaults, "the default" below means the behavior
 when the key is absent. The request mappers gate on truthiness, so for the
 options that become S3 request parameters an empty string or empty mapping has
-the same effect as omitting the key. Four keys are read by presence rather than
-truthiness and are called out individually: `guess_mime_type`, `copy_props`,
-`annotation_copy_mode` and `case_conflict`.
+the same effect as omitting the key — `sse_c_key` and `sse_c_copy_source_key`
+aside, which follow their algorithm's presence instead (below). Four keys are
+read by presence rather than truthiness and are called out individually:
+`guess_mime_type`, `copy_props`, `annotation_copy_mode` and `case_conflict`.
 
 `acl` is the canned ACL name, sent as `ACL` on the write request of an upload
 or a copy. `grants` is a sequence of `permission=grantee` strings whose
@@ -119,15 +120,18 @@ payloads ([`AnnotationCopyMode`](#annotationcopymode)); it too is read only on
 the copy route and defaults to `AnnotationCopyMode.PRELOAD_MEMORY`. Both accept
 the enum member or the equivalent string value the enum defines, and both treat
 an explicit `None` as the default. Any other unrecognized value raises
-`ValidationError` when the engine is constructed, before any item is submitted.
+`ValidationError` as the run is set up, before any item is submitted — under
+`dryrun` too.
 
 `cache_control`, `content_type`, `content_disposition`, `content_encoding`,
 `content_language`, `expires` and `website_redirect` are the object header
 properties, sent on an upload or copy write as `CacheControl`, `ContentType`,
 `ContentDisposition`, `ContentEncoding`, `ContentLanguage`, `Expires` and
 `WebsiteRedirectLocation`. All default to unset. On a copy, setting any one of
-them makes even a single-request copy replace the remaining properties rather
-than carry them over — see [`CopyPropsMode`](#copypropsmode).
+them but `website_redirect` switches even a single-request copy to
+`MetadataDirective=REPLACE`; under every `copy_props` mode but `NONE` the
+remaining metadata properties are then read from the source and re-sent, so
+they still carry over — see [`CopyPropsMode`](#copypropsmode).
 
 `checksum_algorithm` is sent as `ChecksumAlgorithm` on an upload or copy write
 and propagates to the multipart create, part and complete calls; an explicit
@@ -196,13 +200,14 @@ Raises, over and above what each operation raises on its own:
   paths (all before any transfer starts, which is not before every side effect
   — a recursive `cp` / `mv` or a `sync` creates its missing destination
   directory first); a malformed `grants` entry (in flight); an unrecognized
-  `copy_props` or `annotation_copy_mode` on a copy (at engine construction).
+  `copy_props` or `annotation_copy_mode` on a copy (as the run is set up).
 - [`ConfigurationError`](./exceptions.md#configurationerror) — `no_overwrite`
   on an upload or copy whose SDK cannot express a conditional write, and
   `copy_props=CopyPropsMode.ALL` on an SDK without the annotations model
-  (unless `metadata_directive` disabled the chain). Both are refused at engine
-  construction; `sync` never reaches the conditional-write gate because it
-  sends no conditional header. See [`../compatibility.md`](../compatibility.md).
+  (unless `metadata_directive` disabled the chain). Both are refused as the run
+  is set up, before any item and under `dryrun` too; `sync` never reaches the
+  conditional-write gate because it sends no conditional header. See
+  [`../compatibility.md`](../compatibility.md).
 
 ## TransferConfig
 
@@ -368,16 +373,17 @@ which is why an entry a filter removed from the destination listing is not a
 candidate for `sync`'s delete lane at all. The operations compose their own
 conditions with the caller's predicate: an S3 transfer source additionally
 drops zero-byte `/`-terminated folder markers, and `rm` adds its own sweep
-condition. It runs on the enumeration worker thread, so keep it fast and
-thread-safe.
+condition. It runs on the enumeration worker thread (on the consuming thread
+under `read_ahead=False`, below), so keep it fast and thread-safe.
 
 `on_warning` (default `None`) receives the skip messages a backend's
 enumeration emits — a broken symlink, an unreadable or special file — worded as
 `aws s3` words them. `cp` / `mv` / `sync` wire it to the run's shared warning
 rollup, so those skips surface as warnings on the run instead of vanishing;
-`ls` and `rm` leave it unset. It runs on the enumeration worker, and because
-`sync` walks both of its sides through one sink the two walks can invoke it
-concurrently — keep it thread-safe.
+`ls` and `rm` leave it unset. It runs on the enumeration worker (on the
+consuming thread under `read_ahead=False`), and because `sync` walks both of
+its sides through one sink the two walks can invoke it concurrently — keep it
+thread-safe.
 
 `reusable_after_interrupt` (default `True`) is the scan's Ctrl-C exit policy. `True`
 makes the scan's teardown wait for a page pull already in flight, so no
@@ -478,6 +484,7 @@ class S3ScanOptions(ScanOptions):
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
+    include_common_prefixes: bool = False
 ```
 
 `page_size` (default `None`) is the listing page size. `None` sends no
@@ -502,6 +509,12 @@ key — a recursive `cp` / `mv` / `sync` / `rm` source, where the plan appends a
 trailing `/` — so that the storage instance the caller passed is the one
 scanned, rather than a fresh one rebuilt from a URI. A custom `S3Storage`
 subclass and its `scan_pages` override therefore survive the operation.
+
+`include_common_prefixes` (default `False`) widens a *recursive* listing to also
+emit one `DIRECTORY`-kind entry per `CommonPrefixes` entry the response
+carries, ahead of that page's objects. It has no effect on a non-recursive
+listing, which always emits them. `S3.ls` sets it; the transfers leave it off
+([`storage.md`](./storage.md#s3storage)).
 
 `page_size`, `request_payer` and `fetch_owner` are not validated here. Like
 `aws s3`, they pass through to the service, which decides: `page_size=0` lists
@@ -597,9 +610,12 @@ those, tags, and the object's S3 annotations, with multipart staging chosen by
 [`AnnotationCopyMode`](#annotationcopymode).
 
 Two interactions are worth stating. Setting an explicit property such as
-`content_type` makes even a single-request copy replace, rather than copy, the
-remaining properties, matching `aws s3`. Setting `metadata_directive` yourself
-disables the whole mechanism, whatever this option says.
+`content_type` switches even a single-request copy to
+`MetadataDirective=REPLACE`, and every mode but `NONE` then re-sends the
+remaining metadata properties read from the source, so they still carry over,
+matching `aws s3`. Setting
+`metadata_directive` yourself disables the whole mechanism, whatever this
+option says.
 
 Under `DEFAULT` and `ALL`, a multipart copy whose tag set is too large for the
 create request applies it after the copy succeeds; if that call fails, the

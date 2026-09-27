@@ -15,7 +15,8 @@ deletes "successfully" either way, and per-key success/failure is preserved via
 in the DeleteObjects XML 1.0 body fall back to per-key ``DeleteObject``, matching
 aws-cli instead of failing their whole batch (control characters ride that
 route fine; an unpaired surrogate cannot be carried by the HTTP layer on
-either route - reachability of such keys is unverified, design/deleter.md).
+either route, and whether a listing can return such a key at all is
+unverified).
 User-facing lines such as ``delete: s3://...`` are the CLI layer's job, fed by
 ``on_result``; the library only emits ``logging`` diagnostics.
 
@@ -124,8 +125,8 @@ class S3Deleter:
     successes). ``S3.rm`` and ``sync`` do not use it: they keep their own
     dryrun handling upstream (design/deleter.md section 5).
 
-    The worker thread inherits daemon-ness from its creator (Python's
-    ``ThreadPoolExecutor``), so from a normal non-daemon thread an unclosed
+    The worker thread inherits daemon-ness from the thread whose first dispatch
+    starts it (Python's ``ThreadPoolExecutor``), so from a normal non-daemon thread an unclosed
     deleter keeps the interpreter alive until the in-flight batch finishes -
     use the context manager. Use a recursive scan: a non-recursive scan also yields
     DIRECTORY (``CommonPrefixes``) entries, which are not object keys::

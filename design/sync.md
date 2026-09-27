@@ -75,7 +75,7 @@ S3().sync(src, dest, *,
     update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None = None,  # update lane: None=AwsCliComparison() / True=all / False=none / PairFilter=custom / ParallelFilter=pooled
     delete_filter: bool | FileFilter | ParallelFilter[FileInfo] = False,      # orphan lane: False=none / True=all / predicate=scope / ParallelFilter=pooled
     pair_filter: MergedPairFilter | None = None,   # one callable REPLACING the three lanes (section 11)
-    dryrun=False,                                  # follow_symlinks / page_size are storage config now (storage.md)
+    dryrun=False,                                  # follow_symlinks / page_size are storage config (storage.md)
     on_progress=None, on_result=None, cancel_token=None, transfer_config=None,
     capture_response=False,             # surface S3 responses on extra_info (opresult.md)
     **options)                          # TransferOptions (acl / sse / metadata / no_overwrite ...)
@@ -247,8 +247,10 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   rc 0 (there is no onto-itself guard like mv's).
 - An S3 Express directory bucket (`--x-s3`) on either side is rejected with
   aws-cli's `Cannot use sync command with a directory bucket.`
-  (`ValidationError`), after the s3local dest-dir creation above, before any
-  client build or listing: directory buckets drop `ListObjectsV2`'s
+  (`ValidationError`), after the s3local dest-dir creation above and before any
+  listing (a bare `s3://` argument's client is already built during
+  resolution; only a caller-made `S3Storage` without a client has its client
+  built after this check): directory buckets drop `ListObjectsV2`'s
   lexicographic guarantee, so the merge-join could pair keys wrongly and
   `delete_filter` could remove keys present on both sides. The CLI rejects the
   same paths at its own validation stage (rc 252); the library guard is the
@@ -301,9 +303,10 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   (never skip on an indeterminate compare).
 - **`part_size`** is the multipart chunk size, fixed at construction.
   `EtagComparison(s3)` reads it from that `s3`'s active profile
-  (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read tied to the
-  `s3` you pass, not an ambient one (the library never reads config on its
-  own; `EtagComparison()` is a plain 8 MiB constant). An explicit `part_size=` wins
+  (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read through
+  the `s3` you pass: its `session`, or boto3's default session for an `S3`
+  built without one (the library never reads config on its own;
+  `EtagComparison()` is a plain 8 MiB constant). An explicit `part_size=` wins
   over `s3`. The value must match what the object was uploaded with, or every
   multipart object reads as differing (the rclone `--s3-chunk-size` constraint);
   the *effective* size has a 5 MiB floor / 5 GiB ceiling and auto-grows past S3's
@@ -317,7 +320,7 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   pair carrying the *same* opaque value (e.g. a replicated object) reads as
   equal - use the default `update_filter=None` against such buckets instead. The upload / download hash runs on sync's
   calling thread unless the strategy is wrapped in `ParallelFilter` (section 10).
-- **Single object.** `EtagComparison.content_differs(path_or_stream, etag=...)`
+- **Single object.** `EtagComparison.content_differs(source, etag=...)`
   makes the same judgment outside a sync - one local source against an ETag the
   caller already holds - so verifying one object needs no hand-built `SyncPair`
   (same `True` = differs or indeterminate lean, same part-size and SSE caveats).
@@ -330,8 +333,10 @@ part size), `boto3_s3.checksumcompare.ChecksumComparison(...)` reads the object'
 algorithm over the local file. It needs **no write side** (the checksum is one
 S3 already stores), works on objects any tool uploaded with a checksum, is
 **exact for multipart** objects (the part boundaries come back in `ObjectParts`,
-so nothing is guessed), and works for **SSE** objects (a checksum is independent
-of encryption). The cost is one `GetObjectAttributes` round-trip per object
+so nothing is guessed), and works for **SSE-S3 / SSE-KMS / DSSE** objects (a
+checksum is independent of that encryption; an SSE-C object needs a customer
+key the strategy never sends, so it reads as indeterminate and is copied). The
+cost is one `GetObjectAttributes` round-trip per object
 consulted - the S3 side on upload / download, each side on s3->s3 - plus
 follow-up pages when a `COMPOSITE` object's `ObjectParts` listing is truncated.
 Like `EtagComparison` it is a standalone, opt-in building block - re-exported at
@@ -415,9 +420,13 @@ with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
 
 `ParallelFilter` is a value container, not a callable: `sync` recognizes it in
 any of the three lanes, reads `.decide` and `.executor`, and drives the pool
-itself - it is **never invoked** as a filter. Wrapping is a pure performance
-transform: the same entries are acted on and the exit is the same as the bare
-filter, only faster. The wrapped filter must therefore be thread-safe;
+itself - it is **never invoked** as a filter. For a stateless filter, wrapping
+is a performance transform: the same entries are acted on and the exit is the
+same as the bare filter, only faster. The one exception is a wrapped
+`delete_filter` on a local destination: the pair loop advances while delete
+decisions are still outstanding, which re-opens the overlap the no-read-ahead
+walk closes (section 5), so a self-aliasing tree can list a file under its
+second name and fail that delete. The wrapped filter must be thread-safe;
 `ChecksumComparison` and `EtagComparison` are (read-only over their fields; a
 botocore client is safe to share for concurrent calls).
 
@@ -434,19 +443,21 @@ botocore client is safe to share for concurrent calls).
   **delete** lane its `delete_filter` - each on its own executor when wrapped. A
   lane left unwrapped decides inline on the calling thread in compare-key order.
 - **Ordering.** Pooled decisions are consumed in completion order, so survivors
-  submit out of compare-key order. For real transfers and the S3 batch deletes
-  that changes nothing observable (s3transfer moves bytes on its own pool, the
-  deleter batches on its worker; `on_result` fires unordered either way, and
-  delete/transfer lines already interleave non-deterministically, section 5).
-  Results emitted inline on the deciding thread do follow it, though: dry-run
-  records, and the synchronous local / custom-destination orphan deletes,
-  arrive in compare-key order from a serial lane but in completion order from
-  a pooled one. The other visible consequence is `create_filter`:
-  parallelizing it makes the `--case-conflict` gate's "first key wins"
-  non-deterministic (which case-variant survives a case-insensitive local
-  destination, and which warns), because the gate's in-flight set is
+  submit out of compare-key order. For real transfers that changes nothing
+  observable (s3transfer moves bytes on its own pool, `on_result` fires
+  unordered, and delete/transfer lines already interleave
+  non-deterministically, section 5). Every other record follows it, though:
+  dry-run records and the synchronous local / custom-destination orphan
+  deletes, emitted inline on sync's calling thread, and the S3 batch deletes,
+  which the deleter records in submission order, arrive in compare-key order
+  from a serial lane but in completion order from a pooled one. The other
+  visible consequence is `create_filter`: parallelizing it makes the
+  `--case-conflict` gate's "first key wins" non-deterministic (which
+  case-variant survives a case-insensitive local destination, and which
+  warns), because the gate's in-flight set is
   order-sensitive (aws-cli's `CaseConflictSync` in the not-at-dest slot). The
-  **update** lane never touches the gate. Exit parity is unaffected.
+  **update** lane never touches the gate. Exit parity is otherwise unaffected
+  (the wrapped delete lane above is the one exception).
 - **Back-pressure.** `sync` submits each pooled decision as a `Future` and keeps a
   bounded number outstanding (the distinct executors' worker counts, summed), so a
   huge listing is never materialized into futures all at once - a pool's own
@@ -471,15 +482,11 @@ parallel filter, so the CLI never sets it and parity is not at stake.
 The three lanes split the decision by pair shape, which is right when the
 decisions are independent. An application whose decision is *not* split that way
 - an audit journal, a confirmation flow, statistics, anything carrying state
-across the lanes - had to wire one object's three methods into `create_filter` /
-`update_filter` / `delete_filter`, and to merely *observe* the orphans it had to
-pass `delete_filter=lambda info: False`: `delete_filter=False` switches the lane
-off, so the destination-only pairs are never offered to anything. A consumer
-outside this repository (s3bak's push journal) ended up with exactly that -
-three wired methods, a keep-everything delete callable, and the same
-cursor-advance code duplicated between the create and update methods. What it
-actually wanted is one callback over every merged pair, in compare-key order,
-serially.
+across the lanes - wants one callback over every merged pair, in compare-key
+order, serially, rather than one object's methods wired into `create_filter` /
+`update_filter` / `delete_filter` plus a keep-everything `delete_filter` just to
+*observe* the orphans (`delete_filter=False` switches the lane off, so the
+destination-only pairs are never offered to anything).
 
 `pair_filter` is that callback: a `MergedPairFilter =
 Callable[[MergedPair], bool]` that **replaces** all three lanes.
@@ -504,16 +511,15 @@ either not a `SyncPair` or `AwsCliComparison()(pair)`.
   `MergedPair` shape, and the shapes are exactly this callable's argument - and
   no lane gets an executor. Nothing downstream is aware of the hook: routing,
   the glacier and case-conflict gates, dryrun, `cancel_token` and the
-  `BatchError` rollup are the same code, and with `pair_filter=None` the path is
-  the one that was there before. A fourth path through the merge would have
-  duplicated the routing and every gate for no behavioral gain.
+  `BatchError` rollup are the same code, and `pair_filter=None` leaves the
+  lanes as the caller set them. A fourth path through the merge would
+  duplicate the routing and every gate for no behavioral gain.
 - **The delete machinery is live whenever the hook is set**, since the callback
   may delete: the open-route capability gate is checked with `delete=True`
   (section 6), and a walked local destination is listed without read-ahead
   (section 5) - the same reasoning as an ordinary delete lane's, applied to a
   lane whose answers are not known in advance. Returning `False` for every
-  `DestOnlyPair` is then the supported observe-only mode, and the workaround
-  above is gone.
+  `DestOnlyPair` is then the supported observe-only mode.
 - **`ParallelFilter` is refused.** Pooled decisions are consumed in completion
   order (section 10), which destroys the single ascending stream that is the
   reason to take one hook at all; a journal or a cursor over the pair stream
@@ -529,11 +535,10 @@ either not a `SyncPair` or `AwsCliComparison()(pair)`.
   `delete_filter` is refused on the same ground - the hook replaces them, and
   letting one side win silently would hide which decision ran. All of these are
   argument-shape checks, so they land before any resolution or side effect.
-- **The ordering is now a promise, not an implementation note.** That an
-  unwrapped lane decides inline on the calling thread in compare-key order was
-  recorded here (section 10); with this hook it is what makes a streaming
-  journal possible, so it is stated as a user-facing contract in
-  `docs/reference/operations/sync.md`.
+- **The ordering is a promise, not an implementation note.** That an
+  unwrapped lane decides inline on the calling thread in compare-key order
+  (section 10) is what makes a streaming journal possible with this hook, so it
+  is stated as a user-facing contract in `docs/reference/operations/sync.md`.
 
 Library-only, like `ParallelFilter`: `aws s3` has no counterpart, so the CLI
 never sets it and no parity is at stake (the library may be a permissive

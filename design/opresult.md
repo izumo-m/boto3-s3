@@ -84,8 +84,10 @@ Every item that reaches the operation layer produces **exactly one outcome
 record**: `SUCCEEDED` / `FAILED` / `SKIPPED` / `DRYRUN` / `CANCELLED`. An item
 that never reaches it - filtered out during enumeration, or never enumerated
 because the run died first - produces nothing. The delete lane carries one
-carve-out: a cancellation can also discard `S3Deleter`-buffered entries
-(accepted but not yet dispatched) without a record
+carve-out: `S3Deleter` entries accepted but never run produce no record - the
+unsent buffer, which a cancellation or an exception that ends the run (a
+listing failure part-way through, say) discards, and a dispatched batch an
+immediate cancellation stopped before its request started
 ([`deleter.md`](./deleter.md) section 2). Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
@@ -164,7 +166,8 @@ the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
 
 The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
 exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None`
-- a documented degradation ([`overview.md`](./overview.md) section 2).
+- a documented degradation ([`compatibility.md`](../docs/compatibility.md)
+section 1; for the CRT engine, [`crt.md`](./crt.md) section 3).
 
 ### `capture_response` - the full S3 responses
 

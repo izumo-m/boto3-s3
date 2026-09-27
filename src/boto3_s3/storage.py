@@ -165,7 +165,8 @@ class Storage(abc.ABC):
     Class attributes (a concrete backend sets / overrides these):
 
     ``scheme`` - which storage family this is, a display/classification label
-    (result rendering uses it). ``"s3"`` and ``"local"`` are the built-in pair; any
+    for embedders (the engine never reads it; results render through
+    ``as_text``). ``"s3"`` and ``"local"`` are the built-in pair; any
     other value is a non-built-in backend (a custom one, or a stdio stream).
     Transfer *routing* does not read it: the planner routes by concrete type (the
     structural match in ``transferplan._paths_type``). Each concrete Storage sets
@@ -415,8 +416,8 @@ class Storage(abc.ABC):
         """Return the ``FileInfo`` for a single entry, or ``None`` if it is absent.
 
         The single-entry counterpart to ``scan`` (which enumerates): ``cp`` /
-        ``mv`` use it for a single source object, and an existence check (e.g.
-        ``--no-overwrite``) reads it for ``None``. ``key`` is relative to this
+        ``mv`` use it for a single source object (the engine runs no
+        destination existence check through it). ``key`` is relative to this
         storage's location: ``key=""`` (the default) is the location itself (the
         single source/dest the storage points at), a non-empty ``key`` an entry
         beneath it. The outcomes are uniform across backends:

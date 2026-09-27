@@ -169,14 +169,14 @@ below — each mirrors an `aws s3` subcommand.
 
 | Method | What it does |
 | --- | --- |
-| `ls(target, *, on_entry, recursive, …)` | List objects and common prefixes — or, at the bare service root, every bucket. Delivers ordered `FileInfo` entries to `on_entry`. |
+| `ls(target, *, on_entry, recursive, …)` | List objects and common prefixes — or, at the bare service root, every bucket. Delivers `FileInfo` entries to `on_entry` in listing order. |
 | `cp(src, dest, *, recursive, filter, dryrun, …)` | Copy bytes: upload, download, or S3-to-S3. Either side may be a stream. |
 | `mv(src, dest, *, recursive, …)` | `cp`, then delete each source once its copy succeeds. |
 | `sync(src, dest, *, filter, create_filter, update_filter, delete_filter, …)` | Recursively synchronize `src` into `dest`. |
 | `rm(target, *, recursive, filter, dryrun, …)` | Delete objects: a single key, a recursive prefix, or the folder-marker sweep. |
 | `mb(target, *, tags)` | Create the bucket of `target`. |
 | `rb(target)` | Delete the (empty) bucket of `target`. |
-| `presign(target, *, expires_in=3600, method="get_object")` | Return a presigned URL. No request is sent. |
+| `presign(target, *, expires_in=3600, method="get_object")` | Return a presigned URL. No request is sent, except a `CreateSession` when signing for a directory bucket. |
 | `website(target, *, index_document, error_document)` | Set the bucket website configuration. |
 
 Each takes the `aws s3` transfer options as snake_case keyword arguments. The
@@ -202,8 +202,9 @@ response timestamps at C speed — severalfold faster on a large `ls` / `sync` /
 apart from that.
 
 When one operation needs **two** clients — a cross-account S3-to-S3 copy — wrap
-each URL in an `S3Storage` carrying its own client. The same object configures
-how a side is read (`page_size`, `follow_symlinks`, …). An S3-compatible
+each URL in an `S3Storage` carrying its own client. A `Storage` object also
+configures how its side is read (`S3Storage`'s `page_size`, `LocalStorage`'s
+`follow_symlinks`, …). An S3-compatible
 endpoint such as MinIO is just a differently-built client.
 
 ## Documentation

@@ -891,13 +891,15 @@ class S3:
         default session) with ``endpoint_url`` / ``config`` applied. Override to
         change credentials, reuse a cached client, or return a test double; reuse
         one explicitly via ``S3Storage(uri, client=s3.client())``. A failed build
-        raises the translated ``Boto3S3Error`` - ``ConfigurationError`` for
-        unresolvable credentials / region, its ``InvalidConfigError``
-        refinement for a set-but-unusable ``AWS_PROFILE``, partial
-        credentials, or a malformed ``endpoint_url``, and the base
-        ``Boto3S3Error`` for any other botocore error, which the translator's
-        last clause claims - never the raw botocore
-        error (design/exceptions.md section 1).
+        raises the translated ``Boto3S3Error`` - ``InvalidConfigError`` for a
+        set-but-unusable ``AWS_PROFILE``, partial credentials, or a malformed
+        region or ``endpoint_url``, and the base ``Boto3S3Error`` for any other
+        botocore error, which the translator's last clause claims - never the
+        raw botocore error (design/exceptions.md section 1). Missing
+        credentials and an unset region do not fail the build: missing
+        credentials fail when the client first signs - a request, or a
+        ``presign`` - as a ``ConfigurationError``, and an unset region falls
+        back to botocore's default for S3.
         """
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
@@ -922,10 +924,11 @@ class S3:
         ``aws s3 rm`` constructs its transfer manager before deciding anything
         about the run, so the engine's construction-time failures - awscrt
         refusing a client with no region above all - belong to the command, not
-        to the deletes. `rm` here deletes through ``DeleteObject`` and never
-        rides the engine, so an application that owes ``aws s3`` parity calls
-        this to pay the same construction (cross-process lock included) at the
-        same point and simply drops the result.
+        to the deletes. `rm` here deletes through ``DeleteObject`` /
+        ``DeleteObjects`` and never rides the engine, so an application that
+        owes ``aws s3`` parity calls this to pay the same construction
+        (cross-process lock included) at the same point and simply drops the
+        result.
 
         The engine is chosen from *transfer_config* (this instance's
         ``transfer_config`` when none is given) with the same rule the transfer
@@ -2477,9 +2480,9 @@ def _regional_presign(client: Any) -> Generator[None, None, None]:
 
     botocore marks presign requests with a ``use_global_endpoint`` context flag
     and then resolves the endpoint with the region builtin replaced by
-    ``aws-global``, so a eu-west-1 client presigns
+    ``aws-global``, so an eu-central-1 client presigns
     ``bucket.s3.amazonaws.com`` while every real request it sends goes to
-    ``bucket.s3.eu-west-1.amazonaws.com``. The URL still carries the true
+    ``bucket.s3.eu-central-1.amazonaws.com``. The URL still carries the true
     region in its credential scope, so the host and the signature disagree.
     aws-cli's bundled botocore has no such flag and always presigns the
     resolved regional host; this restores that by clearing the flag before
@@ -2488,13 +2491,14 @@ def _regional_presign(client: Any) -> Generator[None, None, None]:
 
     Everything botocore already exempts from the flag is untouched, because
     clearing it only reaches the cases where it was set: a non-``aws``
-    partition, dualstack, an explicit ``addressing_style``, and a us-east-1
-    client with the regional pin the CLI applies never set it in the first
-    place, and botocore's handler ignores it for an ARN bucket, a directory
-    bucket, and a DNS-incompatible name that forces path style. A custom
-    ``endpoint_url`` overrides the resolved host either way. The net change is
-    exactly the plain non-us-east-1 case (all measured against the pinned
-    aws-cli).
+    partition, dualstack, an explicit ``virtual`` ``addressing_style``, and a
+    us-east-1 client with the regional pin the CLI applies never set it in the
+    first place, and botocore's handler ignores it for an explicit ``path``
+    ``addressing_style``, an ARN bucket, a directory bucket, and a
+    DNS-incompatible name that forces path style. A custom ``endpoint_url``
+    overrides the resolved host either way. The net change is exactly the
+    plain non-us-east-1 case, an explicit ``auto`` addressing style included
+    (all measured against the pinned aws-cli).
 
     ``use_global_endpoint`` is a botocore-internal context key; if a botocore
     version renames or drops it this override simply no-ops (the ``pop`` finds

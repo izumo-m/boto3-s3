@@ -13,7 +13,7 @@
 # (compose.dev.yaml) and must stay empty between test runs.
 #
 # Windows twin (same values, runner form): scripts/minio-env.cmd
-# (docs/testing.md section 8).
+# (design/testing.md section 8).
 
 export AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
 export AWS_ACCESS_KEY_ID=minioadmin

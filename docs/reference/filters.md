@@ -59,9 +59,13 @@ local destination pre-walk a recursive S3-to-local `cp` / `mv` performs when
 `case_conflict` is anything but `ignore`, `rm`'s recursive delete and its
 bucket-root folder-marker sweep, and each side of `sync` — the predicate is
 evaluated page by page on the enumeration's prefetch worker thread, overlapped
-with the listing I/O. It must therefore be thread-safe, and a slow predicate
-throttles enumeration. `sync` enumerates its two sides through separate
-workers, so the two side-walks can invoke it concurrently. The `case_conflict`
+with the listing I/O — except where the scan runs without read-ahead
+([`ScanOptions.read_ahead`](./options.md#scanoptions) `False`: a local `sync`
+destination while the delete lane is on, or a backend that seeds it), where it
+runs on the thread that called the operation. It must therefore be
+thread-safe, and a slow predicate throttles enumeration. `sync` enumerates its
+two sides through separate workers, so the two side-walks can invoke it
+concurrently. The `case_conflict`
 pre-walk hands the predicate destination-side entries during a `cp` or `mv`,
 and an entry it excludes is not counted as an existing destination key by that
 gate ([`options.md`](./options.md)). On the single-object paths — a

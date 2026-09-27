@@ -1,7 +1,9 @@
 # Exit codes
 
 `boto3-s3` uses the same exit codes as `aws s3`, with the same meanings, so a
-script that already branches on `aws s3`'s codes keeps working unchanged.
+script that already branches on `aws s3`'s codes keeps working unchanged. How
+the command produces them is recorded in
+[`../../design/cli.md`](../../design/cli.md) section 6.
 
 ## 1. The codes
 
@@ -10,7 +12,7 @@ script that already branches on `aws s3`'s codes keeps working unchanged.
 | 0 | The command succeeded. `help` and `--version` also exit 0. |
 | 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
-| 130 | Interrupted with Ctrl-C before the operation started. |
+| 130 | Interrupted with Ctrl-C outside a running transfer or delete. |
 | 252 | The command line was rejected. |
 | 253 | The environment cannot supply what the command needs. |
 | 254 | A request reached S3 and S3 returned an error. |
@@ -27,8 +29,9 @@ do not branch on it.
 
 ### 1 — the operation failed after it started
 
-Once `cp` / `mv` / `rm` / `sync` / `mb` / `rb` has begun work, every failure ends
-at 1 — **including errors S3 itself returned**. The transfer commands
+Once `cp` / `mv` / `rm` / `sync` / `mb` / `rb` has begun work, a failure ends
+at 1 — **including errors S3 itself returned** — except a failed object
+deletion under `rb --force`, which is 255 (section 2). The transfer commands
 deliberately do not report 254 once running, matching `aws s3`. Per-item
 failures were already printed as `... failed:` lines while the run proceeded;
 a failure that stops the whole run prints one `fatal error:` line.
@@ -49,10 +52,13 @@ modification time that could not be stamped onto a downloaded file. Everything
 else transferred normally. Warnings count toward this code, failures do not —
 if anything failed, the code is 1.
 
-### 130 — Ctrl-C before the operation started
+### 130 — Ctrl-C outside a running transfer or delete
 
-Once a transfer or delete is running, Ctrl-C reports 1 instead (above). The
-interactive prompt's own Ctrl-C and end-of-input also exit 130.
+Ctrl-C before a `cp` / `mv` / `rm` / `sync` run has started, or while `ls`,
+`mb`, `website`, `presign` or `rb` without `--force` is at work — a request
+already in flight included — exits 130. Once a transfer or delete is running,
+Ctrl-C reports 1 instead (above). The interactive prompt's own Ctrl-C and
+end-of-input also exit 130.
 
 ### 252 — the command line was rejected
 
@@ -68,7 +74,11 @@ Credentials or a region could not be resolved, or a requested feature needs a
 dependency that is not installed — asking for the CRT transfer engine without
 the `crt` extra is the common case — or one that is installed but too old to
 carry it ([`compatibility.md`](../compatibility.md) lists what each feature
-needs). An unusable `cli_timestamp_format` in the profile lands here too, and
+needs). Not every such case lands here: a CRT-only `--checksum-algorithm`
+without the extra fails per item (1), `--copy-props all` on a too-old SDK
+ends the run with one `fatal error:` line (1), and `--no-overwrite` on an
+upload or copy with a too-old SDK is rejected up front as a usage error (252).
+An unusable `cli_timestamp_format` in the profile lands here too, and
 it lands early: ahead of the command itself, a `help` page included
 ([`configuration.md`](./configuration.md)).
 
@@ -82,9 +92,10 @@ dependency failures above are not something `aws` can report, so they have no
 envelope. Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
 failure is exit code 1 with no envelope instead: a per-item
 `upload failed:` / `move failed:` / `delete failed:` line when it lands on an
-object, and a whole-run `fatal error:` line when it lands on the listing a
-recursive run starts with (`sync`, `rm --recursive`). `aws` reports both the
-same way.
+upload or a delete, and a whole-run `fatal error:` line when it lands on the
+lookup a download or an S3-to-S3 copy starts with (the source's `HeadObject`)
+or on the S3 listing a recursive run starts with (`sync`, `rm --recursive`).
+`aws` reports both the same way.
 
 ### 254 — S3 returned an error
 
@@ -128,7 +139,7 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | --- | --- | --- |
 | `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
-| `cp --expected-size` with a non-integer | 1 when uploading a stream, 0 otherwise | the value is read only on the streaming route |
+| `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
 | a region set to an empty value, with a bad path or option pairing too | 255 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint (a region merely *unset* builds fine, so those checks keep their own codes) |
 | an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
@@ -138,19 +149,25 @@ All of this matches `aws s3`, including the orderings above.
 
 ## 3. Where this differs from `aws s3`
 
-Two cases where the codes are deliberately not identical:
+Three cases where the codes are deliberately not identical:
 
 - **The CRT transfer engine without the `crt` extra** exits 253; a CRT-only
   `--checksum-algorithm` without it fails per item at exit code 1 instead.
   `aws` v2 bundles awscrt, so neither situation can arise there.
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
+- **A listing an S3-compatible endpoint returns unsorted** stops `sync` here
+  at exit code 1, where `aws` keeps merging and exits 0.
 
-A few failure paths settle on different codes too — a transfer whose connection
-dies below the HTTP layer, a download body cut mid-stream, a stdout or an error
-report that cannot be written, and a standard stream that cannot be set up at
-all. Section 2 of [`aws-differences.md`](./aws-differences.md) has each of them,
-with why it is not worth mirroring.
+A few other paths settle on different codes too — a transfer whose connection
+dies below the HTTP layer, a download body cut mid-stream, a plain-HTTP
+endpoint taken from the environment under the CRT engine, an `aws` plugin that
+cannot be imported, a `cli_history` directory `aws` cannot create, an invalid
+`AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*`
+environment variables, a stdout or an error report that cannot be written, and
+a standard stream that cannot be set up at all. Section 2 of
+[`aws-differences.md`](./aws-differences.md) has each of them, with why it is
+not mirrored.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.

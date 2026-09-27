@@ -1,7 +1,8 @@
 # Which `boto3` version each feature needs
 
-**`boto3` 1.43.31 or newer has everything.** Four of the entries below
-additionally need the `crt` extra.
+**`boto3` 1.43.31 or newer has everything but `MD5`, which `botocore` cannot
+compute (below).** Four of the entries below additionally need the `crt`
+extra.
 
 If you cannot upgrade, the table says what each feature needs; below the version
 listed, that feature is not supported. Check what you have with
@@ -25,7 +26,8 @@ bound, so a newer `boto3` is picked up as it is.
 | `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.41.0 |
 | `[s3]` tuning reaching the CRT transfer manager | boto3 >= 1.42.0 |
 | `mb` on an account-regional bucket (a name ending `-an`) | boto3 >= 1.42.67 |
-| `checksum_algorithm` = `MD5` / `SHA512` | boto3 >= 1.42.94 |
+| `checksum_algorithm` = `SHA512` | boto3 >= 1.42.94 |
+| `checksum_algorithm` = `MD5` | not usable: the S3 model lists it, but `botocore` cannot compute it, so an upload with it fails per item |
 | `checksum_algorithm` = the `XXHASH` family | boto3 >= 1.42.94, plus the `crt` extra |
 | S3 object annotations (GA 2026-06) | boto3 >= 1.43.31 |
 | `copy_props=ALL` / `--copy-props all` | boto3 >= 1.43.31 |

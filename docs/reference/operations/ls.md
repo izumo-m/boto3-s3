@@ -190,9 +190,10 @@ of `cp` / `mv` / `rm` / `sync`; the bucket listing stamps `operation="ls"`.
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — a
   bucket filter (`bucket_name_prefix` / `bucket_region`) on an SDK whose
   `ListBuckets` model lacks the matching input member, raised as the bucket
-  listing starts and before any request; and a client that cannot be built:
-  unresolvable credentials or region, a set-but-unusable profile, a malformed
-  endpoint.
+  listing starts and before any request; a client that cannot be built: a
+  set-but-unusable profile, partial credentials, a malformed region or
+  endpoint; and missing credentials, which fail the listing's first request
+  rather than the build.
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a failure the
   translator cannot classify.
 

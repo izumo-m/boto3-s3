@@ -3,7 +3,8 @@
 The suite under `benchmarks/` exists to detect performance regressions
 against the goal stated in [overview.md](overview.md) section 1: performance
 equal to or better than `aws s3`. It is a local, manually run harness - it is
-not part of pytest (`testpaths` stays `tests`), not run in CI (shared runners
+not part of pytest (`testpaths` stays `tests`; only the harness's own unit
+tests, `tests/benchmarks/`, run there), not run in CI (shared runners
 make wall-clock thresholds meaningless), and nothing in it ships with either
 package.
 

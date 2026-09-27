@@ -149,9 +149,11 @@ def _run_subprocess(
     # PYTHONUTF8=1 fixes the child's stdio at UTF-8, the encoding the capture
     # below decodes. Left alone, a Windows child writes the host's codepage
     # (cp932 and cp1252 measured on two hosts) and its non-ASCII output would
-    # come back as U+FFFD. The pinned aws.exe honors the same variable
-    # (measured), so both sides of a parity pair move together -
-    # PYTHONIOENCODING would not, aws.exe ignores it. UTF-8 mode also pins the
+    # come back as U+FFFD. The pinned aws.exe honors the variable for its
+    # error reports alone (aws's own code reads it back for those streams; its
+    # frozen interpreter ignores it), so an error report moves to UTF-8 on both
+    # sides while aws.exe's result lines keep the host codepage (measured) -
+    # PYTHONIOENCODING moves neither, aws.exe ignores it. UTF-8 mode also pins the
     # child's locale.getpreferredencoding(), so a subprocess test of the
     # file:// paramfile encoding must set AWS_CLI_FILE_ENCODING itself.
     proc_env = {**os.environ, "PYTHONUTF8": "1", **(env or {})}

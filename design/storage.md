@@ -44,7 +44,7 @@ implements exactly what it declares. Every declared flag — including one
 declarations, not implementations, so they refuse an unsupported operation up
 front only when the declaration is honest:
 
-- **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
+- **`scheme: ClassVar[str]`** — the backend's family label, anything but
   `"s3"` / `"local"` (a declared classification label for embedders; the
   engine itself never reads it - results render through `as_text()`).
   Transfer *routing* does not read it either: the planner
@@ -59,7 +59,8 @@ front only when the declaration is honest:
   / progress (its canonical path token).
 - **`open(key, mode, *, size=None) -> BinaryIO`** — per-object byte I/O. `"rb"`
   returns a readable stream; `"wb"` a writable one whose `close()` flushes buffered
-  writes (standard file semantics). `size` is an optional total-length hint for writes.
+  writes (standard file semantics). `size` is an optional total-length hint, for
+  reads as well as writes.
   `S3Storage` implements `"rb"` only (a `GetObject` read convenience, addressed by
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
   stays unimplemented, since every S3 write on the *transfer lanes* rides
@@ -281,7 +282,7 @@ of deep inside the run:
 |---|---|---|
 | `OPEN_READ` | `open(key, "rb")` | an `opens3` source |
 | `OPEN_WRITE` | `open(key, "wb")` | an `s3open` destination |
-| `GET_FILEINFO` | `get_fileinfo` | a single-entry source / existence check |
+| `GET_FILEINFO` | `get_fileinfo` | a single-entry source |
 | `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) **source** |
 | `SORTABLE_SCAN` | byte-ordered recursive `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
 | `DELETE` | `delete(info)` | an `mv` source / a `sync --delete` destination |
@@ -390,16 +391,22 @@ with open("hello.txt", "rb") as f:
 # upload from a text buffer (encoded with `encoding`, default utf-8)
 s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
 
-# download into a buffer, then read it back: IOStorage does NOT reposition the
-# stream, so rewind it yourself (or use getvalue())
+# download into a buffer, then read it back: rewind it yourself (or use
+# getvalue())
 buf = io.StringIO()
 s3.cp("s3://bucket/hello.txt", IOStorage(buf))
 buf.seek(0)
 print(buf.read())            # or: print(buf.getvalue())
 
-# download straight into a gzip writer - a non-seekable binary write stream
+# download straight into a gzip writer - a GzipFile reports seekable() but
+# seeks only forward, so hand over just its write(): a non-seekable binary
+# write stream is written strictly in order
+class WriteOnly:
+    def __init__(self, stream):
+        self.write = stream.write
+
 with gzip.open("hello.txt.gz", "wb") as f:
-    s3.cp("s3://bucket/hello.txt", IOStorage(f))
+    s3.cp("s3://bucket/hello.txt", IOStorage(WriteOnly(f)))
 ```
 
 The contract:
@@ -409,12 +416,19 @@ The contract:
   stream (`io.StringIO`, a file opened `"r"` / `"w"`) is wrapped with a codec
   (`IOStorage(stream, encoding="utf-8")`) — encode on upload, decode on download.
 - **The caller owns the stream.** `IOStorage` **never closes** it and never
-  rewinds it for you: lifecycle and final position are yours. After a download
-  the stream sits at the end of the written bytes, so to read them back rewind it
-  (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well — a
-  `gzip` writer, `sys.stdout`, a pipe — there is nothing to rewind; the bytes
-  land wherever the stream sends them (the `.gz` file, the console), and the
-  caller's own `with` / `close` finalizes it.
+  rewinds it for you: lifecycle and final position are yours. Where a download
+  lands depends on the stream and the engine: the binary view passes `seek`
+  through, so on the classic engine s3transfer's seekable download path writes
+  a seekable binary stream at absolute offsets from 0 — its prior position is
+  ignored, and a multipart download can leave it anywhere — while a text
+  stream, a non-seekable one and any stream under the CRT engine are written in
+  order from their current position. To read a download back, rewind it
+  (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
+  `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there
+  is nothing to rewind; the bytes land wherever the stream sends them (the
+  `.gz` file, the console), and the caller's own `with` / `close` finalizes it.
+  A `GzipFile` handed over directly is not such a sink: it reports `seekable()`
+  but seeks only forward, so a multipart download into it can fail.
 - **A single endpoint, not a container.** Only `open` is meaningful; the
   inherited `get_fileinfo` / `delete` raise `NotImplementedError` on the call,
   and `scan` raises the same on its first iteration rather than on the call
@@ -505,10 +519,10 @@ spanning both would file a broken stream as a local failure.
   the returned `S3FileInfo` and decides.
 - **`cp` / `mv` / `sync` do not use them**, so aws-cli parity is untouched: the
   transfer engine, its gates (glacier, `--no-overwrite`, case-conflict) and the
-  CLI behave exactly as before.
+  CLI do not depend on them.
 - not part of the `Storage` SPI. These are `S3Storage`-specific building blocks
-  like the S3-only operations, so `StorageCapability` and the `Storage` ABC gain
-  nothing and a custom backend implements nothing new.
+  like the S3-only operations, so neither `StorageCapability` nor the `Storage`
+  ABC describes them, and a custom backend implements none of it.
 
 Both address the object through the same `""`-is-this-location /
 join-under-the-prefix rule as `get_fileinfo`, and both return an `S3FileInfo`

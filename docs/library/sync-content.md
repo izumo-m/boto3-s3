@@ -24,12 +24,12 @@ orphans still deleted by their own filters.
 | Compares | S3's ETag, reconstructed for the local side | the object's stored checksum, recomputed locally |
 | Extra requests | none | one `GetObjectAttributes` per object consulted |
 | Multipart | needs the part size to match | exact — the part boundaries come back from S3 |
-| Encrypted objects (SSE-KMS / SSE-C / DSSE) | does not work | works |
+| Encrypted objects (SSE-KMS / SSE-C / DSSE) | does not work | works, except SSE-C (copied every run) |
 | Objects uploaded without a checksum | works | falls back to copying |
 
 Reach for `EtagComparison` when the objects are unencrypted and you know the
 part size they were uploaded with. Reach for `ChecksumComparison` when either of
-those does not hold, and accept the round-trip.
+those does not hold (SSE-C objects aside), and accept the round-trip.
 
 ## 2. `EtagComparison`
 
@@ -55,8 +55,8 @@ objects sharing an ETag.
 
 **Encrypted objects do not work here.** SSE-KMS, SSE-C and DSSE objects carry an
 opaque ETag that is not an MD5, so on upload and download every one of them
-reads as differing and is copied. Use the default rule or `ChecksumComparison`
-against such buckets.
+reads as differing and is copied. Use the default rule against such buckets,
+or `ChecksumComparison` for SSE-KMS and DSSE objects.
 
 An indeterminate comparison always copies. The strategy never skips on a value
 it could not verify.
@@ -72,8 +72,10 @@ s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
 
 It asks S3 for the checksum it already stores and recomputes the same algorithm
 locally. Because the checksum is stored alongside the object, nothing needs to
-be written first, it is independent of encryption, and for multipart objects the
-exact part boundaries come back from S3 — nothing is guessed.
+be written first, it is independent of SSE-S3, SSE-KMS and DSSE encryption, and
+for multipart objects the exact part boundaries come back from S3 — nothing is
+guessed. An SSE-C object is the exception: reading its checksum needs the
+customer key, which the strategy never sends, so it is copied every run.
 
 Pass the same `src` and `dest` you passed to `sync`. It needs them to reach each
 S3 side's client and bucket, which a `FileInfo` alone does not carry. For a
@@ -86,7 +88,7 @@ these run concurrently.
 **Anything indeterminate is copied**: an object with no stored checksum, a pair
 whose two sides used different algorithms, an unknown algorithm, or a
 `GetObjectAttributes` that fails with a client error such as a 404, a denied
-permission, or an SSE-C object whose key was not supplied.
+permission, or an SSE-C object (no customer key is sent).
 
 **One class of failure is not per-object.** A missing credential, an unreachable
 endpoint or a timeout aborts the whole sync rather than being treated as
@@ -126,17 +128,21 @@ down. It must be thread-based; a `ProcessPoolExecutor` cannot work because
 neither the predicate nor its client can be pickled. Whatever you wrap must be
 thread-safe — both content strategies are.
 
-Wrapping is a pure performance change: the same entries are acted on and the
-same outcome is reached. Two visible side effects are worth knowing:
+For a stateless predicate, wrapping is a performance change: the same entries
+are acted on and the same outcome is reached, the last case below aside. Three
+visible side effects are worth knowing:
 
 - **Order.** Pooled decisions are consumed as they finish, so entries are
-  submitted out of key order. This is invisible for transfers and batched
-  deletes, but records emitted on the deciding thread — dry-run records, and
-  deletions against a local destination — arrive in completion order instead of
-  key order.
+  submitted out of key order. This is invisible for transfers, but the other
+  records — dry-run records and deletions, whether against a local destination
+  or batched on S3 — arrive in completion order instead of key order.
 - **Case conflicts.** Parallelizing `create_filter` makes which entry wins a
   case-insensitive collision non-deterministic, because that check depends on
   the order entries arrive in. `update_filter` never touches it.
+- **A self-aliasing local destination.** A wrapped `delete_filter` lets a local
+  destination's listing advance while delete decisions are still outstanding,
+  so a tree that reaches one directory under two names through a symlink can
+  list a file under both and fail the second delete.
 
 If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.

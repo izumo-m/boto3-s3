@@ -14,7 +14,11 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 - `src/boto3_s3/` — **`boto3-s3`**, the library.
 - `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
 - `tests/` — the test suite (see [`design/testing.md`](design/testing.md)).
-- `docs/` — design and reference documentation.
+- `docs/` — the user documentation (the command, the library guide, the API
+  reference).
+- `design/` — design documents and developer runbooks.
+- `benchmarks/` — the performance benchmark harness and its recorded results
+  (see [`design/benchmark.md`](design/benchmark.md)).
 - `scripts/` — helpers for the e2e environment (the local MinIO stack and the
   pinned aws-cli install).
 
@@ -54,8 +58,11 @@ Run any tool through `uv run` so it uses that environment, e.g. `uv run pytest`.
 ## Quality gates
 
 Run these before every commit that changes Python code or test data; all must
-pass. A docs-only commit can skip them: ruff and basedpyright act only on the
-Python sources, and the test suite does not read the documentation.
+pass. A docs-only commit can skip ruff and basedpyright, which act only on the
+Python sources; when it touches `docs/reference/`, still run
+`uv run pytest tests/lib/test_reference_docs.py`, which checks the symbol index
+in `docs/reference/README.md` against the package's exports and the files that
+page links to.
 
 ```bash
 uv run ruff format       # format

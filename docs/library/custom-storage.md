@@ -34,13 +34,14 @@ minimal backend implements exactly what it promised.
 - **`as_text()`** — how this side appears in results and progress.
 - **`open(key, mode, *, size=None)`** — per-object byte I/O. `"rb"` returns a
   readable stream, `"wb"` a writable one whose `close()` flushes. `size` is an
-  optional length hint for writes.
+  optional length hint, for reads as well as writes.
 - **`scan_pages(options)`** — enumerate the container one page of `FileInfo` at
   a time. Callers reach it through `scan()`, which flattens the pages and
   prefetches them in the background.
 - **`get_fileinfo(key)`** — one entry, or `None` when it does not exist.
-- **`delete(info)`** — remove one entry. Whatever mapping you return surfaces on
-  the result record.
+- **`delete(info)`** — remove one entry. When the operation runs with
+  `capture_response=True`, a mapping you return surfaces on the result record
+  under `extra_info["delete"]`.
 
 ### Keys
 
@@ -77,7 +78,7 @@ part-way through.
 | --- | --- | --- |
 | `OPEN_READ` | `open(key, "rb")` | the source of a transfer to S3 |
 | `OPEN_WRITE` | `open(key, "wb")` | the destination of a transfer from S3 |
-| `GET_FILEINFO` | `get_fileinfo` | a single-entry source, or an existence check |
+| `GET_FILEINFO` | `get_fileinfo` | a single-entry source |
 | `SCAN` | `scan_pages` | a recursive **source** |
 | `SORTABLE_SCAN` | a byte-ordered recursive listing | **any** side of a `sync` |
 | `DELETE` | `delete` | an `mv` source, or a `sync` destination with deletes on |
@@ -147,6 +148,8 @@ class DictStorage(Storage):
         return _Writer()
 ```
 
-Declaring only the two `OPEN_*` flags makes this usable as a single-entry `cp`
-side. Add `SCAN` and `get_fileinfo` for recursive transfers, `SORTABLE_SCAN` for
-`sync`, and `DELETE` to be an `mv` source.
+Declaring only the two `OPEN_*` flags makes this usable as the destination of
+a `cp` or `mv` from S3, single-entry or recursive. To be a source it also needs
+`GET_FILEINFO` (and `get_fileinfo`) for a single entry, or `SCAN` (and
+`scan_pages`) for a recursive transfer; `SORTABLE_SCAN` for `sync`; and
+`DELETE` to be an `mv` source.

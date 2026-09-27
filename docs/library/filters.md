@@ -41,14 +41,14 @@ the root the operation is enumerating. For a recursive `rm s3://bucket/logs/`,
 an object at `logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*`
 matches it and `logs/*` does not.
 
-A pattern is **absolute** when it starts with `/` — on Windows, a drive letter
-or a leading `\` counts too. An absolute pattern matches the entry's full key
-instead. Since an S3 key normally has no leading `/`, one is inert against S3
-entries; against local paths it works as written. This is what allows one
-`filter` to
-prune the two sides of a `sync` asymmetrically — a pattern rooted at the local
-source matches there and not on the S3 side. Relative patterns are symmetric
-across sides.
+A pattern is **absolute** when it starts with `/` — on Windows, a
+drive-absolute form such as `C:/...`, a UNC path or a leading `\` counts too (a
+drive-relative `C:foo` does not). An absolute pattern matches the entry's full
+key instead. Since an S3 key normally has no leading `/`, one is inert against
+S3 entries; against local paths it works as written. This is what allows one
+`filter` to prune the two sides of a `sync` asymmetrically — a pattern rooted at
+the local source matches there and not on the S3 side. Relative patterns are
+symmetric across sides.
 
 On **Windows** a backslash in a pattern is folded to `/` and works as a
 separator, so `logs\*.txt` matches `logs/x.txt`. On Linux and macOS a backslash
@@ -66,18 +66,23 @@ s3.sync(src, dest, filter=lambda info: not info.compare_key.startswith("draft/")
 ```
 
 [`FileInfo`](../reference/results.md#fileinfo) carries `key`, `compare_key`,
-`size`, `mtime`, `storage_class` and `storage` — the last being the backend the
-entry came from, always stamped before any filter runs, so a predicate can
-reach back through it (a `HeadObject` for something the listing omits, say).
+`size`, `mtime` and `storage` — the last being the backend the entry came from,
+always stamped before any filter runs, so a predicate can reach back through it
+(a `HeadObject` for something the listing omits, say). An S3 entry is an
+`S3FileInfo`, which adds `storage_class` and `etag`; a local entry has neither,
+so a predicate that reads them must allow for local entries.
 One caveat: on `rm`'s non-recursive single-key path there is no listing, so
 only `key`, `compare_key` and `storage` are populated — `size`, `mtime` and
 `storage_class` are `None`. Guard for that if your predicate might run there.
 
 **On an enumerating path the predicate runs on a listing prefetch worker
 thread**, once per entry as each page of results arrives, so it must be
-thread-safe and it should be cheap: a slow predicate throttles enumeration. On
-the single-object routes — a non-recursive `cp` / `mv`, `rm` on one key —
-there is no prefetch worker and it runs inline on the calling thread.
+thread-safe and it should be cheap: a slow predicate throttles enumeration. The
+exception is a local `sync` destination while `delete_filter` or `pair_filter`
+is on, which is walked without reading ahead: there the predicate runs on the
+calling thread. On the single-object routes — a non-recursive `cp` / `mv`, `rm`
+on one key — there is no prefetch worker and it runs inline on the calling
+thread.
 
 ## 4. `filter` in `sync`
 

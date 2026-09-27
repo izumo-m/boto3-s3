@@ -233,7 +233,9 @@ The outcomes `cp` emits:
   the same item's real outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
 - `CANCELLED` — an accepted item revoked before it could complete, by an
-  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`.
+  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`. On
+  the CRT engine only a cancellation `cancel_token` ordered reports it; every
+  other CRT cancellation reports `FAILED`.
 
 The archived-object gate behind that warning and its
 `ignore_glacier_warnings` skip runs on downloads and copies only; an upload
@@ -244,13 +246,14 @@ restored-object carve-out is read from the single-object `HeadObject`'s
 even a restored object is skipped
 ([`../options.md`](../options.md#transferoptions)).
 
-Records for submitted transfers arrive on the engine's worker threads, and the
-warnings an enumeration raises — the source walk or listing, and the
+Records for submitted transfers arrive on the engine's worker threads, the
+`SKIPPED` of a conditional write S3 answers with `PreconditionFailed` among
+them. The warnings an enumeration raises — the source walk or listing, and the
 `case_conflict` destination walk — arrive on that scan's prefetch worker, so
-they can interleave with transfer records. Dry-run records, skips, notices, the
-warnings the single-object source resolution raises and the per-item warnings
-the producers raise (the archived source, the oversize upload, the parent
-reference) are emitted inline on the calling thread
+they can interleave with transfer records. Dry-run records, the other two
+skips, notices, the warnings the single-object source resolution raises and the
+per-item warnings the producers raise (the archived source, the oversize
+upload, the parent reference) are emitted inline on the calling thread
 ([`README.md`](./README.md#on_result)).
 
 ### Raises
@@ -280,11 +283,15 @@ reference) are emitted inline on the calling thread
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   `no_overwrite` on an SDK without conditional writes, or `copy_props=ALL` on
-  one without the annotations model, both raised as the engine is built and
-  before any item is submitted; and credentials, region, profile or endpoint
-  that will not resolve while a client is being built — during resolution for a
-  bare `"s3://…"` argument, or on the deferred build of a caller-supplied
-  `S3Storage` that carries none.
+  one without the annotations model, both raised as the run sets up its
+  transfers, before any item is submitted — under `dryrun` too; a profile,
+  region, endpoint or partial credentials that will not resolve while a client
+  is being built — during resolution for a bare `"s3://…"` argument, or on the
+  deferred build of a caller-supplied `S3Storage` that carries none; and
+  credentials missing when a listing or a single-object `HeadObject` first
+  needs them. Where the first request is an item's own transfer — an upload, or
+  a download to a stream — missing credentials fail that item instead
+  (`BatchError` below).
 - The enumeration's own rejection, translated to its category and propagated:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror) or
@@ -308,7 +315,7 @@ reference) are emitted inline on the calling thread
 - Anything `filter` itself raises. A predicate's exception surfaces on the
   consuming side of the enumeration and aborts the run; the engine then cancels
   the transfers it had accepted. `on_result` and `on_progress` must not raise —
-  the library states no contract for a callback that does
+  `cp` states no contract for a callback that does
   ([`README.md`](./README.md#on_result)).
 
 ## boto3_s3.cp

@@ -21,7 +21,9 @@ s3.sync("./site", "s3://my-bucket/site/", delete_filter=True, on_result=track)
 **Every item that reaches the operation produces exactly one terminal record** —
 `SUCCEEDED`, `FAILED`, `SKIPPED`, `DRYRUN` or `CANCELLED`. An item that never
 reaches it produces nothing: one excluded by a filter during enumeration, or one
-never enumerated because the run ended first.
+never enumerated because the run ended first. The S3 delete lane of `rm` and
+`sync` is an exception: entries the deleter accepted but had not yet sent can
+be dropped without a record when a cancellation or an error ends the run.
 
 Three checks that run *before* an item is submitted turn it away with an
 advisory and nothing else, so those items get no terminal record either: an
@@ -139,9 +141,9 @@ token.cancel(mode=CancelMode.IMMEDIATE) # also try to stop what is in flight
 ```
 
 **Graceful** (the default) is a drain: the operation stops taking new work,
-finishes what it already accepted, reclaims its workers, and raises
-`CancelledError`. Because accepted items run to completion, no `CANCELLED`
-records appear.
+finishes the transfers it already accepted (the delete lanes of `rm` / `sync`
+drop their unsent buffered deletes instead), reclaims its workers, and raises
+`CancelledError`. No `CANCELLED` records appear.
 
 **Immediate** additionally asks pending and in-flight work to stop. Then the
 records resolve like this:
@@ -158,4 +160,6 @@ Nothing ever downgrades it.
 A run that a cancellation actually cut short **always ends by raising** — the
 triggering error, or `CancelledError`. It never ends with the partial-failure
 error described in [`errors.md`](./errors.md), and `CANCELLED` records are
-counted in neither.
+counted in neither. The one exception is the CRT engine's: a Ctrl-C its manager
+swallows during the transfer drain reports the cut-short items as `FAILED` and
+ends the run with that partial-failure error.

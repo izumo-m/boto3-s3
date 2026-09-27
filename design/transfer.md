@@ -32,8 +32,9 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `s3transfer.manager.TransferManager` directly, or, if CRT is chosen,
   `crtsupport.create_crt_transfer_manager` ([`crt.md`](./crt.md)). **COPY
   (s3->s3) is unconditionally classic** - `CRTTransferManager` has no copy, and
-  boto3 / aws-cli likewise pin s3->s3 to classic. This bullet is the library
-  layer's engine resolution in full; [`crt.md`](./crt.md) points here rather
+  boto3 / aws-cli likewise pin s3->s3 to classic. This bullet, with the
+  `capture_response` override below, is the library layer's engine resolution
+  in full; [`crt.md`](./crt.md) points here rather
   than restating it, while [`cli.md`](./cli.md) section 8 covers the CLI's
   separate, earlier resolution (it settles the value before handing it over). `'auto'` faithfully
   reproduces boto3's behavior that "CRT can be auto-selected merely because
@@ -518,11 +519,11 @@ dest-existence check for download. We ported the same three faces:
   conversion for its exception alone, at both of aws-cli's points: the listing
   conversion inside the S3 backend, and `producers.head_single` for the
   single-object HEAD route. The value carried on stays UTC per the
-  `FileInfo.mtime` contract, and the conversion is skipped for the years that
-  cannot reach either end (only years 1 and 9999 on POSIX, always on Windows,
-  the same banding the local side uses). A single blind delete is exempt
-  because aws issues no HeadObject for it - `rm s3://bkt/key` stays rc 0 on
-  both tools.
+  `FileInfo.mtime` contract, and the conversion runs only for the years that
+  can reach either end (years 1 and 9999 on POSIX, every year on Windows, the
+  same banding the local side uses); every other year skips it. A single blind
+  delete is exempt because aws issues no HeadObject for it - `rm s3://bkt/key`
+  stays rc 0 on both tools.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so
@@ -537,7 +538,7 @@ dest-existence check for download. We ported the same three faces:
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
   boundary ends it with aws's `File does not exist.` warning battery and the
   walk skips the directory, exactly like aws-cli (the boundary comes long
-  before any `RecursionError` could - and the stop now comes from the
+  before any `RecursionError` could - and the stop comes from the
   vetting-time boundary probe one level up rather than from the descent's own
   `os.open`, which is what keeps aws's wording on the bare path); on
   (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
@@ -682,9 +683,9 @@ dest-existence check for download. We ported the same three faces:
   CRT-family algorithm fails (the library is a per-item failure ->
   `BatchError`; the CLI is an in-pipeline `upload failed: ... Missing Dependency:
   Using CRC32C requires an additional dependency. ...` / rc 1; aws is rc 0 with
-  the awscrt bundled in v2). Because the charter stipulates that awscrt-dependent
-  features are "subject only when awscrt is present" (overview.md section 3), this
-  failure does not count as a mismatch. On the download side, when the stored
+  the awscrt bundled in v2). Because the charter holds awscrt-dependent
+  features to parity only where the CRT stack is usable (overview.md section 3),
+  this failure does not count as a mismatch. On the download side, when the stored
   checksum is a CRT-family one with no local implementation, botocore silently
   skips verification (result and rc unchanged). **This delegation of checksum
   computation to awscrt is independent of the transfer engine selection (section 2)**:
@@ -706,7 +707,7 @@ dest-existence check for download. We ported the same three faces:
   integrity checks both, same result and rc. The CLI names aws's value
   wherever aws's botocore would have stamped it (uploads on both engines, and
   every other request with a `ChecksumAlgorithm` member: `checksumdefault`,
-  cli.md section 4), where the installed botocore can compute CRC64NVME;
+  cli.md section 5.7), where the installed botocore can compute CRC64NVME;
   without awscrt the CLI falls back to botocore's `CRC32`, the residual
   difference docs/cli/aws-differences.md records. On the CRT engine the
   algorithm also costs wall time: aws-checksums computes CRC32 in software,
@@ -807,7 +808,9 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   dest is rolled back (aws-cli's order). A folder marker is not transferred, so it
   is not deleted either. An emptied local dir is left in place (as in aws).
 - **The same-path guard** (always in `S3.mv`; the CLI also does it at the argv
-  stage - cli.md section 5.8): apply `S3Storage.same_path` to the keyless-normalized URI -
+  stage - cli.md section 5.8): apply `S3Storage.same_path`'s rule to the
+  keyless-normalized URIs (`S3.mv` computes it from the held bucket / key
+  through `S3Storage.same_path_as`) -
   if it is an exact match, or a `/`-terminated dest + `basename(src)`
   concatenation matches src, then `Cannot mv a file onto itself: <src> - <dest>`
   (`ValidationError`). `--recursive` is also subject to this (a faithful

@@ -74,11 +74,11 @@ The category contracts are specified in
   permission to set the configuration (`AccessDenied`, or a 403 answer).
 - [`TransportError`](../exceptions.md#transporterror) — a 5xx or throttling
   answer, or a connection-level failure reaching the endpoint.
-- [`ConfigurationError`](../exceptions.md#configurationerror) — credentials or
-  region cannot be resolved while the client is built or the request is signed.
+- [`ConfigurationError`](../exceptions.md#configurationerror) — credentials
+  cannot be resolved when the request is signed.
   Its [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement
   covers configuration that is present but unusable, such as a set-but-unknown
-  `AWS_PROFILE`, partial credentials, or a malformed `endpoint_url`.
+  `AWS_PROFILE`, partial credentials, or a malformed region or `endpoint_url`.
 
 `website` acts on one bucket and raises its category exception directly; it
 never raises [`BatchError`](../exceptions.md#batcherror). The botocore error

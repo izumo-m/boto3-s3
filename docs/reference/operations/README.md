@@ -95,8 +95,9 @@ reach these functions either — they instantiate `S3` itself, not the subclass.
 Introspection reports the method's identity: `functools.wraps` copies
 `__name__`, `__qualname__`, `__doc__` and `__module__`, and `__signature__` is
 pinned to the method's signature with `self` removed, so `inspect.signature`
-and `Signature.bind` see the documented parameters rather than the bound-method
-signature `__wrapped__` would otherwise expose.
+and `Signature.bind` see the documented parameters rather than the signature of
+`__wrapped__` — the plain method function (`S3.cp` for `cp`), `self` included —
+that they would otherwise report.
 
 All nine are exported from `boto3_s3` and from `boto3_s3.s3`. The root
 re-export is lazy: reading one of these names imports `boto3_s3.s3`, and with
@@ -127,7 +128,8 @@ deletes, and on the scan's prefetch worker for the warnings a walk or listing
 raises, which can therefore arrive alongside transfer records. Records emitted
 inline — dry-run reports, a single-key `rm`, synchronous deletes — run on the
 calling thread. Keep it fast, keep it thread-safe, and do not let it raise —
-the library states no contract for a callback that raises. `OpResult`, the
+beyond what an operation's page states for its own paths (`rm`'s Raises), the
+library states no contract for a callback that raises. `OpResult`, the
 outcome set, and which fields each record carries are specified in
 [`../results.md`](../results.md).
 

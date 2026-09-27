@@ -84,8 +84,11 @@ root-anchored, which matches the entry's full key rather than its compare key.
 Folder markers — zero-byte `/`-terminated objects — are dropped from an S3
 side's listing before `filter` sees them, and the local walk does not produce
 them, so `sync` neither transfers nor deletes markers. `filter` is evaluated
-during enumeration, off the calling thread, and both sides are enumerated at
-once, so keep it thread-safe and fast, as with `on_result`.
+during enumeration, on each side's background scan worker — except for a side
+walked without read-ahead, such as a local destination while the delete lane is
+on (`pair_filter` included), where it runs on the calling thread — and both
+sides are enumerated at once, so keep it thread-safe and fast, as with
+`on_result`.
 
 `create_filter` decides the keys held only by the source. `True` (the default)
 creates every one, `False` none. A `FileFilter` creates only the entries it
@@ -213,8 +216,8 @@ first-key-wins resolution deterministic.
 Wrapping a lane filter in `ParallelFilter` gives that guarantee up for that lane
 alone — its decisions run on the pool and are consumed in completion order, as
 described above. The visibility `filter` is outside this contract in the other
-direction: it runs during enumeration, on the scan's own thread, before any
-pairing.
+direction: it runs during enumeration, on the scan's own thread (the calling
+thread for a side walked without read-ahead), before any pairing.
 
 The action a surviving decision selects is always submitted from the calling
 thread, in the order the decisions were consumed; what happens after that submit
@@ -242,9 +245,10 @@ one `WARNED` record, and the run completes with warnings rather than raising.
 Only a caller-constructed `S3Storage` carrying no client reaches that late
 client build. The client for a bare `s3://…` string argument is built during
 resolution instead — before the cancel-token poll, the destination-directory
-creation and the directory-bucket check — so credentials, region, profile or
-endpoint that will not resolve raise there rather than at the position listed
-above.
+creation and the directory-bucket check — so a profile, region, endpoint or
+partial credentials that will not resolve raise there rather than at the
+position listed above. Missing credentials fail no client build; they surface
+with the run's first request.
 
 `sync` has no guard against syncing a path onto itself: every key simply pairs
 with itself, so under the default decisions nothing is transferred and the run
@@ -314,10 +318,11 @@ order rather than in compare-key order.
   an upload does not exist.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  credentials, region, profile or endpoint that will not resolve while a client
-  is built for a bare `s3://…` argument, and `copy_props=ALL` on an SDK without
-  the annotations model (S3-to-S3 route), the latter raised as the engine is
-  built and before any item.
+  a profile, region, endpoint or partial credentials that will not resolve
+  while a client is built for a bare `s3://…` argument, credentials missing
+  when the run's first request needs them, and `copy_props=ALL` on an SDK
+  without the annotations model (S3-to-S3 route), the latter raised as the run
+  is set up — before any item, and under `dryrun` too.
 - [`AccessDeniedError`](../exceptions.md#accessdeniederror) or
   [`TransportError`](../exceptions.md#transporterror) — creating the local
   destination directory failed, mapped by the same rules as any other local

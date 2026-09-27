@@ -77,9 +77,10 @@ options accepted and ignored
 (see [`aws-differences.md`](./aws-differences.md)).
 
 One section of `~/.aws/config` is not read at all: `[plugins]`, from which
-`aws` imports and initializes aws-cli plugins on every invocation. This command
-has no plugin mechanism, so the section is inert — including the case where an
-entry cannot be imported, which stops `aws` before it does anything and does not
+`aws` — when the section sets `cli_legacy_plugin_path` — imports and
+initializes aws-cli plugins on every invocation. This command has no plugin
+mechanism, so the section is inert — including the case where such an entry
+cannot be imported, which stops `aws` before it does anything and does not
 stop this command (see [`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section

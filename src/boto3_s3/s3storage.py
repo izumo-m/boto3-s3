@@ -892,11 +892,12 @@ class S3Storage(Storage):
         every later call returns the same instance. Deliberately not guarded by
         a lock; build the client on the caller side for concurrent use. A failed
         default build raises the translated ``Boto3S3Error`` -
-        ``ConfigurationError`` for unresolvable credentials / region, its
-        ``InvalidConfigError`` refinement for a set-but-unusable
-        ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
-        botocore error (design/exceptions.md
-        section 1).
+        ``InvalidConfigError`` for a set-but-unusable ``AWS_PROFILE``, partial
+        credentials or a malformed environment endpoint - never the raw
+        botocore error (design/exceptions.md section 1). Missing credentials
+        and an unset region do not fail the build: the client's first request
+        fails on the missing credentials instead, and an unset region falls
+        back to botocore's default for S3.
         """
         if self._client is None:
             # operation=None: no subcommand is in scope at build time.

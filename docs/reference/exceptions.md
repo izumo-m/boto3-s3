@@ -79,6 +79,9 @@ instances exist only where no classification applies:
   (403, 404, 5xx, other 4xx);
 - a per-key `DeleteObjects` failure whose code is not in the category table
   (such an entry carries no HTTP status to widen on);
+- the deleter's fail-closed failure for a key whose deletion an unattributable
+  `DeleteObjects` error entry leaves unconfirmed (see
+  [`S3Deleter`](./misc.md#s3deleter));
 - the message envelope on `WARNED` and `NOTICE` `OpResult` records, where the
   instance is a carrier for display text and is never raised (see
   [`results.md`](./results.md)).
@@ -92,15 +95,16 @@ for a failed S3 request carries the originating botocore `ClientError` on
 `__cause__`. Per-item failure records link the same way — the translation
 stamps the original exception onto the record error's `__cause__`, and an error
 that was already a `Boto3S3Error` passes through keeping whatever cause it had.
-The one exception-free path is a per-key `DeleteObjects` failure: it is
-synthesized from the response body with no exception object behind it, so its
-`__cause__` is `None` and only the message carries the S3 error code.
+The exception-free paths are the deleter's per-key failures synthesized from a
+`DeleteObjects` response body — an error entry, and the unconfirmed-deletion
+failure above — with no exception object behind them, so their `__cause__` is
+`None` and only the message carries the S3 error code.
 
 Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths;
 `KeyboardInterrupt` and `SystemExit` always propagate. Selecting the CRT engine
 explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
-is absent propagates botocore's `MissingDependencyException`, matching what
+is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
 boto3 does — that pass-through is scoped to engine selection, and the same
 exception surfacing inside a translated S3 call becomes a `ConfigurationError`.
 
@@ -224,7 +228,7 @@ Adds no attributes and no constructor of its own. `except ConfigurationError`
 also catches `InvalidConfigError`.
 
 Note the engine-selection carve-out described under `Boto3S3Error`: requesting
-the CRT engine explicitly without awscrt installed propagates botocore's
+the CRT engine explicitly without a usable awscrt installed propagates botocore's
 `MissingDependencyException` rather than this class.
 
 ## InvalidConfigError
@@ -237,8 +241,8 @@ for any other botocore failure to read the config file while the library reads
 AWS configuration (a `ConfigParseError`, say). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
-which botocore rejects with a plain `ValueError` that the client builders
-convert here.
+and for a malformed or empty region, both of which botocore rejects with a
+`ValueError` that the client builders convert here.
 
 ```python
 class InvalidConfigError(ConfigurationError): ...
@@ -264,11 +268,15 @@ hierarchy.
 
 A run that a cancellation actually cut short ends by raising — either the error
 that triggered the shutdown, or this class — and never with `BatchError`;
-cancelled items are not counted as failures. The class also appears as
-`OpResult.error` on `CANCELLED` records without being raised, for accepted
-items revoked when the engine shut down: a fatal error elsewhere in the run, an
-immediate cancellation, or Ctrl-C. The cancellation modes and the resulting
-record shapes are in [`results.md`](./results.md) and
+cancelled items are not counted as failures. The CRT engine is the exception: a
+Ctrl-C its manager swallows during the transfer drain leaves the cut-short items
+counted as failures and ends the run in `BatchError` ([`s3.md`](./s3.md#s3)).
+The class also appears as `OpResult.error` on `CANCELLED` records without being
+raised, for accepted items revoked when the engine shut down: on the classic
+engine a fatal error elsewhere in the run, an immediate cancellation, or Ctrl-C;
+on the CRT engine only a cancellation this run's `CancelToken` ordered. The
+cancellation modes and the resulting record shapes are in
+[`results.md`](./results.md) and
 [`../library/results.md`](../library/results.md).
 
 ## BatchError

@@ -151,8 +151,11 @@ Raises:
   cases.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  the client had to be built and credentials, region, profile or endpoint were
-  unresolvable. Only when the target did not bring its own client.
+  the client had to be built from a profile, region, endpoint or partial
+  credentials that will not resolve, only when the target did not bring its
+  own client; and credentials missing when the listing sends its first
+  request. The blind single-key delete, which lists nothing, reports missing
+  credentials as its item's failure instead (`BatchError` below).
 - The listing's own rejection, translated to its category and propagated
   untouched: `NoSuchBucket` becomes
   [`NotFoundError`](../exceptions.md#notfounderror), a denied `ListBucket`

@@ -297,8 +297,9 @@ class StdioStorage(IOStorage):
                 # A runtime-state precondition (no stdin in this process), so
                 # ValidationError; raised in-pipeline, rc 1 either way. The
                 # operation name is left unset: this storage does not know which
-                # operation opened it (cp and mv both can), so the operation
-                # layer stamps its own name.
+                # operation opened it, so the operation layer stamps its own
+                # name (a streaming cp; mv rejects a stream source before any
+                # open).
                 raise ValidationError("stdin is required for this operation, but is not available.")
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
         # No stdout counterpart to the guard above: aws checks stdin only, and

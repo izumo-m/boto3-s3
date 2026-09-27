@@ -147,17 +147,18 @@ over-masking, with the credential scope still preserved.
 
 ### 4.1 Target patterns
 
-We pick up the URL/query forms, the plain `Header: value` line form (how
-botocore's `AWSPreparedRequest` repr renders headers), and the **dict-repr form**
-that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
-`'SSECustomerKey': '...'`, including `b'...'`).
+We pick up the URL/query forms, the **dict-repr form** - how botocore's
+`AWSPreparedRequest` repr renders its headers (`'X-Amz-Security-Token': '...'`)
+and how s3transfer logs a task's kwargs (`'SSECustomerKey': '...'`), including
+`b'...'` - and the plain `name: value` line form (the canonical request
+`botocore.auth` logs, and an older botocore's request repr).
 
 | Target | Example (input -> output) | Notation |
 |---|---|---|
 | Access Key ID (`AKIA`/`ASIA`, leading `Credential=`/`X-Amz-Credential=`, `AWSAccessKeyId=`) | `Credential=AKIA...MPLE/2026...` -> `Credential=***MPLE/2026...` | `***` + last 4. Scope (after `/` or `%2F`) preserved |
 | Signature (`X-Amz-Signature=` / `Signature=` / `Signature:\n`) | `Signature=abcd...` -> `Signature=***` | `***` |
-| SigV2 Authorization header (`AWS <access-key-id>:<signature>`, legacy `signature_version='s3'`) | `AWS AKIA...MPLE:frJI...` -> `AWS ***MPLE:***` | `***` (id tail-revealed) |
-| Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
+| SigV2 Authorization header (`AWS <access-key-id>:<signature>`, legacy `signature_version='s3'`) | `AWS AKIA...MPLE:frJI...` -> `AWS ***MPLE:***` | `***`; the id follows the Access Key ID rule (`AWS minioadmin:frJI...` -> `AWS ***:***`) |
+| Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive; the S3 Express `x-amz-s3session-token` in the same forms, and the bare `SecurityToken=` query parameter of botocore's SigV2 request signer) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
 | SSO bearer token (`x-amz-sso_bearer_token` header, dict / colon form - the `sso GetRoleCredentials` request botocore logs at DEBUG; the token mints role credentials for every account/role the user can access) | `'x-amz-sso_bearer_token': 'aoal-...'` -> `'x-amz-sso_bearer_token': '***'` | `***` |
 | sso-oidc token-endpoint bodies (`"accessToken"` / `"refreshToken"` / `"idToken"` / `"clientSecret"` in a CreateToken / RegisterClient `Response body:` line) | `"accessToken": "aoat-..."` -> `"accessToken": "***"` | `***` |
 | STS / metadata-service response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML; quote-agnostic `SecretAccessKey`/`SessionToken`/`Token` key-value in JSON bodies and the metadata fetchers' dict reprs) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>`, `'Token': 'FQo...'` -> `'Token': '***'` | `***`. `ContinuationToken` / `NextToken` are kept (quote-anchored key) |
@@ -174,9 +175,9 @@ that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
 ## 5. Wiring (library / CLI)
 
 - **library**: `boto3_s3.set_stream_logger(name, level, ..., mask_secrets=True)` is
-  exposed (its home module is `boto3_s3.masking`, re-exposed through the 3-layer
-  export). Users get masked debug logs by default, with the same ergonomics as
-  boto3.
+  exposed (its home module is `boto3_s3.masking`, re-exported lazily from the
+  package root; [`imports.md`](./imports.md) section 3). Users get masked
+  debug logs by default, with the same ergonomics as boto3.
 - **CLI**: on `--debug`, `cli._enable_debug_logging` calls
   `set_stream_logger(name, DEBUG, stream=sys.stderr, mask_secrets=True)` for each
   logger in `_DEBUG_LOGGERS` (`boto3_s3` / `boto3_s3_cli` / `botocore` / `boto3` /

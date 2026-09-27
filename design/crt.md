@@ -83,8 +83,9 @@ also read as `'auto'`) with the same rules as boto3.
   the lock is held by another process, it returns `None` = classic fallback. A
   later client that falls outside the compatibility check (same region + same
   frozen credentials, **+ our extensions: same endpoint, same signing mode**
-  [signed/unsigned]**, same TLS `verify`, same `Config.s3` shape** - the CRT
-  client bakes in the first client's `verify` and the shared serializer its
+  [signed/unsigned]**, same TLS `verify`, same URL-shaping `Config` (the `s3`
+  dict plus the top-level fips / dualstack flags)** - the CRT client bakes in
+  the first client's `verify` and the shared serializer its
   `Config`, so a differing later client must not silently ride those) also
   drops to classic (the same shape as boto3's region/credentials-mismatch
   fallback). The credentials half of that check carries one caller opt-in,
@@ -293,10 +294,12 @@ aws builds the transfer manager immediately after that read
 (`_get_transfer_manager`), before it decides anything about the run, so a CRT
 selection pays the whole construction - the cross-process lock and
 `create_s3_crt_client` - even for a `--dryrun` that transfers nothing. The
-library builds its manager lazily, at the first submit, which would put those
-failures inside the transfer span (rc 1) instead of ahead of it (rc 255). So
-all four commands call `transferargs.materialize_transfer_engine` at aws's
-slot; it delegates to `S3.materialize_crt_engine`, which builds the engine the
+library builds its manager only once a live run starts - `prepare()` just ahead
+of enumeration, or the first submit on a stream route - and never for a
+dryrun, which would put those failures inside the operation (rc 1), or skip
+them, instead of ahead of it (rc 255). So all four commands call
+`transferargs.materialize_transfer_engine` at aws's slot; it delegates to
+`S3.materialize_crt_engine`, which builds the engine the
 effective `TransferConfig` selects and drops it (a no-op when that engine is
 classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).
@@ -363,8 +366,10 @@ boto3 takes the CRT client's region from the built client
 (`TransferManagerFactory._resolve_region`: `--region`, else the session's
 config variable), which answers `None` when nothing is configured. The two
 agree everywhere except that last case, where botocore has already handed the
-*botocore* client S3's `aws-global` pseudo-region - so boto3's source can never
-be `None`, and `awscrt.s3.S3Client`'s `assert isinstance(region, str)` is
+*botocore* client a concrete region - `us-east-1` in stock botocore's default
+(legacy) us-east-1 endpoint mode, S3's `aws-global` pseudo-region in the
+regional mode the CLI pins (cli.md section 4 item 3) - so boto3's source can
+never be `None`, and `awscrt.s3.S3Client`'s `assert isinstance(region, str)` is
 unreachable.
 
 Same split as the credentials posture above: the library keeps boto3's source
@@ -408,9 +413,9 @@ than inheriting the opt-in through the process singleton.
 
 ## 5. Charter treatment
 
-The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
-from "excluded because hard to realize" to a target that "**takes parity against
-aws's CRT mode**" (the CRT transfer engine is removed from charter exception 2).
+The charter of [`overview.md`](./overview.md) section 3 holds the CRT mode to
+**parity against aws's CRT mode**; the CRT transfer engine is not a "hard to
+realize" feature under charter exception 2.
 When the CRT stack is usable (awscrt present and s3transfer's CRT surface new
 enough - section 6), the exit code and output of CRT mode must match those of
 aws's CRT mode (enforced by the e2e CRT lane - testing.md).
@@ -445,7 +450,7 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   recorded in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
   too (testing.md section 9's recording rule); the measurement and the
   mechanism stay in section 3.
-- **CRT configured x no resolvable region**: aligned, no longer a divergence.
+- **CRT configured x no resolvable region**: aligned.
   aws's factory hands `create_s3_crt_client` whatever its region chain
   answered, unvalidated, so an unresolved region reaches
   `awscrt.s3.S3Client`'s `assert isinstance(region, str)`; the bare
@@ -453,7 +458,7 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   (`aws: [ERROR]:`) at rc 255. It fires for every command whose architecture
   builds a transfer manager - `cp` / `mv` / `sync` **and** `rm` - independently
   of whether credentials exist, and `--dryrun` / `--quiet` do not save it. This
-  CLI now reaches the same assertion: it declares aws's chain-resolved region
+  CLI reaches the same assertion: it declares aws's chain-resolved region
   (section 4, "Where the CRT region comes from") instead of the built client's
   `aws-global`, builds the engine at aws's slot (section 4, "Materializing the
   engine") so `rm` and the dryrun routes get there too, converts the bare
@@ -513,9 +518,12 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself
-  still gets `part_size` / `target_throughput`, passed to
-  `create_s3_crt_client` directly ([`compatibility.md`](../docs/compatibility.md) for
-  what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
+  still gets `target_throughput`, passed to `create_s3_crt_client` directly,
+  while `part_size` stays `None` (the CRT's dynamic part size): an explicit
+  `multipart_chunksize` is only detectable through the `UNSET_DEFAULT`
+  machinery s3transfer 0.16.0 introduced
+  ([`compatibility.md`](../docs/compatibility.md) for what the caller sees).
+  The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`.
 - **Empty / whitespace-only `verify`**: aws refuses such a value outright from
   2.36.2 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
@@ -548,13 +556,12 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   an upload that names no checksum; aws-cli's bundled one stamps `CRC64NVME`
   (its bundled botocore's default). The library keeps boto3's (section 1):
   a library caller names `checksum_algorithm` itself. The CLI names aws's
-  value for both engines (`checksumdefault`, cli.md section 4), which is
+  value for both engines (`checksumdefault`, cli.md section 5.7), which is
   where the two agree. The difference is not cosmetic on this lane:
   aws-checksums computes CRC32 in software on x86-64 (about 3 GiB/s against
   about 20 for CRC64NVME), which on a 4-vCPU instance pushing 800 MiB/s was
-  10% of a 1 GB upload's wall time against real S3 - the one benchmark row
-  where the CLI trailed aws until the default was aligned
-  (benchmarks/RESULTS.md, 2026-09-06). A library caller on the CRT lane who
-  wants that speed passes `checksum_algorithm="CRC64NVME"`.
+  10% of a 1 GB upload's wall time against real S3 (benchmarks/RESULTS.md,
+  2026-09-06). A library caller on the CRT lane who wants that speed passes
+  `checksum_algorithm="CRC64NVME"`.
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
   actual verification is only on the e2e (MinIO) lane.
