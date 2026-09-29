@@ -1694,7 +1694,11 @@ class LocalStorage(Storage):
             # None per get_fileinfo's contract, not a raised transport error.
             return None
         except OSError as exc:
-            raise translate_os_error(exc, operation="get_fileinfo", key=None) from exc
+            # operation=None, like open / delete: the storage cannot know which
+            # operation resolves the path, so the operation layer fills the
+            # name in (attribute_failure); key names the path, the entry's own
+            # address space (exceptions.md).
+            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
         if _is_special_mode(st.st_mode):
             notify(
                 f"Skipping file {path}. File is character special device, "

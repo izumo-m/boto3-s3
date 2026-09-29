@@ -28,6 +28,7 @@ from boto3_s3.exceptions import (
     BatchError,
     CancelledError,
     NotFoundError,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage, StdioStorage
@@ -102,6 +103,26 @@ class TestUploadRoute:
         S3().cp(src, S3Storage("s3://bucket/up/", client=client), transfer_config=_SYNC)
         assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
+
+    def test_a_single_source_resolution_failure_is_attributed_to_the_operation(
+        self, tmp_path: Path
+    ) -> None:
+        # The storage's get_fileinfo raises with operation unset (it cannot know
+        # who resolves the path); the single-source producer fills the name in,
+        # as the run does for open / delete failures. Before, the local backend
+        # stamped its own method name and the operation could not replace it.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+
+        class _Unresolvable(LocalStorage):
+            def get_fileinfo(self, key: str = "", *, on_warning: Any = None) -> Any:
+                raise TransportError("stat failed", operation=None, key=str(src))
+
+        client, _calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().cp(_Unresolvable(str(src)), S3Storage("s3://bucket/k", client=client))
+        assert excinfo.value.operation == "cp"
+        assert excinfo.value.key == str(src)
 
     def test_oversize_upload_warns_but_still_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -1457,6 +1457,7 @@ class S3:
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     item_filter=item_filter,
+                    operation=operation,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 )
             else:

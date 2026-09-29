@@ -27,10 +27,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
-from boto3_s3.exceptions import NotFoundError, ValidationError
+from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
+    attribute_failure,
     # The one out-of-module caller of these two: the required-element read and
     # the local-zone band belong with the backend that reads S3 responses,
     # while aws-cli runs the same reads on the single-object HEAD this module
@@ -132,7 +133,7 @@ def _compare_key(info: FileInfo) -> str:
 
 
 def _single_source_info(
-    plan: transferplan.TransferPlan, transferrer: Transferrer
+    plan: transferplan.TransferPlan, transferrer: Transferrer, *, operation: str
 ) -> FileInfo | None:
     """Resolve the single (non-dir_op) source through ``get_fileinfo``.
 
@@ -140,8 +141,18 @@ def _single_source_info(
     the built-ins stamp their own ``get_fileinfo`` results, so this only fills a
     ``None`` left by a bespoke backend - keeping ``src_info.storage`` in
     agreement with ``OpResult.src_storage`` on the single-object routes too.
+
+    A family error the storage raises (a stat the local backend could not
+    take - ``ELOOP``, a permission error on the way - or a HEAD that failed)
+    leaves ``operation`` unset, since the storage cannot know which operation
+    resolves the path; this is the operation layer that fills it in, as the
+    run does for ``open`` / ``delete`` failures (`attribute_failure`).
     """
-    single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    try:
+        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    except Boto3S3Error as exc:
+        attribute_failure(exc, operation=operation, bucket=None, key=None)
+        raise
     if single is not None and single.storage is None:
         single.storage = plan.src
     return single
@@ -304,6 +315,7 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
+    operation: str,
     reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
@@ -335,7 +347,7 @@ def upload_items(
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
         # get_fileinfo has no filter, so an excluded single source is dropped here.
-        single = _single_source_info(plan, transferrer)
+        single = _single_source_info(plan, transferrer, operation=operation)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
@@ -816,7 +828,7 @@ def open_upload_items(
             )
         )
     else:
-        single = _single_source_info(plan, transferrer)
+        single = _single_source_info(plan, transferrer, operation=operation)
         if single is None:
             raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",

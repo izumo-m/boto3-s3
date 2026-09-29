@@ -591,7 +591,8 @@ separator the AWS CLI's `local_format` gives a directory source, except when
 symlinks are not followed, where the AWS CLI strips it again before its
 battery). A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
-that is not absence is raised, translated.
+that is not absence is raised, translated, with `operation` unset for the
+operation layer to fill and the path as `key`.
 
 ### as_text() / format(\*, dir_op)
 

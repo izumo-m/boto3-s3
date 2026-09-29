@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from boto3_s3.exceptions import NotFoundError
+from boto3_s3.exceptions import NotFoundError, TransportError
 from boto3_s3.globsieve import GlobFilter
 from boto3_s3.localstorage import (
     LocalFileGenerator,
@@ -1727,6 +1727,22 @@ class TestGetFileinfo:
         assert calls == 1  # a single content stat, reused
         assert info.stat_result is not None  # always populated (the reused snapshot)
         assert info.size == 5
+
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    def test_a_stat_failure_is_raised_unattributed_with_the_path_as_key(
+        self, tmp_path: Path
+    ) -> None:
+        # A stat error other than absence is raised into the taxonomy with
+        # `operation` unset - the storage cannot know which operation resolves
+        # the path, so the operation layer fills it (as for open / delete) -
+        # and the path as `key`, the entry's own address space.
+        (tmp_path / "loop1").symlink_to(tmp_path / "loop2")
+        (tmp_path / "loop2").symlink_to(tmp_path / "loop1")
+        with pytest.raises(TransportError) as excinfo:
+            LocalStorage(str(tmp_path / "loop1")).get_fileinfo()
+        assert excinfo.value.operation is None
+        assert excinfo.value.key == str(tmp_path / "loop1").replace(os.sep, "/")
+        assert excinfo.value.bucket is None
 
     @skip_if_chmod_is_inert
     def test_unreadable_directory_warning_keeps_the_separator_when_following(
