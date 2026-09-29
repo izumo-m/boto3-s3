@@ -286,8 +286,10 @@ run comes out differently, listed in section 1.
   rendering accidents above, so this command keeps the complete record instead
   of copying it.
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
-  source is a directory always fails — exit code 1 on both tools, the source
-  left in place — and only the failed line's wording differs. `aws` threads
+  source is a directory fails — exit code 1 on both tools, the source left in
+  place — unless a filter excludes the source (`--exclude 'd/'`, its
+  trailing-separator form, or `--exclude '*'`), when both tools do nothing and
+  exit 0; only the failed line's wording differs. `aws` threads
   the source through in its trailing-separator form: its line names the
   source `d/` and, on the classic engine, ends with `[Errno 21] Is a
   directory: '/path/to/d/'` when the destination carries a key — or, when the
