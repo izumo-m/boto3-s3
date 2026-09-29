@@ -44,8 +44,10 @@ class TransferOptions(TypedDict, total=False):
     sse_c_copy_source_key: str | bytes
     metadata: Mapping[str, str]
     metadata_directive: str
-    copy_props: CopyPropsMode
-    annotation_copy_mode: AnnotationCopyMode
+    copy_props: CopyPropsMode | Literal["none", "metadata-directive", "default", "all"] | None
+    annotation_copy_mode: (
+        AnnotationCopyMode | Literal["preload-memory", "preload-tempfile", "deferred"] | None
+    )
     cache_control: str
     content_type: str
     content_disposition: str
@@ -59,7 +61,7 @@ class TransferOptions(TypedDict, total=False):
     guess_mime_type: bool
     force_glacier_transfer: bool
     ignore_glacier_warnings: bool
-    case_conflict: CaseConflictMode
+    case_conflict: CaseConflictMode | Literal["ignore", "skip", "warn", "error"] | None
     no_overwrite: bool
 ```
 
