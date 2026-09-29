@@ -2610,7 +2610,7 @@ class TestConditionalWriteSupport:
     """The --no-overwrite (IfNoneMatch) old-botocore gate, library side.
 
     IfNoneMatch reached the S3 write ops only in later botocore (PutObject in
-    1.35.16, CopyObject in 1.41.0); below that --no-overwrite must be rejected
+    1.35.2, CopyObject in 1.40.61); below that --no-overwrite must be rejected
     with a clear message instead of an opaque botocore ParamValidationError.
     """
 
@@ -2625,22 +2625,22 @@ class TestConditionalWriteSupport:
     def test_reason_names_min_botocore_for_upload(self) -> None:
         reason = conditional_write_unsupported_reason(model_only_client(set()), is_copy=False)
         assert reason is not None
-        assert "1.35.16" in reason and "PutObject" in reason
+        assert "1.35.2" in reason and "PutObject" in reason
 
     def test_reason_names_min_botocore_for_copy(self) -> None:
-        # PutObject present but CopyObject not: copy needs the later 1.41.0.
+        # PutObject present but CopyObject not: copy needs the later 1.40.61.
         reason = conditional_write_unsupported_reason(
             model_only_client({"PutObject"}), is_copy=True
         )
         assert reason is not None
-        assert "1.41.0" in reason and "CopyObject" in reason
+        assert "1.40.61" in reason and "CopyObject" in reason
 
     def test_upload_refused_without_s3transfer_create_blocklist(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # s3transfer < 0.11 hands the full extra_args to CreateMultipartUpload
         # (no CREATE_MULTIPART_BLOCKLIST), so a botocore that models
-        # IfNoneMatch - the real boto3 1.35.16+ / s3transfer 0.10.x pairing -
+        # IfNoneMatch - the real boto3 1.35.2+ / s3transfer 0.10.x pairing -
         # would fail every multipart --no-overwrite upload deep in botocore.
         # The probe refuses uploads up front instead.
         monkeypatch.delattr("s3transfer.upload.UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST")
@@ -2661,14 +2661,14 @@ class TestConditionalWriteSupport:
     def test_transferrer_rejects_no_overwrite_upload_on_old_botocore(self) -> None:
         # ConfigurationError: the environment (SDK floor) lacks the
         # capability, not the caller's arguments (exceptions.md section 3).
-        with pytest.raises(ConfigurationError, match=r"1\.35\.16"):
+        with pytest.raises(ConfigurationError, match=r"1\.35\.2"):
             Transferrer(
                 TransferType.UPLOAD, model_only_client(set()), options={"no_overwrite": True}
             )
 
     def test_transferrer_rejects_no_overwrite_copy_on_old_botocore(self) -> None:
         client = model_only_client({"PutObject"})  # upload ok, copy not yet
-        with pytest.raises(ConfigurationError, match=r"1\.41\.0"):
+        with pytest.raises(ConfigurationError, match=r"1\.40\.61"):
             Transferrer(
                 TransferType.COPY, client, source_client=client, options={"no_overwrite": True}
             )

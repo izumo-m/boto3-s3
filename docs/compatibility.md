@@ -23,7 +23,7 @@ bound, so a newer `boto3` is picked up as it is.
 | `no_overwrite` / `--no-overwrite` on upload | boto3 >= 1.36.0 |
 | `checksum_algorithm` = `CRC64NVME` | boto3 >= 1.36.0, plus the `crt` extra |
 | `mb --tags` (`CreateBucketConfiguration.Tags`) | boto3 >= 1.39.2 |
-| `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.41.0 |
+| `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.40.61 |
 | `[s3]` tuning reaching the CRT transfer manager | boto3 >= 1.42.0 |
 | `mb` on an account-regional bucket (a name ending `-an`) | boto3 >= 1.42.67 |
 | `checksum_algorithm` = `SHA512` | boto3 >= 1.42.94 |

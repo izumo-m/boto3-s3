@@ -274,7 +274,7 @@ def _allow_if_none_match() -> None:
     # blocklist to extend), so skip it when the attribute is absent - and
     # `conditional_write_unsupported_reason` refuses --no-overwrite uploads on
     # such installs up front (botocore can model IfNoneMatch there: boto3
-    # 1.35.16+ pins s3transfer 0.10.x). Drop this getattr guard once the
+    # 1.35.2+ pins s3transfer 0.10.x). Drop this getattr guard once the
     # s3transfer floor is raised to >= 0.11.
     create_blocklist = getattr(upload_cls, "CREATE_MULTIPART_BLOCKLIST", None)
     if create_blocklist is not None and "IfNoneMatch" not in create_blocklist:
@@ -290,17 +290,19 @@ def _allow_if_none_match() -> None:
 
 # Back-compat (supported floor botocore 1.31, docs/compatibility.md):
 # IfNoneMatch reached the S3 write ops only in later botocore - PutObject and
-# CompleteMultipartUpload in 1.35.16, CopyObject in 1.41.0. Below those,
-# --no-overwrite is rejected up front (here for the library, and in the CLI for
-# rc 252) instead of failing deep in botocore with an opaque "Unknown parameter
-# in input: IfNoneMatch". Drop this gate once the botocore floor reaches them.
-_CONDITIONAL_WRITE_MIN_BOTOCORE = {"upload": "1.35.16", "copy": "1.41.0"}
+# CompleteMultipartUpload in 1.35.2, CopyObject in 1.40.61 (each the first
+# release whose S3 model carries the member, read from the published wheels).
+# Below those, --no-overwrite is rejected up front (here for the library, and
+# in the CLI for rc 252) instead of failing deep in botocore with an opaque
+# "Unknown parameter in input: IfNoneMatch". Drop this gate once the botocore
+# floor reaches them.
+_CONDITIONAL_WRITE_MIN_BOTOCORE = {"upload": "1.35.2", "copy": "1.40.61"}
 
 # Uploads additionally need s3transfer's create-multipart blocklist
 # (`UploadSubmissionTask.CREATE_MULTIPART_BLOCKLIST`, s3transfer 0.11.0): older
 # s3transfer hands the *full* extra_args to CreateMultipartUpload, whose model
 # has no IfNoneMatch -> ParamValidationError on any multipart-threshold upload.
-# The combination is real, not theoretical: boto3 1.35.16+ pins s3transfer
+# The combination is real, not theoretical: boto3 1.35.2+ pins s3transfer
 # 0.10.x while its botocore already models IfNoneMatch, so the botocore gate
 # above passes there. Rejected up front (uniformly, small files included -
 # sizes are unknown at validation time and a size-dependent refusal would be

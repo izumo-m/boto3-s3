@@ -486,7 +486,7 @@ dest-existence check for download. We ported the same three faces:
   create-multipart blocklist (`CREATE_MULTIPART_BLOCKLIST`, s3transfer 0.11):
   older s3transfer hands the full extra_args to CreateMultipartUpload, whose
   model has no `IfNoneMatch`, failing every multipart-threshold upload - a real
-  pairing, since boto3 1.35.16+ pins s3transfer 0.10.x while its botocore
+  pairing, since boto3 1.35.2+ pins s3transfer 0.10.x while its botocore
   already models the param. `Transferrer` rejects `no_overwrite` at
   construction with a `ConfigurationError` instead of failing deep in botocore
   with an opaque "Unknown parameter in input". The probe behind that gate is

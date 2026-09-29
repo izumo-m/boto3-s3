@@ -26,13 +26,13 @@ from tests.utils.fakemodel import model_only_client
 
 def test_rejects_upload_on_old_botocore() -> None:
     client = model_only_client(set())
-    with pytest.raises(ValidationError, match=r"1\.35\.16"):
+    with pytest.raises(ValidationError, match=r"1\.35\.2"):
         transferargs.validate_no_overwrite_supported(True, "locals3", client, operation="cp")
 
 
 def test_rejects_copy_on_old_botocore() -> None:
-    client = model_only_client({"PutObject"})  # upload ok, copy needs 1.41.0
-    with pytest.raises(ValidationError, match=r"1\.41\.0"):
+    client = model_only_client({"PutObject"})  # upload ok, copy needs 1.40.61
+    with pytest.raises(ValidationError, match=r"1\.40\.61"):
         transferargs.validate_no_overwrite_supported(True, "s3s3", client, operation="cp")
 
 
