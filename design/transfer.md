@@ -426,8 +426,11 @@ The caller's stream is never closed by `IOStorage`.
 - **upload**: hands s3transfer the fileobj from `IOStorage.open(key, "rb")` (the
   open ignores the key - a single endpoint). No ContentType guess (there is no
   filename). `expected_size` is a chunk-design hint for multipart
-  (TransferItem.size) - if unspecified, the engine buffers up to the threshold to
-  decide (s3transfer's non-seekable handling = the same implementation as aws).
+  (TransferItem.size_hint, provided to s3transfer only for a non-seekable
+  fileobj: a seekable one is sized by the engine, and a provided size would be
+  the byte count it reads, so an understated hint would truncate the object) -
+  if unspecified, the engine buffers up to the threshold to decide
+  (s3transfer's non-seekable handling = the same implementation as aws).
 - **download**: provides neither size nor etag -> s3transfer self-probes with
   HeadObject before GetObject (exactly aws's stream wire shape). Directory
   creation and the mtime stamp are not performed (section 5 is for path destinations

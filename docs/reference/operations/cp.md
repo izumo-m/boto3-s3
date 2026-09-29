@@ -145,8 +145,12 @@ instead of becoming `DRYRUN` records.
 
 `expected_size` is the multipart sizing hint for a streaming upload, in bytes.
 It reaches the engine only on that route; on every other route it is accepted
-and ignored. Without it, an upload from a stream of unknown length buffers up
-to the multipart threshold before deciding how to send the object.
+and ignored. It applies to a stream the engine cannot size — one that is not
+seekable, `sys.stdin` say — and is ignored for a seekable stream, whose length
+the engine reads itself. It is a hint for planning the parts, never the byte
+count: the whole stream is sent whatever the hint says, and the record reports
+the bytes counted. Without it, an upload from a stream of unknown length
+buffers up to the multipart threshold before deciding how to send the object.
 
 `on_progress` receives byte-level
 [`TransferProgress`](../results.md#transferprogress) updates for submitted

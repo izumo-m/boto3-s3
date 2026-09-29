@@ -59,6 +59,42 @@ _SYNC_CONFIG = TransferConfig(use_threads=False)
 _MIB = 1024 * 1024
 
 
+class _Pipe:
+    """A reader without ``seek`` / ``tell``: what s3transfer calls non-seekable."""
+
+    def __init__(self, data: bytes) -> None:
+        self._buffer = io.BytesIO(data)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._buffer.read(size)
+
+    def close(self) -> None:
+        self._buffer.close()
+
+
+def _consume_bodies(client: Any) -> None:
+    """Have the recording client read each request ``Body`` like a real one.
+
+    s3transfer fires its progress callbacks as the body is read, so a stream
+    upload's byte counter (``transfer._CountBytes``) only advances when the
+    stub consumes what botocore would have sent. The chunk's callbacks are
+    enabled by s3transfer's ``request-created`` hook, which the stub never
+    reaches, so the stub enables them the way that hook would.
+    """
+    original = client._make_api_call
+
+    def call(operation: str, params: dict[str, Any]) -> Any:
+        body = params.get("Body")
+        if body is not None and hasattr(body, "read"):
+            enable = getattr(body, "enable_callback", None)
+            if enable is not None:
+                enable()
+            body.read()
+        return original(operation, params)
+
+    client._make_api_call = call
+
+
 class _OpenSink(io.BytesIO):
     """A download sink whose ``close`` is suppressed.
 
@@ -2239,6 +2275,70 @@ class TestStreams:
         # the probe-skip that delivery buys is pinned by the cp download tests'
         # call sequences - GetObject with no HeadObject when size+etag ride.)
         assert results[0].bytes_transferred == 4
+
+    def test_a_size_hint_never_shortens_a_seekable_stream(self) -> None:
+        # expected_size is a hint for a stream the engine cannot size. A
+        # seekable one (a file opened "rb", the streams.md example) is sized by
+        # s3transfer itself, and a provided size would become the byte count it
+        # reads: an understated hint truncated the object silently, SUCCEEDED
+        # (measured on MinIO: 6 MiB of a 12 MiB file, 100 bytes on a hint of 100).
+        client, calls = make_recording_client([{}])
+        _consume_bodies(client)
+        results: list[OpResult] = []
+        item = TransferItem(
+            compare_key="streaming.txt",
+            size_hint=2,
+            src_fileobj=io.BytesIO(b"foo\n"),
+            dest_bucket="bucket",
+            dest_key="streaming.txt",
+        )
+        with Transferrer(
+            TransferType.UPLOAD, client, transfer_config=_SYNC_CONFIG, on_result=results.append
+        ) as transferrer:
+            transferrer.submit(item)
+        assert ops(calls) == ["PutObject"]
+        # The body s3transfer handed the request is the whole stream.
+        assert len(calls[0].params["Body"]) == 4
+        assert transferrer.succeeded == 1
+        assert results[0].bytes_transferred == 4
+
+    def test_a_size_hint_sizes_a_non_seekable_stream_and_the_record_counts(self) -> None:
+        # A reader without seek/tell is the hint's one target: s3transfer plans
+        # the parts from the provided size and reads to EOF regardless (aws's
+        # --expected-size, applied to its non-seekable stdin alone), so the
+        # whole stream is sent and SUCCEEDED reports the bytes counted, not
+        # the hint the engine was handed.
+        client, calls = make_recording_client([{}])
+        _consume_bodies(client)
+        results: list[OpResult] = []
+        item = TransferItem(
+            compare_key="-", size_hint=2, src_fileobj=_Pipe(b"foo\n"), dest_bucket="b", dest_key="k"
+        )
+        with Transferrer(
+            TransferType.UPLOAD, client, transfer_config=_SYNC_CONFIG, on_result=results.append
+        ) as transferrer:
+            transferrer.submit(item)
+        assert ops(calls) == ["PutObject"]
+        assert len(calls[0].params["Body"]) == 4
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert results[0].bytes_transferred == 4
+
+    def test_the_hint_is_provided_to_the_engine_only_for_a_non_seekable_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = _CrtCapturingManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        client, _ = make_recording_client([])
+        with Transferrer(TransferType.UPLOAD, client) as transferrer:
+            transferrer.submit(
+                TransferItem(compare_key="a", size_hint=2, src_fileobj=io.BytesIO(b"foo\n"))
+            )
+            transferrer.submit(TransferItem(compare_key="b", size_hint=2, src_fileobj=_Pipe(b"x")))
+        provided = [
+            [s._size for s in upload["subscribers"] if type(s).__name__ == "_ProvideSize"]
+            for upload in manager.uploads
+        ]
+        assert provided == [[], [2]]
 
     def test_stream_download_probes_then_writes(self) -> None:
         sink = _OpenSink()

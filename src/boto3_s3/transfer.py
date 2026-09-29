@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 from s3transfer import copies as s3transfer_copies
+from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
@@ -173,11 +174,16 @@ class TransferItem:
     a copy item must carry it - an under-threshold value routes metadata/tags
     down the single-part path. ``etag`` is the source object's ETag held
     unquoted (``S3Storage`` strips the surrounding quotes); the engine
-    re-quotes it when it provides it to s3transfer.
+    re-quotes it when it provides it to s3transfer. ``size_hint`` is a stream
+    upload's ``expected_size``: a sizing hint for a source the engine cannot
+    size itself, never a byte count - `_applied_size_hint` provides it only
+    for a non-seekable fileobj, and SUCCEEDED reports the bytes counted
+    rather than the hint.
     """
 
     compare_key: str
     size: int | None = None
+    size_hint: int | None = None
     src_bucket: str | None = None
     src_key: str | None = None
     src_path: str | None = None
@@ -222,6 +228,22 @@ def _is_precondition_failed(exc: BaseException) -> bool:
         return bool(response["Error"]["Code"] == "PreconditionFailed")
     except (TypeError, KeyError):
         return False
+
+
+def _applied_size_hint(item: TransferItem) -> int | None:
+    """The ``size_hint`` the engine is given, or None where the hint is ignored.
+
+    A hint sizes only a stream the engine cannot size itself: s3transfer's
+    non-seekable upload plans its parts from a provided size and reads to EOF
+    regardless - aws-cli's ``--expected-size``, which applies to its
+    non-seekable stdin alone. A seekable stream (a file opened ``"rb"``) is
+    sized by the engine, and a provided size would become the byte count it
+    reads: an understated hint truncated the object silently, SUCCEEDED
+    (measured against MinIO).
+    """
+    if item.size is not None or item.size_hint is None or item.src_fileobj is None:
+        return None
+    return None if seekable(item.src_fileobj) else item.size_hint
 
 
 def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
@@ -1304,9 +1326,13 @@ class Transferrer:
         if item.size is not None:
             subscribers.append(_ProvideSize(item.size))
         else:
+            hint = _applied_size_hint(item)
+            if hint is not None:
+                subscribers.append(_ProvideSize(hint))
             # A size-unknown item (a stream, a custom backend's deferred
             # reader): count what actually moves, so SUCCEEDED can report it
-            # where the engine resolves no size of its own (`_CountBytes`).
+            # where the engine resolves no size of its own (`_CountBytes`) -
+            # or resolves the hint it was handed, which is not the count.
             counted = _CountBytes()
             subscribers.append(counted)
         if item.etag:
@@ -1326,6 +1352,7 @@ class Transferrer:
             on_success=self._record_success,
             on_failure=self._record_failure,
             counted=counted,
+            hinted=_applied_size_hint(item) is not None,
         )
 
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
@@ -2139,11 +2166,13 @@ class _Completion:
         on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
         counted: _CountBytes | None = None,
+        hinted: bool = False,
     ) -> None:
         self._item = item
         self._on_success = on_success
         self._on_failure = on_failure
         self._counted = counted
+        self._hinted = hinted
         self._settled = False
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
@@ -2162,12 +2191,13 @@ class _Completion:
         # Classic s3transfer resolves an unknown-size download's size on the
         # future (its HeadObject probe); a non-seekable upload gets none, and
         # the CRT manager's meta has no size at all - there the item's own
-        # byte counter (`_CountBytes`) is what SUCCEEDED reports. meta.etag
-        # carries the affected object's ETag on a copy / download (None on an
-        # upload); the user_context slot carries mv's source-delete response
-        # (capture_response).
+        # byte counter (`_CountBytes`) is what SUCCEEDED reports, as it is
+        # where meta.size is the hint the engine was handed (``hinted``), not
+        # a count. meta.etag carries the affected object's ETag on a copy /
+        # download (None on an upload); the user_context slot carries mv's
+        # source-delete response (capture_response).
         size = getattr(future.meta, "size", None)
-        if size is None and self._counted is not None:
+        if self._counted is not None and (size is None or self._hinted):
             size = self._counted.total
         self._on_success(
             self._item,

@@ -100,4 +100,5 @@ path with nothing to enumerate; a `mv` onto a stream does not take that path,
 so its `filter` still runs — against the one source entry, which it can
 therefore drop. `expected_size` applies to uploads only, where it lets
 multipart be planned in advance for a stream whose length is not otherwise
-knowable.
+knowable (a non-seekable one; a seekable stream is sized by the engine itself
+and the hint is ignored, so it never shortens what is sent).

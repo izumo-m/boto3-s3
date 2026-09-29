@@ -1251,9 +1251,11 @@ class S3:
         run) and reports ``OpOutcome.DRYRUN`` without transferring; warnings
         still apply. ``expected_size`` is the multipart sizing hint for a
         streaming upload (stdin -> S3): it is forwarded to the stream path
-        (`_cp_stream` sets it as the upload item ``size``) and is ignored
-        on the non-stream routes, exactly like aws's ``--expected-size`` (which
-        only matters for a stdin upload above ~50 GB).
+        (`_cp_stream` sets it as the upload item ``size_hint``, which the
+        engine applies to a stream it cannot size - a non-seekable one - and
+        ignores for a seekable stream it sizes itself) and is ignored on the
+        non-stream routes, exactly like aws's ``--expected-size`` (which
+        applies to its non-seekable stdin alone and only matters above ~50 GB).
 
         Results stream to ``on_result`` from the engine's worker threads for
         submitted transfers; non-submitting records - dryrun, skips, notices,
@@ -1544,9 +1546,11 @@ class S3:
         The other side must be S3 (a non-S3 peer is the "stream on one side"
         error); its key is taken verbatim (the CLI owns aws's ``-``-basename
         naming quirk). The stream's fileobj comes from ``IOStorage.open`` and is
-        handed straight to ``s3transfer``. Uploads honor ``expected_size`` as the
-        multipart sizing hint (without it the engine buffers up to the threshold
-        and decides); downloads provide neither size nor etag, so s3transfer
+        handed straight to ``s3transfer``. Uploads carry ``expected_size`` as the
+        multipart sizing hint of a stream the engine cannot size (without it the
+        engine buffers up to the threshold and decides; a seekable stream is
+        sized by the engine and the hint is ignored); downloads provide neither
+        size nor etag, so s3transfer
         probes the object with a HeadObject - the aws stream wire shape. Streams
         are single items: the glacier / parent-ref gates do not apply; displays
         render as ``-``. A ``cancel_token`` already cancelled raises
@@ -1598,7 +1602,7 @@ class S3:
                 src_fileobj = None if dryrun else src_storage.open(storage.key, "rb")
             item = TransferItem(
                 compare_key=storage.key,
-                size=expected_size,
+                size_hint=expected_size,
                 src_fileobj=src_fileobj,
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
