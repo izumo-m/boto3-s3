@@ -38,6 +38,7 @@ from boto3_s3 import (
     FileKind,
     InvalidConfigError,
     LocalStorage,
+    MalformedResponseError,
     NotFoundError,
     S3FileInfo,
     S3ScanOptions,
@@ -702,8 +703,10 @@ class TestMalformedListingEntries:
 
     aws-cli reads a ``Contents`` entry's ``Key`` / ``LastModified`` / ``Size``
     (and a common prefix's ``Prefix``, a bucket's ``CreationDate`` / ``Name``) by
-    subscript, so a response that omits one raises ``KeyError`` naming the
-    element, right at that entry. Measured against the pinned aws through a
+    subscript, so a response that omits one dies with ``KeyError`` naming the
+    element, right at that entry; here that is ``MalformedResponseError`` with
+    the KeyError's text as its message and the KeyError on ``__cause__``.
+    Measured against the pinned aws through a
     127.0.0.1 fake: ``ls`` prints the entries ahead of it and exits 255 with
     ``[ERROR]: 'LastModified'``, a transfer prints its own and exits 1 with
     ``fatal error: 'LastModified'``. Dropping the entry instead - what this used
@@ -719,22 +722,28 @@ class TestMalformedListingEntries:
             ({"ETag": '"x"'}, "Key"),
         ],
     )
-    def test_a_missing_element_raises_keyerror_naming_it(
+    def test_a_missing_element_is_a_malformed_response_naming_it(
         self, entry: dict[str, Any], missing: str
     ) -> None:
         # The last row pins the read order too: aws-cli's BucketLister takes Key
         # first, then LastModified, and its consumer Size afterwards, so an entry
         # missing several is reported by the first of them.
         storage, _ = _storage([{"Contents": [entry]}])
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             list(storage.scan(S3ScanOptions(recursive=True)))
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"  # str(KeyError): the CLI's line
+        cause = excinfo.value.__cause__
+        assert isinstance(cause, KeyError) and cause.args[0] == missing
+        assert excinfo.value.bucket == storage.bucket
+        assert excinfo.value.key == (None if missing == "Key" else entry["Key"])
 
     def test_entries_ahead_of_the_bad_one_are_still_yielded(self) -> None:
         bad = {"Key": "prefix/bad.txt", "Size": 1}
         pages = [{"Contents": [_obj("prefix/a.txt"), bad, _obj("prefix/z.txt")]}]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+        )
         assert keys == ["prefix/a.txt"]
 
     def test_an_earlier_page_survives_a_later_bad_entry(self) -> None:
@@ -743,7 +752,9 @@ class TestMalformedListingEntries:
             {"Contents": [_obj("prefix/b.txt"), {"Key": "prefix/bad.txt", "Size": 1}]},
         ]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+        )
         assert keys == ["prefix/a.txt", "prefix/b.txt"]
 
     def test_a_common_prefix_without_prefix_raises_before_the_objects(self) -> None:
@@ -756,7 +767,9 @@ class TestMalformedListingEntries:
             }
         ]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=False)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=False)), MalformedResponseError
+        )
         assert keys == ["prefix/good/"]
 
     @pytest.mark.parametrize(
@@ -767,7 +780,7 @@ class TestMalformedListingEntries:
             ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
-    def test_a_head_missing_an_element_raises_keyerror_naming_it(
+    def test_a_head_missing_an_element_is_a_malformed_response_naming_it(
         self, head: dict[str, Any], missing: str
     ) -> None:
         # The single-object HEAD follows the same rule in aws-cli's
@@ -776,9 +789,16 @@ class TestMalformedListingEntries:
         # is blamed on ContentLength (the transfer engine's `head_single` reads
         # it the same way; the CLI measurement is in that route's suite).
         storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             storage.get_fileinfo()
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        # A storage-level call: the operation stays unset, the entry is named.
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            None,
+            "bucket",
+            "prefix/obj.txt",
+        )
 
     @pytest.mark.parametrize(
         ("entry", "missing"),
@@ -791,11 +811,11 @@ class TestMalformedListingEntries:
         # name, so the date is the one reported when both are gone.
         storage, _ = _storage([{"Buckets": [_bucket_entry("aaa"), entry]}], url="s3://")
         keys: list[str] = []
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             for info in storage.list_buckets():
                 keys.append(info.key)
         assert keys == ["aaa"]
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"
 
 
 _FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
@@ -845,6 +865,8 @@ class TestListingTimestampRepresentability:
     ``date value out of range`` there rather than being listed or transferred -
     measured against the pinned aws through a 127.0.0.1 fake: ``fatal error: date
     value out of range`` at rc 1 for cp / sync, ``[ERROR]`` at rc 255 for ``ls``.
+    Here it is ``MalformedResponseError`` carrying that text and the
+    ``OverflowError`` on ``__cause__``.
     Which stamps qualify depends on the zone, so each case pins one; the value
     kept on the entry stays UTC per the ``FileInfo.mtime`` contract.
     """
@@ -853,7 +875,9 @@ class TestListingTimestampRepresentability:
         pages = [{"Contents": [_obj("prefix/a.txt"), _stamped("prefix/far.txt", _FAR_FUTURE)]}]
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage(pages)
-            keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), OverflowError)
+            keys = _keys_until_raise(
+                storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+            )
         assert keys == ["prefix/a.txt"]
 
     def test_the_same_stamp_is_kept_where_the_zone_can_hold_it(self) -> None:
@@ -867,8 +891,10 @@ class TestListingTimestampRepresentability:
         pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
         with _local_zone("America/New_York"):
             storage, _ = _storage(pages)
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range") as excinfo:
                 list(storage.scan(S3ScanOptions(recursive=True)))
+        assert isinstance(excinfo.value.__cause__, OverflowError)
+        assert (excinfo.value.bucket, excinfo.value.key) == (storage.bucket, "prefix/old.txt")
 
     def test_the_far_past_stamp_is_kept_east_of_utc(self) -> None:
         pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
@@ -883,7 +909,7 @@ class TestListingTimestampRepresentability:
         head = {"ContentLength": 5, "LastModified": _FAR_FUTURE}
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([], head_response=head)
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 storage.get_fileinfo("a.txt")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no check-free range")

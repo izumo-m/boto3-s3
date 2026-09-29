@@ -1564,10 +1564,11 @@ are 1). Therefore `RmCommand.run` / `CpCommand.run` / `MvCommand.run` /
 emitted by on_result, anything else = a `fatal error:` line), and do not let it
 flow to `main()`'s `exit_code_for` (the 254 family). The catch is **positional,
 not by type**: aws's recorder turns whatever the pipeline raises into an error
-result, so a failure outside the library's taxonomy - a `KeyError` naming a
-listing element the response left out, an `OverflowError` from a timestamp the
-local zone cannot hold - is the same one `fatal error:` line at rc 1 as a
-`Boto3S3Error` (measured on both tools). `KeyboardInterrupt` keeps its own arm
+result, so a failure outside the library's taxonomy is the same one `fatal
+error:` line at rc 1 as a `Boto3S3Error` (measured on both tools; the listing
+element a response left out and the timestamp the local zone cannot hold,
+aws's bare `KeyError` / `OverflowError`, arrive as the library's
+`MalformedResponseError` carrying the same text). `KeyboardInterrupt` keeps its own arm
 (the cancelled-run line above), the rest of the `BaseException` family passes,
 and `AssertionError` is re-raised - the same carve-out the dispatcher's backstop
 below makes. What becomes 252 is only a usage

@@ -90,6 +90,7 @@ that wraps it is documented on the same page.
 - [`Location`](./storage.md#location)
 - [`LoopDetector`](./storage.md#loopdetector)
 - [`ls`](./operations/ls.md#s3ls)
+- [`MalformedResponseError`](./exceptions.md#malformedresponseerror)
 - [`mb`](./operations/mb.md#s3mb)
 - [`MergedPair`](./comparator.md#mergedpair)
 - [`MergedPairFilter`](./comparator.md#mergedpairfilter)

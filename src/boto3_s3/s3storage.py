@@ -63,6 +63,7 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     ConfigurationError,
     InvalidConfigError,
+    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -358,7 +359,37 @@ _LOCAL_CHECK_FREE_YEARS = range(datetime.min.year + 1, datetime.max.year)
 _ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
 
 
-def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
+def read_required(
+    entry: Mapping[str, Any],
+    element: str,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> Any:
+    """Read an element a response entry must carry: aws-cli's subscript, as a family error.
+
+    aws-cli reads these by subscript and dies on the ``KeyError`` naming the
+    element; here that becomes `MalformedResponseError` with the same message
+    (the ``KeyError``'s ``str()``, the element name in quotes) and the
+    ``KeyError`` on ``__cause__``, so a consumer catches it as a family error
+    while the CLI's line stays byte-identical. Each call site reads in
+    aws-cli's own order, so a doubly incomplete entry is blamed on the same
+    element there.
+    """
+    try:
+        return entry[element]
+    except KeyError as exc:
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
+
+
+def reject_unrepresentable_stamp(
+    mtime: datetime | None,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> None:
     """Run aws-cli's local-zone conversion of an S3 timestamp for its failure alone.
 
     aws-cli turns every timestamp an S3 response carries into
@@ -368,7 +399,9 @@ def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
     away from the end of ``datetime``'s range) aborts the whole run with
     ``date value out of range`` instead of being listed or transferred. The value
     kept here stays UTC per the ``FileInfo.mtime`` contract, so this runs the
-    conversion only for the exception it may raise. dateutil's ``tzlocal`` is
+    conversion only for the exception it may raise, which surfaces as
+    `MalformedResponseError` (aws-cli's ``date value out of range`` as the
+    message, the ``OverflowError`` on ``__cause__``). dateutil's ``tzlocal`` is
     rebuilt per call the way aws-cli does, so a process that changes ``TZ`` (and
     calls ``time.tzset``) follows; the import is deferred because the whole
     dateutil package costs about as much to import as boto3-s3 itself.
@@ -382,7 +415,10 @@ def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
         return
     from dateutil.tz import tzlocal
 
-    mtime.astimezone(tzlocal())
+    try:
+        mtime.astimezone(tzlocal())
+    except (OverflowError, ValueError) as exc:
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
 
 def _page_to_infos(
@@ -410,18 +446,19 @@ def _page_to_infos(
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
 
-    The elements a listing entry must carry are read by subscript, not by
-    ``get``: aws-cli reads them the same way (``BucketLister`` takes ``Key`` then
+    The elements a listing entry must carry are read as required, not by
+    ``get``: aws-cli reads them by subscript (``BucketLister`` takes ``Key`` then
     ``LastModified``, its consumer ``Size``; a common prefix is read as
-    ``Prefix``), so an entry missing one raises ``KeyError`` naming the element
-    and stops the listing right there rather than being dropped from it. That is
-    what the ignores below mark: the subscripts may raise at runtime on purpose.
-    This is a generator, entry by entry, for the same reason - the entries ahead
-    of the bad one are already emitted when it is reached, as in aws-cli.
+    ``Prefix``), so an entry missing one stops the listing right there with
+    `MalformedResponseError` naming the element (`read_required`) rather than
+    being dropped from it. This is a generator, entry by entry, for the same
+    reason - the entries ahead of the bad one are already emitted when it is
+    reached, as in aws-cli.
     """
+    bucket = storage.bucket
     if include_common_prefixes:
         for common in page.get("CommonPrefixes", []):
-            dir_prefix = common["Prefix"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            dir_prefix: str = read_required(common, "Prefix", bucket=bucket)
             yield S3FileInfo(
                 key=dir_prefix,
                 kind=FileKind.DIRECTORY,
@@ -429,10 +466,10 @@ def _page_to_infos(
                 storage=storage,
             )
     for obj in page.get("Contents", []):
-        key = obj["Key"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        mtime = obj["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        reject_unrepresentable_stamp(mtime)
-        size = obj["Size"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        key: str = read_required(obj, "Key", bucket=bucket)
+        mtime: datetime = read_required(obj, "LastModified", bucket=bucket, key=key)
+        reject_unrepresentable_stamp(mtime, bucket=bucket, key=key)
+        size: int = read_required(obj, "Size", bucket=bucket, key=key)
         etag = obj.get("ETag")
         owner = obj.get("Owner")
         yield S3FileInfo(
@@ -482,17 +519,19 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
 
-    Both elements are read by subscript, in the order aws-cli's bucket listing
-    reads them (it renders the creation date, then appends the name), so a bucket
-    entry missing one raises ``KeyError`` naming the element and stops the
-    listing at that bucket - the buckets ahead of it are already delivered,
-    this being a generator its caller yields straight through. The date needs no
-    local-zone check here: nothing but the ``ls`` rendering consumes it, and that
-    conversion is aws-cli's own (``output.format_entry``).
+    Both elements are read as required, in the order aws-cli's bucket listing
+    subscripts them (it renders the creation date, then appends the name), so a
+    bucket entry missing one stops the listing at that bucket with
+    `MalformedResponseError` naming the element - the buckets ahead of it are
+    already delivered, this being a generator its caller yields straight
+    through. The date needs no local-zone check here: nothing but the ``ls``
+    rendering consumes it, and that conversion is aws-cli's own
+    (``output.format_entry``).
     """
-    for bucket in page.get("Buckets", []):
-        creation = bucket["CreationDate"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        name = bucket["Name"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    for entry in page.get("Buckets", []):
+        name_hint = entry.get("Name")
+        creation: datetime = read_required(entry, "CreationDate", bucket=name_hint)
+        name: str = read_required(entry, "Name", bucket=name_hint)
         yield S3FileInfo(
             key=name,
             kind=FileKind.BUCKET,
@@ -1210,18 +1249,18 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
-        # Read by subscript in aws-cli's own order (`ContentLength`, then
-        # `LastModified`; `ETag` takes a default), like the listing converter
-        # above and the transfer engine's `producers.head_single`: a response
-        # missing one raises `KeyError` naming it instead of yielding an entry
-        # with the value unset.
-        size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        # Read as required in aws-cli's own subscript order (`ContentLength`,
+        # then `LastModified`; `ETag` takes a default), like the listing
+        # converter above and the transfer engine's `producers.head_single`: a
+        # response missing one is a MalformedResponseError naming it instead
+        # of an entry with the value unset.
+        size: int = read_required(head, "ContentLength", bucket=self._bucket, key=target_key)
+        mtime: datetime = read_required(head, "LastModified", bucket=self._bucket, key=target_key)
         etag = head.get("ETag")
         # aws-cli converts the HeadObject stamp to the local zone as it reads the
         # response (filegenerator's single-object branch), so an unrepresentable
         # one kills the run there rather than downstream.
-        reject_unrepresentable_stamp(mtime)
+        reject_unrepresentable_stamp(mtime, bucket=self._bucket, key=target_key)
         return S3FileInfo(
             key=target_key,
             size=size,

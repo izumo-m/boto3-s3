@@ -12,7 +12,7 @@ from the command will find its exit codes specified separately in
 [`../cli/exit-codes.md`](../cli/exit-codes.md); they are a CLI concept and play
 no part in the library contract below.
 
-All ten classes are exported from the `boto3_s3` root and from
+All eleven classes are exported from the `boto3_s3` root and from
 `boto3_s3.exceptions`.
 
 ```
@@ -22,6 +22,7 @@ Boto3S3Error
 ├── ValidationError
 │   └── InvalidValueError
 ├── TransportError
+├── MalformedResponseError
 ├── ConfigurationError
 │   └── InvalidConfigError
 ├── CancelledError
@@ -105,12 +106,10 @@ failure above — with no exception object behind them, so their `__cause__` is
 Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths;
 `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
-returned incomplete is reported the way the AWS CLI reports it, not translated:
-a listing entry, a bucket entry or a single-object `HeadObject` missing an
-element the CLI reads by subscript raises `KeyError` naming the element, and a
-timestamp the host's local zone cannot represent raises `OverflowError` (the
-exact elements are under `scan_pages`, `list_buckets` and `get_fileinfo` in
-[`storage.md`](./storage.md)). Selecting the CRT engine
+returned incomplete, or a timestamp the host cannot represent, is inside it:
+[`MalformedResponseError`](#malformedresponseerror) carries the `KeyError` /
+`OverflowError` the AWS CLI dies with on `__cause__` and its text as the
+message. Selecting the CRT engine
 explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
 is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
 boto3 does — that pass-through is scoped to engine selection, and the same
@@ -212,6 +211,39 @@ message text rides through unchanged.
 
 ```python
 class TransportError(Boto3S3Error): ...
+```
+
+Adds no attributes and no constructor of its own. It has no subclasses in the
+hierarchy.
+
+## MalformedResponseError
+
+The service answered, but with a response the library cannot consume. Raised
+where the AWS CLI itself dies reading the same response: a `ListObjectsV2`
+entry missing `Key`, `LastModified` or `Size`, a `CommonPrefixes` entry
+missing `Prefix`, a `ListBuckets` entry missing `CreationDate` or `Name`, or a
+single-object `HeadObject` missing `ContentLength` or `LastModified` — each
+element read in the CLI's own order, so a doubly incomplete entry is blamed on
+the same element (the exact rules are under `scan_pages`, `list_buckets` and
+`get_fileinfo` in [`storage.md`](./storage.md)) — and a `LastModified` the
+host's local zone cannot represent (years 1 and 9999, within the zone's offset
+of `datetime`'s range), which the CLI's conversion of every S3 timestamp to
+local time rejects. A truncating proxy or a partial S3 implementation is the
+usual source of the first kind.
+
+The run stops where the CLI's stops: the entries ahead of the bad one are
+already delivered — an `ls` has reported them, a transfer has submitted them —
+and nothing after it is read. The message is the text the AWS CLI prints for
+the same response: the `KeyError`'s `str()`, which is the element name in
+quotes (`'LastModified'`), or `date value out of range`; that original
+exception is on `__cause__`. `bucket` and `key` name the entry when the
+response carried them (an entry missing `Key` names only its bucket; a bucket
+entry puts its name in `bucket`), and `operation` is set on the single-object
+paths a transfer runs and left unset on the shared listing path and on a
+storage-level call, like every other error those raise.
+
+```python
+class MalformedResponseError(Boto3S3Error): ...
 ```
 
 Adds no attributes and no constructor of its own. It has no subclasses in the

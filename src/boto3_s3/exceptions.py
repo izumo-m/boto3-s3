@@ -60,6 +60,23 @@ class TransportError(Boto3S3Error):
     """Network or local I/O failure (connection, timeout, OSError)."""
 
 
+class MalformedResponseError(Boto3S3Error):
+    """The service answered, but with a response this library cannot consume.
+
+    A listing entry, a bucket entry or a single-object ``HeadObject`` missing
+    an element aws-cli reads by subscript (``Key`` / ``LastModified`` /
+    ``Size``, a common prefix's ``Prefix``, a bucket's ``CreationDate`` /
+    ``Name``, a HEAD's ``ContentLength`` / ``LastModified``) - a truncating
+    proxy, a partial S3 implementation - or a ``LastModified`` the host's
+    local zone cannot represent (aws-cli converts every S3 timestamp it reads
+    to local time, so such an object ends its run). aws-cli dies with the
+    bare ``KeyError`` / ``OverflowError``; this class carries that exception
+    on ``__cause__`` and its ``str()`` as the message, so the CLI's line reads
+    the same. The run stops where aws-cli's stops: the entries ahead of the
+    bad one are already delivered (design/exceptions.md section 3).
+    """
+
+
 class ConfigurationError(Boto3S3Error):
     """Required configuration is missing or unresolvable.
 
@@ -140,6 +157,7 @@ __all__ = [
     "ConfigurationError",
     "InvalidConfigError",
     "InvalidValueError",
+    "MalformedResponseError",
     "NotFoundError",
     "TransportError",
     "ValidationError",

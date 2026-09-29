@@ -30,6 +30,7 @@ from boto3_s3 import (
     ConfigurationError,
     InvalidConfigError,
     InvalidValueError,
+    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -108,6 +109,10 @@ class TestExitCodeFor:
     def test_other_errors_map_to_255(self) -> None:
         assert cli.exit_code_for(TransportError("connection reset")) == 255
         assert cli.exit_code_for(Boto3S3Error("unexpected")) == 255
+        # An incomplete listing entry reaches aws's general handler as a bare
+        # KeyError (ls: `[ERROR]: 'LastModified'` at 255); the translated
+        # class keeps that rc through this mapping.
+        assert cli.exit_code_for(MalformedResponseError("'LastModified'")) == 255
 
     def test_refining_subclasses_map_to_255_not_their_parents_rc(self) -> None:
         # aws routes post-parse value failures and bad config through its

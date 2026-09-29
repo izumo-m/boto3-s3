@@ -93,8 +93,9 @@ front only when the declaration is honest:
   built-in S3 backend is what needs it: it reads the elements a listing entry
   must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
   `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
-  for a bucket), so an entry missing one raises `KeyError` naming the element
-  instead of being silently dropped - the object listing emitting the part of
+  for a bucket), so an entry missing one raises `MalformedResponseError`
+  naming the element (aws-cli's `KeyError` text and cause) instead of being
+  silently dropped - the object listing emitting the part of
   the page it had converted, the bucket listing being streamed entry by entry
   to begin with. Its single-object `HeadObject` (`get_fileinfo`, and the
   transfer engine's `producers.head_single`) reads `ContentLength` ->

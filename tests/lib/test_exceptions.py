@@ -13,6 +13,7 @@ CATEGORIES: list[type[ex.Boto3S3Error]] = [
     ex.NotFoundError,
     ex.ValidationError,
     ex.TransportError,
+    ex.MalformedResponseError,
     ex.ConfigurationError,
     ex.CancelledError,
 ]
@@ -36,6 +37,7 @@ CATEGORY_NAMES = [
     "ValidationError",
     "InvalidValueError",
     "TransportError",
+    "MalformedResponseError",
     "ConfigurationError",
     "InvalidConfigError",
     "CancelledError",

@@ -39,6 +39,9 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 |   `-- InvalidValueError   # refinement: a value failing post-parse conversion (aws's bare int() -> its
 |                           #   general handler, rc 255 - not the rc-252 usage path)
 +-- TransportError          # network / local I/O failure (connection, timeout, OSError)
++-- MalformedResponseError  # a response the tool cannot consume: an element aws-cli reads by subscript is missing,
+|                           #   or a LastModified the host's zone cannot represent (aws dies with the bare
+|                           #   KeyError / OverflowError; here its text is the message and it rides on __cause__)
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
@@ -160,6 +163,8 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
 | connection failure / timeout; a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
 | an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
+| a listing / bucket / single-object HEAD entry missing an element aws-cli reads by subscript (its bare `KeyError` naming the element - `s3storage.read_required`) | `MalformedResponseError` |
+| an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |

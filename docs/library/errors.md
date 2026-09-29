@@ -15,9 +15,7 @@ except Boto3S3Error as exc:
 
 Catching the root catches every failure the library reports as its own. The
 deliberate exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`,
-the `KeyError` / `OverflowError` an incomplete or unrepresentable service
-response raises the way the AWS CLI raises it, and
-botocore's `MissingDependencyException` when the CRT engine is requested
+and botocore's `MissingDependencyException` when the CRT engine is requested
 explicitly without a usable awscrt — are listed under
 [`Boto3S3Error`](../reference/exceptions.md#boto3s3error).
 
@@ -30,6 +28,7 @@ Boto3S3Error                 the root; catch this to catch every reported failur
 ├── ValidationError          an invalid argument, precondition or state
 │   └── InvalidValueError
 ├── TransportError           network or local I/O failure
+├── MalformedResponseError   a response missing what the AWS CLI reads, or a timestamp the host cannot hold
 ├── ConfigurationError       credentials or region missing or unusable
 │   └── InvalidConfigError
 ├── CancelledError           cancelled through a CancelToken
@@ -94,6 +93,7 @@ synthesized from the response body and has no exception behind it, so its
 | S3 403 / `AccessDenied`; a local `PermissionError` | `AccessDeniedError` |
 | S3 404 / `NoSuchKey` / `NoSuchBucket`; a local `FileNotFoundError` or missing source | `NotFoundError` |
 | S3 5xx or throttling (`InternalError`, `SlowDown`, `ServiceUnavailable`); a connection failure, a timeout, a local I/O `OSError` | `TransportError` |
+| a listing, bucket or HeadObject response missing an element the AWS CLI reads; a `LastModified` the host's local zone cannot represent | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature | `ConfigurationError` |
 | an unusable profile, partial credentials, a config value that will not convert | `InvalidConfigError` |
 | an invalid argument or a violated precondition | `ValidationError` |

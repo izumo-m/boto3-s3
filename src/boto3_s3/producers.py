@@ -31,9 +31,11 @@ from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
-    # The one out-of-module caller: the local-zone band this encodes belongs
-    # with the backend that reads S3 timestamps, while aws-cli runs the same
-    # conversion on the single-object HEAD this module owns.
+    # The one out-of-module caller of these two: the required-element read and
+    # the local-zone band belong with the backend that reads S3 responses,
+    # while aws-cli runs the same reads on the single-object HEAD this module
+    # owns.
+    read_required,
     reject_unrepresentable_stamp,
     s3_errors,
 )
@@ -669,14 +671,16 @@ def head_single(
     # aws-cli's `_list_single_object` reads the two elements the HEAD must
     # carry by subscript - `ContentLength` first, then `LastModified` - and
     # `ETag` with a default, so a response missing one of the two ends the run
-    # with a KeyError naming it (`fatal error: 'ContentLength'` /
-    # `'LastModified'` at rc 1 on the CLI, measured) rather than riding on as
-    # None: the single-object counterpart of the listing rule the S3 backend
-    # applies (design/storage.md). The order decides which element a doubly
+    # with a MalformedResponseError naming it - the KeyError's text, so the
+    # CLI's line still reads `fatal error: 'ContentLength'` / `'LastModified'`
+    # at rc 1 (measured against aws) - rather than riding on as None: the
+    # single-object counterpart of the listing rule the S3 backend applies
+    # (design/storage.md). The order decides which element a doubly
     # incomplete response is blamed on. The stream route never comes here, and
     # aws is lenient there too.
-    size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-    mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    bucket = src_storage.bucket
+    size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
+    mtime = read_required(head, "LastModified", operation=operation, bucket=bucket, key=key)
     etag = head.get("ETag")
     # aws-cli converts the HeadObject stamp to the local zone as the last thing
     # `_list_single_object` does, so a stamp the local calendar cannot hold
@@ -685,7 +689,7 @@ def head_single(
     # check inside the S3 backend; this route never passes through it, so it
     # gets the check at aws's own slot. The value handed on stays UTC per the
     # `FileInfo.mtime` contract - only the conversion's failure is wanted.
-    reject_unrepresentable_stamp(mtime)
+    reject_unrepresentable_stamp(mtime, operation=operation, bucket=bucket, key=key)
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees

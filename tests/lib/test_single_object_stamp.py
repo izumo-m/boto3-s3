@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import S3, OpOutcome, OpResult, S3Storage
+from boto3_s3 import S3, MalformedResponseError, OpOutcome, OpResult, S3Storage
 from tests.lib.test_s3storage import _local_zone, _needs_tzset
 from tests.utils.fakes3 import MTIME, get_response, head_response
 from tests.utils.recorder import make_recording_client, ops
@@ -43,7 +43,8 @@ class TestSingleObjectRequiredElements:
 
     aws-cli's `_list_single_object` reads those two elements by subscript
     (`ContentLength` first) and `ETag` with a default, so a response without
-    one of the two ends the run with `KeyError` naming it - the single-object
+    one of the two ends the run with `MalformedResponseError` naming it (the
+    KeyError's text, the KeyError on `__cause__`) - the single-object
     counterpart of the listing rule (`TestMalformedListingEntries` in the S3
     backend suite). Measured against the pinned aws (2.36.40) through a
     127.0.0.1 fake: `fatal error: 'LastModified'` at rc 1 for
@@ -62,28 +63,35 @@ class TestSingleObjectRequiredElements:
             ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
-    def test_a_missing_element_raises_keyerror_naming_it(
+    def test_a_missing_element_is_a_malformed_response_naming_it(
         self, tmp_path: Path, head: dict[str, Any], missing: str
     ) -> None:
         client, calls = make_recording_client([head, get_response()])
         dest = tmp_path / "out.bin"
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"  # str(KeyError): the CLI's line
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "cp",
+            "b",
+            "d/a.txt",
+        )
         # The HEAD is where aws dies: no GET, nothing written.
         assert ops(calls) == ["HeadObject"]
         assert not dest.exists()
 
     def test_a_dryrun_copy_source_is_rejected_too(self) -> None:
         client, calls = make_recording_client([{"ContentLength": 7, "ETag": '"abc"'}])
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             S3().mv(
                 S3Storage("s3://b/d/a.txt", client=client),
                 S3Storage("s3://b2/d/a.txt", client=client),
                 dryrun=True,
                 transfer_config=_SYNC,
             )
-        assert excinfo.value.args[0] == "LastModified"
+        assert str(excinfo.value) == "'LastModified'"
+        assert excinfo.value.operation == "mv"
         assert ops(calls) == ["HeadObject"]
 
     def test_a_missing_etag_transfers(self, tmp_path: Path) -> None:
@@ -119,7 +127,7 @@ class TestSingleObjectStampRepresentability:
         )
         dest = tmp_path / "out.bin"
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().cp(
                     S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC
                 )
@@ -134,7 +142,7 @@ class TestSingleObjectStampRepresentability:
         client, _ = make_recording_client([head_response(LastModified=_FAR_FUTURE)])
         results: list[OpResult] = []
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().cp(
                     S3Storage("s3://b/d/a.txt", client=client),
                     str(tmp_path / "out.bin"),
@@ -149,7 +157,7 @@ class TestSingleObjectStampRepresentability:
         # as well - measured on aws.
         client, calls = make_recording_client([head_response(LastModified=_FAR_FUTURE)])
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().mv(
                     S3Storage("s3://b/d/a.txt", client=client),
                     S3Storage("s3://b2/d/a.txt", client=client),
