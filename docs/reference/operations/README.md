@@ -93,11 +93,13 @@ yourself and calling the method ([`../s3.md`](../s3.md)). Subclassing does not
 reach these functions either — they instantiate `S3` itself, not the subclass.
 
 Introspection reports the method's identity: `functools.wraps` copies
-`__name__`, `__qualname__`, `__doc__` and `__module__`, and `__signature__` is
-pinned to the method's signature with `self` removed, so `inspect.signature`
-and `Signature.bind` see the documented parameters rather than the signature of
+`__name__`, `__doc__` and `__module__`, and `__signature__` is pinned to the
+method's signature with `self` removed, so `inspect.signature` and
+`Signature.bind` see the documented parameters rather than the signature of
 `__wrapped__` — the plain method function (`S3.cp` for `cp`), `self` included —
-that they would otherwise report.
+that they would otherwise report. `__qualname__` is the wrapper's own
+module-level name (`cp`, not `S3.cp`), so each function pickles by reference
+and can be handed to a `ProcessPoolExecutor` or `multiprocessing`.
 
 All nine are exported from `boto3_s3` and from `boto3_s3.s3`. The root
 re-export is lazy: reading one of these names imports `boto3_s3.s3`, and with

@@ -689,3 +689,17 @@ class TestModuleLevelConvenienceSignatures:
 
         bound = inspect.signature(boto3_s3.cp).bind("local.txt", "s3://bucket/key")
         assert bound.args == ("local.txt", "s3://bucket/key")
+
+    def test_wrappers_pickle_by_reference(self) -> None:
+        # pickle stores a function as module + __qualname__, so the qualname
+        # functools.wraps copied (``S3.cp``) resolved to the method itself and
+        # the wrapper was refused as "not the same object" - unusable with a
+        # ProcessPoolExecutor. The wrapper is named by its own binding instead.
+        import pickle
+
+        import boto3_s3
+
+        for name in ("cp", "ls", "mv", "rm", "mb", "rb", "presign", "sync", "website"):
+            wrapper = getattr(boto3_s3, name)
+            assert wrapper.__qualname__ == name
+            assert pickle.loads(pickle.dumps(wrapper)) is wrapper, name

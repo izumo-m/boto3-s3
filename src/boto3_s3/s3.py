@@ -2550,6 +2550,12 @@ def _delegate(method: Callable[Concatenate[S3, _P], _R]) -> Callable[_P, _R]:
     wrapper.__signature__ = method_signature.replace(  # pyright: ignore[reportAttributeAccessIssue]
         parameters=list(method_signature.parameters.values())[1:]
     )
+    # ``functools.wraps`` also copied ``__qualname__`` (``S3.cp``), which is how
+    # pickle locates a function by reference: the lookup would land on the
+    # method itself and refuse the wrapper as "not the same object", so the
+    # wrappers could not be handed to a ProcessPoolExecutor or multiprocessing.
+    # Name the wrapper by its own module-level binding, where the lookup finds it.
+    wrapper.__qualname__ = method.__name__
     return wrapper
 
 
