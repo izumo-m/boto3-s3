@@ -302,7 +302,10 @@ is a classic-path setting. An auto-selected CRT engine ignores the base
 classic-only knobs; requesting `preferred_transfer_client="crt"` explicitly
 while any of them is set is rejected when the CRT manager is built, surfacing
 as [`ValidationError`](./exceptions.md#validationerror) that carries boto3's
-own `InvalidCrtTransferConfigError` as its `__cause__`. Requesting `"crt"`
+own `InvalidCrtTransferConfigError` as its `__cause__`; a transfer argument
+s3transfer refuses when an item is handed to it — a `checksum_algorithm` outside
+the set awscrt computes — is the same `ValidationError`, carrying the engine's
+`ValueError`. Requesting `"crt"`
 explicitly without a usable awscrt — absent or older than the version the CRT
 path needs — or on an s3transfer that lacks the CRT surface propagates
 botocore's `MissingDependencyException`, which stays outside the

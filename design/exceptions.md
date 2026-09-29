@@ -171,6 +171,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
+| a transfer argument s3transfer refuses synchronously at hand-over (`InvalidCrtTransferConfigError` at the manager build, the CRT engine's `ValueError` for a checksum algorithm awscrt cannot compute) | `ValidationError` |
 | an SDK floor missing a capability (`no_overwrite` on an old botocore) | `ConfigurationError` |
 | `CancelToken.cancel()` | `CancelledError` |
 

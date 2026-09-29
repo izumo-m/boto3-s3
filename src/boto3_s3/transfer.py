@@ -1233,7 +1233,8 @@ class Transferrer:
         if self._capture is not None:
             # Admit the key: only submitted items' responses are recorded.
             self._capture.expect(item.dest_bucket, item.dest_key)
-        return manager.upload(
+        return self._accept(
+            manager.upload,
             fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -1285,7 +1286,8 @@ class Transferrer:
             # slot (the transfer's own GetObject is the item's read) nor sit
             # in the store forever for a pair the run never submits.
             self._capture.expect(item.src_bucket, item.src_key)
-        return manager.download(
+        return self._accept(
+            manager.download,
             bucket=item.src_bucket,
             key=item.src_key,
             fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
@@ -1327,7 +1329,8 @@ class Transferrer:
         if self._capture is not None:
             # Admit the key: only submitted items' responses are recorded.
             self._capture.expect(item.dest_bucket, item.dest_key)
-        return manager.copy(
+        return self._accept(
+            manager.copy,
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
             bucket=item.dest_bucket,
             key=item.dest_key,
@@ -1335,6 +1338,26 @@ class Transferrer:
             subscribers=subscribers,
             source_client=source_client,
         )
+
+    def _accept(self, hand_over: Callable[..., Any], **kwargs: Any) -> Any:
+        """Hand one transfer to the manager, keeping its own refusal in the taxonomy.
+
+        s3transfer refuses some caller arguments synchronously, before it
+        accepts the work - the CRT manager's checksum algorithm outside the set
+        awscrt computes (``ChecksumAlgorithm: MD5 not supported``), either
+        engine's extra_args key check - with a bare ``ValueError``. That is a
+        caller-argument problem like `InvalidCrtTransferConfigError` at the
+        manager build, and stays inside the taxonomy the same way
+        (design/exceptions.md carves out exactly one pass-through,
+        ``MissingDependencyException``). The classic engine's botocore-level
+        refusals arrive per item on the task instead (FAILED records); this is
+        the up-front one, and the run ends the way any submit-time
+        `ValidationError` does.
+        """
+        try:
+            return hand_over(**kwargs)
+        except ValueError as exc:
+            raise ValidationError(str(exc), operation=self._operation) from exc
 
     def _common_subscribers(self, item: TransferItem) -> tuple[list[Any], _CountBytes | None]:
         """Build the size, ETag, and progress hooks shared by all transfer routes.

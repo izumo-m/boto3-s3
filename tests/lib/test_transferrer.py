@@ -3113,3 +3113,43 @@ class TestImmediateCancelWatcher:
             "s3://b/a": OpOutcome.CANCELLED,
             "s3://b/b": OpOutcome.SUCCEEDED,
         } or [result.outcome for result in results] == [OpOutcome.CANCELLED, OpOutcome.SUCCEEDED]
+
+
+class TestHandOverRefusal:
+    def test_the_managers_synchronous_refusal_is_a_validationerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The CRT manager refuses a checksum algorithm awscrt cannot compute
+        # with a bare ValueError before accepting the work (the classic engine's
+        # botocore refusal arrives per item instead, FAILED). A caller-argument
+        # problem stays inside the taxonomy, like InvalidCrtTransferConfigError
+        # at the manager build; measured raw out of S3.cp against MinIO.
+        refusal = ValueError(
+            "ChecksumAlgorithm: MD5 not supported. Supported algorithms are: "
+            "['CRC32C', 'CRC32', 'SHA1', 'SHA256', 'CRC64NVME']"
+        )
+
+        class _Refusing(_CrtDrainManager):
+            def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+                raise refusal
+
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: _Refusing())
+        client, _ = make_recording_client([])
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(ValidationError) as excinfo, transferrer:
+            transferrer.submit(
+                TransferItem(
+                    compare_key="a.bin",
+                    size=1,
+                    src_path=str(src),
+                    dest_bucket="b",
+                    dest_key="a.bin",
+                )
+            )
+        assert excinfo.value.__cause__ is refusal
+        assert excinfo.value.operation == "cp"
+        assert str(excinfo.value) == str(refusal)
+        assert results == []
