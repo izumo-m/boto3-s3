@@ -40,10 +40,12 @@ client (design/crt.md):
   `create_crt_transfer_manager`); ``boto3-s3-cli`` is the caller that sets it
   and the default keeps every library caller boto3-faithful.
 - **region**: boto3 takes the CRT region from the built client, aws-cli from
-  its own region chain - which resolves to ``None`` where botocore invents the
-  ``aws-global`` pseudo-region, and ``None`` is what trips awscrt's own
-  ``assert isinstance(region, str)``. The ``region`` argument carries a
-  caller's already-resolved value (``None`` included); the `CLIENT_REGION`
+  its own region chain - which resolves to ``None`` where the client carries
+  the ``aws-global`` pseudo-region (the regional us-east-1 endpoint mode the
+  CLI pins; a stock botocore client falls back to us-east-1 instead), and
+  ``None`` is what trips awscrt's own ``assert isinstance(region, str)``.
+  The ``region`` argument carries a caller's already-resolved value
+  (``None`` included); the `CLIENT_REGION`
   default keeps boto3's source. ``boto3-s3-cli`` is again the caller that sets
   it (design/crt.md section 6).
 
@@ -366,8 +368,8 @@ def create_crt_transfer_manager(
     ``region`` is the caller's already-resolved CRT region. `CLIENT_REGION`
     (the default) reads it off the client, boto3's own source; an explicit
     value - ``None`` included - is used verbatim, which is how aws-cli's region
-    chain reaches awscrt's ``assert isinstance(region, str)`` instead of
-    botocore's invented ``aws-global``.
+    chain reaches awscrt's ``assert isinstance(region, str)`` instead of the
+    ``aws-global`` pseudo-region the CLI's regional-mode client carries.
 
     ``sign_requests`` is the caller's signing declaration, aws-cli's
     ``sign_request`` parameter. ``None`` (the default) derives it from the
