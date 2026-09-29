@@ -133,7 +133,10 @@ page pulls and stops the deleter from dispatching further batches; what each
 mode leaves buffered, dispatched or in flight is specified with the token
 itself. Either mode ends by raising
 [`CancelledError`](../exceptions.md#cancellederror) once the worker has been
-reclaimed.
+reclaimed. On the blind single-key path the token is polled after the record
+is emitted, the `FAILED` record included, so a cancel from that callback
+raises `CancelledError` in place of the `BatchError` the failure would
+otherwise become.
 
 `capture_response=True` attaches the delete response to each successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`

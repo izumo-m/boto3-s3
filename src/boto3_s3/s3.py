@@ -2236,6 +2236,7 @@ class S3:
                 request_payer=request_payer,
                 capture_response=capture_response,
                 on_result=on_result,
+                cancel_token=cancel_token,
             )
             _raise_if_cancelled(cancel_token, "rm")
             return
@@ -2322,12 +2323,16 @@ class S3:
         request_payer: str | None,
         capture_response: bool,
         on_result: ResultCallback | None,
+        cancel_token: CancelToken | None,
     ) -> None:
         """The blind single-key path (no listing; aws ``_list_single_object``).
 
         No scan runs here, so the entry's ``compare_key`` (its key relative to
         the prefix returned by `rm_filter_root`, what a glob filter matches) is
-        stamped on the hand-built ``FileInfo``.
+        stamped on the hand-built ``FileInfo``. A token cancelled from the
+        ``FAILED`` record's callback wins over the failure's ``BatchError``,
+        the precedence the batched path and the transfers give it; the caller
+        polls the token after a success or a dry run.
         """
         key = storage.key
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)
@@ -2352,6 +2357,7 @@ class S3:
             _emit_result(
                 on_result, info=info, storage=storage, outcome=OpOutcome.FAILED, error=failure
             )
+            _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
                 "1 of 1 deletes failed",
                 succeeded=0,

@@ -240,6 +240,27 @@ class TestRmCancellation:
         assert len(client.delete_objects_calls[0]["Delete"]["Objects"]) == 1000
         assert len(results) == 1000
 
+    def test_blind_path_cancel_from_the_failed_record_wins_over_batcherror(self) -> None:
+        # The batched path and the transfers poll the token before rolling the
+        # failures into BatchError; the blind single-key path does the same.
+        client = _FakeS3Client(
+            delete_object_error=client_error("AccessDenied", 403, "DeleteObject")
+        )
+        storage = S3Storage("s3://b/k", client=client)
+        token = CancelToken()
+        results: list[OpResult] = []
+
+        def cancel_on_failure(result: OpResult) -> None:
+            results.append(result)
+            if result.outcome is OpOutcome.FAILED:
+                token.cancel()
+
+        with pytest.raises(CancelledError):
+            S3().rm(storage, cancel_token=token, on_result=cancel_on_failure)
+
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert len(client.delete_object_calls) == 1
+
     def test_dryrun_raises_on_cancelled_token_with_empty_listing(self) -> None:
         client = _FakeS3Client([{"Contents": []}])
         storage = S3Storage("s3://b/k/", client=client)
