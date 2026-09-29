@@ -2620,6 +2620,39 @@ def _align_annotation_put_args() -> None:
         pass
 
 
+# The S3CopyFailedError subclass a partial annotation write raises, built on
+# first use: the floor s3transfer predates the base class (and the write path).
+_annotation_copy_failure_cls: type[S3CopyFailedError] | None = None
+
+
+def _annotation_copy_failure_type() -> type[S3CopyFailedError]:
+    """The exception type `_annotation_copy_error` builds.
+
+    A subclass of the ``S3CopyFailedError`` upstream raises - the taxonomy
+    translation and the exit code see the base class, unchanged - that marks
+    the one copy failure whose object *was* written: the copy completed and
+    only annotation writes failed. `_SetTags` reads the mark to keep aws-cli's
+    destination state (its tags-first subscribers had already written the
+    tags when the annotation write failed).
+    """
+    global _annotation_copy_failure_cls
+    if _annotation_copy_failure_cls is None:
+        from s3transfer.exceptions import S3CopyFailedError
+
+        class AnnotationCopyFailedError(S3CopyFailedError):
+            """A completed copy that could not carry every annotation."""
+
+        _annotation_copy_failure_cls = AnnotationCopyFailedError
+    return _annotation_copy_failure_cls
+
+
+def _is_annotation_copy_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` is a partial annotation write's failure (the copy completed)."""
+    # Never built means never raised: nothing to import on a floor s3transfer.
+    cls = _annotation_copy_failure_cls
+    return cls is not None and isinstance(exc, cls)
+
+
 def _annotation_copy_error(
     bucket: str, key: str, written: list[str], failed: list[tuple[str, str]]
 ) -> S3CopyFailedError:
@@ -2639,11 +2672,9 @@ def _annotation_copy_error(
     failures join with ``"; "`` as ``name: message``, and both keep the order
     the source listing gave.
     """
-    from s3transfer.exceptions import S3CopyFailedError
-
     written_names = ", ".join(written) or "(none)"
     failed_descriptions = "; ".join(f"{name}: {message}" for name, message in failed)
-    return S3CopyFailedError(
+    return _annotation_copy_failure_type()(
         f"Failed to copy all annotations to s3://{bucket}/{key}. "
         f"The object was copied successfully and was not deleted. "
         f"Annotations written: {written_names}. "
@@ -2781,8 +2812,16 @@ class _SetTags:
             return
         try:
             future.result()
-        except Exception:
-            return  # the copy itself failed; nothing to tag or roll back
+        except Exception as exc:
+            if not _is_annotation_copy_failure(exc):
+                return  # the copy itself failed; nothing to tag or roll back
+            # The object was copied and only its annotation writes failed:
+            # aws-cli's tags-first subscribers had already written the tags by
+            # then, so the tagging write still goes out here (after the
+            # annotations, upstream's write path having run inside the
+            # complete task) and the destination ends up as aws leaves it -
+            # the annotation failure stays the reported error, unless the
+            # tagging write fails and its own error takes over below.
         bucket = future.meta.call_args.bucket
         key = future.meta.call_args.key
         try:

@@ -1005,6 +1005,74 @@ class TestCopy:
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
+    def _all_with_oversized_tags_and_a_failing_annotation(
+        self, dest_tail: list[dict[str, Any] | BaseException]
+    ) -> tuple[list[ApiCall], list[OpResult], Transferrer]:
+        """A `copy_props=ALL` multipart copy whose tags do not fit the create
+        header and whose second annotation write is denied; ``dest_tail`` is
+        what the destination answers after upstream's failure cleanup."""
+        big = "v" * 3000
+        responses: list[dict[str, Any] | BaseException] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {"ETag": '"dest-etag"'},
+            {},  # PutObjectAnnotation ann1
+            client_error("AccessDenied", 403, "PutObjectAnnotation"),  # ann2
+            {},  # AbortMultipartUpload (upstream's failure cleanup)
+            *dest_tail,
+        ]
+        source_responses: list[dict[str, Any] | BaseException] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": big}]},
+            {
+                "Annotations": [
+                    {"AnnotationName": "ann1", "LastModified": MTIME, "Size": 1},
+                    {"AnnotationName": "ann2", "LastModified": MTIME, "Size": 1},
+                ]
+            },
+            {"AnnotationPayload": io.BytesIO(b"1")},
+            {"AnnotationPayload": io.BytesIO(b"2")},
+        ]
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+        )
+        return calls, results, transferrer
+
+    def test_a_partial_annotation_failure_still_writes_the_oversized_tags(self) -> None:
+        # aws-cli's tags-first subscribers had written the tags before its
+        # annotation write failed; here the annotations ride upstream's write
+        # path inside the complete task, so the tagging write must not be
+        # withheld by that failure - the destination ends up the same (tagged,
+        # ann1 written), and the annotation failure stays the reported error.
+        calls, results, transferrer = self._all_with_oversized_tags_and_a_failing_annotation(
+            [{}]  # PutObjectTagging
+        )
+        assert ops(calls)[-4:] == [
+            "PutObjectAnnotation",
+            "PutObjectAnnotation",
+            "AbortMultipartUpload",
+            "PutObjectTagging",
+        ]
+        assert "DeleteObject" not in ops(calls)
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "Annotations that failed: ann2" in str(results[0].error)
+
+    def test_a_tagging_failure_after_the_annotation_failure_rolls_back(self) -> None:
+        # The tagging write's own failure takes over, rollback included - the
+        # state aws-cli reaches when its (earlier) tagging write fails.
+        calls, results, _ = self._all_with_oversized_tags_and_a_failing_annotation(
+            [client_error("AccessDenied", 403, "PutObjectTagging"), {}]
+        )
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert "PutObjectTagging" in str(results[0].error)
+
     def test_post_copy_tagging_failure_rolls_back_the_destination(self) -> None:
         big = "v" * 3000
         responses: list[dict[str, Any] | Exception] = [

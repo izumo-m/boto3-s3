@@ -239,7 +239,9 @@ run comes out differently, listed in section 1.
   both tools fall back to a `PutObjectTagging` after the copy, and both carry
   the source's object annotations over. `aws` sends that tagging write first
   and the annotation writes after it; here the annotations ride the transfer
-  library's own write path, which finishes before the tagging write goes out.
+  library's own write path, which finishes before the tagging write goes out
+  (an annotation write that fails part way does not withhold it: the tags are
+  still written, as `aws` had already written them by then).
   The same requests are sent, and the console lines and the exit code agree. So
   does the destination whenever the tagging write succeeds, and whenever it
   fails and the rollback delete that follows it succeeds — both tools then

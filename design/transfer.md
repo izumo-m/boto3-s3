@@ -228,7 +228,13 @@ chain:
   inside the CompleteMultipartUpload task, which finishes before any
   subscriber's `on_done` - so the tagging write goes out last. The same
   requests are sent, and the console lines and the exit code are the same; only
-  the order differs, and so does the destination in exactly one corner. When
+  the order differs, and so does the destination in exactly one corner. An
+  annotation write that fails part way (the copy completed; upstream's
+  `S3CopyFailedError`, re-worded above) does not withhold the tagging write:
+  `_SetTags` recognizes that failure (`_annotation_copy_failure_type`) and
+  still sends PutObjectTagging, since aws-cli had already sent its own before
+  the annotation write failed - the reported error stays the annotation
+  failure unless the tagging write fails and takes over. When
   the tagging write fails and the rollback delete succeeds, both tools leave no
   destination object. When the rollback delete fails too (the bullet above,
   rc 0 on both), the surviving object carries the copied annotations here and
