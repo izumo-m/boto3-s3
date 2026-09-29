@@ -205,7 +205,8 @@ so `src_info` is `None` as well.
 The outcomes `cp` emits:
 
 - `SUCCEEDED` — the item transferred. `bytes_transferred` is the item's size,
-  or the size the engine resolved when the item had none. `extra_info` carries
+  or, when the item had none (a stream, a custom backend's entry), the size the
+  engine resolved or the bytes it reported moving. `extra_info` carries
   `{"ETag": …}` for a download or a copy — the source object's ETag — and is
   `None` for an upload unless `capture_response=True` supplies it.
 - `FAILED` — the item's transfer failed; `error` is the translated exception.

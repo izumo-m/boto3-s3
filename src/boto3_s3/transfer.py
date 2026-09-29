@@ -1171,12 +1171,12 @@ class Transferrer:
             guessed = _guess_content_type(name)
             if guessed is not None:
                 extra_args["ContentType"] = guessed
-        subscribers = self._common_subscribers(item)
+        subscribers, counted = self._common_subscribers(item)
         if item.src_fileobj is not None:
             subscribers.append(_CloseFileobj(item.src_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
-        subscribers.append(self._completion(item))
+        subscribers.append(self._completion(item, counted))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
@@ -1194,7 +1194,7 @@ class Transferrer:
     def _submit_download(self, item: TransferItem) -> Any:
         """Map one download and order destination, durability, and completion hooks."""
         extra_args = requestparams.map_get_object_params(self._options)
-        subscribers = self._common_subscribers(item)
+        subscribers, counted = self._common_subscribers(item)
         if item.dest_path is not None:
             subscribers.append(_DirectoryCreator())
         if item.dest_fileobj is not None:
@@ -1223,7 +1223,7 @@ class Transferrer:
             # window in which a same-name-different-case twin still counts as
             # in flight - by an os.utime on cp, by a whole DeleteObject on mv.
             subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
-        subscribers.append(self._completion(item))
+        subscribers.append(self._completion(item, counted))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
@@ -1263,14 +1263,14 @@ class Transferrer:
             # caller-less size (a custom scan) skips the flip and leaves the
             # decision - and upstream's own preservation - to its probe.
             extra_args["MetadataDirective"] = "REPLACE"
-        subscribers = self._common_subscribers(item)
+        subscribers, counted = self._common_subscribers(item)
         source_client: Any = self._source_client
         if not self._options.get("metadata_directive"):
             copy_props_subscribers, source_client = self._copy_props_subscribers(item)
             subscribers.extend(copy_props_subscribers)
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
-        subscribers.append(self._completion(item))
+        subscribers.append(self._completion(item, counted))
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
@@ -1286,8 +1286,12 @@ class Transferrer:
             source_client=source_client,
         )
 
-    def _common_subscribers(self, item: TransferItem) -> list[Any]:
-        """Build the size, ETag, and progress hooks shared by all transfer routes."""
+    def _common_subscribers(self, item: TransferItem) -> tuple[list[Any], _CountBytes | None]:
+        """Build the size, ETag, and progress hooks shared by all transfer routes.
+
+        The second element is the byte counter a size-unknown item carries
+        (``None`` otherwise), for `_completion` to read.
+        """
         # Size and etag are provided for every kind, aws-cli-style: under the
         # default response_checksum_validation ("when_supported") s3transfer
         # skips its pre-transfer HeadObject probe (downloads AND copies) only
@@ -1295,8 +1299,15 @@ class Transferrer:
         # regardless, probing with a first-chunk GET). S3-sourced items always
         # carry an etag; local sources have none, and uploads never probe.
         subscribers: list[Any] = []
+        counted: _CountBytes | None = None
         if item.size is not None:
             subscribers.append(_ProvideSize(item.size))
+        else:
+            # A size-unknown item (a stream, a custom backend's deferred
+            # reader): count what actually moves, so SUCCEEDED can report it
+            # where the engine resolves no size of its own (`_CountBytes`).
+            counted = _CountBytes()
+            subscribers.append(counted)
         if item.etag:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
@@ -1305,14 +1316,15 @@ class Transferrer:
                     self._result_transfer_type, item.compare_key, item.size, self._on_progress
                 )
             )
-        return subscribers
+        return subscribers, counted
 
-    def _completion(self, item: TransferItem) -> _Completion:
+    def _completion(self, item: TransferItem, counted: _CountBytes | None) -> _Completion:
         """Bind an item's terminal callbacks into one s3transfer subscriber."""
         return _Completion(
             item,
             on_success=self._record_success,
             on_failure=self._record_failure,
+            counted=counted,
         )
 
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
@@ -1877,6 +1889,27 @@ class _Progress:
             self._fire(self._done)
 
 
+class _CountBytes:
+    """Sum a size-unknown item's chunk deltas so SUCCEEDED can report its bytes.
+
+    Registered only for an item submitted without a size (a stream, a custom
+    backend's deferred reader). Classic s3transfer sizes an unknown download
+    with its HeadObject probe (``meta.size``) but never a non-seekable
+    upload, and the CRT manager's meta carries no size; `_Completion` falls
+    back to this total whenever the future resolves none. A retry's negative
+    delta is summed like `_Progress` sums it, so the total ends at the bytes
+    that actually landed.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.total = 0
+
+    def on_progress(self, future: Any, bytes_transferred: int, **kwargs: Any) -> None:
+        with self._lock:
+            self.total += bytes_transferred
+
+
 class _DirectoryCreator:
     """Create the download destination's parent directory (aws-cli subscriber)."""
 
@@ -2107,10 +2140,12 @@ class _Completion:
         *,
         on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
         on_failure: Callable[[TransferItem, BaseException], None],
+        counted: _CountBytes | None = None,
     ) -> None:
         self._item = item
         self._on_success = on_success
         self._on_failure = on_failure
+        self._counted = counted
         self._settled = False
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
@@ -2126,14 +2161,19 @@ class _Completion:
         except Exception as exc:
             self._on_failure(self._item, exc)
             return
-        # s3transfer resolves the transfer size on the future (a HeadObject
-        # probe for an unknown-size download); pass it so _record_success can
-        # report real bytes when the item carried no size. meta.etag carries the
-        # affected object's ETag on a copy / download (None on an upload); the
-        # user_context slot carries mv's source-delete response (capture_response).
+        # Classic s3transfer resolves an unknown-size download's size on the
+        # future (its HeadObject probe); a non-seekable upload gets none, and
+        # the CRT manager's meta has no size at all - there the item's own
+        # byte counter (`_CountBytes`) is what SUCCEEDED reports. meta.etag
+        # carries the affected object's ETag on a copy / download (None on an
+        # upload); the user_context slot carries mv's source-delete response
+        # (capture_response).
+        size = getattr(future.meta, "size", None)
+        if size is None and self._counted is not None:
+            size = self._counted.total
         self._on_success(
             self._item,
-            getattr(future.meta, "size", None),
+            size,
             getattr(future.meta, "etag", None),
             future.meta.user_context.get(_DELETE_RESPONSE_KEY),
         )

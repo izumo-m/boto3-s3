@@ -2131,6 +2131,30 @@ class TestStreams:
         assert transferrer.succeeded == 1
         assert results[-1].src == "-"
 
+    def test_stream_upload_without_a_resolved_size_reports_the_bytes_counted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A size-unknown item gets a byte counter (`_CountBytes`): the CRT
+        # manager's meta carries no size, and classic resolves none for a
+        # non-seekable upload, so SUCCEEDED reports the progress total instead
+        # of 0 (measured on both engines against MinIO before the counter).
+        manager = _CrtCapturingManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        item = TransferItem(
+            compare_key="-", src_fileobj=io.BytesIO(b"x" * 10), dest_bucket="b", dest_key="k"
+        )
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer.submit(item)
+            for subscriber in manager.uploads[0]["subscribers"]:
+                on_progress = getattr(subscriber, "on_progress", None)
+                if on_progress is not None:
+                    on_progress(None, bytes_transferred=6)
+                    on_progress(None, bytes_transferred=4)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert results[0].bytes_transferred == 10
+
     def test_stream_upload_with_expected_size(self) -> None:
         item = TransferItem(
             compare_key="streaming.txt",
