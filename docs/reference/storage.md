@@ -1056,9 +1056,10 @@ behind a close-suppressing view. A text stream — recognized either as an
 wrapped with an incremental codec instead, encoding on read for an upload and
 decoding on write for a download.
 
-`encoding` is that codec's encoding and applies only to a text stream. A single
-incremental encoder or decoder spans the whole transfer, so a stateful codec
-behaves as one stream — utf-16 emits its BOM once, not per chunk.
+`encoding` is that codec's encoding and applies only to a text stream; a name
+`codecs.lookup` does not know raises `InvalidValueError` from the constructor.
+A single incremental encoder or decoder spans the whole transfer, so a stateful
+codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
 
 **The caller's stream is never closed by this class.** The transfer closes
 every file object `open` returns, since that close is how a real backend

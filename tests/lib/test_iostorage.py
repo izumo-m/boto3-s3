@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.exceptions import BatchError, Boto3S3Error, ValidationError
+from boto3_s3.exceptions import BatchError, Boto3S3Error, InvalidValueError, ValidationError
 from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -124,6 +124,16 @@ class TestTextAdapter:
         writer = IOStorage(sink).open("k", "wb")
         writer.write("café".encode())
         assert sink.getvalue() == "café"
+
+    def test_an_unknown_encoding_is_rejected_at_construction(self) -> None:
+        # Before this check the name reached codecs only from the first open:
+        # cp's eager stream route let the bare LookupError escape the taxonomy
+        # while mv's lazy open route reported it as the item's failure.
+        with pytest.raises(InvalidValueError, match="unknown encoding: nope") as excinfo:
+            IOStorage(io.StringIO(), encoding="nope")
+        assert isinstance(excinfo.value.__cause__, LookupError)
+        with pytest.raises(InvalidValueError):
+            IOStorage(io.BytesIO(), encoding="")
 
     def test_custom_encoding(self) -> None:
         reader = IOStorage(io.StringIO("café"), encoding="latin-1").open("k", "rb")

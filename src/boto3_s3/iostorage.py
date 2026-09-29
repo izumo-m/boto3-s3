@@ -45,7 +45,7 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
@@ -287,6 +287,12 @@ class IOStorage(Storage):
 
     ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
     I/O (both directions, chosen per ``open`` call), with no listing or deletion.
+
+    ``encoding`` is checked at construction (``codecs.lookup``): an unknown name
+    is an ``InvalidValueError`` here rather than a bare ``LookupError`` from the
+    first ``open`` - which the eager stream route of ``cp`` would let escape
+    the library's taxonomy while the lazy open route of ``mv`` reported it as
+    the item's failure.
     """
 
     scheme: ClassVar[str] = "stream"
@@ -296,6 +302,10 @@ class IOStorage(Storage):
 
     def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
         self._stream: IO[Any] | None = stream
+        try:
+            codecs.lookup(encoding)
+        except LookupError as exc:
+            raise InvalidValueError(str(exc)) from exc
         self._encoding = encoding
 
     @override
