@@ -1446,7 +1446,11 @@ A directory that cannot be opened or scanned — replaced, removed or locked awa
 in the race between its parent's scan and this descent — is put through the
 `triggers_warning` battery and yields an empty list, so the walk goes on. The
 battery runs on `dir_path` as passed, which for a descended child carries the
-trailing separator the AWS CLI's own re-test names it by. If that battery finds
+trailing separator the AWS CLI's own re-test names it by. With symlinks not
+followed, that re-test first strips the separator and tests the name itself,
+as the AWS CLI's `should_ignore_file` does at the top of each descent: a
+directory that became a symlink is skipped silently rather than followed, and
+the battery names the stripped path. If that battery finds
 nothing wrong, the `OSError` propagates instead of pruning silently. That
 handling is scoped to establishing the scan; a per-entry `OSError` raised
 mid-scan propagates. The deterministic full-path limits — a symlink cycle
@@ -1505,7 +1509,10 @@ the natural per-entry override point, and the owner of the single stat.
 
 Symlinks are decided first, on a free type test: with symlinks not followed,
 the complete view returns the link's own lstat leaf and the normal view skips
-it silently. Then `entry_stat_result` is taken once. A `None` stat warns; the
+it — silently when `os.path.islink` agrees, and otherwise through the full-path
+warning battery, which is where the AWS CLI's lstat-based test lands in a
+directory that grants no search permission ("File does not exist."). Then
+`entry_stat_result` is taken once. A `None` stat warns; the
 complete view falls back to the link's lstat and the normal view skips. A stat
 that itself reports a symlink — which only an lstat-style override produces —
 is its own vetting-free leaf. Otherwise the normal view vets the entry through

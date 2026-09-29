@@ -396,14 +396,70 @@ class TestDirectoryChangedBeforeItsDescent:
     """
 
     def _swapped(
-        self, tmp_path: Path, action: Callable[[], None]
+        self, tmp_path: Path, action: Callable[[], None], **config: bool
     ) -> tuple[list[str | None], list[str], _MutateAtFinalize]:
         _make_tree(tmp_path, "aaa.txt", "mmm/inner.txt", "zzz/inner.txt")
         walker = _MutateAtFinalize(tmp_path / "mmm", action)
         warnings: list[str] = []
-        storage = LocalStorage(str(tmp_path), walker=walker)
+        storage = LocalStorage(str(tmp_path), walker=walker, **config)
         keys = [info.compare_key for info in storage.walk_local(on_warning=warnings.append)]
         return keys, warnings, walker
+
+    @staticmethod
+    def _replace_with_a_link(tmp_path: Path) -> Callable[[], None]:
+        target = tmp_path / "mmm"
+        elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "other.txt").write_bytes(b"o")
+
+        def action() -> None:
+            (target / "inner.txt").unlink()
+            target.rmdir()
+            target.symlink_to(elsewhere)
+
+        return action
+
+    def test_replaced_by_a_link_is_skipped_silently_when_links_are_not_followed(
+        self, tmp_path: Path
+    ) -> None:
+        # aws-cli's should_ignore_file runs again at the top of each descent
+        # and, not following symlinks, strips the separator to test the name
+        # itself - so the link is dropped silently, never followed. Measured
+        # against the pinned aws (--no-follow-symlinks, the directory swapped
+        # for a link right after its parent's scan): only the other entries
+        # are listed, rc 0; ours followed the link into the other tree.
+        keys, warnings, walker = self._swapped(
+            tmp_path, self._replace_with_a_link(tmp_path), follow_symlinks=False
+        )
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == []
+
+    def test_replaced_by_a_link_is_followed_when_links_are_followed(self, tmp_path: Path) -> None:
+        keys, warnings, walker = self._swapped(tmp_path, self._replace_with_a_link(tmp_path))
+        assert walker.fired
+        assert keys == ["aaa.txt", "mmm/other.txt", "zzz/inner.txt"]
+        assert warnings == []
+
+    @skip_if_chmod_is_inert
+    def test_made_unreadable_warns_without_the_separator_when_links_are_not_followed(
+        self, tmp_path: Path
+    ) -> None:
+        # The no-follow re-test rebinds the separator-stripped path before its
+        # battery, so the warning names the directory without the separator
+        # (the follow mode keeps it - the test below). Measured against the
+        # pinned aws: `.../mmm. File/Directory is not readable.` without
+        # --follow-symlinks stripping, `.../mmm/.` with the default follow.
+        target = tmp_path / "mmm"
+        try:
+            keys, warnings, walker = self._swapped(
+                tmp_path, lambda: target.chmod(0), follow_symlinks=False
+            )
+        finally:
+            target.chmod(0o755)
+        assert walker.fired
+        assert keys == ["aaa.txt", "zzz/inner.txt"]
+        assert warnings == [f"Skipping file {target}. File/Directory is not readable."]
 
     def test_replaced_by_a_regular_file_warns_and_the_walk_goes_on(self, tmp_path: Path) -> None:
         target = tmp_path / "mmm"
@@ -869,6 +925,37 @@ class TestSymlinks:
         warnings: list[str] = []
         assert _keys(tmp_path, on_warning=warnings.append) == ["plain.txt"]
         assert warnings == [f"Skipping file {tmp_path / 'broken'}. File does not exist."]
+
+    @skip_if_chmod_is_inert
+    def test_no_follow_link_in_a_searchless_directory_warns_like_aws(self, tmp_path: Path) -> None:
+        # A directory that can be read but not searched (r--) lists its entries
+        # with their types, so the walk knows the link from d_type; aws-cli's
+        # test is an lstat by full path, which fails there, so it takes the
+        # entry for a non-link and its battery warns "File does not exist."
+        # (measured on the pinned aws: two warnings, rc 2, where ours dropped
+        # both silently, rc 0). The follow mode already agreed: the followed
+        # stat fails the same way on both sides.
+        _make_tree(tmp_path, "a.txt")
+        locked = tmp_path / "rd"
+        locked.mkdir()
+        (locked / "l").symlink_to(tmp_path / "a.txt")
+        (locked / "lb").symlink_to(tmp_path / "nosuch")
+        locked.chmod(0o444)
+        expected = [
+            f"Skipping file {locked / 'l'}. File does not exist.",
+            f"Skipping file {locked / 'lb'}. File does not exist.",
+        ]
+        try:
+            # Vetting runs in directory-read order on both sides (aws-cli's
+            # listdir, our scandir), so only the set of warnings is pinned.
+            warnings: list[str] = []
+            assert _keys(tmp_path, follow_symlinks=False, on_warning=warnings.append) == ["a.txt"]
+            assert sorted(warnings) == expected
+            warnings = []
+            assert _keys(tmp_path, on_warning=warnings.append) == ["a.txt"]
+            assert sorted(warnings) == expected
+        finally:
+            locked.chmod(0o755)
 
 
 class TestSymlinkLoopDetection:

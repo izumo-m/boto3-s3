@@ -842,7 +842,11 @@ class LocalFileGenerator:
         ``triggers_warning`` battery on ``dir_path`` as passed, which is the
         aws-cli warning its own re-test before descending would emit, and yields
         an empty list (the walk goes on); if the battery sees nothing wrong, the
-        ``OSError`` propagates instead. ``sym_depth`` (the
+        ``OSError`` propagates instead. With symlinks not followed that re-test
+        first strips the separator and tests the name itself, as aws-cli's
+        ``should_ignore_file`` does at the top of each descent: a directory
+        that became a symlink is skipped silently rather than followed, and
+        the battery names the stripped path. ``sym_depth`` (the
         number of followed symlinks from the walk root down to ``dir_path``) lets
         a child near the symlink-loop / path-length limit be re-vetted by full
         path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
@@ -870,6 +874,18 @@ class LocalFileGenerator:
         children: list[WalkChild] = []
         dir_fd: int | None = None
         use_fd = self.have_dir_fd
+        # aws-cli's should_ignore_file runs again at the top of each descent,
+        # and with symlinks not followed it strips the separator to test the
+        # name itself: a directory that became a symlink since its parent's
+        # scan is skipped silently - never followed - and its battery (below)
+        # names the stripped path. The open through the separator-terminated
+        # path would follow that link, so the two probes aws-cli spends here
+        # (isdir + islink, only when not following) run first.
+        probe = dir_path
+        if not options.follow_symlinks and probe.endswith(os.sep) and os.path.isdir(probe):
+            probe = probe[:-1]
+            if os.path.islink(probe):
+                return []
         try:
             if use_fd:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
@@ -883,9 +899,11 @@ class LocalFileGenerator:
             # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
             # the battery, and still-a-directory-but-unreadable warns through the
             # ``should_ignore_file`` at the top of the recursion. Establishing
-            # this scan *is* that re-test, so run the same battery on ``dir_path``
-            # as given - it keeps the separator every descended child was
-            # addressed with, and aws-cli's warning keeps it too - then keep
+            # this scan *is* that re-test, so run the same battery on ``probe``:
+            # ``dir_path`` as given - it keeps the separator every descended
+            # child was addressed with, and aws-cli's warning keeps it too - or,
+            # when symlinks are not followed, the separator-stripped form
+            # aws-cli's should_ignore_file rebinds - then keep
             # walking (a warning, rc 2) instead of failing the run. If the probes
             # see nothing wrong (e.g. fd exhaustion resolved by the probe's
             # close), re-raise like aws-cli's ``listdir`` would - never prune
@@ -898,7 +916,7 @@ class LocalFileGenerator:
             # dropping the directory.
             if dir_fd is not None:
                 os.close(dir_fd)
-            if not self.triggers_warning(dir_path, notify):
+            if not self.triggers_warning(probe, notify):
                 raise
             return []
         try:
@@ -1009,7 +1027,10 @@ class LocalFileGenerator:
         ``entry_stat_result`` **once** and threads that one value through the
         rest (so nothing below re-stats or re-checks for ``None``). Symlinks are
         decided first on a free ``d_type`` test: no-follow returns an lstat leaf
-        only in the complete view and otherwise skips it. A followed stat that
+        only in the complete view and otherwise skips it - silently when
+        ``os.path.islink`` agrees, else through the full-path battery, the way
+        aws-cli's lstat-based test lands where the directory grants no search
+        permission. A followed stat that
         comes back ``None`` warns; the complete view then falls back to the link's
         lstat, while the normal view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
@@ -1026,7 +1047,17 @@ class LocalFileGenerator:
             if options.enumerate_all_entries and not options.follow_symlinks:
                 return self.symlink_child(entry, full, notify=notify)
             if not options.follow_symlinks:
-                return None
+                if os.path.islink(full):
+                    return None
+                # The entry's type says symlink, but aws-cli's own test - an
+                # lstat by full path - fails here (the directory grants no
+                # search permission, or the entry raced away), so aws-cli takes
+                # it for a non-link and vets it by full path: normally "File
+                # does not exist.", a warning and rc 2 rather than the silent
+                # skip. Only when the battery finds nothing wrong does the entry
+                # go on to be classified.
+                if self.triggers_warning(full, notify):
+                    return None
         st = self.entry_stat_result(entry)
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
