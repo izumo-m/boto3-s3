@@ -62,6 +62,7 @@ Engine choices (parity-driven):
 from __future__ import annotations
 
 import errno
+import functools
 import io
 import logging
 import mimetypes
@@ -850,6 +851,10 @@ class Transferrer:
         # cancel it describes is issued, so the callback that observes a
         # cancel outcome observes the flag too.
         self._cancel_initiated = False
+        # The interrupt a use_threads=False run took mid-transfer, kept by
+        # `_note_interrupt` for `submit` to re-raise: upstream's serial executor
+        # swallows it inside the manager call (`_SerialExecutor`).
+        self._pending_interrupt: BaseException | None = None
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
@@ -1106,6 +1111,21 @@ class Transferrer:
             # mirrors _CloseFileobj's failure branch, discard-preferring).
             self._close_item_fileobjs(item)
             raise
+        # A use_threads=False run's interrupt: the serial executor settled the
+        # item (CANCELLED) and noted the interrupt, and upstream's submission
+        # task then swallowed it, so the manager call returned as if nothing
+        # had happened. Re-raise it here - the item's fileobjs were already
+        # released by its done subscribers - and the caller's exit folds the
+        # manager the way any mid-run interrupt does.
+        pending = self._pending_interrupt
+        if pending is not None:
+            self._pending_interrupt = None
+            raise pending
+
+    def _note_interrupt(self, exc: BaseException) -> None:
+        """Keep the first interrupt the serial executor saw (`_SerialExecutor`)."""
+        if self._pending_interrupt is None:
+            self._pending_interrupt = exc
 
     @staticmethod
     def _close_item_fileobjs(item: TransferItem) -> None:
@@ -1470,9 +1490,13 @@ class Transferrer:
             # TransferConfig carries, or the two drift (they differ in the
             # download IO queue depth).
             config = transferconfig.TransferConfig()
-        executor_cls = None
+        executor_cls: Any = None
         if not getattr(config, "use_threads", True):
-            executor_cls = NonThreadedExecutor
+            # boto3's NonThreadedExecutor semantics, with a mid-transfer
+            # interrupt settling the item before upstream's teardown runs
+            # (`_SerialExecutor`); s3transfer instantiates the class per
+            # executor with max_workers alone, so the note hook rides a partial.
+            executor_cls = functools.partial(_SerialExecutor, self._note_interrupt)
         # TransferManager registers handlers on self._client at construction and
         # leaves them there - shutdown() never removes them. Intentional and
         # boto3-faithful (boto3's own TransferManager does the same): we do not
@@ -1707,6 +1731,68 @@ class Transferrer:
 # on_done(future), all with **kwargs.
 
 
+class _SerialExecutor(NonThreadedExecutor):
+    """``use_threads=False``'s executor: s3transfer's serial one, with an
+    interrupt settling the transfer before the task's teardown runs.
+
+    Under ``NonThreadedExecutor`` every task runs on the calling thread, so a
+    ``KeyboardInterrupt`` (any ``BaseException`` outside ``Exception``) lands
+    inside a task's main. Upstream's ``Task.__call__`` catches ``Exception``
+    alone, and its ``finally`` still runs the task's done callbacks - a
+    download's final rename task among them - and, for the final task,
+    ``announce_done``, with the coordinator still ``running``: ``result()``
+    then returns ``None`` as if the transfer had succeeded, so the done
+    subscribers would delete a ``mv`` source, rename a half-written download
+    into place, and record SUCCEEDED for bytes that never arrived - and
+    ``SubmissionTask._main`` swallows the interrupt, so the run goes on to the
+    next item (measured: a SIGINT mid-PutObject under ``use_threads=False``
+    left ``mv`` with neither the file nor the object). Each task's
+    ``_execute_main`` is wrapped so the interrupt first cancels the
+    coordinator - ``CancelledError`` naming it, the shape the manager's own
+    Ctrl-C shutdown gives in-flight transfers, so the item records CANCELLED
+    and upstream's failure cleanups run (temp file removed, multipart
+    aborted, the rename skipped) - and is noted for `Transferrer.submit` to
+    re-raise once the manager call returns. An interrupt escaping a done
+    callback (past ``_execute_main``) is noted at the executor boundary the
+    same way, and the terminal subscribers run once per item so upstream's
+    second announce, re-running the uncleared list, cannot double-count.
+    Both attribute lookups are guards: an upstream that reshapes its task
+    degrades to its own behavior.
+    """
+
+    def __init__(
+        self, note: Callable[[BaseException], None], max_workers: int | None = None
+    ) -> None:
+        super().__init__(max_workers)
+        self._note = note
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        coordinator = getattr(fn, "_transfer_coordinator", None)
+        execute = getattr(fn, "_execute_main", None)
+        if coordinator is not None and execute is not None:
+            fn._execute_main = self._guarded(execute, coordinator)
+        try:
+            return super().submit(fn, *args, **kwargs)
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                self._note(exc)
+            raise
+
+    def _guarded(self, execute: Callable[[Any], Any], coordinator: Any) -> Callable[[Any], Any]:
+        def _execute_main(main_kwargs: Any) -> Any:
+            try:
+                return execute(main_kwargs)
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    self._note(exc)
+                    if not coordinator.done():
+                        # The manager's own Ctrl-C cancel wording (str, else repr).
+                        coordinator.cancel(str(exc) or repr(exc))
+                raise
+
+        return _execute_main
+
+
 class _ProvideSize:
     """Pre-populate ``TransferFuture.meta.size`` (with the etag: skips the probe).
 
@@ -1917,8 +2003,15 @@ class _DeleteSource:
     def __init__(self, delete: Callable[[], Any], *, capture: bool = False) -> None:
         self._delete = delete
         self._capture = capture
+        self._ran = False
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
+        # Once per item: an interrupt escaping a later done callback on the
+        # serial executor leaves upstream's callback list uncleared, and its
+        # second announce re-runs the whole list (`_SerialExecutor`).
+        if self._ran:
+            return
+        self._ran = True
         try:
             future.result()
         except Exception:
@@ -2018,8 +2111,16 @@ class _Completion:
         self._item = item
         self._on_success = on_success
         self._on_failure = on_failure
+        self._settled = False
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
+        # Once per item: an interrupt escaping `on_result` on the serial
+        # executor leaves upstream's callback list uncleared, and its second
+        # announce re-runs the whole list (`_SerialExecutor`); the item must
+        # not be counted or reported twice.
+        if self._settled:
+            return
+        self._settled = True
         try:
             future.result()
         except Exception as exc:

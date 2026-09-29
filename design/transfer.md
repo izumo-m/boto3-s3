@@ -48,7 +48,17 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `annotation_temp_dir`; the defaults are the same as aws-cli - 8 MiB
   threshold / 8 MiB chunk / concurrency 10). As in boto3, classic maps
   `use_threads=False` to `NonThreadedExecutor` (a determinization lever for
-  tests). Classic-only knobs under CRT also follow boto3: auto-selected CRT
+  tests) - through `_SerialExecutor`, which settles a transfer an interrupt
+  cuts short before upstream's teardown runs: every task then executes on the
+  calling thread, so a Ctrl-C lands inside the request itself, and upstream's
+  `Task.__call__` (catching `Exception` alone) would run the done callbacks
+  on a coordinator nobody settled - `result()` returning `None`, a `mv`
+  deleting its source, a half-written download renamed into place, SUCCEEDED
+  recorded - and its submission task would then swallow the interrupt. The
+  executor wraps each task's main so the interrupt first cancels the
+  coordinator (`CancelledError` naming it, the manager's own Ctrl-C shape: the
+  item records CANCELLED, upstream's failure cleanups run) and re-raises it
+  from `submit` once the manager call returns. Classic-only knobs under CRT also follow boto3: auto-selected CRT
   ignores them, while an explicit `preferred_transfer_client='crt'` rejects
   them up front (`_validate_crt_transfer_config`). The overall design of CRT
   mode is in [`crt.md`](./crt.md).

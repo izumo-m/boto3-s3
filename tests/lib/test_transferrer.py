@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -76,9 +77,9 @@ class _OpenSink(io.BytesIO):
 def _run(
     kind: TransferType,
     items: list[TransferItem],
-    responses: list[dict[str, Any] | Exception],
+    responses: list[dict[str, Any] | BaseException],
     *,
-    source_responses: list[dict[str, Any] | Exception] | None = None,
+    source_responses: list[dict[str, Any] | BaseException] | None = None,
     options: TransferOptions | None = None,
     config: TransferConfig = _SYNC_CONFIG,
     is_move: bool = False,
@@ -1441,6 +1442,143 @@ class TestFatalCancellation:
         assert (transferrer.succeeded, transferrer.failed, transferrer.cancelled) == (1, 0, 2)
         # first_error stays reserved for real failures (BatchError's sample).
         assert transferrer.first_error is None
+
+
+class _InterruptingBody:
+    """A GetObject body whose read past ``after`` chunks is a Ctrl-C landing
+    mid-stream on the calling thread (the use_threads=False lane)."""
+
+    def __init__(self, data: bytes, *, after: int) -> None:
+        self._buf = io.BytesIO(data)
+        self._after = after
+        self._reads = 0
+
+    def read(self, amount: int = -1) -> bytes:
+        self._reads += 1
+        if self._reads > self._after:
+            raise KeyboardInterrupt
+        return self._buf.read(amount)
+
+
+class TestSerialExecutorInterrupt:
+    """``use_threads=False`` runs every task on the calling thread, so a
+    Ctrl-C lands inside the request itself; upstream's serial executor would
+    then run the done callbacks on a coordinator nobody settled (result()
+    returns None) and swallow the interrupt (`transfer._SerialExecutor`).
+    Pinned here: the item records CANCELLED, its source survives, upstream's
+    failure cleanups run, and the interrupt propagates out of submit."""
+
+    def _upload_item(self, tmp_path: Path, size: int = 7) -> TransferItem:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x" * size)
+        return TransferItem(
+            compare_key="a.bin",
+            size=size,
+            src_path=str(src),
+            src_info=FileInfo(key=str(src).replace(os.sep, "/")),
+            dest_bucket="b",
+            dest_key="k",
+        )
+
+    def _run_interrupted(
+        self,
+        kind: TransferType,
+        item: TransferItem,
+        responses: list[dict[str, Any] | BaseException],
+        *,
+        is_move: bool,
+        on_result: Callable[[OpResult], None],
+    ) -> tuple[list[ApiCall], Transferrer]:
+        client, calls = make_recording_client(responses)
+        transferrer = Transferrer(
+            kind,
+            client,
+            src_storage=LocalStorage(".") if kind is TransferType.UPLOAD else None,
+            transfer_config=_SYNC_CONFIG,
+            is_move=is_move,
+            on_result=on_result,
+        )
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer.submit(item)
+        return calls, transferrer
+
+    def test_upload_move_keeps_the_source_and_records_cancelled(self, tmp_path: Path) -> None:
+        item = self._upload_item(tmp_path)
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.UPLOAD, item, [KeyboardInterrupt()], is_move=True, on_result=results.append
+        )
+        assert ops(calls) == ["PutObject"]
+        assert (tmp_path / "a.bin").exists()
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_multipart_upload_aborts_and_records_cancelled(self, tmp_path: Path) -> None:
+        # The interrupt lands in a non-final task (the first UploadPart): the
+        # coordinator is cancelled before upstream's teardown, so its failure
+        # cleanup aborts the multipart upload and the item still gets its one
+        # record instead of leaking the interrupt from the done callbacks.
+        item = self._upload_item(tmp_path, size=9 * _MIB)
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.UPLOAD,
+            item,
+            [{"UploadId": "u"}, KeyboardInterrupt(), {}],
+            is_move=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["CreateMultipartUpload", "UploadPart", "AbortMultipartUpload"]
+        assert (tmp_path / "a.bin").exists()
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert transferrer.cancelled == 1
+
+    def test_download_move_mid_body_leaves_no_file_and_keeps_the_object(
+        self, tmp_path: Path
+    ) -> None:
+        # Upstream registers the final rename as the GetObject task's done
+        # callback, so an unsettled coordinator would rename the half-written
+        # temp file into place and then delete the S3 source; cancelled first,
+        # the rename is skipped, the temp file removed, the source untouched.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag="abc123",
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "out" / "a.bin"),
+        )
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.DOWNLOAD,
+            item,
+            [{"Body": _InterruptingBody(b"payload", after=1), "ContentLength": 7}],
+            is_move=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["GetObject"]  # no DeleteObject
+        assert list((tmp_path / "out").iterdir()) == []  # neither the file nor a temp file
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert transferrer.cancelled == 1
+
+    def test_interrupt_inside_on_result_reports_the_item_once(self, tmp_path: Path) -> None:
+        # Past the request, inside the terminal callback: the transfer itself
+        # completed, so the record stands - once, although upstream re-runs the
+        # whole (uncleared) callback list on its second announce - and the
+        # interrupt still propagates.
+        item = self._upload_item(tmp_path)
+        results: list[OpResult] = []
+
+        def on_result(result: OpResult) -> None:
+            results.append(result)
+            raise KeyboardInterrupt
+
+        calls, transferrer = self._run_interrupted(
+            TransferType.UPLOAD, item, [{}], is_move=True, on_result=on_result
+        )
+        assert ops(calls) == ["PutObject"]
+        assert not (tmp_path / "a.bin").exists()  # the move completed
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
 
 
 class TestNoOverwrite:
