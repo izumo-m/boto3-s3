@@ -185,9 +185,16 @@ _SSE_C_PARAM_RE = re.compile(
 # through ``_reveal_access_key`` like every other id slot, so an id of any
 # shape - an S3-compatible endpoint's ``minioadmin``, say - is covered: an
 # AWS-shaped id keeps its tail, anything else masks entirely. The id runs to
-# the first colon (a signature is base64 and has none). SigV4's
+# the first colon, and the signature is pinned to its own shape - the base64
+# of an HMAC-SHA1, 27 characters and one ``=`` - because with the id
+# unconstrained that shape is all that separates the header from an object
+# key or a metadata value written ``AWS <word>:<text>``, which a value
+# pattern as loose as the token one swallowed to the next quote (a logged
+# DeleteObjects body, every key of the batch included). SigV4's
 # ``AWS4-HMAC-SHA256 ...`` does not match (no space before the digit).
-_SIGV2_AUTH_HEADER_RE = re.compile(rf"(?P<key>\bAWS )(?P<id>[^\s'\"\\:]+):(?P<val>{_TOKEN_VALUE})")
+_SIGV2_AUTH_HEADER_RE = re.compile(
+    r"(?P<key>\bAWS )(?P<id>[^\s'\"\\:]+):(?P<val>[A-Za-z0-9+/]{27}=)"
+)
 
 # STS / metadata-service response-body temporary credentials. botocore logs the
 # raw response body at DEBUG (``Response body:``), so an AssumeRole /
@@ -199,13 +206,22 @@ _SIGV2_AUTH_HEADER_RE = re.compile(rf"(?P<key>\bAWS )(?P<id>[^\s'\"\\:]+):(?P<va
 # (IMDS's invalid-JSON path logs no body),
 # where the session token rides under the key ``Token``. The key/value regex is
 # therefore quote-agnostic and includes ``Token``; the quote anchored directly
-# to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked, and
-# ``AccessKeyId`` is left for the standalone id regex to tail-reveal.
+# to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked. The
+# ``AccessKeyId`` beside them has a slot of its own (both forms, and SSO's
+# camel-cased ``accessKeyId``) through ``_reveal_access_key``: an AWS-shaped
+# id would be tail-revealed by the standalone id regex anyway, but an id of
+# another shape - what an S3-compatible endpoint's STS issues - has no shape
+# for that regex to find, and the promise is that such an id masks entirely
+# wherever a keyed slot carries it.
 _STS_BODY_XML_CRED_RE = re.compile(
     r"(?P<key><(?:SecretAccessKey|SessionToken)>)(?P<val>[^<]+)", re.IGNORECASE
 )
 _CRED_BODY_KV_RE = re.compile(
     r"(?P<key>['\"](?:SecretAccessKey|SessionToken|Token)['\"]\s*:\s*b?['\"])(?P<val>[^'\"]+)",
+    re.IGNORECASE,
+)
+_CRED_BODY_ACCESS_KEY_ID_RE = re.compile(
+    r"(?P<key><AccessKeyId>|['\"]AccessKeyId['\"]\s*:\s*b?['\"])(?P<val>[^<'\"]+)",
     re.IGNORECASE,
 )
 
@@ -292,6 +308,9 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _CRED_BODY_KV_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _CRED_BODY_ACCESS_KEY_ID_RE.sub(
+        lambda m: m.group("key") + _reveal_access_key(m.group("val")), text
+    )
     text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_PROVIDED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)

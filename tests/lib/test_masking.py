@@ -225,9 +225,11 @@ class TestMaskTextNotation:
 
     def test_sigv2_authorization_header_signature_masked(self) -> None:
         # Legacy SigV2 header `AWS <id>:<sig>` (signature_version='s3'): the
-        # signature after the colon is a secret; the id is tail-revealed.
-        out = m.mask_text(f"{{'Authorization': 'AWS {ACCESS_KEY_ID}:{SIGNATURE}'}}")
-        assert SIGNATURE not in out
+        # signature after the colon - an HMAC-SHA1's base64, the shape the
+        # rule is pinned to - is a secret; the id is tail-revealed.
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"{{'Authorization': 'AWS {ACCESS_KEY_ID}:{sig}'}}")
+        assert sig not in out
         assert "AWS ***MPLE:***" in out
 
     def test_sigv2_authorization_header_non_aws_shaped_id_masks_entirely(self) -> None:
@@ -242,6 +244,41 @@ class TestMaskTextNotation:
         sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
         out = m.mask_text(f"Authorization: AWS minioadmin:{sig}\nDate: x")
         assert out == "Authorization: AWS ***:***\nDate: x"
+
+    def test_sigv2_rule_leaves_text_shaped_like_the_header_alone(self) -> None:
+        # With the id unconstrained, the signature's shape (an HMAC-SHA1's
+        # base64: 27 characters and one '=') is what separates the header from
+        # an object key or a metadata value written `AWS <word>:<text>`. Those
+        # must survive, and so must everything after them on the line: a logged
+        # DeleteObjects body carries every key of the batch.
+        key_line = "{'bucket': 'bkt', 'key': 'AWS reports:q1.csv', 'extra_args': {}}"
+        assert m.mask_text(key_line) == key_line
+        body = (
+            "'body': b'<Delete><Object><Key>AWS notes:2025.txt</Key></Object>"
+            "<Object><Key>b-second.txt</Key></Object><Quiet>true</Quiet></Delete>'"
+        )
+        assert m.mask_text(body) == body
+        note = "'Metadata': {'note': 'AWS account:123456789012'}"
+        assert m.mask_text(note) == note
+
+    def test_credentials_body_access_key_id_follows_the_id_rule(self) -> None:
+        # The id beside the secrets in an STS / metadata / SSO credentials body:
+        # an AWS-shaped one keeps its tail, one of another shape (what an
+        # S3-compatible endpoint's STS issues) masks entirely instead of
+        # passing through - in the XML, dict-repr and camel-cased JSON forms.
+        xml = "<AccessKeyId>7ASECVI8W0BHU4WALTZI</AccessKeyId><SecretAccessKey>s</SecretAccessKey>"
+        assert (
+            m.mask_text(xml)
+            == "<AccessKeyId>***</AccessKeyId><SecretAccessKey>***</SecretAccessKey>"
+        )
+        xml_aws = f"<AccessKeyId>{ACCESS_KEY_ID}</AccessKeyId>"
+        assert m.mask_text(xml_aws) == "<AccessKeyId>***MPLE</AccessKeyId>"
+        kv = "{'AccessKeyId': '7ASECVI8W0BHU4WALTZI', 'SecretAccessKey': 's'}"
+        assert m.mask_text(kv) == "{'AccessKeyId': '***', 'SecretAccessKey': '***'}"
+        sso = '{"roleCredentials": {"accessKeyId": "7ASECVI8W0BHU4WALTZI", "sessionToken": "t"}}'
+        assert (
+            m.mask_text(sso) == '{"roleCredentials": {"accessKeyId": "***", "sessionToken": "***"}}'
+        )
 
     def test_sigv4_header_not_touched_by_sigv2_rule(self) -> None:
         # `AWS4-HMAC-SHA256 ...` must not match the SigV2 `AWS <id>:` shape.
