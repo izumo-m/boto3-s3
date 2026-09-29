@@ -129,8 +129,13 @@ space keeps that naming whole.
 ## AccessDeniedError
 
 The caller lacks permission for the resource. Raised for an S3 403 or the
-`AccessDenied` error code, and for a local `PermissionError` — one
-`except AccessDeniedError` therefore covers both sides of a transfer.
+`AccessDenied` error code, and for a local `PermissionError` on boto3-s3's
+own paths — a storage's `open`, `delete` or `get_fileinfo`, a directory the
+operation creates — so one `except AccessDeniedError` covers both sides of a
+transfer there. A `PermissionError` raised inside s3transfer's task execution
+(a download into a directory the process cannot write, say) is the `OSError`
+carve-out described under `Boto3S3Error`: it stays at the base class with the
+`PermissionError` as its cause.
 
 ```python
 class AccessDeniedError(Boto3S3Error): ...
