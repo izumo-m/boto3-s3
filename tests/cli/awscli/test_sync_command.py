@@ -311,15 +311,15 @@ class TestSyncCommand:
     ) -> None:
         (tmp_path / "foo.txt").write_text("mycontent")
 
-        # Patch the walk's single stat accessor to report an out-of-range mtime
-        # (impossible to set on all OSes; aws-cli patches get_file_stat the same
-        # way). st_mtime overflows datetime -> the epoch-fallback path.
-        def invalid_stat(_self: object, _entry: os.DirEntry[str]) -> os.stat_result:
-            return os.stat_result((0o100644, 0, 0, 1, 0, 0, 9, 0, 10**30, 0))
+        # Patch the shared mtime derivation to report every stat as
+        # unrepresentable (impossible to set on all OSes; aws-cli patches
+        # get_file_stat the same way). The walk takes a leaf's stat twice - at
+        # its parent's scan and at its turn - and warns from the latter, where
+        # aws-cli takes its only one, so the derivation both read is patched.
+        def unrepresentable(st: os.stat_result) -> tuple[int, None]:
+            return st.st_size, None
 
-        monkeypatch.setattr(
-            "boto3_s3.localstorage.LocalFileGenerator.entry_stat_result", invalid_stat
-        )
+        monkeypatch.setattr("boto3_s3.localstorage._size_mtime", unrepresentable)
         _, calls = _run_cmd(
             [
                 {"CommonPrefixes": [], "Contents": []},
