@@ -11,6 +11,7 @@ gate warns/skips/forces, and item failures aggregate into ``BatchError``.
 
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import io
 import os
@@ -940,6 +941,28 @@ class TestStreamRoutes:
         assert calls[0].params["Key"] == "streaming.txt"
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert (results[0].src, results[0].dest) == ("-", "s3://bucket/streaming.txt")
+
+    def test_a_cancellederror_the_stream_raises_is_a_failure_not_a_revocation(self) -> None:
+        # Nobody ordered a cancel: a reader raising concurrent.futures'
+        # CancelledError from read() wears s3transfer's cancellation type, but
+        # the coordinator settled the task's own exception as a failure. FAILED
+        # and BatchError - not a CANCELLED record and a normal return with no
+        # object stored (measured on MinIO).
+        class _StrayReader:
+            def read(self, size: int = -1) -> bytes:
+                raise concurrent.futures.CancelledError("nobody ordered this")
+
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                IOStorage(_StrayReader()),
+                S3Storage("s3://bucket/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert calls == []
 
     def test_stream_download_probes_then_streams(self) -> None:
         sink = io.BytesIO()

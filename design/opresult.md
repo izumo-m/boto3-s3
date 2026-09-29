@@ -131,7 +131,11 @@ cut short, and the run raises `BatchError` in place of the swallowed
 interrupt (on the other windows the run still ends with the fatal or the
 re-raised `KeyboardInterrupt` itself). The classic engine settles every
 revoked item with s3transfer's `CancelledError` shapes and re-raises a
-drain-time interrupt, so none of this arises there.
+drain-time interrupt, so none of this arises there. A `CancelledError` a task
+itself raised - a caller's stream read throwing
+`concurrent.futures.CancelledError`, nobody having ordered a cancel - wears the
+type but is not a revocation: the coordinator settled it as a failure, and the
+item is `FAILED`.
 
 A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
 items run to completion and report their real outcomes, so no `CANCELLED`

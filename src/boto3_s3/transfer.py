@@ -246,13 +246,34 @@ def _applied_size_hint(item: TransferItem) -> int | None:
     return None if seekable(item.src_fileobj) else item.size_hint
 
 
-def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
+def _future_revoked(future: Any) -> bool | None:
+    """Whether classic s3transfer settled ``future`` through ``cancel()``.
+
+    The classic coordinator's ``status`` is ``"cancelled"`` for an outcome its
+    ``cancel()`` installed - the manager's fatal / Ctrl-C shutdown, the token's
+    ``future.cancel()``, `_SerialExecutor`'s interrupt - and ``"failed"`` for
+    an exception a task raised, which may wear the cancellation type too: a
+    ``CancelledError`` a caller's stream read threw is a failure nobody
+    ordered. None where the engine keeps no such status (the CRT
+    coordinator), leaving the exception type alone to decide.
+    """
+    status = getattr(getattr(future, "_coordinator", None), "status", None)
+    if not isinstance(status, str):
+        return None
+    return status == "cancelled"
+
+
+def _is_cancellation(
+    exc: BaseException, *, cancel_initiated: bool, revoked: bool | None = None
+) -> bool:
     """A future outcome meaning "revoked", not "failed".
 
     Classic s3transfer settles cancelled futures with its own
-    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass), and
-    the library's own `CancelledError` is included for symmetry (a subscriber
-    re-raising a translated cancellation) - both always classify as revoked.
+    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass):
+    revoked when the coordinator says so (``revoked``, `_future_revoked`),
+    a failure when a task raised that type itself. The library's own
+    `CancelledError` is included for symmetry (a subscriber re-raising a
+    translated cancellation) and always classifies as revoked.
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
     matched by the error's ``name`` without importing awscrt - but only when
     this run's cancel token ordered the cancel (``cancel_initiated``), the
@@ -266,8 +287,10 @@ def _is_cancellation(exc: BaseException, *, cancel_initiated: bool) -> bool:
     discards the interrupt - the item classified FAILED is then the only
     evidence the run was cut short (design/crt.md section 6).
     """
-    if isinstance(exc, (CancelledError, S3TransferCancelledError)):
+    if isinstance(exc, CancelledError):
         return True
+    if isinstance(exc, S3TransferCancelledError):
+        return revoked is not False
     return cancel_initiated and getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
 
 
@@ -1661,12 +1684,19 @@ class Transferrer:
             return None, self._capture.pop_read(item.src_bucket, item.src_key)
         return None, None
 
-    def _record_failure(self, item: TransferItem, exc: BaseException) -> None:
-        """Classify a terminal exception as a cancellation, no-overwrite skip, or failure."""
+    def _record_failure(
+        self, item: TransferItem, exc: BaseException, revoked: bool | None = None
+    ) -> None:
+        """Classify a terminal exception as a cancellation, no-overwrite skip, or failure.
+
+        ``revoked`` is the classic coordinator's word on whether its
+        ``cancel()`` installed the outcome (`_future_revoked`); None where
+        there is no such word (a submit-time failure, the CRT engine).
+        """
         # Failed / skipped / cancelled items surface no captured response, but
         # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
-        if _is_cancellation(exc, cancel_initiated=self._cancel_initiated):
+        if _is_cancellation(exc, cancel_initiated=self._cancel_initiated, revoked=revoked):
             # An accepted item revoked as a cancellation: classic s3transfer's
             # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
             # CRT cancel this run's token ordered. CANCELLED, not FAILED -
@@ -2164,7 +2194,7 @@ class _Completion:
         item: TransferItem,
         *,
         on_success: Callable[[TransferItem, int | None, str | None, dict[str, Any] | None], None],
-        on_failure: Callable[[TransferItem, BaseException], None],
+        on_failure: Callable[[TransferItem, BaseException, bool | None], None],
         counted: _CountBytes | None = None,
         hinted: bool = False,
     ) -> None:
@@ -2186,7 +2216,7 @@ class _Completion:
         try:
             future.result()
         except Exception as exc:
-            self._on_failure(self._item, exc)
+            self._on_failure(self._item, exc, _future_revoked(future))
             return
         # Classic s3transfer resolves an unknown-size download's size on the
         # future (its HeadObject probe); a non-seekable upload gets none, and
