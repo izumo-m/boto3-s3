@@ -125,10 +125,12 @@ class S3Deleter:
     successes). ``S3.rm`` and ``sync`` do not use it: they keep their own
     dryrun handling upstream (design/deleter.md section 5).
 
-    The worker thread inherits daemon-ness from the thread whose first dispatch
-    starts it (Python's ``ThreadPoolExecutor``), so from a normal non-daemon thread an unclosed
-    deleter keeps the interpreter alive until the in-flight batch finishes -
-    use the context manager. Use a recursive scan: a non-recursive scan also yields
+    The worker thread is started by the first dispatch (a
+    ``ThreadPoolExecutor``'s), and interpreter shutdown joins it whichever
+    thread started it - the executor registers that join itself, so a daemon
+    caller earns no exemption - so an unclosed deleter holds shutdown until
+    the in-flight batch finishes: use the context manager. Use a recursive
+    scan: a non-recursive scan also yields
     DIRECTORY (``CommonPrefixes``) entries, which are not object keys::
 
         with S3Deleter(storage, on_result=cb) as deleter:

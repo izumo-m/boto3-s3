@@ -463,9 +463,10 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     layer, which runs before ``S3Command._run_main`` creates the client, and
     everything below is the ``add_paths`` validation, which runs after. So an
     empty region - the one shape whose client cannot be built (``Invalid
-    endpoint: https://s3..amazonaws.com``, rc 255) - preempts every usage error
-    the family reports, while a merely absent region builds fine (S3's global
-    endpoint fallback) and leaves those 252s exactly where they were.
+    endpoint: https://s3..amazonaws.com``, rc 255; an explicit endpoint URL
+    sidesteps that derivation, and the build then succeeds) - preempts every
+    usage error the family reports, while a merely absent region builds fine
+    (S3's global endpoint fallback) and leaves those 252s exactly where they were.
     """
     globalargs.validate_query(args)
     clientfactory.validate_endpoint_url(args)

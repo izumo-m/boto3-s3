@@ -47,10 +47,10 @@ Used as a context manager, exiting normally flushes; exiting because of an
 exception discards the unsent buffer while still waiting for what is already in
 flight.
 
-**Close it.** The worker thread inherits daemon-ness from the thread whose
-first dispatch starts it, so from an ordinary thread, if you neither close it
-nor use the context manager, interpreter shutdown blocks until the in-flight
-batch finishes.
+**Close it.** Interpreter shutdown waits for the worker thread whichever
+thread started it (a daemon thread included), so if you neither close the
+deleter nor use the context manager, shutdown blocks until the in-flight batch
+finishes.
 
 ### Rehearsing with `dryrun`
 

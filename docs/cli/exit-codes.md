@@ -92,10 +92,12 @@ dependency failures above are not something `aws` can report, so they have no
 envelope. Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
 failure is exit code 1 with no envelope instead: a per-item
 `upload failed:` / `move failed:` / `delete failed:` line when it lands on an
-upload or a delete, and a whole-run `fatal error:` line when it lands on the
-lookup a download or an S3-to-S3 copy starts with (the source's `HeadObject`)
-or on the S3 listing a recursive run starts with (`sync`, `rm --recursive`).
-`aws` reports both the same way.
+upload or a delete, a per-item `download failed:` line on a download to stdout
+(`cp s3://… -`, which starts with no lookup of its own), and a whole-run
+`fatal error:` line when it lands on the lookup a download to a file or an
+S3-to-S3 copy starts with (the source's `HeadObject`) or on the S3 listing a
+recursive run starts with (`sync`, `rm --recursive`). `aws` reports all three
+the same way.
 
 ### 254 — S3 returned an error
 
@@ -141,7 +143,7 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
-| a region set to an empty value, with a bad path or option pairing too | 255 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint (a region merely *unset* builds fine, so those checks keep their own codes) |
+| a region set to an empty value, with a bad path or option pairing too | 255 without an endpoint URL; with one (`--endpoint-url` or the environment) the path or option check's own code, 252 or 1 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint to derive; an explicit endpoint sidesteps the derivation and the build succeeds (a region merely *unset* builds fine either way, so those checks keep their own codes) |
 | an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 

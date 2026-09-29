@@ -65,10 +65,12 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   exception there is the caller's own - it propagates straight out of
   `submit`, and is deliberately not turned into the worker path's deferred
   re-raise.
-- The worker thread is started by the first dispatch and inherits that
-  thread's daemon-ness. From an ordinary non-daemon thread, if you fail to
-  close it, interpreter shutdown blocks until the in-flight batch completes, so
-  using the context manager is recommended.
+- The worker thread is started by the first dispatch, and interpreter shutdown
+  joins it whichever thread started it: `ThreadPoolExecutor` registers that
+  join itself (`threading._register_atexit`), so the worker's inherited
+  daemon-ness does not exempt a daemon caller. If you fail to close it,
+  shutdown blocks until the in-flight batch completes, so using the context
+  manager is recommended.
 - Cancellation never discards a *running* batch's results: a batch whose S3
   request has started completes and delivers its per-key results before
   shutdown returns. Unsent buffered entries are discarded without an

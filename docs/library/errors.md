@@ -13,8 +13,10 @@ except Boto3S3Error as exc:
     ...
 ```
 
-Catching the root catches every failure the library reports. The deliberate
-exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`, and
+Catching the root catches every failure the library reports as its own. The
+deliberate exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`,
+the `KeyError` / `OverflowError` an incomplete or unrepresentable service
+response raises the way the AWS CLI raises it, and
 botocore's `MissingDependencyException` when the CRT engine is requested
 explicitly without a usable awscrt — are listed under
 [`Boto3S3Error`](../reference/exceptions.md#boto3s3error).

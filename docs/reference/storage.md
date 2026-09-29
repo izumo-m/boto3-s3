@@ -931,7 +931,10 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined. A `LastModified` the host's local zone cannot represent raises
+determined. A response missing `ContentLength` or `LastModified` raises
+`KeyError` naming the element, read in that order — the AWS CLI's own reading of
+its single-object HEAD, and the single-entry counterpart of the `scan_pages`
+rule. A `LastModified` the host's local zone cannot represent raises
 `OverflowError` (`date value out of range`) instead of being returned, the same
 test `scan_pages` applies and at the point the AWS CLI applies it to its own
 single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source

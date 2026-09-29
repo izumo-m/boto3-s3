@@ -31,7 +31,8 @@ Boto3S3Error
 ## Boto3S3Error
 
 The root of the hierarchy and the catch-all: `except Boto3S3Error` catches
-every failure the public API reports. It derives from `Exception`, not
+every failure the public API reports as its own (the exceptions that stay
+outside it are listed at the end of this section). It derives from `Exception`, not
 `BaseException`, so a bare `except Exception` catches it too.
 
 ```python
@@ -102,7 +103,13 @@ failure above — with no exception object behind them, so their `__cause__` is
 
 Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths;
-`KeyboardInterrupt` and `SystemExit` always propagate. Selecting the CRT engine
+`KeyboardInterrupt` and `SystemExit` always propagate. A response the service
+returned incomplete is reported the way the AWS CLI reports it, not translated:
+a listing entry, a bucket entry or a single-object `HeadObject` missing an
+element the CLI reads by subscript raises `KeyError` naming the element, and a
+timestamp the host's local zone cannot represent raises `OverflowError` (the
+exact elements are under `scan_pages`, `list_buckets` and `get_fileinfo` in
+[`storage.md`](./storage.md)). Selecting the CRT engine
 explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
 is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
 boto3 does — that pass-through is scoped to engine selection, and the same

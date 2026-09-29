@@ -1147,12 +1147,12 @@ have stamped its own: an upload run's `TransferOptions` (`locals3` only - aws
 sends no algorithm on a copy's requests, measured - so both transfer engines
 see it; the CRT engine reads its trailing checksum from that argument alone),
 and a `provide-client-params.s3.*` handler `build_client` attaches for every
-other request (`rm`'s DeleteObjects, `website` / `mb --tags`, the annotation
+other request (`rm`'s DeleteObjects, `website`, the post-copy `PutObjectTagging`, the annotation
 writes). Only where the installed botocore can compute CRC64NVME (awscrt) and
 only where botocore would have stamped a default of its own: on every such
 request for a client whose `request_checksum_calculation` resolves to
 `when_supported`, and under `when_required` only on the operations that
-require a checksum (`DeleteObjects`, the bucket configuration puts) - the
+require a checksum (`DeleteObjects`, `PutBucketWebsite`, `PutObjectTagging`) - the
 handler asks the operation model, in botocore's own order, so a
 `when_required` `website` sends CRC64NVME on both tools while a
 `when_required` classic upload sends none on either. The CRT engine is the
@@ -1191,9 +1191,11 @@ unlike the options above - the one value family the coercions beat) -> cp's
 **`--expected-size` paramfile (252)** -> **session
 profile resolution (255**, aws binds the profile at startup, so a bad
 `--profile` beats every post-parse usage error; an unresolvable *region*
-does NOT fail here - aws defers it to client construction) -> **client
-creation** (step 2 above: 255 on an empty region, 253 unresolvable / 255
-invalid-config otherwise, section 6) -> route type / streaming
+does NOT fail here, nor at client construction - an absent region builds on
+S3's global endpoint) -> **client
+creation** (step 2 above: 255 on an empty region or an invalid configuration,
+section 6; missing credentials are no construction failure either, they fail
+the first request) -> route type / streaming
 constraints (252) -> **checksum path
 type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
@@ -1587,8 +1589,11 @@ the scheme 252, exactly like aws. (This means an `mb` / `rb` path usage error
 loads `boto3`; the import contract does not constrain usage-error paths.) Client creation is
 outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
-as a traceback - `NoCredentialsError` /
-`NoRegionError` -> `ConfigurationError` = 253 (aws's dedicated handlers); every
+as a traceback. The translation knows `NoCredentialsError` /
+`NoRegionError` -> `ConfigurationError` = 253 (aws's dedicated handlers), but
+neither arises at construction - credentials are first resolved when a request
+is signed, and an absent region falls back to us-east-1 - so what construction
+raises is every
 other `BotoCoreError` -> `InvalidConfigError` = 255 (aws's
 `GeneralExceptionHandler`), including `ProfileNotFound` for a bad `--profile`
 **and `PartialCredentialsError`** (e.g. an access key with no secret) - aws has

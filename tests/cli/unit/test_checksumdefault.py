@@ -121,16 +121,18 @@ class TestRegister:
 
     def test_the_required_set_is_read_off_the_model(self) -> None:
         # The stamp asks the operation model, not a list of its own: the three
-        # the CLI reaches are marked required there (with two dozen bucket
-        # configuration puts the CLI never sends), and every marked operation
-        # names the ChecksumAlgorithm member the stamp fills.
+        # the CLI reaches (rm's DeleteObjects, website's PutBucketWebsite, and
+        # the PutObjectTagging a copy falls back to for a large tag set) are
+        # marked required there (with two dozen bucket configuration puts the
+        # CLI never sends), and every marked operation names the
+        # ChecksumAlgorithm member the stamp fills.
         model = _client().meta.service_model
         required = {
             name
             for name in model.operation_names
             if model.operation_model(name).http_checksum.get("requestChecksumRequired")
         }
-        assert {"DeleteObjects", "PutBucketTagging", "PutBucketWebsite"} <= required
+        assert {"DeleteObjects", "PutBucketWebsite", "PutObjectTagging"} <= required
         for name in required:
             member = model.operation_model(name).http_checksum.get("requestAlgorithmMember")
             assert member == "ChecksumAlgorithm", name

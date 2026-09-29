@@ -555,9 +555,10 @@ because of an exception abandons the unsent buffer while still waiting for the
 batch already in flight, and a worker error raised at that point propagates
 with the body's exception chained as its `__context__`.
 
-Closing matters: the worker thread inherits daemon-ness from the thread whose
-first dispatch starts it, so from an ordinary non-daemon thread an unclosed
-deleter keeps the interpreter alive until the in-flight batch finishes.
+Closing matters: interpreter shutdown joins the worker thread whichever thread
+started it (the executor registers the join itself, so a daemon caller is no
+exemption), so an unclosed deleter keeps the interpreter alive until the
+in-flight batch finishes.
 
 ### Threading
 
