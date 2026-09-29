@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from boto3_s3.exceptions import NotFoundError, TransportError
+from boto3_s3.exceptions import NotFoundError, TransportError, ValidationError
 from boto3_s3.globsieve import GlobFilter
 from boto3_s3.localstorage import (
     LocalFileGenerator,
@@ -2083,6 +2083,21 @@ class TestStatResultAndSymlink:
         # real file / real directory are unaffected (still descended / followed)
         assert by_key["reg.txt"].is_symlink is False
         assert "realdir/inner.txt" in by_key
+
+
+class TestEmptyPath:
+    def test_validate_rejects_the_empty_string(self, tmp_path: Path) -> None:
+        # "" is not a location: os.path.exists("") is False and aws refuses
+        # it, but os.path.abspath("") is the working directory - so an
+        # operation onto "" silently worked in the working directory (a
+        # sync with delete_filter deleted its files). validate is the
+        # operations' pre-use check; construction stays permissive.
+        storage = LocalStorage("")
+        with pytest.raises(ValidationError, match="must not be empty"):
+            storage.validate()
+        LocalStorage(".").validate()
+        LocalStorage(str(tmp_path)).validate()
+        LocalStorage(Path("")).validate()  # pathlib spells "" as "."
 
 
 class TestLocalStorageIO:

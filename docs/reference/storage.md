@@ -312,7 +312,7 @@ their own held state.
 Runs deferred strict validation on this location. Construction is permissive,
 so an operation — or the CLI at its parity point — calls this to reject a
 malformed location loudly before use. The base implementation is a concrete
-no-op; `S3Storage` overrides it. Idempotent.
+no-op; `S3Storage` and `LocalStorage` override it. Idempotent.
 
 When an operation runs the check, a `Boto3S3Error` raised here that names no
 operation is stamped with that operation's name; a direct call leaves
@@ -467,7 +467,11 @@ separator, the one backend whose `format` roots are not `/`-separated.
 `scan_pages_filters` is `True` because the walk applies `options.filter`
 itself.
 
-`path` is the location, taken as given; `os.PathLike` is accepted. It is
+`path` is the location, taken as given; `os.PathLike` is accepted. An empty
+string is not a location — `validate` rejects it with `ValidationError`,
+since Python's own path functions and the AWS CLI both treat `""` as a path
+that does not exist, while `os.path.abspath` alone would silently make it the
+working directory (`pathlib.Path("")` is `"."` and passes). It is
 absolutized once, at construction, against the then-current working directory.
 Every scan, `get_fileinfo`, `open` and transfer plan anchors on that absolute
 form, so a relative `path` keeps meaning the same directory if the process

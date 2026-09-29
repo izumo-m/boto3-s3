@@ -104,6 +104,23 @@ class TestUploadRoute:
         assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
 
+    def test_an_empty_local_path_is_rejected_before_anything_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws refuses "" on either side (rc 255); the library used to resolve
+        # it to the working directory and run there.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        for src, dest in (
+            ("", S3Storage("s3://bucket/up/", client=client)),
+            (S3Storage("s3://bucket/k", client=client), ""),
+        ):
+            with pytest.raises(ValidationError, match="must not be empty") as excinfo:
+                S3().cp(src, dest, recursive=True)
+            assert excinfo.value.operation == "cp"
+        assert calls == []
+
     def test_a_single_source_resolution_failure_is_attributed_to_the_operation(
         self, tmp_path: Path
     ) -> None:

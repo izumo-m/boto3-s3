@@ -121,6 +121,7 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     NotFoundError,
     TransportError,
+    ValidationError,
 )
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
@@ -1496,6 +1497,22 @@ class LocalStorage(Storage):
     def walker(self) -> LocalFileGenerator:
         """The ``LocalFileGenerator`` driving this backend's directory walk."""
         return self._walker
+
+    @override
+    def validate(self) -> None:
+        """Reject an empty path (``Storage.validate``).
+
+        ``""`` is not a location: Python's own path functions treat it as a
+        path that does not exist (``os.path.exists("")`` is ``False``) and
+        aws-cli refuses it the same way, while ``os.path.abspath`` alone
+        would silently make it the working directory - a ``sync`` with
+        ``delete_filter`` onto ``""`` then deleted the working directory's
+        files. Construction stays permissive, like every backend's; the
+        operations call this before use. ``os.PathLike`` never yields ``""``
+        (``pathlib.Path("")`` is ``"."``).
+        """
+        if not self._path:
+            raise ValidationError("A local path must not be empty.")
 
     @override
     def as_text(self) -> str:
