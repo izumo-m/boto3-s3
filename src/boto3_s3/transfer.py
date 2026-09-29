@@ -2028,11 +2028,13 @@ class _StampMtime:
 class _DeleteSource:
     """Delete the transfer's source after it succeeds (mv; aws-cli port).
 
-    Sits immediately before ``_Completion`` - the aws-cli slot between the
-    route extras and the Done recorder - so a deletion failure can flip the
-    already-settled future via ``set_exception`` (s3transfer accepts the
-    post-done override) and ``_Completion`` then records aws's ``move
-    failed`` outcome. A failed transfer leaves the source untouched.
+    Sits ahead of ``_Completion`` - the aws-cli slot between the route extras
+    and the Done recorder, with only the case-conflict gate's
+    ``_CaseConflictCleanup`` allowed in between (aws-cli's own order) - so a
+    deletion failure can flip the already-settled future via
+    ``set_exception`` (s3transfer accepts the post-done override) and
+    ``_Completion`` then records aws's ``move failed`` outcome. A failed
+    transfer leaves the source untouched.
     """
 
     def __init__(self, delete: Callable[[], Any], *, capture: bool = False) -> None:
