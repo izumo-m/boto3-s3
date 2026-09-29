@@ -91,6 +91,12 @@ duals of each other, and the reason `create_filter` has no `aws` counterpart is 
 aws hard-codes "always create" (`file_not_at_dest`); `update_filter` is the
 overwrite judgment for the intersection. The aws `sync` equivalent is the default
 of all three (`create_filter=True` / `update_filter=None` / `delete_filter=False`).
+A value outside a lane's shapes - `None` on `create_filter` / `delete_filter`
+(the slip `update_filter`'s default invites), an integer - is refused with
+`ValidationError` before anything is resolved (`_reject_lane_filter_shapes`),
+the eager-refusal rule `pair_filter`'s `ParallelFilter` check follows
+(section 11): it would otherwise pass the `is True` / `is False` tests, list
+both sides, submit the new entries and only then die as a mid-run `TypeError`.
 `filter` is separate: it is **visibility** (`FileFilter = Callable[[FileInfo],
 bool]`, e.g. `GlobFilter`), applied per side *before* pairing to narrow which
 entries are in scope. `create_filter` / `delete_filter` are `FileFilter`s over the

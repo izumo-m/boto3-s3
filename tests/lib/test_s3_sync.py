@@ -881,6 +881,46 @@ class TestSyncCopy:
         assert results == []
 
 
+class TestLaneFilterShapes:
+    """A lane filter outside its shapes is refused before anything runs.
+
+    ``update_filter=None`` is the aws-cli default, so ``delete_filter=None`` is
+    the natural slip; it passed the ``is False`` test and reached the lane as a
+    predicate, so the run listed both sides, submitted the new entries and only
+    then died with ``TypeError: 'NoneType' object is not callable``.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("create_filter", None),
+            ("delete_filter", None),
+            ("create_filter", 0),
+            ("delete_filter", 1),
+            ("update_filter", 0),
+        ],
+    )
+    def test_a_wrong_shape_is_refused_before_any_request(
+        self, tmp_path: Path, name: str, value: object
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError, match=f"sync: {name} must be") as exc_info:
+            S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), **{name: value})  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.operation == "sync"
+        assert calls == []
+
+    def test_update_filter_none_stays_the_default(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([listing(("p/a.txt", 1)), {}])
+        S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), update_filter=None)
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
+
+
 class TestParallelFilter:
     """``ParallelFilter(fn, executor=pool)`` runs a lane's per-entry decision on a
     caller-supplied thread pool - the same entries are acted on, only the decision

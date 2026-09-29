@@ -359,6 +359,36 @@ def _reject_pair_filter_conflicts(
         )
 
 
+def _reject_lane_filter_shapes(
+    *, create_filter: object, update_filter: object, delete_filter: object
+) -> None:
+    """Refuse a ``S3.sync`` lane filter that is none of the shapes a lane can run.
+
+    A lane takes ``True`` / ``False``, a callable, or a ``ParallelFilter``
+    (``update_filter`` also ``None``, the aws-cli judgment). Anything else -
+    ``None`` on ``create_filter`` / ``delete_filter``, where ``update_filter``'s
+    default invites the slip, or an integer - is an unchecked caller's error
+    that would otherwise pass the ``is True`` / ``is False`` tests, run both
+    listings, submit transfers and only then fail as a mid-run ``TypeError``
+    when the lane first calls it; refuse it up front instead, the same
+    reasoning as `_reject_pair_filter_conflicts` and the unknown-option
+    check. Takes ``object`` because this is the shape check itself.
+    """
+    for name, value, allows_none in (
+        ("create_filter", create_filter, False),
+        ("update_filter", update_filter, True),
+        ("delete_filter", delete_filter, False),
+    ):
+        if value is None and allows_none:
+            continue
+        if isinstance(value, (bool, ParallelFilter)) or callable(value):
+            continue
+        shapes = "None, True, False, a callable, or a ParallelFilter"
+        if not allows_none:
+            shapes = "True, False, a callable, or a ParallelFilter"
+        raise ValidationError(f"sync: {name} must be {shapes}, not {value!r}", operation="sync")
+
+
 def _pool_window(executor: Executor) -> int:
     """The outstanding-decision cap for one ``ParallelFilter`` executor.
 
@@ -1833,7 +1863,11 @@ class S3:
           (which would drop the update lane and hide those pairs), or as a
           `ParallelFilter` (the serial order is the contract) raises
           ``ValidationError``. ``filter`` still composes ahead of it: a key
-          pruned by visibility never reaches ``pair_filter``.
+          pruned by visibility never reaches ``pair_filter``. A lane filter
+          that is none of its shapes - ``None`` on ``create_filter`` /
+          ``delete_filter``, an integer - raises ``ValidationError`` before
+          anything is resolved rather than failing as a ``TypeError`` once
+          the run first calls it.
 
           ``no_overwrite`` is an orthogonal write-guard on the update lane: an
           existing destination is never overwritten (new entries still copy),
@@ -1868,9 +1902,12 @@ class S3:
         requests best-effort future cancellation.
         """
         _validate_transfer_options(options, operation="sync")
+        # Shape checks over the arguments alone: refuse before any resolution
+        # or side effect (the destination pre-create below).
+        _reject_lane_filter_shapes(
+            create_filter=create_filter, update_filter=update_filter, delete_filter=delete_filter
+        )
         if pair_filter is not None:
-            # A shape check over the arguments alone: refuse before any
-            # resolution or side effect (the destination pre-create below).
             _reject_pair_filter_conflicts(
                 pair_filter,
                 create_filter=create_filter,

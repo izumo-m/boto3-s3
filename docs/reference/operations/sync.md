@@ -300,7 +300,11 @@ order rather than in compare-key order.
 ### Raises
 
 - [`ValidationError`](../exceptions.md#validationerror) — an unrecognized key
-  in `**options`; a `pair_filter` passed together with a non-default
+  in `**options`; a `create_filter` / `update_filter` / `delete_filter` that is
+  none of the shapes its parameter takes (`None` on `create_filter` or
+  `delete_filter`, an integer), refused before anything is resolved rather
+  than failing as a `TypeError` once the lane first calls it; a `pair_filter`
+  passed together with a non-default
   `create_filter` / `update_filter` / `delete_filter`, with `no_overwrite=True`,
   or wrapped in a `ParallelFilter`, each rejected before anything is resolved;
   a local-to-local pair, a custom backend paired with anything but S3, or a
