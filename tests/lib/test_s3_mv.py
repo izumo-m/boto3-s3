@@ -229,8 +229,10 @@ class TestUploadMove:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert error is not None
+        # The storage's delete raised unnamed; the run stamped its own name
+        # and kept the local path the raiser put in key (bucket stays unset).
         assert (error.operation, error.bucket, error.key) == (
-            "delete",
+            "mv",
             None,
             str(src).replace(os.sep, "/"),
         )

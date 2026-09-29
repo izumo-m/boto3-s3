@@ -18,18 +18,26 @@ from botocore.exceptions import ProfileNotFound
 from boto3_s3 import (
     CLIENT_REGION,
     S3,
+    BatchError,
+    Boto3S3Error,
     CancelledError,
     CancelToken,
+    FileInfo,
     FileKind,
     InvalidConfigError,
     IOStorage,
     LocalStorage,
     NotFoundError,
+    OpOutcome,
+    OpResult,
     S3Storage,
+    SyncPair,
     TransferConfig,
     ValidationError,
 )
 from tests.utils.fakemodel import model_meta
+from tests.utils.fakes3 import client_error, listing
+from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -325,6 +333,91 @@ class TestValidationOperationAttribution:
             S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
         assert exc_info.value is error
         assert exc_info.value.__cause__ is cause
+
+
+class TestStorageMethodAttribution:
+    """A storage's ``open`` / ``delete`` raise unnamed; the operation names them.
+
+    The storage cannot know which operation is using it (design/exceptions.md),
+    so the same delete failure reads the operation's name whichever path
+    reached it, and ``None`` on a direct call - the rule ``validate`` already
+    follows above.
+    """
+
+    def test_a_direct_delete_leaves_operation_unset(self, tmp_path: Any) -> None:
+        client, _calls = make_recording_client([client_error("AccessDenied", 403, "DeleteObject")])
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3Storage("s3://b/p/k", client=client).delete(FileInfo(key="p/k"))
+        assert (exc_info.value.operation, exc_info.value.bucket, exc_info.value.key) == (
+            None,
+            "b",
+            "p/k",
+        )
+        with pytest.raises(NotFoundError) as local_info:
+            LocalStorage(str(tmp_path)).delete(
+                FileInfo(key=f"{tmp_path}/missing".replace(os.sep, "/"))
+            )
+        assert local_info.value.operation is None
+
+    def test_rms_single_key_path_names_rm(self) -> None:
+        # The batched path (S3Deleter) already stamps "rm"; the blind
+        # single-key path goes through S3Storage.delete and must agree.
+        client, _calls = make_recording_client([client_error("AccessDenied", 403, "DeleteObject")])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as exc_info:
+            S3().rm(S3Storage("s3://b/p/k", client=client), on_result=results.append)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert (error.operation, error.bucket, error.key) == ("rm", "b", "p/k")
+        assert exc_info.value.__cause__ is error
+
+    def test_syncs_local_orphan_delete_names_sync(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "orphan.txt").write_bytes(b"o")
+
+        def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(os, "remove", refuse)
+        client, _calls = make_recording_client([listing(("p/a.txt", 1))])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().sync(
+                S3Storage("s3://b/p/", client=client),
+                str(dest),
+                create_filter=False,
+                delete_filter=True,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert (error.operation, error.bucket, error.key) == (
+            "sync",
+            None,
+            str(dest / "orphan.txt").replace(os.sep, "/"),
+        )
+
+    def test_a_decision_raising_unnamed_is_attributed_to_sync(self, tmp_path: Any) -> None:
+        # A content strategy opens one side through Storage.open, which raises
+        # unnamed; the failure aborts the run attributed to sync.
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "a.txt").write_bytes(b"a")
+        error = Boto3S3Error("content compare failed", key="p/a.txt")
+
+        def compare(_pair: SyncPair) -> bool:
+            raise error
+
+        client, _calls = make_recording_client([listing(("p/a.txt", 1))])
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3().sync(S3Storage("s3://b/p/", client=client), str(dest), update_filter=compare)
+        assert exc_info.value is error
+        assert error.operation == "sync"
 
 
 class TestClientSeam:

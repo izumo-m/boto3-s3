@@ -118,10 +118,12 @@ value: it means no subcommand-scoped operation was in scope - client
 construction, the shared object-listing path that backs every recursive
 scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
 would mislabel the others), and a storage-level method the caller invokes
-itself - `Storage.validate`, or `open` on a storage that does not name its own
-errors (the stream wrappers; `LocalStorage` / `S3Storage` name theirs), where
-an operation making the same call stamps its own name, since only the operation
-layer knows it. A locally-originating error carries a filesystem path in `key`
+itself - `validate`, `open`, `delete` - whose raise sites leave it unset because
+the storage cannot know which operation is using it; an operation making the
+same call stamps its own name, since only the operation layer knows it (the
+single rule `s3storage.attribute_failure` applies for every capture, so a
+`DeleteObject` denied under `rm` reads `"rm"` on the blind single-key path and
+the batched path alike). A locally-originating error carries a filesystem path in `key`
 (and no `bucket`) when set: the field names the failing entry in the backend's
 own address space, not always an S3 key.
 

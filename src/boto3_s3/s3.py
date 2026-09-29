@@ -59,7 +59,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, request_failure, s3_errors, translate_boto_error
+from boto3_s3.s3storage import S3Storage, request_failure, s3_errors
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer
 from boto3_s3.types import (
@@ -684,12 +684,15 @@ class _SyncDeletes:
         )
 
     def _fail(self, exc: Exception, info: FileInfo) -> Boto3S3Error:
-        """Map a synchronous-delete error into the taxonomy and count it."""
-        error = translate_boto_error(exc, operation="sync", key=info.key)
-        if error is not exc:
-            # Same cause link as the transfer engine's _record_failure
-            # (exceptions.md section 2.1); a pass-through keeps its own cause.
-            error.__cause__ = exc
+        """Map a synchronous-delete error into the taxonomy and count it.
+
+        The same capture as the blind single-key ``rm`` (`request_failure`):
+        a pass-through family error - a ``LocalStorage.delete`` that raised
+        unnamed - is stamped with this run's name and keeps its own cause; a
+        non-family exception becomes the base error carrying it as
+        ``__cause__`` (exceptions.md section 2.1).
+        """
+        error = request_failure(exc, operation="sync", key=info.key)
         self._local_failed += 1
         if self._local_first_error is None:
             self._local_first_error = error
@@ -2038,19 +2041,23 @@ class S3:
 
             # no_overwrite rules out every update up front (an existing
             # destination is never overwritten), so the update lane is dropped.
-            _run_sync_pairs(
-                Comparator(transfer_type).compare(src_entries, dest_entries),
-                create_lane=_Lane(create_decide, submit_copy, create_pool),
-                update_lane=(
-                    None if no_overwrite else _Lane(update_decide, submit_copy, update_pool)
-                ),
-                delete_lane=(
-                    None
-                    if delete_decide is None
-                    else _Lane(delete_decide, submit_delete, delete_pool)
-                ),
-                cancel_token=cancel_token,
-            )
+            # A family error a decision raises unnamed - a content strategy's
+            # ``Storage.open`` of one side, which cannot know the operation -
+            # aborts the run attributed to sync, like the storage checks above.
+            with _attributed_to("sync"):
+                _run_sync_pairs(
+                    Comparator(transfer_type).compare(src_entries, dest_entries),
+                    create_lane=_Lane(create_decide, submit_copy, create_pool),
+                    update_lane=(
+                        None if no_overwrite else _Lane(update_decide, submit_copy, update_pool)
+                    ),
+                    delete_lane=(
+                        None
+                        if delete_decide is None
+                        else _Lane(delete_decide, submit_delete, delete_pool)
+                    ),
+                    cancel_token=cancel_token,
+                )
 
         _raise_if_cancelled(cancel_token, "sync")
         failed = transferrer.failed + deletes.failed

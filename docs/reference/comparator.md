@@ -447,9 +447,10 @@ translated into the library taxonomy —
 [`AccessDeniedError`](./exceptions.md#accessdeniederror) for a permission
 failure, [`TransportError`](./exceptions.md#transporterror) otherwise —
 carrying `operation="sync"` and the entry's compare key. A `LocalStorage`
-readable side translates its own `open` failure first, the same way but with
-`operation="open"`, so a file removed between the listing and the compare
-surfaces as a `NotFoundError` carrying `operation="open"`. Whatever else a
+readable side translates its own `open` failure first, the same way but
+unnamed, so a file removed between the listing and the compare surfaces as a
+`NotFoundError` whose `operation` is `"sync"` when the strategy ran under
+`sync` and `None` when it was called directly. Whatever else a
 custom backend raises propagates unchanged. Either way the exception aborts the
 `sync` run rather than being recorded as a per-item failure, as
 [`PairFilter`](#pairfilter) states for any raising predicate.

@@ -59,6 +59,7 @@ from typing_extensions import override
 
 from boto3_s3.exceptions import (
     AccessDeniedError,
+    BatchError,
     Boto3S3Error,
     ConfigurationError,
     InvalidConfigError,
@@ -292,28 +293,56 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
+def attribute_failure(
+    error: Boto3S3Error, *, operation: str | None, bucket: str | None, key: str | None
+) -> None:
+    """Fill the attribution a raiser could not know; never overwrite what it set.
+
+    The one rule every operation-layer capture applies to a family error
+    raised in-pipeline (design/exceptions.md): a storage's ``open`` /
+    ``delete`` / ``validate`` leaves ``operation`` unset because the storage
+    cannot know which operation is using it, so the operation fills it here.
+    ``bucket`` and ``key`` fill only as a pair, never one alone: a raiser that
+    named only ``key`` placed it in its own address space
+    (`localstorage.translate_os_error`'s local path, which leaves ``bucket``
+    unset by contract), and pairing this run's bucket with it would invent a
+    mixed address. A ``BatchError`` is skipped outright - it stands for a
+    whole run, and its coordinates are pinned as always-None
+    (docs/reference/exceptions.md).
+    """
+    if error.operation is None:
+        error.operation = operation
+    if error.bucket is None and error.key is None and not isinstance(error, BatchError):
+        error.bucket = bucket
+        error.key = key
+
+
 def request_failure(
     exc: Exception, *, operation: str | None, bucket: str | None = None, key: str | None = None
 ) -> Boto3S3Error:
-    """The per-item failure for an exception a single S3 request raised.
+    """The per-item failure for an exception a single request raised.
 
-    `s3_errors` has already translated the boto family. Anything else the
-    client call raised - botocore reading a response that lacks an element it
-    needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
+    `s3_errors` (or a backend's own translation) has already turned the boto
+    family into a ``Boto3S3Error``, which passes through with its own cause
+    and gets the attribution it left unset (`attribute_failure`). Anything
+    else the call raised - botocore reading a response that lacks an element
+    it needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
     ``KeyError``), a redirect loop ending in ``RecursionError`` - is the
     request failing all the same, and becomes `translate_boto_error`'s
     last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
-    carrying the original as ``__cause__``; an existing ``Boto3S3Error``
-    passes through with its own cause. This is aws-cli's shape: its per-key
-    ``DeleteObject`` runs as an s3transfer task, which records whatever the
-    request raises as that key's failure, so the CLI's line reads
+    carrying the original as ``__cause__``. This is aws-cli's shape: its
+    per-key ``DeleteObject`` runs as an s3transfer task, which records
+    whatever the request raises as that key's failure, so the CLI's line reads
     ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
-    transfer engine gets the same from s3transfer itself; the deleter and the
-    blind single-key delete apply it by hand.
+    transfer engine gets the same from s3transfer itself; the deleter, the
+    blind single-key delete, sync's synchronous deletes and the single-call
+    operations apply it by hand.
     """
     error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
     if error is not exc:
         error.__cause__ = exc
+    else:
+        attribute_failure(error, operation=operation, bucket=bucket, key=key)
     return error
 
 
@@ -1111,7 +1140,9 @@ class S3Storage(Storage):
         """
         if mode != "rb":
             raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
-        with s3_errors(operation="open", bucket=self._bucket, key=key):
+        # operation=None: the storage cannot know which operation opened it;
+        # the operation layer fills the name in (attribute_failure).
+        with s3_errors(operation=None, bucket=self._bucket, key=key):
             response = self.get_client().get_object(Bucket=self._bucket, Key=key)
         return cast("BinaryIO", response["Body"])
 
@@ -1131,7 +1162,10 @@ class S3Storage(Storage):
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
-        with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
+        # operation=None, like open: rm's single-key path, a sync's orphan
+        # removal and an mv's source delete all reach this, and each stamps
+        # its own name on the way out (attribute_failure).
+        with s3_errors(operation=None, bucket=self._bucket, key=info.key):
             return self.get_client().delete_object(**kwargs)
 
     def _resolve_key(self, key: str) -> str:

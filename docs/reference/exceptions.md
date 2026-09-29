@@ -52,10 +52,11 @@ class Boto3S3Error(Exception):
 operation was in scope — while a client is being built, on the shared
 object-listing path that backs every recursive scan, which `ls` / `rm` / `cp` /
 `mv` / `sync` all ride, or when the caller invokes a storage-level method
-directly, such as `Storage.validate` ([`storage.md`](./storage.md)), or `open`
-on a storage that does not name its own errors — the stream wrappers, where
-`LocalStorage` and `S3Storage` do name theirs. The same call reached through an
-operation carries that operation's name instead.
+directly — `validate`, `open` or `delete` ([`storage.md`](./storage.md)), whose
+errors leave it unset because the storage cannot know which operation is using
+it. The same call reached through an operation carries that operation's name
+instead, whichever path the operation took: a `DeleteObject` the service denies
+reads `"rm"` on the blind single-key path and on the batched path alike.
 
 `bucket` and `key` are best-effort context for the failing entry. `key` names
 that entry in the address space it came from, not necessarily an S3 key: a

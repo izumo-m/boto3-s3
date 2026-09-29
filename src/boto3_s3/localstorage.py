@@ -1684,7 +1684,9 @@ class LocalStorage(Storage):
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(target, "wb"))
         except OSError as exc:
-            raise translate_os_error(exc, operation="open", key=key) from exc
+            # operation=None: the storage cannot know which operation opened
+            # it; the operation layer fills the name in (attribute_failure).
+            raise translate_os_error(exc, operation=None, key=key) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -1693,7 +1695,9 @@ class LocalStorage(Storage):
         try:
             os.remove(target)
         except OSError as exc:
-            raise translate_os_error(exc, operation="delete", key=info.key) from exc
+            # operation=None, like open: an mv's source delete and a sync's
+            # orphan removal both reach this and stamp their own name.
+            raise translate_os_error(exc, operation=None, key=info.key) from exc
 
     @override
     def get_fileinfo(
