@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import errno
 import io
+import os
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -52,6 +54,60 @@ class TestBinaryPassthrough:
     def test_key_and_size_are_ignored(self) -> None:
         buf = io.BytesIO(b"x")
         assert IOStorage(buf).open("anything", "rb", size=999).read() == b"x"
+
+
+class TestAppendModeStream:
+    """A binary stream that appends every write, behind ``IOStorage``.
+
+    Such a stream reports ``seekable()`` and takes ``seek``, so the pass-through
+    view would let s3transfer run its positioned, parallel download - and
+    ``O_APPEND`` would land every ranged part at the end, in completion order,
+    with the item reported SUCCEEDED (measured: a 40 MiB object into
+    ``open(p, "ab")`` came back scrambled on every run). A write-only view takes
+    the in-order path instead, the same guard ``StdioStorage`` has for a ``>>``
+    redirected stdout.
+    """
+
+    def test_an_append_mode_file_gets_a_write_only_view(self, tmp_path: Path) -> None:
+        target = tmp_path / "out.bin"
+        target.write_bytes(b"HEAD")
+        with target.open("ab") as fh:
+            assert fh.seekable()  # the hazard: the raw stream IS seekable
+            writer = IOStorage(fh).open("k", "wb")
+            assert not hasattr(writer, "seek")
+            assert not hasattr(writer, "seekable")
+            writer.write(b"tail")
+            writer.close()
+            assert not fh.closed
+        assert target.read_bytes() == b"HEADtail"
+
+    @pytest.mark.skipif(not hasattr(os, "O_APPEND") or os.name != "posix", reason="POSIX fd flags")
+    def test_an_append_only_descriptor_is_detected_without_the_mode(self, tmp_path: Path) -> None:
+        # A `>>` redirected stdout's .buffer carries mode "wb"; only the
+        # descriptor's O_APPEND flag says where its writes land.
+        fd = os.open(tmp_path / "out.bin", os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        with os.fdopen(fd, "wb") as fh:
+            assert fh.mode == "wb"
+            writer = IOStorage(fh).open("k", "wb")
+            assert not hasattr(writer, "seek")
+
+    def test_a_plain_file_keeps_the_seekable_view(self, tmp_path: Path) -> None:
+        with (tmp_path / "out.bin").open("wb") as fh:
+            writer = IOStorage(fh).open("k", "wb")
+            assert writer.seekable()
+        # A stream with no descriptor is never append-only either.
+        assert IOStorage(io.BytesIO()).open("k", "wb").seekable()
+
+    def test_a_download_lands_after_the_existing_bytes(self, tmp_path: Path) -> None:
+        target = tmp_path / "out.bin"
+        target.write_bytes(b"HEAD")
+        client, _calls = make_recording_client([head_response(), get_response()])
+        with target.open("ab") as fh:
+            S3().cp(
+                S3Storage("s3://b/d/a.txt", client=client), IOStorage(fh), transfer_config=_SYNC
+            )
+            assert not fh.closed
+        assert target.read_bytes() == b"HEADpayload"
 
 
 class TestTextAdapter:

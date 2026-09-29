@@ -51,8 +51,11 @@ Uploads encode, downloads decode.
 Where a download writes into it depends on the stream and the engine: on the
 classic transfer engine a seekable binary stream is written at absolute offsets
 from 0, so whatever position it held beforehand is ignored, and a multipart
-download can leave it anywhere. A text stream, a stream that cannot seek, and
-any stream under the CRT engine are written in order from where they stand.
+download can leave it anywhere. A text stream, a stream that cannot seek, a
+binary stream in append mode (`open(path, "ab")`, or a `>>` redirected
+stdout's `.buffer` — every write lands at its end, so it is written in order
+rather than at offsets that would scramble a multipart download), and any
+stream under the CRT engine are written in order from where they stand.
 
 Either way, reading a download back needs a rewind.
 

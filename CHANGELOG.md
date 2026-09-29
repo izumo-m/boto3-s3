@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A download into an `IOStorage` over an append-mode stream is now written in order instead of scrambling a multipart object.
 - A streaming upload from a seekable stream is no longer cut to `expected_size`; the hint now sizes only a stream the engine cannot size itself.
 - An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.
 - An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.

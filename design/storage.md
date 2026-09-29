@@ -422,7 +422,10 @@ The contract:
   through, so on the classic engine s3transfer's seekable download path writes
   a seekable binary stream at absolute offsets from 0 — its prior position is
   ignored, and a multipart download can leave it anywhere — while a text
-  stream, a non-seekable one and any stream under the CRT engine are written in
+  stream, a non-seekable one, an append-mode binary stream (`open(p, "ab")`, a
+  `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
+  lands at its end, so the view hides `seek` and the parts arrive in order
+  instead of scrambling) and any stream under the CRT engine are written in
   order from their current position. To read a download back, rewind it
   (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
   `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there

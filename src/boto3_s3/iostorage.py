@@ -11,7 +11,12 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 ``IOStorage(binary_stream)`` presents the stream through a close-suppressing
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
-(download). The transfer ``close``s every fileobj ``open`` returns (the open
+(download). A binary stream in append mode (``open(p, "ab")``, a ``>>``
+redirected stdout's ``.buffer``) is written through a write-only view instead:
+it reports ``seekable()`` and takes ``seek``, but every write lands at its end,
+so s3transfer's positioned, parallel download would append the ranged parts in
+completion order - the view hides ``seek`` and the download runs in order.
+The transfer ``close``s every fileobj ``open`` returns (the open
 route flushes a real backend's writer that way), so each ``IOStorage`` *writer*
 view absorbs that ``close`` into a flush and each reader view's ``close`` is a
 no-op (nothing to release): the caller's stream is **never closed** by
@@ -34,6 +39,7 @@ from __future__ import annotations
 
 import codecs
 import io
+import os
 import sys
 from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -44,6 +50,11 @@ from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
     from typing import BinaryIO
+
+try:
+    import fcntl
+except ImportError:  # Windows: no descriptor flags; the open mode is the only cue
+    fcntl = None
 
 
 _READ_CHUNK = 64 * 1024
@@ -102,6 +113,59 @@ class _WriteOnly:
 
     def close(self) -> None:
         pass
+
+
+class _SequentialWriter:
+    """Write-only binary view of an append-mode stream (see `_is_append_mode`).
+
+    Exposing only ``write`` takes s3transfer's non-seekable download path, which
+    orders the ranged parts before writing them out, so the bytes land in
+    object order at the stream's end - where an append-mode stream puts every
+    write anyway. ``close`` flushes and leaves the caller's stream open, like
+    `_Uncloseable`.
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+
+    def write(self, data: Any) -> int:
+        return self._raw.write(data)
+
+    def close(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush is not None:
+            flush()
+
+
+def _is_append_mode(stream: Any) -> bool:
+    """Whether every write to ``stream`` lands at its end (``O_APPEND``).
+
+    Such a stream still reports ``seekable()`` and honours ``seek`` / ``tell``,
+    so through the plain pass-through view s3transfer would take its positioned,
+    parallel download path and every ranged part would be appended in
+    completion order - a corrupted object reported as a success. The cue is the
+    open mode where the object carries one (``"a"`` in ``mode``:
+    ``open(p, "ab")``), and otherwise the descriptor's flags where the platform
+    can read them (``fcntl``'s ``F_GETFL``): a ``>>`` redirected stdout's
+    ``.buffer`` has mode ``"wb"`` and only the flag reveals it. A stream with no
+    descriptor (``BytesIO``) is not append-only.
+    """
+    mode = getattr(stream, "mode", None)
+    if isinstance(mode, str) and "a" in mode:
+        return True
+    if fcntl is None:
+        return False
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        fd = fileno()
+    except (OSError, ValueError):  # io.UnsupportedOperation is both
+        return False
+    try:
+        return bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND)
+    except OSError:
+        return False
 
 
 class _NonSeekable:
@@ -212,7 +276,9 @@ class IOStorage(Storage):
     ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
     the bytes land (a stream is never a move *source* - it cannot be deleted).
     A binary stream is used as-is behind a close-suppressing view
-    (`_Uncloseable`); a text stream - recognized as an
+    (`_Uncloseable`) - except one in append mode, written through a write-only
+    view (`_SequentialWriter`) so a multipart download lands in order rather
+    than in completion order; a text stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
     with ``encoding`` (default utf-8). The caller's stream is never closed by
@@ -237,7 +303,9 @@ class IOStorage(Storage):
         """Return the wrapped stream as a binary stream (``key`` / ``size`` ignored).
 
         A single endpoint takes no key. A text stream is adapted to bytes via the
-        configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``).
+        configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``). A
+        binary stream in append mode is written through a write-only view, so
+        the download runs in order (`_is_append_mode`).
         """
         stream = self._stream
         assert stream is not None  # plain IOStorage always holds a stream
@@ -248,6 +316,8 @@ class IOStorage(Storage):
                 else _DecodingWriter(stream, self._encoding)
             )
             return cast("BinaryIO", adapter)
+        if mode == "wb" and _is_append_mode(stream):
+            return cast("BinaryIO", _SequentialWriter(stream))
         return cast("BinaryIO", _Uncloseable(stream))
 
     @override
