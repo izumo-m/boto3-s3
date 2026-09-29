@@ -940,7 +940,7 @@ Key") -> rc 252.
 
 | flag | handling |
 |---|---|
-| `--expires-in <seconds>` | Default 3600. **No range validation** (0 / a negative value / over 604800 are all signed as-is = same as aws. S3 rejects it only **when the URL is used**). A non-integer is rc **255** (the integer-conversion rule of section 6) |
+| `--expires-in <seconds>` | Default 3600. **No range validation** (0 / a negative value / over 604800 are all signed as-is = same as aws. S3 rejects it only **when the URL is used**). A non-integer is rc **255** (the integer-conversion rule of section 6). On a SigV4a target (an MRAP ARN) the CRT signer refuses 0 / a negative value with awscrt's bare `AssertionError`, which aws's general handler reports as an empty rc-255 line; `presign` converts it at that one call, the same shape as the CRT-region refusal (crt.md section 6) |
 
 Output: a single URL line to stdout. With `--no-sign-request`, a bare URL with no
 query (matches aws). The signature format derives from the client
@@ -957,7 +957,8 @@ rc forms: **0 / 252 / 253 / 255 only** (because the server is never reached, 1 /
 `main()`, credentials that cannot be located are 253 when signing (a missing
 region is no failure: the client signs for us-east-1), a client-creation
 failure is 255 for a present-but-unusable config (`InvalidConfigError`,
-section 6), and a non-integer `--expires-in` is 255.
+section 6), a non-integer `--expires-in` is 255, and so is the CRT signer's
+refusal of a non-positive `--expires-in` on a SigV4a target (the table above).
 A key with no bucket (`s3:///k`, or the scheme-less `/k`) is part of that
 botocore 252 rather than a rejection of the form: aws splits it into `Bucket=""`
 plus the key and signs, so the bad-bucket-name text - regex tail included - is

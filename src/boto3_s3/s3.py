@@ -2359,8 +2359,12 @@ class S3:
         aws-cli's presign also takes ``bucket/key``) or an ``S3Storage``.
         Signing is pure client-side computation: no request is sent, so
         neither bucket nor key existence is checked, and ``expires_in`` is
-        not range-validated (aws-cli passes any integer through; S3 enforces
-        its 604800-second maximum only when the URL is *used*). An empty
+        not range-validated here (aws-cli passes any integer through; S3
+        enforces its 604800-second maximum only when the URL is *used*) -
+        though with awscrt installed botocore signs every SigV4 variant
+        through the CRT signer, which refuses ``0`` and negative values with
+        awscrt's own bare ``AssertionError``, left untranslated
+        (docs/reference/operations/presign.md). An empty
         bucket or key fails botocore's client-side parameter validation ->
         `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
