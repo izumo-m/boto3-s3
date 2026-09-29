@@ -1728,6 +1728,29 @@ class TestGetFileinfo:
         assert info.stat_result is not None  # always populated (the reused snapshot)
         assert info.size == 5
 
+    @skip_if_chmod_is_inert
+    def test_unreadable_directory_warning_keeps_the_separator_when_following(
+        self, tmp_path: Path
+    ) -> None:
+        # aws-cli's local_format names an existing directory source with a
+        # trailing separator and its warning keeps it (measured: `cp d
+        # s3://b/k` warns `.../d/. File/Directory is not readable.`, rc 2);
+        # its no-follow check rebinds the stripped path first, so there the
+        # warning has none (measured, `--no-follow-symlinks`).
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        try:
+            warnings: list[str] = []
+            assert LocalStorage(str(locked)).get_fileinfo(on_warning=warnings.append) is None
+            assert warnings == [f"Skipping file {locked}{os.sep}. File/Directory is not readable."]
+            warnings = []
+            storage = LocalStorage(str(locked), follow_symlinks=False)
+            assert storage.get_fileinfo(on_warning=warnings.append) is None
+            assert warnings == [f"Skipping file {locked}. File/Directory is not readable."]
+        finally:
+            locked.chmod(0o755)
+
     def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
         # aws parity: no type check, so a directory source yields a FileInfo and
         # fails later at open ([Errno 21], rc 1). Its kind still reflects the

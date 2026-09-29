@@ -1667,7 +1667,10 @@ class LocalStorage(Storage):
         ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` /
         ``ENOTDIR`` - including a broken symlink when following), is a silent ``None``; a special /
         unreadable file warns via ``notify`` and returns ``None`` (aws-cli's
-        warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
+        warn-and-skip; an unreadable directory is named with the trailing
+        separator aws-cli's ``local_format`` gives a directory source, except
+        when symlinks are not followed, where aws-cli strips it again before
+        its battery); a regular file or directory returns a ``LocalFileInfo`` (no
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
@@ -1698,8 +1701,15 @@ class LocalStorage(Storage):
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(path, stat_module.S_ISDIR(st.st_mode)):
-            notify(f"Skipping file {path}. File/Directory is not readable.")
+        is_dir = stat_module.S_ISDIR(st.st_mode)
+        if not is_readable(path, is_dir):
+            # aws-cli's local_format names a directory source with a trailing
+            # separator, and its no-follow check strips it again before the
+            # battery - so the warning keeps the separator only when following
+            # (measured: `.../d/. File/Directory is not readable.` by default,
+            # `.../d.` under --no-follow-symlinks).
+            shown = path + os.sep if is_dir and follow_symlinks else path
+            notify(f"Skipping file {shown}. File/Directory is not readable.")
             return None
         size, mtime = get_file_stat(path, st)
         if mtime is None:

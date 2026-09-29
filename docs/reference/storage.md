@@ -586,7 +586,10 @@ cannot disagree.
 Returns `None` for a definitively absent path (`ENOENT` / `ENOTDIR`, which
 includes a broken symlink when following), for a symlink when
 `follow_symlinks=False`, and — after warning through `on_warning` — for a
-special or unreadable file. A directory is returned with `FileKind.DIRECTORY`
+special or unreadable file (an unreadable directory is named with the trailing
+separator the AWS CLI's `local_format` gives a directory source, except when
+symlinks are not followed, where the AWS CLI strips it again before its
+battery). A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
 that is not absence is raised, translated.
 
