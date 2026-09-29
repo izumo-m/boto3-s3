@@ -167,6 +167,24 @@ class TestMb:
         assert not isinstance(excinfo.value, BatchError)
         assert excinfo.value.__cause__ is error
 
+    def test_a_non_botocore_exception_is_wrapped_with_its_cause(self) -> None:
+        # A redirect loop inside botocore ends in RecursionError; the request
+        # failed all the same, so it is the base error like a per-item failure.
+        cause = RecursionError("maximum recursion depth exceeded")
+        client = _FakeBucketClient(create_error=cause)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().mb(S3Storage("s3://bucket", client=client))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is cause
+        assert (excinfo.value.operation, excinfo.value.bucket) == ("mb", "bucket")
+        assert str(excinfo.value) == str(cause)
+
+    def test_an_assertion_error_passes_through(self) -> None:
+        # An invariant or a test double's guard stays loud, never a failure.
+        client = _FakeBucketClient(create_error=AssertionError("unexpected call"))
+        with pytest.raises(AssertionError, match="unexpected call"):
+            S3().mb(S3Storage("s3://bucket", client=client))
+
 
 class TestRb:
     def test_deletes_the_bucket(self) -> None:
@@ -197,6 +215,15 @@ class TestRb:
         with pytest.raises(NotFoundError) as excinfo:
             S3().rb(S3Storage("s3://bucket", client=client))
         assert excinfo.value.__cause__ is error
+
+    def test_a_non_botocore_exception_is_wrapped_with_its_cause(self) -> None:
+        cause = RecursionError("maximum recursion depth exceeded")
+        client = _FakeBucketClient(delete_error=cause)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().rb(S3Storage("s3://bucket", client=client))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is cause
+        assert (excinfo.value.operation, excinfo.value.bucket) == ("rb", "bucket")
 
     def test_bucket_not_empty_raises_validation_category(self) -> None:
         error = client_error("BucketNotEmpty", 409, "DeleteBucket")

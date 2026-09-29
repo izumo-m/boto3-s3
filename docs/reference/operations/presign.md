@@ -161,7 +161,11 @@ The category contracts are specified in
 never raises [`BatchError`](../exceptions.md#batcherror). No path other than
 the directory-bucket one sends an S3 request, so elsewhere the service-side
 categories do not arise from the signing itself; any other botocore error
-raised on the way is translated by the same category table.
+raised on the way is translated by the same category table, and any other
+exception the signing raised from inside botocore surfaces as the base
+[`Boto3S3Error`](../exceptions.md#boto3s3error) with the original on
+`__cause__` — except the CRT signer's `AssertionError` above, which is not
+translated.
 
 ## boto3_s3.presign
 

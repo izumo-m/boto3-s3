@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ParamValidationError
 
-from boto3_s3 import S3, BatchError, S3Storage, ValidationError
+from boto3_s3 import S3, BatchError, Boto3S3Error, S3Storage, ValidationError
 
 
 class _FakePresignClient:
@@ -257,6 +257,26 @@ class TestPresignErrors:
         assert not isinstance(excinfo.value, BatchError)
         assert "Invalid bucket name" in str(excinfo.value)
         assert excinfo.value.operation == "presign"
+
+    def test_a_non_botocore_exception_is_wrapped_with_its_cause(self) -> None:
+        cause = ValueError("a signer's own rejection")
+        client = _FakePresignClient(error=cause)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().presign(_storage("s3://b/k", client))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is cause
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "presign",
+            "b",
+            "k",
+        )
+
+    def test_the_crt_signers_assertion_passes_through(self) -> None:
+        # docs/reference/operations/presign.md: the CRT signer's refusal of a
+        # non-positive expiry is awscrt's bare AssertionError, not translated.
+        client = _FakePresignClient(error=AssertionError())
+        with pytest.raises(AssertionError):
+            S3().presign(_storage("s3://b/k", client), expires_in=0)
 
     def test_empty_key_fails_real_botocore_validation(self) -> None:
         # Real botocore (no fake): presign validates the request shape

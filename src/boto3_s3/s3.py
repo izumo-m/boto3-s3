@@ -156,6 +156,35 @@ def _validate_storage(storage: Storage, *, operation: str) -> None:
         storage.validate()
 
 
+@contextmanager
+def _single_request(
+    operation: str, *, bucket: str | None = None, key: str | None = None
+) -> Generator[None, None, None]:
+    """Report whatever one request raised as the single-call operation's failure.
+
+    ``mb`` / ``rb`` / ``website`` / ``presign`` issue one client call and raise
+    its category error directly (design/exceptions.md section 4). `s3_errors`
+    translates the boto family; anything else the call raised from inside
+    botocore - a redirect loop ending in ``RecursionError``, a response
+    missing an element it reads - is that request failing all the same, and
+    becomes the base ``Boto3S3Error`` carrying it as ``__cause__``, the
+    `request_failure` shape the blind single-key ``rm`` applies. Only
+    ``AssertionError`` passes through: an invariant, a test double's guard,
+    or the CRT signer's refusal of a non-positive presign expiry, which the
+    reference documents as untranslated.
+    """
+    try:
+        with s3_errors(operation=operation, bucket=bucket, key=key):
+            yield
+    except AssertionError:
+        raise
+    except Exception as exc:
+        error = request_failure(exc, operation=operation, bucket=bucket, key=key)
+        if error is exc:
+            raise
+        raise error from exc
+
+
 def _emit_result(
     on_result: ResultCallback | None,
     *,
@@ -2310,7 +2339,9 @@ class S3:
         and duplicate keys (passed through for the server to reject, which is
         what the CLI's repeated ``--tags`` parity rests on). A single-call
         operation: failures raise their category error directly, never
-        ``BatchError`` (design/exceptions.md section 4).
+        ``BatchError``, and whatever else the request raised from inside
+        botocore is the base error carrying it as ``__cause__``
+        (`_single_request`, design/exceptions.md section 4).
         """
         storage = self._resolve_s3_target(target, operation="mb")
         bucket = storage.bucket
@@ -2330,7 +2361,7 @@ class S3:
             config["Tags"] = bucket_tags
         if config:
             params["CreateBucketConfiguration"] = config
-        with s3_errors(operation="mb", bucket=bucket):
+        with _single_request("mb", bucket=bucket):
             storage.get_client().create_bucket(**params)
 
     def rb(self, target: Location) -> None:
@@ -2350,7 +2381,7 @@ class S3:
         bucket = storage.bucket
         if not bucket:
             raise ValidationError('Invalid bucket name "": rb requires a bucket', operation="rb")
-        with s3_errors(operation="rb", bucket=bucket):
+        with _single_request("rb", bucket=bucket):
             storage.get_client().delete_bucket(Bucket=bucket)
 
     def presign(
@@ -2401,7 +2432,7 @@ class S3:
         storage = self._resolve_s3_target(target, operation="presign")
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
-        with s3_errors(operation="presign", bucket=storage.bucket, key=storage.key):
+        with _single_request("presign", bucket=storage.bucket, key=storage.key):
             with _sigv4_presign(client, operation), _regional_presign(client):
                 return client.generate_presigned_url(
                     method,
@@ -2437,7 +2468,7 @@ class S3:
             config["IndexDocument"] = {"Suffix": index_document}
         if error_document is not None:
             config["ErrorDocument"] = {"Key": error_document}
-        with s3_errors(operation="website", bucket=storage.bucket):
+        with _single_request("website", bucket=storage.bucket):
             storage.get_client().put_bucket_website(
                 Bucket=storage.bucket, WebsiteConfiguration=config
             )

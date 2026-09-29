@@ -256,7 +256,12 @@ class BatchError(Boto3S3Error):
   "task" and yields `... failed: ...` + rc 1, this shape keeps the CLI mapping
   uniform with the recursive case. Only `mb` / `rb` / `website` / `presign`
   are single-item operations that do not aggregate; they raise the
-  corresponding category exception on the spot. Note that an error before item
+  corresponding category exception on the spot, and whatever else their one
+  request raised from inside botocore (a redirect loop's `RecursionError`, a
+  response missing an element it reads) as the base `Boto3S3Error` carrying
+  the original on `__cause__` - the same capture as a per-item failure
+  (`s3storage.request_failure`), with `AssertionError` alone passing through.
+  Note that an error before item
   processing begins - such as a failure of the enumeration (scan) itself, or
   `cp`'s missing-source check - **propagates as the category exception** (the
   CLI's transfer-family commands turn an enumeration failure into rc 1, while

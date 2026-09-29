@@ -79,6 +79,11 @@ Raises:
   category table does not list (`BucketAlreadyOwnedByYou`, for instance). The
   originating botocore `ClientError` is kept on `__cause__`. The full mapping
   is in [`../exceptions.md`](../exceptions.md).
+- [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — any other exception
+  the `CreateBucket` call raised from inside botocore, such as a redirect loop
+  ending in `RecursionError` or a response missing an element botocore reads;
+  the original is kept on `__cause__`, the same capture a per-item failure
+  gets. `AssertionError` alone is not translated.
 
 ## boto3_s3.mb
 
